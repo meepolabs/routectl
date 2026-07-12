@@ -16,6 +16,7 @@ use routectl_core::{
     TokenCount,
     cache_control::{MAX_BREAKPOINTS, compute_frozen_floor, validate_source},
     context_reduction::{ReductionOutcome, apply_json_minify},
+    failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify},
     identity::anthropic::is_anthropic_api_host,
     sanitize_for_log, scan_volatile,
 };
@@ -181,11 +182,31 @@ struct RouterMetrics {
     /// `anthropic-api` egress. Bumped by the router-side passthrough
     /// gate; see [`Router::enforce_forwarded_anthropic_target`].
     forwarded_non_anthropic_refusals: AtomicU64,
+    /// Upstream failures the classifier could not confidently categorize
+    /// (`FailureClass::Unknown`) that arrived on a real upstream HTTP
+    /// outcome (`Error::Upstream`). A fail-closed unknown on a genuine
+    /// upstream response is a signal the token vocabulary or status map
+    /// may need extending; bumped at both dispatch error arms.
+    unknown_failure_classifications_total: AtomicU64,
+    /// Upstream failures the classifier lifted to
+    /// `FailureClass::FeatureUnsupported` (a requested capability the
+    /// upstream rejected). Bumped at both dispatch error arms.
+    feature_unsupported_total: AtomicU64,
 }
 
 impl RouterMetrics {
     fn incr_forwarded_non_anthropic_refusal(&self) {
         self.forwarded_non_anthropic_refusals
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_unknown_failure_classification(&self) {
+        self.unknown_failure_classifications_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_feature_unsupported(&self) {
+        self.feature_unsupported_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -196,6 +217,21 @@ impl RouterMetrics {
     fn forwarded_non_anthropic_refusals(&self) -> u64 {
         self.forwarded_non_anthropic_refusals
             .load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative unknown-upstream-classification count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn unknown_failure_classifications_total(&self) -> u64 {
+        self.unknown_failure_classifications_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative feature-unsupported classification count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn feature_unsupported_total(&self) -> u64 {
+        self.feature_unsupported_total.load(Ordering::Relaxed)
     }
 }
 
@@ -1051,11 +1087,13 @@ impl Router {
             }
         }
         for target in &mut out {
-            target.provider_kind = self
-                .config
-                .providers
-                .get(&target.provider_name)
-                .map(super::config::ProviderEntry::kind_str);
+            if target.provider_kind.is_none() {
+                target.provider_kind = self
+                    .config
+                    .providers
+                    .get(&target.provider_name)
+                    .map(super::config::ProviderEntry::kind_str);
+            }
         }
         out
     }
@@ -1117,10 +1155,15 @@ impl Router {
                 None,
             ),
         };
+        let provider_kind = self
+            .config
+            .providers
+            .get(&m.provider_name)
+            .map(super::config::ProviderEntry::kind_str);
         let first = out.len();
         for idx in order {
             let seat = &seats[idx];
-            out.push(dispatch_target_for_seat(m, seat));
+            out.push(dispatch_target_for_seat(m, seat, provider_kind));
         }
         // Stamp the decision on the home (first) target pushed for THIS
         // model only -- never the fallback seats. The LIMITATION on
@@ -1709,6 +1752,7 @@ impl Router {
                         return Ok(resp);
                     }
                     Err(e) => {
+                        let cf = classify(&e, target.provider_kind);
                         // A forwarded-credential request that drew
                         // an upstream 401/403/429 is TERMINAL -- bypass BOTH
                         // the on_auth_failure refresh-and-retry (below) AND
@@ -1785,9 +1829,9 @@ impl Router {
                         // probe_max_tokens) that hit a rate-limit/overload
                         // (429/529) returns the status immediately via an
                         // explicit early return -- no retry, no fallback,
-                        // no breaker failure debit (record_failure is gated
-                        // on `do_fallback`, the retry branch on
-                        // `can_retry_here`, both false here). It does still
+                        // no breaker failure debit. The early return below
+                        // precedes the debit site, so a probe 429/529 never
+                        // reaches health accounting at all. It does still
                         // release the half-open slot it may have claimed at
                         // the gate (see below).
                         let probe_fast_failed = if is_probe {
@@ -1817,7 +1861,16 @@ impl Router {
                         // decision below and the in-loop sleep bump in the
                         // retry branch. `None` for every non-rate-limit error.
                         let reset_hint = rate_limit_reset_hint(&e, &policy);
-                        if do_fallback {
+                        // The breaker DEBIT keys off the failure CLASS, not
+                        // the chain-hop decision: a seat looks unhealthy when
+                        // it emits a transient-health failure (429 / 5xx /
+                        // status-0 / overload), independent of whether the
+                        // operator routes past that status. A non-debiting
+                        // class (4xx caller error, capability, auth) that
+                        // still falls back releases its slot without a debit
+                        // in the fallback branch below.
+                        let debits = class_debits(&cf.class);
+                        if debits {
                             match reset_hint {
                                 // Non-probe LARGE reset: park the provider for
                                 // the honored duration (force_open) instead of
@@ -1834,10 +1887,23 @@ impl Router {
                             }
                             probe_guard.disarm();
                         }
+                        self.emit_class_observability(
+                            &e,
+                            &cf,
+                            DispatchSurface::Complete,
+                            provider_name,
+                            target,
+                            do_fallback,
+                            retry_cap_for(&e, &policy),
+                            debits,
+                            raw_override_label(explicit_status_decision(&e, &policy)),
+                            is_probe,
+                            is_forwarded,
+                        );
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
-                            // slot this attempt claimed. A no-op when
-                            // do_fallback already routed through
+                            // slot this attempt claimed. A no-op when a
+                            // debiting class already routed through
                             // record_failure (which clears the slot).
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
@@ -1899,6 +1965,15 @@ impl Router {
                                     error = ?e,
                                     "chain exhausted; no fallback target available; request will fail",
                                 );
+                            }
+                            // A fallbackable error whose class did NOT debit
+                            // the breaker leaves the half-open probe slot
+                            // armed; release it without a debit before the hop
+                            // so every settle path frees the slot exactly once.
+                            // A debiting class already settled + disarmed above.
+                            if !debits {
+                                self.release_probe_slot(state_key);
+                                probe_guard.disarm();
                             }
                             last_err = Some(e);
                             continue 'chain;
@@ -2155,15 +2230,20 @@ impl Router {
                         return CountSeatOutcome::Capability;
                     }
 
-                    // Health error. Mirror `complete_with_options`:
-                    // status-0 / 5xx-class errors debit the breaker (an
-                    // honored reset hint parks instead); a non-fallbackable
-                    // 4xx releases the slot without a debit. Either way this
-                    // propagates -- health fallback stays reserved for the
-                    // messages path, so a 429 here does NOT walk.
+                    // Health error. Mirror `complete_with_options`: the
+                    // breaker DEBIT keys off the failure CLASS, not the
+                    // fallback decision. A transient-health class (429 / 5xx
+                    // / status-0 / overload) debits (an honored reset hint
+                    // parks instead); a caller-shaped 4xx releases the slot
+                    // without a debit, so a repeated non-retryable 4xx here
+                    // cannot trip the per-seat breaker that also gates
+                    // completions and streams. Either way this propagates --
+                    // health fallback stays reserved for the messages path,
+                    // so a 429 here does NOT walk.
                     let policy = self.policy_for(&req.model);
+                    let cf = classify(&e, target.provider_kind);
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
-                    if should_fallback(&e, &policy, false) {
+                    if class_debits(&cf.class) {
                         match reset_hint {
                             Some(h) => self.park_provider(&target.state_key, h),
                             None => self.record_failure(&target.state_key),
@@ -2439,6 +2519,7 @@ impl Router {
                         return Ok(wrap_with_breaker_accounting(relabeled.boxed(), state));
                     }
                     Err(e) => {
+                        let cf = classify(&e, target.provider_kind);
                         // A forwarded-credential 401/403/429 is
                         // TERMINAL -- bypass the on_auth_failure refresh
                         // (below) AND the fallback hop, surface verbatim.
@@ -2492,12 +2573,12 @@ impl Router {
                         let do_fallback = should_fallback(&e, &policy, is_probe);
                         // Probe fast-fail: a probe that hit a rate-limit/
                         // overload (429/529) returns the status immediately
-                        // -- no fallback, no breaker failure debit
-                        // (record_failure is gated on `do_fallback`, false
-                        // here). It does release the half-open slot it may
-                        // have claimed at the gate (see below). Streams never
-                        // retry the same provider, so there is no
-                        // can_retry_here to guard.
+                        // -- no fallback, no breaker failure debit. The early
+                        // return below precedes the debit site, so a probe
+                        // 429/529 never reaches health accounting. It does
+                        // release the half-open slot it may have claimed at
+                        // the gate (see below). Streams never retry the same
+                        // provider, so there is no can_retry_here to guard.
                         let probe_fast_failed = if is_probe {
                             probe_fast_fail_status(&e)
                         } else {
@@ -2526,17 +2607,37 @@ impl Router {
                         // parks (R7) and a no-hint error keeps the
                         // threshold-gated debit.
                         let reset_hint = rate_limit_reset_hint(&e, &policy);
-                        if do_fallback {
+                        // The DEBIT keys off the failure CLASS, not the
+                        // chain-hop decision (see `complete_inner`): a seat is
+                        // unhealthy when it emits a transient-health failure,
+                        // independent of routing. A non-debiting class that
+                        // still falls back releases its slot without a debit
+                        // in the fallback branch below.
+                        let debits = class_debits(&cf.class);
+                        if debits {
                             match reset_hint {
                                 Some(h) if !is_probe => self.park_provider(state_key, h),
                                 _ => self.record_failure(state_key),
                             }
                             probe_guard.disarm();
                         }
+                        self.emit_class_observability(
+                            &e,
+                            &cf,
+                            DispatchSurface::Stream,
+                            provider_name,
+                            target,
+                            do_fallback,
+                            retry_cap_for(&e, &policy),
+                            debits,
+                            raw_override_label(explicit_status_decision(&e, &policy)),
+                            is_probe,
+                            is_forwarded,
+                        );
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
-                            // slot this attempt claimed. A no-op when
-                            // do_fallback already routed through
+                            // slot this attempt claimed. A no-op when a
+                            // debiting class already routed through
                             // record_failure (which clears the slot).
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
@@ -2569,6 +2670,15 @@ impl Router {
                                     "stream chain exhausted; no fallback target available; request will fail",
                                 );
                             }
+                            // A fallbackable error whose class did NOT debit
+                            // the breaker leaves the half-open probe slot
+                            // armed; release it without a debit before the hop
+                            // so every settle path frees the slot exactly once.
+                            // A debiting class already settled + disarmed above.
+                            if !debits {
+                                self.release_probe_slot(state_key);
+                                probe_guard.disarm();
+                            }
                             last_err = Some(e);
                             continue 'chain;
                         }
@@ -2584,6 +2694,64 @@ impl Router {
         }
 
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
+    }
+
+    /// Observability seam at the router's class-decision point. Bumps the
+    /// fail-closed-unknown / feature-unsupported counters, emits the stable
+    /// FeatureUnsupported event when applicable, and emits exactly one
+    /// class-decision event (DEBUG, or WARN on an Unknown-classified
+    /// upstream outcome). Called from BOTH dispatch error arms with only
+    /// safe, structured facts -- never the error body / Display string.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn emit_class_observability(
+        &self,
+        err: &Error,
+        cf: &ClassifiedFailure,
+        surface: DispatchSurface,
+        provider: &str,
+        target: &DispatchTarget,
+        fallback: bool,
+        retry_cap: u32,
+        debit: bool,
+        raw_override: &'static str,
+        is_probe: bool,
+        is_forwarded: bool,
+    ) {
+        let facts = upstream_facts(err);
+        let model = target.nickname.as_deref().unwrap_or("");
+        match &cf.class {
+            FailureClass::FeatureUnsupported { capability } => {
+                self.metrics.incr_feature_unsupported();
+                emit_feature_unsupported(
+                    provider,
+                    target.provider_kind,
+                    model,
+                    capability,
+                    &facts,
+                    cf.matched_by,
+                    surface,
+                    is_forwarded,
+                );
+            }
+            FailureClass::Unknown if facts.status.is_some() => {
+                self.metrics.incr_unknown_failure_classification();
+            }
+            _ => {}
+        }
+        emit_class_decision(&ClassDecisionObs {
+            provider,
+            model,
+            surface,
+            class: &cf.class,
+            matched_by: cf.matched_by,
+            facts,
+            fallback,
+            retry_cap,
+            debit,
+            raw_override,
+            is_probe,
+            is_forwarded,
+        });
     }
 
     /// Run RPM bucket + circuit breaker. Returns `Some((kind, err))` if
@@ -3596,14 +3764,19 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
 /// `into_one_dispatch_target` except the seat overrides the provider
 /// instance and `state_key` (its own breaker + RPM bucket); every other
 /// knob is shared from the model. The nickname stays the model's nickname
-/// for tracing, while `state_key` carries the seat suffix.
+/// for tracing, while `state_key` carries the seat suffix. `provider_kind`
+/// is the seat provider's stable kind token (a seat shares its model's
+/// provider entry, so the caller resolves it from `provider_name` exactly
+/// as the non-seat path does) so error classification keys off the real
+/// egress kind rather than the union table.
 fn dispatch_target_for_seat(
     m: &Arc<ResolvedModel>,
     seat: &crate::seat_pool::SeatTarget,
+    provider_kind: Option<&'static str>,
 ) -> DispatchTarget {
     DispatchTarget {
         provider_name: m.provider_name.clone(),
-        provider_kind: None,
+        provider_kind,
         state_key: seat.state_key.clone(),
         upstream: m.upstream.clone(),
         provider: Some(seat.provider.clone()),
@@ -4017,6 +4190,249 @@ const fn is_capability_error(err: &Error) -> bool {
     )
 }
 
+/// The operator's explicit per-status escape hatch, consulted only for a
+/// real upstream HTTP status (`400..=599`). Status 0 (no HTTP status
+/// reached) and every non-upstream error yield `None` so they never
+/// consult the list -- preserving the historical rule that a network /
+/// status-0 failure always falls back and always uses the network retry
+/// cap regardless of the allow/deny lists.
+fn explicit_status_decision(err: &Error, policy: &RetryPolicy) -> Option<bool> {
+    match err {
+        Error::Upstream { status, .. } if (400..=599).contains(status) => {
+            policy.explicit_status_override(*status)
+        }
+        _ => None,
+    }
+}
+
+/// Which dispatch surface an error arm belongs to. Carried as a stable
+/// `surface` field on the router's class-decision observability events so
+/// operators can tell a completion failure from a stream failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchSurface {
+    Complete,
+    Stream,
+}
+
+impl DispatchSurface {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+/// Safe, structured facts pulled from an [`Error`] for the router's
+/// class-decision observability. Deliberately EXCLUDES the body and the
+/// Display/Debug string: only the numeric status and the
+/// already-structured classifier tokens are carried, so no prompt, body,
+/// header, or free-form upstream message text can leak into a field.
+/// `status` is `Some` iff the error is an [`Error::Upstream`].
+#[derive(Debug, Clone, Copy)]
+struct UpstreamFacts<'a> {
+    status: Option<u16>,
+    upstream_type: Option<&'a str>,
+    upstream_code: Option<&'a str>,
+}
+
+fn upstream_facts(err: &Error) -> UpstreamFacts<'_> {
+    match err {
+        Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            ..
+        } => UpstreamFacts {
+            status: Some(*status),
+            upstream_type: upstream_type.as_deref(),
+            upstream_code: upstream_code.as_deref(),
+        },
+        _ => UpstreamFacts {
+            status: None,
+            upstream_type: None,
+            upstream_code: None,
+        },
+    }
+}
+
+/// Stable, low-cardinality label for a [`FailureClass`]. The
+/// `FeatureUnsupported` capability is surfaced in its own field, so the
+/// label collapses that variant to a bare token. Fail-closed: any class
+/// the classifier gains later renders as `unknown`.
+const fn class_label(class: &FailureClass) -> &'static str {
+    match class {
+        FailureClass::RateLimited => "rate_limited",
+        FailureClass::Auth => "auth",
+        FailureClass::BadRequest => "bad_request",
+        FailureClass::ContentPolicy => "content_policy",
+        FailureClass::ContextWindow => "context_window",
+        FailureClass::ServerError => "server_error",
+        FailureClass::Timeout => "timeout",
+        FailureClass::NetworkError => "network_error",
+        FailureClass::Overloaded => "overloaded",
+        FailureClass::FeatureUnsupported { .. } => "feature_unsupported",
+        FailureClass::Unknown => "unknown",
+        _ => "unknown",
+    }
+}
+
+/// Stable label for how the classification was decided.
+const fn matched_by_label(matched_by: MatchedBy) -> &'static str {
+    match matched_by {
+        MatchedBy::Variant => "variant",
+        MatchedBy::Status => "status",
+        MatchedBy::UpstreamType => "upstream_type",
+    }
+}
+
+/// Stable label for the operator's explicit per-status override decision:
+/// `none` (no list applies), `allow` (allowlisted / retryable), or `deny`
+/// (excluded / denylisted).
+const fn raw_override_label(decision: Option<bool>) -> &'static str {
+    match decision {
+        None => "none",
+        Some(true) => "allow",
+        Some(false) => "deny",
+    }
+}
+
+/// The same-provider retry cap for `err` under `policy`, keyed by failure
+/// class family -- the value the retry branch compares `attempts_made`
+/// against. A class outside the retryable set yields 0. Shared by
+/// [`should_retry_same_provider`] and the class-decision observability so
+/// the logged cap never drifts from the cap actually enforced.
+fn retry_cap_for(err: &Error, policy: &RetryPolicy) -> u32 {
+    match classify(err, None).class {
+        FailureClass::RateLimited => policy.retry_on_429.unwrap_or(policy.max_attempts),
+        FailureClass::ServerError | FailureClass::Overloaded => {
+            policy.retry_on_5xx.unwrap_or(policy.max_attempts)
+        }
+        // Streaming and status-0 both classify NetworkError -- bucket
+        // them under `retry_on_network` so configuration matches the
+        // error class.
+        FailureClass::NetworkError => policy.retry_on_network.unwrap_or(policy.max_attempts),
+        _ => 0,
+    }
+}
+
+/// Safe, structured inputs for the per-arm class-decision observability
+/// event. Carries only already-structured facts: NEVER a body, prompt,
+/// header, token, or the [`Error`] Display/Debug string.
+struct ClassDecisionObs<'a> {
+    provider: &'a str,
+    model: &'a str,
+    surface: DispatchSurface,
+    class: &'a FailureClass,
+    matched_by: MatchedBy,
+    facts: UpstreamFacts<'a>,
+    fallback: bool,
+    retry_cap: u32,
+    debit: bool,
+    raw_override: &'static str,
+    is_probe: bool,
+    is_forwarded: bool,
+}
+
+/// Emit exactly one structured event per error-arm pass at the point the
+/// class decision is settled. DEBUG normally; WARN when the classifier
+/// failed closed (`FailureClass::Unknown`) on a real upstream outcome --
+/// a silent fail-closed-unknown on a genuine upstream response would hide
+/// a gap in the status map / token vocabulary. Safe dimensions only.
+fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
+    let unknown_upstream = matches!(obs.class, FailureClass::Unknown) && obs.facts.status.is_some();
+    if unknown_upstream {
+        tracing::warn!(
+            provider = obs.provider,
+            model = obs.model,
+            surface = obs.surface.as_str(),
+            status = ?obs.facts.status,
+            upstream_type = obs.facts.upstream_type.unwrap_or(""),
+            class = class_label(obs.class),
+            matched_by = matched_by_label(obs.matched_by),
+            fallback = obs.fallback,
+            retry_cap = obs.retry_cap,
+            debit = obs.debit,
+            raw_override = obs.raw_override,
+            is_probe = obs.is_probe,
+            is_forwarded = obs.is_forwarded,
+            "unknown failure classification on upstream outcome (fail-closed)",
+        );
+    } else {
+        tracing::debug!(
+            provider = obs.provider,
+            model = obs.model,
+            surface = obs.surface.as_str(),
+            status = ?obs.facts.status,
+            upstream_type = obs.facts.upstream_type.unwrap_or(""),
+            class = class_label(obs.class),
+            matched_by = matched_by_label(obs.matched_by),
+            fallback = obs.fallback,
+            retry_cap = obs.retry_cap,
+            debit = obs.debit,
+            raw_override = obs.raw_override,
+            is_probe = obs.is_probe,
+            is_forwarded = obs.is_forwarded,
+            "router failure class decision",
+        );
+    }
+}
+
+/// Emit the stable FeatureUnsupported observability event at a dispatch
+/// error arm. Fired only when the classifier lifted the failure to
+/// [`FailureClass::FeatureUnsupported`]. Carries only safe, structured
+/// dimensions -- NEVER a body, prompt, header, token, or the error's
+/// Display/Debug text. `capability` is the upstream token the classifier
+/// matched, already best-effort and non-sensitive.
+#[allow(clippy::too_many_arguments)]
+fn emit_feature_unsupported(
+    provider: &str,
+    provider_kind: Option<&str>,
+    model: &str,
+    capability: &str,
+    facts: &UpstreamFacts<'_>,
+    matched_by: MatchedBy,
+    surface: DispatchSurface,
+    is_forwarded: bool,
+) {
+    tracing::info!(
+        target: "routectl::feature_unsupported",
+        provider,
+        provider_kind = provider_kind.unwrap_or(""),
+        model,
+        capability,
+        status = facts.status.unwrap_or(0),
+        upstream_type = facts.upstream_type.unwrap_or(""),
+        upstream_code = facts.upstream_code.unwrap_or(""),
+        matched_by = matched_by_label(matched_by),
+        surface = surface.as_str(),
+        is_forwarded,
+        "upstream reported an unsupported capability",
+    );
+}
+
+/// Whether a failure of this class debits the per-seat circuit breaker's
+/// health accounting. True ONLY for the fixed transient-health set --
+/// conditions a fallback or a cooldown can recover from; false for
+/// caller-shaped or capability faults that retrying the same seat would
+/// never fix, and (fail-closed) for any class the classifier gains later.
+///
+/// Deliberately independent of the fallback/retry decision and of the
+/// operator's `explicit_status_override`: routing (whether to advance the
+/// chain) and health accounting (whether the seat looks unhealthy) are
+/// separate concerns. An operator denylisting a status changes routing,
+/// not whether a 429 / 5xx is evidence of upstream health.
+const fn class_debits(class: &FailureClass) -> bool {
+    matches!(
+        class,
+        FailureClass::RateLimited
+            | FailureClass::ServerError
+            | FailureClass::Timeout
+            | FailureClass::NetworkError
+            | FailureClass::Overloaded
+    )
+}
+
 fn should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
     // Availability-probe fast-fail: a probe (max_tokens <=
     // probe_max_tokens) that hits a rate-limit (429) or overload (529)
@@ -4027,14 +4443,29 @@ fn should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
     if is_probe && probe_fast_fail_status(err).is_some() {
         return false;
     }
-    match err {
-        // status 0 means we never reached the upstream HTTP layer
-        // (DNS, TCP connect, TLS handshake, request body, timeout). Always
-        // fallbackable -- nothing upstream-specific has happened yet.
-        Error::Upstream { status: 0, .. } => true,
-        Error::Upstream { status, .. } => policy.is_fallbackable_status(*status),
-        Error::Streaming(_) => true,
-        Error::UnknownProvider(_) => true,
+    // An unknown provider id in the chain is a config-shaped fault the
+    // caller routes past: always fallbackable, independent of class.
+    if let Error::UnknownProvider(_) = err {
+        return true;
+    }
+    // An operator naming the status in an allow/deny list wins over the
+    // class default, mirroring the old is_fallbackable_status gating.
+    if let Some(explicit) = explicit_status_decision(err, policy) {
+        return explicit;
+    }
+    match classify(err, None).class {
+        FailureClass::Unknown => false,
+        FailureClass::RateLimited
+        | FailureClass::Auth
+        | FailureClass::BadRequest
+        | FailureClass::ContentPolicy
+        | FailureClass::ContextWindow
+        | FailureClass::ServerError
+        | FailureClass::Timeout
+        | FailureClass::NetworkError
+        | FailureClass::Overloaded
+        | FailureClass::FeatureUnsupported { .. } => true,
+        // Fail closed on any class the classifier gains later.
         _ => false,
     }
 }
@@ -4051,15 +4482,13 @@ fn should_retry_same_provider(
     if is_probe && probe_fast_fail_status(err).is_some() {
         return false;
     }
-    let cap = match err {
-        Error::Upstream { status, .. } => policy.retries_for_status(*status),
-        // Streaming errors are transport-level (broken connection
-        // mid-stream, partial frame, decode failure on the wire) --
-        // semantically network-class, not 5xx-class. Bucket them under
-        // `retry_on_network` so configuration matches the error class.
-        Error::Streaming(_) => policy.retry_on_network.unwrap_or(policy.max_attempts),
-        _ => 0,
-    };
+    // An explicit exclude (allowlist omitting the status, or denylist
+    // naming it) forbids retry outright, mirroring the old
+    // is_fallbackable_status gating inside the 429 / 5xx retry arms.
+    if explicit_status_decision(err, policy) == Some(false) {
+        return false;
+    }
+    let cap = retry_cap_for(err, policy);
     attempts_made < cap
 }
 
@@ -4257,6 +4686,205 @@ mod tests {
             ..RetryPolicy::default()
         };
         assert!(should_fallback(&err, &policy_deny, false));
+    }
+
+    // --- Differential oracle: class-based predicates vs pre-class rules ---
+    //
+    // The class rewire of `should_fallback` / `should_retry_same_provider`
+    // must be behavior-preserving. These reference functions reimplement
+    // the PRE-CHANGE logic verbatim (the old `is_fallbackable_status` /
+    // `retries_for_status` plus the old error-variant match arms). The
+    // grid below asserts the live predicates equal them for every cell, so
+    // the expected values are an independent reimplementation, never a
+    // capture of post-change output.
+
+    fn old_is_fallbackable_status(policy: &RetryPolicy, status: u16) -> bool {
+        if !(400..=599).contains(&status) {
+            return false;
+        }
+        if !policy.retry_allowlist.is_empty() {
+            return policy.retry_allowlist.contains(&status);
+        }
+        if let Some(denylist) = &policy.retry_denylist {
+            return !denylist.contains(&status);
+        }
+        true
+    }
+
+    fn old_retries_for_status(policy: &RetryPolicy, status: u16) -> u32 {
+        match status {
+            0 => policy.retry_on_network.unwrap_or(policy.max_attempts),
+            429 if old_is_fallbackable_status(policy, 429) => {
+                policy.retry_on_429.unwrap_or(policy.max_attempts)
+            }
+            s if (500..600).contains(&s) && old_is_fallbackable_status(policy, s) => {
+                policy.retry_on_5xx.unwrap_or(policy.max_attempts)
+            }
+            _ => 0,
+        }
+    }
+
+    fn old_should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
+        if is_probe && probe_fast_fail_status(err).is_some() {
+            return false;
+        }
+        match err {
+            Error::Upstream { status: 0, .. } => true,
+            Error::Upstream { status, .. } => old_is_fallbackable_status(policy, *status),
+            Error::Streaming(_) => true,
+            Error::UnknownProvider(_) => true,
+            _ => false,
+        }
+    }
+
+    fn old_retry_cap(err: &Error, policy: &RetryPolicy) -> u32 {
+        match err {
+            Error::Upstream { status, .. } => old_retries_for_status(policy, *status),
+            Error::Streaming(_) => policy.retry_on_network.unwrap_or(policy.max_attempts),
+            _ => 0,
+        }
+    }
+
+    fn old_should_retry(
+        err: &Error,
+        policy: &RetryPolicy,
+        attempts_made: u32,
+        is_probe: bool,
+    ) -> bool {
+        if is_probe && probe_fast_fail_status(err).is_some() {
+            return false;
+        }
+        attempts_made < old_retry_cap(err, policy)
+    }
+
+    #[test]
+    fn retry_fallback_predicates_match_pre_class_semantics() {
+        // Error shapes per status: bare upstream, one representative
+        // upstream-type lift from each same-row set (content policy,
+        // context window, overloaded, feature-unsupported), and a
+        // transport Streaming error (status-independent).
+        fn shapes(status: u16) -> Vec<Error> {
+            vec![
+                Error::upstream("p", status, "body"),
+                Error::upstream_full(
+                    "p",
+                    status,
+                    "body",
+                    None,
+                    Some("content_policy_violation".into()),
+                    None,
+                ),
+                Error::upstream_full(
+                    "p",
+                    status,
+                    "body",
+                    None,
+                    Some("context_length_exceeded".into()),
+                    None,
+                ),
+                Error::upstream_full(
+                    "p",
+                    status,
+                    "body",
+                    None,
+                    Some("overloaded_error".into()),
+                    None,
+                ),
+                Error::upstream_full(
+                    "p",
+                    status,
+                    "body",
+                    None,
+                    Some("unsupported_parameter".into()),
+                    None,
+                ),
+                Error::Streaming(format!("wire reset near {status}")),
+            ]
+        }
+
+        // Named statuses exercised by every list-shaped policy so both a
+        // hit and a miss appear for allow / deny lists across the grid.
+        let listed = vec![429u16, 500, 503, 400, 401];
+        let policies: Vec<(&str, RetryPolicy)> = vec![
+            ("default", RetryPolicy::default()),
+            (
+                "caps_only",
+                RetryPolicy {
+                    retry_on_429: Some(5),
+                    retry_on_5xx: Some(3),
+                    retry_on_network: Some(7),
+                    ..RetryPolicy::default()
+                },
+            ),
+            (
+                "allowlist_nocaps",
+                RetryPolicy {
+                    retry_allowlist: listed.clone(),
+                    ..RetryPolicy::default()
+                },
+            ),
+            (
+                "allowlist_caps",
+                RetryPolicy {
+                    retry_allowlist: listed.clone(),
+                    retry_on_429: Some(5),
+                    retry_on_5xx: Some(3),
+                    retry_on_network: Some(7),
+                    ..RetryPolicy::default()
+                },
+            ),
+            (
+                "denylist_nocaps",
+                RetryPolicy {
+                    retry_denylist: Some(listed.clone()),
+                    ..RetryPolicy::default()
+                },
+            ),
+            (
+                "denylist_caps",
+                RetryPolicy {
+                    retry_denylist: Some(listed.clone()),
+                    retry_on_429: Some(5),
+                    retry_on_5xx: Some(3),
+                    retry_on_network: Some(7),
+                    ..RetryPolicy::default()
+                },
+            ),
+        ];
+
+        // attempts_made must span past the largest possible cap (7) so the
+        // retry predicate's step-function is pinned exactly, not just its
+        // zero/non-zero shape.
+        let attempts_range = 0u32..=8;
+
+        let statuses = std::iter::once(0u16).chain(400..=599);
+        let mut cells = 0usize;
+        for status in statuses {
+            for err in shapes(status) {
+                for (pname, policy) in &policies {
+                    for is_probe in [false, true] {
+                        cells += 1;
+                        assert_eq!(
+                            should_fallback(&err, policy, is_probe),
+                            old_should_fallback(&err, policy, is_probe),
+                            "should_fallback mismatch: status={status} policy={pname} \
+                             is_probe={is_probe} err={err:?}",
+                        );
+                        for attempts in attempts_range.clone() {
+                            assert_eq!(
+                                should_retry_same_provider(&err, policy, attempts, is_probe),
+                                old_should_retry(&err, policy, attempts, is_probe),
+                                "should_retry mismatch: status={status} policy={pname} \
+                                 is_probe={is_probe} attempts={attempts} err={err:?}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Guard the grid actually ran (201 statuses x 6 shapes x 6
+        // policies x 2 probe states).
+        assert_eq!(cells, 201 * 6 * 6 * 2);
     }
 
     #[test]
@@ -5599,7 +6227,7 @@ mod resolved_models_tests {
             provider: p.clone(),
             auth_secret_ref: None,
         };
-        let via_seat = dispatch_target_for_seat(&m, &seat);
+        let via_seat = dispatch_target_for_seat(&m, &seat, None);
         assert_eq!(via_seat.reported_model.as_deref(), Some("public-label"));
     }
 
@@ -5633,8 +6261,50 @@ mod resolved_models_tests {
             provider: p.clone(),
             auth_secret_ref: None,
         };
-        let via_seat = dispatch_target_for_seat(&m, &seat);
+        let via_seat = dispatch_target_for_seat(&m, &seat, None);
         assert!(!via_seat.visible_routectl_provider);
+    }
+
+    #[test]
+    fn seat_dispatch_target_carries_provider_kind() {
+        // A seat-backed target must classify errors against the seat
+        // provider's OWN kind, not the union table. `provider_kind` is
+        // config-derived (a seat shares its model's provider entry), so
+        // the chain expander resolves it from `provider_name` and threads
+        // it onto every seat target -- not left `None`.
+        let mut config = Config::default();
+        config.providers.insert(
+            "test-prov".into(),
+            crate::config::ProviderEntry::anthropic_api("literal:k"),
+        );
+        let router = Router::new(Arc::new(config));
+
+        let provider: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "test-prov".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let seats: Vec<crate::seat_pool::SeatTarget> = ["seat-a", "seat-b"]
+            .iter()
+            .map(|label| crate::seat_pool::SeatTarget {
+                label: Some((*label).to_string()),
+                state_key: crate::seat_pool::seat_state_key("nick", Some(label)),
+                provider: provider.clone(),
+                auth_secret_ref: None,
+            })
+            .collect();
+        let model = Arc::new(
+            ResolvedModel::new("nick", "test-prov", provider, "claude-x").with_seats(seats.into()),
+        );
+
+        let targets = router.expand_chain_to_targets(vec![model], None);
+        assert_eq!(targets.len(), 2, "one dispatch target per seat");
+        for target in &targets {
+            assert_eq!(
+                target.provider_kind,
+                Some("anthropic-api"),
+                "seat target must carry the configured provider kind",
+            );
+        }
     }
 
     #[test]
@@ -7858,6 +8528,69 @@ mod count_tokens_tests {
     }
 
     #[tokio::test]
+    async fn non_retryable_4xx_leaves_breaker_closed() {
+        // A caller-shaped 4xx (BadRequest class) from a capable count_tokens
+        // seat must NOT debit the per-seat breaker that also gates
+        // completions and streams. The debit keys off the failure CLASS, so
+        // a repeated 4xx storm here leaves the shared breaker CLOSED and
+        // every dispatch keeps reaching the seat.
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "anthropic-only",
+            provider_name: "anthropic-prov",
+            entry: anthropic_api_entry_with_breaker(2, 60_000),
+            behavior: CountBehavior::UpstreamError(400),
+        }]);
+
+        for _ in 0..4 {
+            let err = router.count_tokens(count_req()).await.unwrap_err();
+            assert!(
+                matches!(err, Error::Upstream { status: 400, .. }),
+                "a count_tokens 4xx must surface verbatim; got {err:?}",
+            );
+        }
+
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            4,
+            "a non-debiting 4xx must never trip the breaker, so every \
+             dispatch reaches the capable seat",
+        );
+        assert_eq!(
+            circuit_phase(&router, "anthropic-only"),
+            crate::runtime_state::CircuitPhase::Closed,
+            "a non-retryable 4xx storm must leave the count_tokens seat \
+             breaker CLOSED (BadRequest class does not debit)",
+        );
+    }
+
+    #[tokio::test]
+    async fn health_5xx_still_debits_breaker() {
+        // Complement to the 4xx case: a 5xx (ServerError class) from a
+        // capable count_tokens seat is a health failure and must still debit
+        // and trip the shared per-seat breaker.
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "anthropic-only",
+            provider_name: "anthropic-prov",
+            entry: anthropic_api_entry_with_breaker(1, 60_000),
+            behavior: CountBehavior::UpstreamError(503),
+        }]);
+
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::Upstream { status: 503, .. }),
+            "a count_tokens 5xx must surface verbatim; got {err:?}",
+        );
+        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+        assert_eq!(
+            circuit_phase(&router, "anthropic-only"),
+            crate::runtime_state::CircuitPhase::Open,
+            "a count_tokens 5xx (ServerError class) must debit and trip the \
+             breaker (threshold 1 -> Open)",
+        );
+    }
+
+    #[tokio::test]
     async fn walk_reruns_gate_on_next_seat_and_respects_open_breaker() {
         // Guardrail: the capability walk must re-run the gate on each new
         // seat. If the next capable seat's breaker is open, the walk must
@@ -9873,16 +10606,14 @@ mod circuit_breaker_slot_release_tests {
     async fn complete_half_open_non_fallbackable_429_does_not_lock_breaker() {
         // Regression: a NON-probe request hits a half-open provider that
         // returns 429 under a policy that excludes 429 from fallback
-        // (`retry_allowlist=[500]`). Because `retries_for_status` honors
-        // the fallback predicate, an excluded 429 is also non-retryable
-        // (`retries_for_status(429)=0`) even with `retry_on_429` set --
-        // exclusion wins. So the dispatch takes the terminal
-        // non-fallbackable path, which must release the half-open probe
-        // slot before returning. A leaked slot would leave the breaker
-        // stuck CircuitOpen forever; the second dispatch must still reach
-        // the upstream. (The release at the `can_retry_here && !do_fallback`
-        // site is now defense-in-depth -- unreachable while every retryable
-        // status is also fallbackable.)
+        // (`retry_allowlist=[500]`). do_fallback is false and the 429 is
+        // also non-retryable, so the dispatch surfaces verbatim. Under
+        // class-based debit the excluded 429 DOES debit (RateLimited is a
+        // health class -- accounting is decoupled from routing), but the
+        // half-open slot must still be settled exactly once so the breaker
+        // is not left locked open. With a zero cooldown the re-trip is
+        // immediately half-open-eligible, so the second dispatch must still
+        // reach the upstream.
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: Arc<dyn Provider> = Arc::new(Probe429Provider {
             id: "p".into(),
@@ -10578,6 +11309,294 @@ mod circuit_breaker_slot_release_tests {
             2,
             "the post-cooldown stream probe must reach the upstream",
         );
+    }
+
+    // ---- Class-based breaker debit (accounting decoupled from routing) ----
+    //
+    // The debit keys off the failure CLASS, not the fallback decision:
+    // only the transient-health set (RateLimited, ServerError, Timeout,
+    // NetworkError, Overloaded) debits the per-seat breaker. Caller-shaped
+    // 4xx, auth, and capability faults fall back but never debit.
+
+    /// A `[retry]` policy with no same-provider retry and no backoff, so
+    /// one dispatch equals exactly one outcome (the debit count is not
+    /// inflated by in-loop retries and the tests run instantly).
+    fn no_retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            backoff_multiplier: 1.0,
+            jitter_ms: 0,
+            ..RetryPolicy::default()
+        }
+    }
+
+    /// Provider whose `complete` always fails with a canonical
+    /// `Error::Streaming` (classifies `NetworkError`, a health class).
+    struct AlwaysStreamingErrProvider {
+        id: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for AlwaysStreamingErrProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Streaming("wire reset before first chunk".into()))
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    /// Provider whose `stream` always fails pre-first-chunk with a
+    /// configurable upstream status, so the stream dispatch loop's error
+    /// arm (not the mid-stream wrap) decides the breaker debit.
+    struct PreChunkStatusErrProvider {
+        id: String,
+        status: u16,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for PreChunkStatusErrProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream(
+                &self.id,
+                self.status,
+                "pre-first-chunk failure",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn non_retryable_4xx_storm_leaves_breaker_closed() {
+        // The intended feature delta on the completion path. A caller-shaped
+        // 4xx is not upstream health, so a storm of them must never trip the
+        // per-seat breaker. Before the class rewire a fallbackable 4xx
+        // debited (do_fallback was true), so threshold+ consecutive 4xx
+        // would trip; now class_debits is false across the whole 4xx
+        // caller-error row, so the breaker stays closed and the alias stays
+        // in rotation.
+        for status in [400u16, 404, 422] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+                id: "p".into(),
+                status,
+                retry_after: None,
+                calls: calls.clone(),
+            });
+            // Threshold 2, four consecutive 4xx: a health-debiting error
+            // would trip twice over.
+            let router = build_router_with_breaker(provider, no_retry_policy(), 2, 60_000);
+
+            for _ in 0..4 {
+                let _ = router.complete(plain_req()).await.unwrap_err();
+            }
+
+            assert_eq!(
+                circuit_phase(&router),
+                crate::runtime_state::CircuitPhase::Closed,
+                "status {status}: a non-retryable 4xx storm must leave the breaker CLOSED",
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                4,
+                "status {status}: every dispatch must reach the upstream \
+                 (alias stays in rotation, never gated by a tripped breaker)",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_health_errors_still_trip_breaker_after_threshold() {
+        // The complementary pin: the transient-health status row still
+        // debits and trips at threshold, exactly as before the rewire.
+        for status in [429u16, 503, 500, 0] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+                id: "p".into(),
+                status,
+                retry_after: None,
+                calls: calls.clone(),
+            });
+            let router = build_router_with_breaker(provider, no_retry_policy(), 2, 60_000);
+
+            // First health failure is sub-threshold: still closed.
+            let _ = router.complete(plain_req()).await.unwrap_err();
+            assert_eq!(
+                circuit_phase(&router),
+                crate::runtime_state::CircuitPhase::Closed,
+                "status {status}: one health failure is below threshold 2",
+            );
+            // Second reaches the threshold: the breaker trips open.
+            let _ = router.complete(plain_req()).await.unwrap_err();
+            assert!(
+                breaker_open_at(&router, Instant::now()),
+                "status {status}: a health-error storm must trip the breaker at threshold",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_transport_error_still_debits_breaker() {
+        // Error::Streaming classifies NetworkError (a health class), so it
+        // must debit like a status-0 transport failure.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(AlwaysStreamingErrProvider {
+            id: "p".into(),
+            calls: calls.clone(),
+        });
+        let router = build_router_with_breaker(provider, no_retry_policy(), 1, 60_000);
+
+        let _ = router.complete(plain_req()).await.unwrap_err();
+
+        assert!(
+            breaker_open_at(&router, Instant::now()),
+            "a Streaming transport error (NetworkError class) must debit and trip the breaker",
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn completion_501_debits_breaker() {
+        // Contrast with the count_tokens capability walk: on the COMPLETION
+        // path a wire-501 is a ServerError (health), not a capability
+        // signal, so it debits and trips the breaker. Only count_tokens
+        // treats a 501 from a capable-by-kind seat as a capability signal.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 501,
+            retry_after: None,
+            calls: calls.clone(),
+        });
+        let router = build_router_with_breaker(provider, no_retry_policy(), 1, 60_000);
+
+        let _ = router.complete(plain_req()).await.unwrap_err();
+
+        assert!(
+            breaker_open_at(&router, Instant::now()),
+            "a completion-path 501 (ServerError class) must debit and trip the breaker",
+        );
+    }
+
+    #[tokio::test]
+    async fn denylisted_429_still_debits_breaker() {
+        // Intended delta: health accounting is decoupled from routing. An
+        // operator denylisting 429 (retry_denylist=[429]) makes do_fallback
+        // false -- before the rewire that suppressed the debit. Now the
+        // debit keys off the RateLimited class, not the fallback decision,
+        // so a denylisted 429 STILL debits the breaker while surfacing
+        // verbatim (no fallback, no retry).
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 429,
+            retry_after: None,
+            calls: calls.clone(),
+        });
+        let retry = RetryPolicy {
+            retry_denylist: Some(vec![429]),
+            ..no_retry_policy()
+        };
+        let router = build_router_with_breaker(provider, retry, 1, 60_000);
+
+        let err = router.complete(plain_req()).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::Upstream { status: 429, .. }),
+            "a denylisted 429 must surface verbatim (no fallback); got {err:?}",
+        );
+        assert!(
+            breaker_open_at(&router, Instant::now()),
+            "a denylisted 429 must STILL debit the breaker (accounting decoupled from routing)",
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "denylisted 429 is terminal: one upstream call, no retry, no fallback",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_non_retryable_4xx_leaves_breaker_closed() {
+        // The intended delta on the STREAM dispatch loop: a pre-first-chunk
+        // 4xx falls back but must not debit. Exercises the stream error
+        // arm's class-gated debit and the debit-skipped fallback release.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(PreChunkStatusErrProvider {
+            id: "p".into(),
+            status: 400,
+            calls: calls.clone(),
+        });
+        let router = build_router_with_breaker(provider, no_retry_policy(), 2, 60_000);
+
+        for _ in 0..4 {
+            router
+                .stream(plain_req())
+                .await
+                .err()
+                .expect("a pre-first-chunk 4xx must error");
+        }
+
+        assert_eq!(
+            circuit_phase(&router),
+            crate::runtime_state::CircuitPhase::Closed,
+            "a pre-first-chunk 4xx storm must leave the stream-path breaker CLOSED",
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "every stream dispatch must reach the upstream (alias stays in rotation)",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_health_error_still_debits_breaker() {
+        // Complement to the 4xx case: a pre-first-chunk 5xx is a health
+        // failure and must still debit + trip the stream-path breaker.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(PreChunkStatusErrProvider {
+            id: "p".into(),
+            status: 503,
+            calls: calls.clone(),
+        });
+        let router = build_router_with_breaker(provider, no_retry_policy(), 1, 60_000);
+
+        router
+            .stream(plain_req())
+            .await
+            .err()
+            .expect("a pre-first-chunk 5xx must error");
+
+        assert!(
+            breaker_open_at(&router, Instant::now()),
+            "a pre-first-chunk 5xx (ServerError class) must debit and trip the breaker",
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -13037,5 +14056,295 @@ mod k_query_key_tests {
             meta.would_trim_break_even_k, None,
             "a Missing catalog row must record K* = None",
         );
+    }
+}
+
+#[cfg(test)]
+mod observability_seam_tests {
+    //! Router-consumer observability at the class-decision point: the
+    //! stable FeatureUnsupported event, the per-arm class-decision
+    //! DEBUG/WARN event, and the two RouterMetrics counters -- wired at
+    //! BOTH dispatch loops. All capture tests run on the `#[tokio::test]`
+    //! current-thread runtime (the dispatch path never spawns before its
+    //! error arm), so the thread-local capture subscriber sees every
+    //! event the arm emits.
+
+    use super::*;
+    use crate::config::{ProviderEntry, RetryPolicy};
+    use async_trait::async_trait;
+    use routectl_testkit::with_capture;
+
+    /// A body string that must NEVER surface in any observability event
+    /// field or message. Every capture test scans for it.
+    const SECRET_BODY: &str = "TOP-SECRET-UPSTREAM-BODY-DO-NOT-LOG";
+
+    /// A provider whose `complete` / `stream` both fail with a
+    /// configurable upstream status + classifier tokens, carrying a
+    /// sentinel body used to prove no body text leaks into the new events.
+    struct FailingProvider {
+        id: String,
+        status: u16,
+        upstream_type: Option<String>,
+        upstream_code: Option<String>,
+    }
+
+    impl FailingProvider {
+        fn make_error(&self) -> Error {
+            Error::upstream_full(
+                &self.id,
+                self.status,
+                SECRET_BODY,
+                None,
+                self.upstream_type.clone(),
+                self.upstream_code.clone(),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FailingProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            Err(self.make_error())
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            Err(self.make_error())
+        }
+    }
+
+    /// Single openai-compat entry `m1 -> p1`, retry capped at one attempt
+    /// so the failing provider is hit exactly once. The config provider
+    /// entry exists so the chain expander resolves `provider_kind` to
+    /// `openai-compat` (used by both the classifier's token table and the
+    /// FeatureUnsupported event's `provider_kind` field).
+    fn router_with_failing(status: u16, ty: Option<&str>, code: Option<&str>) -> Router {
+        let config = Config {
+            retry: RetryPolicy {
+                max_attempts: 1,
+                ..RetryPolicy::default()
+            },
+            providers: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "p1".to_string(),
+                    ProviderEntry::openai_compat("https://example.test/v1", "literal:k"),
+                );
+                m
+            },
+            ..Config::default()
+        };
+        let mut router = Router::new(Arc::new(config));
+        let provider: Arc<dyn Provider> = Arc::new(FailingProvider {
+            id: "p1".into(),
+            status,
+            upstream_type: ty.map(str::to_string),
+            upstream_code: code.map(str::to_string),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m1".to_string(),
+            Arc::new(ResolvedModel::new("m1", "p1", provider, "wire-model")),
+        );
+        router.install_resolved_models(models);
+        router
+    }
+
+    fn req_m1() -> ChatRequest {
+        ChatRequest {
+            model: "m1".into(),
+            messages: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// The sentinel upstream body must not appear in any event emitted by
+    /// the NEW observability seam (the FeatureUnsupported event and the
+    /// per-arm class-decision DEBUG/WARN). Pre-existing dispatch logs that
+    /// render `error = ?e` are out of scope by design and left untouched.
+    fn assert_no_body_leak_in_seam(events: &[routectl_testkit::CapturedEvent]) {
+        let is_seam = |e: &&routectl_testkit::CapturedEvent| {
+            e.target == "routectl::feature_unsupported"
+                || e.message == "router failure class decision"
+                || e.message == "unknown failure classification on upstream outcome (fail-closed)"
+        };
+        let seam: Vec<_> = events.iter().filter(is_seam).collect();
+        assert!(!seam.is_empty(), "expected at least one seam event");
+        for e in seam {
+            assert!(
+                !e.message.contains(SECRET_BODY),
+                "body leaked into seam message: {}",
+                e.message
+            );
+            for (k, v) in &e.fields {
+                assert!(
+                    !v.contains(SECRET_BODY),
+                    "body leaked into seam field {k}: {v}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn feature_unsupported_event_fires_on_complete_with_safe_fields() {
+        // Arrange: openai-compat 400 carrying `unsupported_parameter` on
+        // error.code lifts to FeatureUnsupported.
+        let router = router_with_failing(400, None, Some("unsupported_parameter"));
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert: the request still fails (event is observational only).
+        assert!(result.is_err());
+        let ev = events
+            .iter()
+            .find(|e| e.target == "routectl::feature_unsupported")
+            .expect("feature_unsupported event must fire");
+        assert_eq!(ev.level, tracing::Level::INFO);
+        assert_eq!(ev.field("provider"), Some("p1"));
+        assert_eq!(ev.field("provider_kind"), Some("openai-compat"));
+        assert_eq!(ev.field("model"), Some("m1"));
+        assert_eq!(ev.field("capability"), Some("unsupported_parameter"));
+        assert_eq!(ev.field("status"), Some("400"));
+        assert_eq!(ev.field("upstream_type"), Some(""));
+        assert_eq!(ev.field("upstream_code"), Some("unsupported_parameter"));
+        assert_eq!(ev.field("matched_by"), Some("upstream_type"));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("is_forwarded"), Some("false"));
+
+        assert_no_body_leak_in_seam(&events);
+        assert_eq!(router.metrics.feature_unsupported_total(), 1);
+        assert_eq!(router.metrics.unknown_failure_classifications_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn feature_unsupported_event_fires_on_stream_surface() {
+        // Arrange
+        let router = router_with_failing(400, None, Some("unsupported_parameter"));
+
+        // Act: the pre-first-chunk error rides the stream error arm.
+        let (result, events) = with_capture(router.stream(req_m1())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let ev = events
+            .iter()
+            .find(|e| e.target == "routectl::feature_unsupported")
+            .expect("feature_unsupported event must fire on the stream loop");
+        assert_eq!(ev.field("surface"), Some("stream"));
+        assert_eq!(ev.field("capability"), Some("unsupported_parameter"));
+        assert_no_body_leak_in_seam(&events);
+        assert_eq!(router.metrics.feature_unsupported_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_upstream_classification_warns_and_counts_on_complete() {
+        // Arrange: status 600 is outside every mapped row -> Unknown by
+        // status, on a genuine Error::Upstream (fail-closed unknown).
+        let router = router_with_failing(600, None, None);
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let ev = events
+            .iter()
+            .find(|e| {
+                e.message == "unknown failure classification on upstream outcome (fail-closed)"
+            })
+            .expect("unknown-upstream decision must WARN");
+        assert_eq!(ev.level, tracing::Level::WARN);
+        assert_eq!(ev.field("class"), Some("unknown"));
+        assert_eq!(ev.field("matched_by"), Some("status"));
+        assert_eq!(ev.field("status"), Some("Some(600)"));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("fallback"), Some("false"));
+        assert_eq!(ev.field("debit"), Some("false"));
+        assert_eq!(ev.field("raw_override"), Some("none"));
+
+        assert_no_body_leak_in_seam(&events);
+        assert_eq!(router.metrics.unknown_failure_classifications_total(), 1);
+        assert_eq!(router.metrics.feature_unsupported_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_upstream_classification_warns_and_counts_on_stream() {
+        // Arrange
+        let router = router_with_failing(600, None, None);
+
+        // Act
+        let (result, events) = with_capture(router.stream(req_m1())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let ev = events
+            .iter()
+            .find(|e| {
+                e.message == "unknown failure classification on upstream outcome (fail-closed)"
+            })
+            .expect("unknown-upstream decision must WARN on the stream loop");
+        assert_eq!(ev.level, tracing::Level::WARN);
+        assert_eq!(ev.field("surface"), Some("stream"));
+        assert_no_body_leak_in_seam(&events);
+        assert_eq!(router.metrics.unknown_failure_classifications_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn generic_bad_request_emits_single_debug_decision() {
+        // Arrange: a generic 400 stays BadRequest -- exercises the DEBUG
+        // (non-WARN, non-feature) class-decision path and its field set.
+        let router = router_with_failing(400, Some("invalid_request_error"), None);
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert: exactly one class-decision event per error-arm pass.
+        assert!(result.is_err());
+        let decisions: Vec<_> = events
+            .iter()
+            .filter(|e| e.message == "router failure class decision")
+            .collect();
+        assert_eq!(decisions.len(), 1, "one decision event per error-arm pass");
+        let ev = decisions[0];
+        assert_eq!(ev.level, tracing::Level::DEBUG);
+        assert_eq!(ev.field("class"), Some("bad_request"));
+        assert_eq!(ev.field("matched_by"), Some("status"));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("fallback"), Some("true"));
+        assert_eq!(ev.field("debit"), Some("false"));
+        assert_eq!(ev.field("retry_cap"), Some("0"));
+        assert_eq!(ev.field("raw_override"), Some("none"));
+        assert_eq!(ev.field("is_probe"), Some("false"));
+        assert_eq!(ev.field("is_forwarded"), Some("false"));
+
+        assert_no_body_leak_in_seam(&events);
+        assert_eq!(router.metrics.feature_unsupported_total(), 0);
+        assert_eq!(router.metrics.unknown_failure_classifications_total(), 0);
+    }
+
+    #[test]
+    fn label_helpers_map_stable_tokens() {
+        assert_eq!(class_label(&FailureClass::RateLimited), "rate_limited");
+        assert_eq!(class_label(&FailureClass::Unknown), "unknown");
+        assert_eq!(
+            class_label(&FailureClass::FeatureUnsupported {
+                capability: "x".into()
+            }),
+            "feature_unsupported"
+        );
+        assert_eq!(matched_by_label(MatchedBy::Variant), "variant");
+        assert_eq!(matched_by_label(MatchedBy::Status), "status");
+        assert_eq!(matched_by_label(MatchedBy::UpstreamType), "upstream_type");
+        assert_eq!(raw_override_label(None), "none");
+        assert_eq!(raw_override_label(Some(true)), "allow");
+        assert_eq!(raw_override_label(Some(false)), "deny");
     }
 }
