@@ -1,6 +1,6 @@
 //! Observability primitives for the MITM front-proxy.
 //!
-//! Realization note: the decision doc sketched these as Prometheus-style
+//! Realization note: these metrics were originally sketched as Prometheus-style
 //! metrics (`rc_proxy_requests_total{leg,result_class,path_class}`, a
 //! `rc_streams_open` gauge, and so on). routectl has no metrics
 //! backend or exporter anywhere in the workspace, so this module does

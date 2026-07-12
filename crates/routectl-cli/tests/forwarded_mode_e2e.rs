@@ -1,5 +1,5 @@
-//! End-to-end HTTP coverage for `first-party-passthrough.f2.11` -- the
-//! validator-facing feature gate for forwarded (pure-proxy) mode.
+//! End-to-end HTTP coverage for the validator-facing feature gate for
+//! forwarded (pure-proxy) mode.
 //!
 //! Every test here drives a REAL axum server over a REAL TCP loopback
 //! connection (`helpers::spawn`, same pattern as `anthropic_ingress.rs`),
@@ -429,7 +429,7 @@ async fn e2e_router_refuses_forwarded_request_to_non_anthropic_target_upstream_n
 
 // ---------------------------------------------------------------------------
 // Backward compat -- own mode and absent-[mitm] mode behave byte-for-byte
-// pre-f2, INCLUDING when a client sends forwarded-style headers a curious
+// pre-passthrough, INCLUDING when a client sends forwarded-style headers a curious
 // or misconfigured client might send. Real HTTP against a wiremock upstream
 // standing in for api.anthropic.com; the host pin does not apply because
 // neither path ever sets `forwarded_bearer` (config-is-the-capability).
@@ -524,7 +524,7 @@ async fn e2e_own_mode_backward_compat_ignores_forwarded_style_headers() {
     assert_backward_compat_round_trip(Some(mitm_config(CredentialSource::Own))).await;
 }
 
-/// Absent `[mitm]` block entirely (the pre-f1 shape, and still the default
+/// Absent `[mitm]` block entirely (the pre-MITM shape, and still the default
 /// for any deployment that never opts into the MITM feature): the same
 /// forwarded-style headers are equally inert, because there is no
 /// `[mitm]` block to arm the capture gate's config-is-the-capability half.

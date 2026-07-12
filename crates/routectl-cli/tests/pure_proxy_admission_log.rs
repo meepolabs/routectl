@@ -1,6 +1,5 @@
 //! Structured-log safety for the forwarded-mode (pure-proxy) INGRESS
-//! admission rejections (`first-party-passthrough.f2.06`, decision-doc
-//! Section 6).
+//! admission rejections.
 //!
 //! When `ingress_handle` rejects a forwarded request at admission it emits
 //! ONE WARN. This test pins the operator-grep contract: the WARN carries
@@ -35,7 +34,7 @@ use serde_json::{Value, json};
 const FORWARDED_TOKEN: &str = "sk-ant-oat01-FORWARDED-INGRESS-must-never-surface";
 
 /// The MITM seam header the forwarded-mode admission gate treats as the hint
-/// that a request arrived through the f1 proxy leg.
+/// that a request arrived through the MITM proxy leg.
 const MITM_PROXIED_HEADER: &str = "x-routectl-mitm-proxied";
 
 /// Build a forwarded-mode `AppState` (`[mitm] credential_source = forwarded`)

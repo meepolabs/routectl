@@ -66,7 +66,7 @@ impl PureProxyRejectionReason {
         }
     }
 
-    /// HTTP status each rejection maps to (decision-doc Section 6): the
+    /// HTTP status each rejection maps to: the
     /// absent-credential case is 401, every other admission failure is a
     /// 400 bad-request shape.
     pub(crate) const fn status(self) -> StatusCode {

@@ -5,7 +5,7 @@
 //!
 //! Deliberately a plain printer: no rich formatting, no colors, no shell
 //! detection, no flags. A future `routectl setup claude-code` supersedes
-//! this with a richer onboarding flow (decision doc section 9); this
+//! this with a richer onboarding flow; this
 //! command stays minimal until then.
 
 use routectl_core::{Error, Result};
