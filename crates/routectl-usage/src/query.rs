@@ -705,12 +705,20 @@ WHERE ts_start >= ?1
   AND session_id IS NOT NULL
   AND provider_kind IS NOT NULL
   AND model IS NOT NULL
+  AND outcome = 'ok'
 ORDER BY ts_start ASC
 LIMIT ?2";
 
 /// Raw reuse samples whose request start time is at or after `window_start_ms`,
 /// ordered oldest-first, capped at `limit`.
 ///
+/// Admission contract: `outcome = 'ok'` ONLY, matching the live sample path
+/// (the live K-store write fires only on the non-streaming success finalize
+/// and on natural stream EOS, both of which finalize as `Outcome::Ok`). A
+/// mid-stream failure (e.g. `upstream_error`) may have observed partial
+/// `cache_read`, but it never reaches the live K store, so the warm rebuild
+/// must not replay it either -- otherwise a restart would admit rows live
+/// traffic never would, silently diverging the two paths' K-store contents.
 /// Rows without a `session_id`, `provider_kind`, or `model` are filtered out:
 /// the K estimator keys on the full (session, provider_kind, model) triple, so
 /// a NULL in any of the three has no usable identity and is dropped rather than
@@ -1712,7 +1720,8 @@ mod tests {
     }
 
     /// Insert a row exercising the reuse-sample columns: nullable
-    /// `session_id`, `provider_kind`, `model`, and `cache_read`.
+    /// `session_id`, `provider_kind`, `model`, `cache_read`, and an explicit
+    /// `outcome` so the admission-contract filter is exercisable.
     #[allow(clippy::too_many_arguments)]
     fn insert_reuse_row(
         db: &UsageDb,
@@ -1722,20 +1731,22 @@ mod tests {
         provider_kind: Option<&str>,
         model: Option<&str>,
         cache_read: Option<i64>,
+        outcome: &str,
     ) {
         db.conn()
             .execute(
                 "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
                  requested_model, alias, model, provider_kind, session_id, stream, outcome, \
                  latency_ms, tool_count, msg_count, attempt_count, fallback_count, cache_read) \
-                 VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, ?4, ?5, 1, 'ok', \
-                 5, 0, 0, 1, 0, ?6)",
+                 VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, ?4, ?5, 1, ?6, \
+                 5, 0, 0, 1, 0, ?7)",
                 rusqlite::params![
                     ts_start,
                     request_id,
                     model,
                     provider_kind,
                     session_id,
+                    outcome,
                     cache_read,
                 ],
             )
@@ -1757,6 +1768,7 @@ mod tests {
             Some("anthropic-api"),
             Some("opus"),
             Some(42),
+            "ok",
         );
         insert_reuse_row(
             &db,
@@ -1766,6 +1778,7 @@ mod tests {
             Some("anthropic-api"),
             Some("opus"),
             None,
+            "ok",
         );
         // A second triple (different provider_kind).
         insert_reuse_row(
@@ -1776,6 +1789,7 @@ mod tests {
             Some("bedrock"),
             Some("opus"),
             Some(7),
+            "ok",
         );
         // NULL session_id -> filtered out (no usable triple identity).
         insert_reuse_row(
@@ -1786,9 +1800,19 @@ mod tests {
             Some("anthropic-api"),
             Some("opus"),
             Some(9),
+            "ok",
         );
         // NULL provider_kind -> filtered out.
-        insert_reuse_row(&db, "n-pk", 130, Some("s2"), None, Some("opus"), Some(9));
+        insert_reuse_row(
+            &db,
+            "n-pk",
+            130,
+            Some("s2"),
+            None,
+            Some("opus"),
+            Some(9),
+            "ok",
+        );
         // NULL model -> filtered out.
         insert_reuse_row(
             &db,
@@ -1798,6 +1822,7 @@ mod tests {
             Some("anthropic-api"),
             None,
             Some(9),
+            "ok",
         );
         // Out of window (ts < window_start).
         insert_reuse_row(
@@ -1808,6 +1833,7 @@ mod tests {
             Some("anthropic-api"),
             Some("opus"),
             Some(99),
+            "ok",
         );
 
         // Act: window starts at 100.
@@ -1843,6 +1869,7 @@ mod tests {
                 Some("anthropic-api"),
                 Some("opus"),
                 Some(1),
+                "ok",
             );
         }
 
@@ -1852,6 +1879,46 @@ mod tests {
         // Assert: the three OLDEST (ascending order, then LIMIT).
         let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
         assert_eq!(ids, vec![100, 101, 102]);
+    }
+
+    #[test]
+    fn read_reuse_samples_excludes_non_ok_outcome() {
+        // Arrange: a mid-stream-failed row (upstream_error) that still
+        // carries a full triple and a non-null cache_read -- the divergence
+        // case where the live path never records it (record_k_sample only
+        // fires on the success finalize / natural stream EOS) but a
+        // filter-less rebuild would replay it after a restart. An ok row in
+        // the same window must still be admitted.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_reuse_row(
+            &db,
+            "failed",
+            100,
+            Some("s1"),
+            Some("anthropic-api"),
+            Some("opus"),
+            Some(42),
+            "upstream_error",
+        );
+        insert_reuse_row(
+            &db,
+            "succeeded",
+            110,
+            Some("s1"),
+            Some("anthropic-api"),
+            Some("opus"),
+            Some(7),
+            "ok",
+        );
+
+        // Act
+        let rows = read_reuse_samples_since(db.conn(), 0, 100).expect("read");
+
+        // Assert: only the ok row survives.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts_start_ms, 110);
+        assert_eq!(rows[0].cache_read, 7);
     }
 
     /// Insert a calibration row: an optional `would_trim_k_floor` (None ->

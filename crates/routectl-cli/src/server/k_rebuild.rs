@@ -131,7 +131,9 @@ mod tests {
     }
 
     /// Insert a reuse-bearing row directly so the reader's mapping +
-    /// clamps can be exercised against a real read-only open.
+    /// clamps can be exercised against a real read-only open. Always
+    /// `outcome = 'ok'` -- see `insert_reuse_row_with_outcome` for the
+    /// admission-contract test.
     fn insert_reuse_row(
         db: &routectl_usage::UsageDb,
         request_id: &str,
@@ -141,19 +143,45 @@ mod tests {
         model: &str,
         cache_read: Option<i64>,
     ) {
+        insert_reuse_row_with_outcome(
+            db,
+            request_id,
+            ts_start,
+            session_id,
+            provider_kind,
+            model,
+            cache_read,
+            "ok",
+        );
+    }
+
+    /// Same as `insert_reuse_row`, with an explicit `outcome` so the
+    /// admission-contract filter (`outcome = 'ok'` only) is exercisable.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_reuse_row_with_outcome(
+        db: &routectl_usage::UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        session_id: &str,
+        provider_kind: &str,
+        model: &str,
+        cache_read: Option<i64>,
+        outcome: &str,
+    ) {
         db.conn()
             .execute(
                 "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
                  requested_model, alias, model, provider_kind, session_id, stream, outcome, \
                  latency_ms, tool_count, msg_count, attempt_count, fallback_count, cache_read) \
-                 VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, ?4, ?5, 1, 'ok', \
-                 5, 0, 0, 1, 0, ?6)",
+                 VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, ?4, ?5, 1, ?6, \
+                 5, 0, 0, 1, 0, ?7)",
                 rusqlite::params![
                     ts_start,
                     request_id,
                     model,
                     provider_kind,
                     session_id,
+                    outcome,
                     cache_read,
                 ],
             )
@@ -254,6 +282,83 @@ mod tests {
                     model: "opus".into(),
                 })
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn warm_excludes_mid_stream_failed_row_matching_live_admission() {
+        // Arrange: an ok row and a mid-stream-failed row (upstream_error)
+        // sharing a triple -- the failed row still carries a full triple and
+        // a non-null cache_read (it observed partial usage before failing),
+        // which is exactly the divergence case: the live path never records
+        // it (record_k_sample only fires on the success finalize / natural
+        // stream EOS) but a filter-less rebuild would replay it after a
+        // restart. Plus a second triple that is ENTIRELY a failed row, which
+        // must warm nothing.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as i64;
+        insert_reuse_row(
+            &db,
+            "ok1",
+            now_ms - 1000,
+            "s1",
+            "anthropic-api",
+            "opus",
+            Some(9),
+        );
+        insert_reuse_row_with_outcome(
+            &db,
+            "failed1",
+            now_ms - 900,
+            "s1",
+            "anthropic-api",
+            "opus",
+            Some(5),
+            "upstream_error",
+        );
+        insert_reuse_row_with_outcome(
+            &db,
+            "failed-only",
+            now_ms - 800,
+            "s2",
+            "anthropic-api",
+            "opus",
+            Some(3),
+            "upstream_error",
+        );
+        drop(db);
+
+        // Act
+        let store = KSessionStore::new();
+        warm_k_store_from_ledger(&path, &store);
+
+        // Assert: only the ok-row triple warms, with exactly its one sample.
+        assert_eq!(store.len(), 1);
+        let primary = store
+            .get(&KSessionKey {
+                session_key: "s1".into(),
+                provider_kind: "anthropic-api".into(),
+                model: "opus".into(),
+            })
+            .expect("ok-row triple warmed");
+        assert_eq!(
+            primary.len(),
+            1,
+            "the failed row must not contribute a sample"
+        );
+        assert!(
+            store
+                .get(&KSessionKey {
+                    session_key: "s2".into(),
+                    provider_kind: "anthropic-api".into(),
+                    model: "opus".into(),
+                })
+                .is_none(),
+            "a triple with only a failed row must not warm at all"
         );
     }
 
