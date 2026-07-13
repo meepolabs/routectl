@@ -126,6 +126,34 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+    /// Guided first-run setup: detect stored oauth logins and resolvable
+    /// credential env vars, wire the chosen providers plus a single default
+    /// route, and write `config.toml` through the same atomic, re-validated
+    /// write path the other config commands use. Composes `provider add`
+    /// once per selected provider under ONE confirmation, then the single
+    /// models/aliases write. Ends at config-written -- it prints the next
+    /// steps (run doctor, start serve, a sample curl) but embeds no probe,
+    /// installs no service, and launches nothing.
+    Init {
+        /// Drop the committed starter `config.toml` (expert fast-path)
+        /// instead of walking the guided wizard. Fresh path only; refuses
+        /// an existing config. Mutually exclusive with the wizard flags.
+        #[arg(long, conflicts_with_all = ["default_model", "forwarded"])]
+        scaffold: bool,
+        /// Non-interactive: select every detected credential and take the
+        /// remaining answers from the flags/env. A required value with no
+        /// TTY errors actionably instead of prompting.
+        #[arg(long)]
+        yes: bool,
+        /// Upstream model id wired for every selected provider -- the
+        /// non-interactive answer to the per-provider model-id prompt.
+        #[arg(long = "default-model")]
+        default_model: Option<String>,
+        /// Include the zero-config forwarded (claude.ai relay) provider and
+        /// its alias, captured with no secret prompt.
+        #[arg(long)]
+        forwarded: bool,
+    },
     /// Add or overwrite a provider entry in `config.toml`, routed through
     /// the same atomic, re-validated write path as `config set`. The secret
     /// is supplied by reference (`--secret-ref`) or environment variable
@@ -583,6 +611,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Cmd::Init {
+            scaffold,
+            yes,
+            default_model,
+            forwarded,
+        } => {
+            let config_path = resolve_config_path(cli.config.as_deref());
+            let args = commands::init::InitArgs {
+                scaffold,
+                yes,
+                default_model,
+                forwarded,
+            };
+            if let Err(e) = commands::init::run(&config_path, args).await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         Cmd::Provider { action } => match action {
             ProviderCmd::Add {
                 kind,
@@ -931,5 +977,52 @@ mod tests {
                 action: ProviderCmd::Add { .. }
             }
         ));
+    }
+
+    /// `init` parses the full flag surface and reaches the `Cmd::Init` variant.
+    #[test]
+    fn init_parses_the_scaffold_and_wizard_flags() {
+        let cli = Cli::parse_from(["routectl", "init", "--scaffold"]);
+        assert!(matches!(cli.cmd, Cmd::Init { scaffold: true, .. }));
+
+        let cli = Cli::parse_from([
+            "routectl",
+            "init",
+            "--yes",
+            "--default-model",
+            "gpt-4o",
+            "--forwarded",
+        ]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Init {
+                scaffold: false,
+                yes: true,
+                forwarded: true,
+                default_model: Some(_),
+            }
+        ));
+    }
+
+    /// `--scaffold` is mutually exclusive with the wizard-flow flags at the
+    /// clap layer, so the fast-path and the guided flow can never be requested
+    /// at once.
+    #[test]
+    fn init_scaffold_conflicts_with_the_wizard_flags() {
+        assert!(
+            Cli::try_parse_from([
+                "routectl",
+                "init",
+                "--scaffold",
+                "--default-model",
+                "gpt-4o"
+            ])
+            .is_err(),
+            "--scaffold with --default-model must be rejected"
+        );
+        assert!(
+            Cli::try_parse_from(["routectl", "init", "--scaffold", "--forwarded"]).is_err(),
+            "--scaffold with --forwarded must be rejected"
+        );
     }
 }
