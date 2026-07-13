@@ -3,6 +3,7 @@
 //! Binary entry point is `src/main.rs`. Tests import from this crate root.
 
 pub mod commands;
+pub mod config_classify;
 pub mod handlers;
 pub mod ingress;
 pub mod proxy;

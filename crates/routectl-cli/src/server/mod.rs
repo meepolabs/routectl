@@ -1521,11 +1521,11 @@ async fn handle_config_reload(
 
     router_swap.store(Arc::new(new_router));
 
-    // Flip the usage capture gate live. `db_path` is restart-required
-    // (the writer holds the DB handle opened at boot, so it is NOT
-    // re-opened here); `retention_days` needs no live action (the prune
-    // is startup-only, so a changed value takes effect at the next
-    // daemon start). Only `enabled` flips at runtime.
+    // Flip the usage capture gate live. `db_path` and `retention_days` are
+    // restart-required (the writer holds the DB handle opened at boot, and
+    // pruning runs only at startup, so a changed value takes effect at the
+    // next daemon start -- both surface in the restart-required warning
+    // below). Only `enabled` flips at runtime.
     usage.set_enabled(new_config.usage.enabled);
 
     tracing::info!(
@@ -1534,7 +1534,8 @@ async fn handle_config_reload(
         "config reloaded; router rebuilt and swapped",
     );
 
-    let restart_required = collect_restart_required_changes(current_config, &new_config);
+    let restart_required =
+        crate::config_classify::collect_restart_required_changes(current_config, &new_config);
     if !restart_required.is_empty() {
         tracing::warn!(
             restart_required = ?restart_required,
@@ -1740,63 +1741,6 @@ fn warn_if_config_world_readable(path: &Path, config: &Config, raw_text: &str) {
     }
 }
 
-/// Diff the previous config against the new one and return the
-/// names of fields whose change requires a daemon restart to take
-/// effect. Per the architect-validated decision: bind, listener
-/// auth, the `DefaultBodyLimit` axum layer, and the three `[log]`
-/// knobs (deliberately frozen behind `OnceLock` in
-/// `routectl-core/src/log_safe.rs`) all stay restart-required.
-fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = Vec::new();
-
-    if prev.server.host != next.server.host {
-        out.push("server.host");
-    }
-    if prev.server.port != next.server.port {
-        out.push("server.port");
-    }
-    let prev_tokens: &[String] = prev
-        .server
-        .auth
-        .as_ref()
-        .map_or(&[], |a| a.tokens.as_slice());
-    let next_tokens: &[String] = next
-        .server
-        .auth
-        .as_ref()
-        .map_or(&[], |a| a.tokens.as_slice());
-    if prev_tokens != next_tokens {
-        out.push("server.auth.tokens");
-    }
-    if prev.server.max_body_bytes != next.server.max_body_bytes {
-        out.push("server.max_body_bytes");
-    }
-
-    if prev.log.trace_headers != next.log.trace_headers {
-        out.push("log.trace_headers");
-    }
-    if prev.log.trace_body_bytes != next.log.trace_body_bytes {
-        out.push("log.trace_body_bytes");
-    }
-    if prev.log.redact_prompts != next.log.redact_prompts {
-        out.push("log.redact_prompts");
-    }
-
-    if prev.usage.db_path != next.usage.db_path {
-        out.push("usage.db_path");
-    }
-
-    if prev.mitm != next.mitm {
-        // The MITM front-proxy listener is spawned once at boot
-        // (`start_mitm_proxy`) from the config it was given; a
-        // hot-reloaded `[mitm]` edit has no live listener to apply to,
-        // so report it restart-required rather than silently no-op.
-        out.push("mitm");
-    }
-
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1850,95 +1794,6 @@ mod tests {
         // IPv4-mapped addresses must not be.
         assert!(is_loopback("::ffff:127.0.0.1"));
         assert!(!is_loopback("::ffff:192.168.1.1"));
-    }
-
-    #[test]
-    fn collect_restart_required_changes_flags_bind_and_log() {
-        use routectl_router::{Config, ServerAuth, ServerConfig};
-
-        // `next` is cloned from `prev` (not a second `Config::default()`) so
-        // both share an identical baseline -- including `usage.db_path`, whose
-        // default reads `XDG_CONFIG_HOME`/`HOME` and so can differ between two
-        // independent `Config::default()` calls if a concurrent test mutates
-        // those env vars. Cloning keeps this test hermetic against that.
-        let mut prev = Config::default();
-        let mut next = prev.clone();
-
-        // Baseline: identical configs -> empty list.
-        assert!(collect_restart_required_changes(&prev, &next).is_empty());
-
-        // Host change -> server.host.
-        next.server = ServerConfig {
-            host: "0.0.0.0".into(),
-            ..ServerConfig::default()
-        };
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(changes.contains(&"server.host"), "got {changes:?}");
-
-        // Token change -> server.auth.tokens.
-        prev.server = ServerConfig::default();
-        next.server = ServerConfig {
-            auth: Some(ServerAuth {
-                tokens: vec!["literal:tok-1".into()],
-            }),
-            ..ServerConfig::default()
-        };
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(changes.contains(&"server.auth.tokens"), "got {changes:?}");
-
-        // Log knob change -> log.redact_prompts.
-        prev = Config::default();
-        next = prev.clone();
-        next.log.redact_prompts = Some(true);
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(changes.contains(&"log.redact_prompts"), "got {changes:?}");
-
-        // usage.db_path change -> restart-required.
-        prev = Config::default();
-        next = prev.clone();
-        next.usage.db_path = std::path::PathBuf::from("/tmp/other-usage.db");
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(changes.contains(&"usage.db_path"), "got {changes:?}");
-
-        // usage.enabled change -> hot-reload, NOT restart-required.
-        prev = Config::default();
-        next = prev.clone();
-        next.usage.enabled = !prev.usage.enabled;
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(
-            !changes.contains(&"usage.enabled") && changes.is_empty(),
-            "enabled must hot-reload; got {changes:?}"
-        );
-
-        // usage.retention_days change -> hot-reload, NOT restart-required.
-        prev = Config::default();
-        next = prev.clone();
-        next.usage.retention_days = prev.usage.retention_days + 1;
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(
-            !changes.contains(&"usage.retention_days") && changes.is_empty(),
-            "retention_days must hot-reload; got {changes:?}"
-        );
-
-        // [mitm] edit -> restart-required (the MITM listener is
-        // startup-only; a hot-reloaded edit has no live listener to
-        // apply to).
-        use routectl_router::MitmConfig;
-        prev = Config::default();
-        next = prev.clone();
-        next.mitm = Some(MitmConfig::default());
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(changes.contains(&"mitm"), "got {changes:?}");
-
-        prev = Config::default();
-        prev.mitm = Some(MitmConfig::default());
-        next = prev.clone();
-        next.mitm = Some(MitmConfig {
-            listen_port: prev.mitm.as_ref().unwrap().listen_port + 1,
-            ..MitmConfig::default()
-        });
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(changes.contains(&"mitm"), "got {changes:?}");
     }
 
     #[tokio::test]

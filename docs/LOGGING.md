@@ -309,6 +309,20 @@ and inherit no `request_id` span (the writer runs on a dedicated OS thread).
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage channel full -- dropping record (capture lags writer)"` (rate-limited: first drop + every 1024 thereafter) |
 | WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` |
 
+## Config-edit audit shape
+
+`routectl config set` emits exactly one audit event on a successful
+write (a no-op set or a rejected edit emits nothing):
+
+| Level | Fields | Message |
+|---|---|---|
+| INFO | `surface="cli"`, `verb="set"`, `path=<dotted path>`, `restart_required=[<field>, ...]`, `high_consequence=<bool>` | `"config edit committed"` |
+
+The event records WHICH key changed and whether the change was
+egress-defining or restart-only -- never the value written. The value
+may be a `literal:` secret, so it is deliberately absent from the audit
+trail (as it is from every other log surface).
+
 ## Prompt-cache auto-emission log shapes
 
 The dispatch-path prompt-cache auto-emitter (see CONFIGURATION.md,

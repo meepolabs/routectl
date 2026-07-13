@@ -7,6 +7,8 @@
 pub mod catalog;
 pub mod catalog_import;
 pub mod config;
+pub mod config_edit;
+pub mod config_effective;
 pub mod login;
 pub mod logout;
 pub mod prompt_size;

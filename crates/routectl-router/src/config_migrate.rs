@@ -22,7 +22,6 @@
 //! rewrite, so it either has not run yet or has already fully completed.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -227,59 +226,12 @@ fn rewrite_config_to_v2(config_path: &Path) -> Result<(), MigrationError> {
     doc["version"] = toml_edit::value(i64::from(CURRENT_CONFIG_VERSION));
     doc.remove("cache_pricing");
 
-    write_config_atomic(config_path, doc.to_string().as_bytes()).map_err(|reason| {
-        MigrationError::ConfigIo {
+    crate::config_write::write_config_atomic(config_path, doc.to_string().as_bytes()).map_err(
+        |reason| MigrationError::ConfigIo {
             path: display,
             reason,
-        }
-    })
-}
-
-/// Temp-file-then-rename write, mirroring `catalog_overlay`'s writer
-/// discipline (fsync before rename), but preserving the ORIGINAL file's
-/// permission bits instead of forcing `0o600` -- `config.toml` is
-/// operator-owned and its existing mode is deliberate, not a default this
-/// migration should override.
-///
-/// Also fsyncs the PARENT DIRECTORY after the rename: `rename` is atomic
-/// for concurrent readers, but the rename itself is not durable across a
-/// crash/power loss until the directory entry pointing at the new inode is
-/// flushed too -- without this, a crash right after this call returns can
-/// roll the directory entry back to the pre-rename file even though the
-/// temp file's own contents were already fsynced.
-fn write_config_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "path has no parent directory".to_string())?;
-
-    #[cfg(unix)]
-    let original_mode = {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path).ok().map(|m| m.permissions().mode())
-    };
-
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".config.tmp.")
-        .suffix(".toml")
-        .tempfile_in(parent)
-        .map_err(|e| format!("tempfile: {e}"))?;
-    tmp.write_all(bytes)
-        .map_err(|e| format!("write tempfile: {e}"))?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| format!("fsync tempfile: {e}"))?;
-    tmp.persist(path).map_err(|e| format!("rename: {e}"))?;
-
-    #[cfg(unix)]
-    if let Some(mode) = original_mode {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-    }
-
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+        },
+    )
 }
 
 /// Today's date as `"YYYY-MM-DD"`, derived from the system clock via pure

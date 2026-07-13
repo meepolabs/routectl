@@ -16,9 +16,12 @@ pub mod catalog_overlay;
 pub(crate) mod catalog_state;
 pub mod class_policy;
 pub mod config;
+pub mod config_effective;
 pub mod config_error;
 pub mod config_locate;
 pub mod config_migrate;
+pub mod config_path;
+pub mod config_write;
 pub mod context_trim;
 pub mod cost_gate;
 pub mod factory;
@@ -73,9 +76,14 @@ pub use config::{
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
+pub use config_effective::{
+    ClassPolicyCell, ClassPolicySource, EffectiveView, ModelCell, derive_effective_view,
+};
 pub use config_error::parse_config;
 pub use config_locate::locate_dotted_path;
 pub use config_migrate::{MigrationError, MigrationOutcome, migrate_v1_to_v2};
+pub use config_path::{PathError, PathShape, validate_config_path};
+pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};
 pub use context_trim::{
     ElisionMark, NearLosslessMarks, SteadyStateTrimParams, SteadyStateTrimPlan, apply_trim_plan,
     collect_near_lossless_marks, near_lossless_candidate, propose_steady_state_trim,
