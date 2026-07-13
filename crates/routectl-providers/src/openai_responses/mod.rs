@@ -77,7 +77,9 @@ const PROVIDER_KIND: &str = "openai-responses";
 ///
 /// Kebab-case on the TOML wire so config writes look natural:
 ///   `auth_kind = "chatgpt-oauth"`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthKind {
     /// ChatGPT subscription via OAuth bearer JWT. Default.

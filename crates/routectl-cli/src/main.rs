@@ -399,8 +399,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Config { action } => match action {
             ConfigCmd::Check => {
-                let config = load_config(cli.config.as_deref())?;
-                if let Err(e) = commands::config::check(&config).await {
+                // `check` is the showcase validation surface: it runs the
+                // full shared validator suite itself and renders EVERY error
+                // with a source line. Load WITHOUT the fail-fast validation
+                // gate so a parseable-but-semantically-invalid config reaches
+                // the renderer intact instead of aborting on the first error.
+                let config = load_config_unvalidated(cli.config.as_deref())?;
+                // Re-read the raw TOML so `check` can render semantic errors
+                // with the source line they came from. A read failure here is
+                // not fatal: `check` falls back to the plain message.
+                let raw = std::fs::read_to_string(resolve_config_path(cli.config.as_deref())).ok();
+                if let Err(e) = commands::config::check(&config, raw.as_deref()).await {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
@@ -588,6 +597,19 @@ fn load_config_with_overlay(
 ) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
     let path = resolve_config_path(explicit);
     Ok(server::load_effective_config(&path)?)
+}
+
+/// Cold-start config load that PARSES and migrates but SKIPS the fail-fast
+/// semantic validation gate. Only `config check` uses this: it runs the full
+/// shared validator suite itself and renders every error with a source line,
+/// so it must receive a parseable-but-semantically-invalid config intact
+/// rather than have the load abort on the first semantic error. Parse-level
+/// failures still propagate (nothing for `check` to render against).
+fn load_config_unvalidated(
+    explicit: Option<&std::path::Path>,
+) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {
+    let path = resolve_config_path(explicit);
+    Ok(server::load_effective_config_unvalidated(&path)?.config)
 }
 
 /// Resolve the config path the same way `load_config` does, but

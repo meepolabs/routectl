@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::class_policy::{ClassPolicy, ConfigFailureClass};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Schema-version stamp for this `config.toml`. Absent in the file
@@ -353,7 +353,7 @@ mod config_version_tests {
 /// optional `auto_emit_top_level_breakpoint` override consulted only when
 /// the global switch is on. The effective decision is "global on AND
 /// provider not explicitly off".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct CacheConfig {
@@ -389,7 +389,7 @@ impl Default for CacheConfig {
 /// keys are rejected so a typo surfaces at config-load time rather than
 /// being silently ignored. The two do not conflict -- a config naming a
 /// future field simply requires a binary new enough to know that field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ReductionConfig {
@@ -426,7 +426,7 @@ pub struct ReductionConfig {
 /// `#[non_exhaustive]` leaves room for a later knob without breaking
 /// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
 /// config-load time instead of silently ignoring it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct TrimConfig {
@@ -504,7 +504,7 @@ const fn default_trim_keep_recent_messages() -> usize {
 /// tracing subscriber BEFORE any config load runs, and the
 /// architect-validated design declines to reorder boot to introduce a
 /// config-side fallback for it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
     /// Opt-in for the four `trace_*_headers` directions (raw, no
@@ -532,7 +532,7 @@ pub struct LogConfig {
 /// `retention_days` hot-reload on the next config swap. See
 /// `collect_restart_required_changes` in the CLI server module for the
 /// classification.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UsageConfig {
     /// Master switch for the usage-accounting subsystem. Default on.
@@ -594,7 +594,9 @@ fn default_usage_db_path() -> PathBuf {
 /// `validate_provider_credential_sources`) -- the legacy `[mitm]
 /// credential_source` field this enum also backed is removed; see
 /// `preflight_legacy_mitm_credential_source`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum CredentialSource {
     /// Authenticate to the upstream with routectl's own managed
@@ -619,7 +621,7 @@ pub enum CredentialSource {
 /// `preflight_legacy_mitm_credential_source` for the pre-parse check
 /// that catches a config still carrying the removed `[mitm]
 /// credential_source` key and names the replacement.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MitmConfig {
     /// Upstream origin the proxy forwards decrypted requests to. Must
@@ -827,7 +829,7 @@ mod legacy_mitm_credential_source_preflight_tests {
 /// fixes historical rows.
 ///
 /// `Eq` is deliberately NOT derived: `f64` is not `Eq`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PricingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -856,7 +858,7 @@ pub struct PricingConfig {
 /// sub-table, so a newer config carrying that key must not fail against
 /// an older binary. `PricingConfig` still rejects typos (its field set
 /// is stable).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -938,7 +940,7 @@ impl Config {
 /// type at the core boundary (config-side enum -> `Core*` enum via the
 /// `From` impls below), so a single shared struct cannot span both
 /// crates without inverting the `core <- router` dependency.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ModelEntry {
@@ -1243,7 +1245,7 @@ fn default_effort_levels() -> Vec<String> {
 /// "claude-opus-4-7-20251022" = "heavy"      # single
 /// "fast"                     = ["small", "smaller"]  # chain
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum AliasValue {
     Single(String),
@@ -1317,7 +1319,7 @@ impl<'a> Iterator for NicknameIter<'a> {
 /// a list missing routectl-mandatory keys (`messages`,
 /// `anthropic_version`, `max_tokens`) or missing `anthropic_beta`
 /// when a `[providers.X] anthropic_beta` floor is set.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BedrockGlobalConfig {
     /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
     /// entry independently and 400s the request on the first
@@ -1348,7 +1350,7 @@ pub struct BedrockGlobalConfig {
     pub allowed_body_fields: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Bind host. Defaults to localhost. Refuses non-loopback unless
@@ -1416,7 +1418,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerAuth {
     /// Allowed tokens, stored as SecretRef URIs. Empty list means
@@ -1446,7 +1448,7 @@ const fn default_port() -> u16 {
 /// Operators override per-entry via the `cache_capability` TOML key
 /// when a non-Anthropic upstream behind an anthropic-api-shaped provider
 /// differs from the default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct CacheCapability {
@@ -1505,7 +1507,7 @@ impl CacheCapability {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum ProviderEntry {
@@ -1814,7 +1816,9 @@ pub enum ProviderEntry {
 /// off (so non-Bedrock builds stay lean), and serde derives don't
 /// like cfg-gated re-exports.
 #[cfg(feature = "bedrock")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum BedrockApiShapeConfig {
     #[default]
@@ -1847,7 +1851,7 @@ pub enum BedrockApiShapeConfig {
 /// creds = { kind = "default-chain" }
 /// ```
 #[cfg(feature = "bedrock")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum BedrockCredsConfig {
@@ -2474,7 +2478,7 @@ fn redact_literal_secret(uri: &str) -> String {
 /// Per-provider runtime knobs that gate dispatch: rate limits, circuit
 /// breaker, timeouts, capability filters. All fields default to "off"
 /// so omitting the block leaves provider behavior unchanged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct ProviderRuntimePolicy {
     /// Maximum requests per minute. When exceeded, the router treats
@@ -2538,6 +2542,9 @@ pub struct ProviderRuntimePolicy {
         skip_serializing_if = "BTreeMap::is_empty",
         with = "crate::class_policy::status_class_overrides"
     )]
+    #[schemars(
+        with = "std::collections::BTreeMap<String, crate::class_policy::ConfigFailureClass>"
+    )]
     pub class_overrides: BTreeMap<u16, ConfigFailureClass>,
 
     /// How dispatch picks among multiple OAuth seats configured for this
@@ -2554,7 +2561,9 @@ pub struct ProviderRuntimePolicy {
 /// Per-provider seat-selection strategy for the OAuth credential pool.
 /// Default is `fill-first` so a single-seat provider (the common case)
 /// keeps its current behavior with no config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum SeatSelection {
     /// Drain one seat fully before advancing to the next.
@@ -2588,7 +2597,9 @@ pub(crate) fn default_gemini_base() -> String {
     "https://generativelanguage.googleapis.com/v1beta".into()
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReasoningDialect {
     #[default]
@@ -2621,7 +2632,9 @@ impl From<ReasoningDialect> for routectl_core::CoreReasoningDialect {
 ///     0.6 hosts that 400 on echo-back.
 ///   - `preserve`: emit the dialect-native preserve shape. Required by
 ///     DeepSeek v4+, which 400s on missing echo-back.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum HistoryReasoning {
     /// Use the dialect's default (DeepSeek/vLLM strip; OpenAI/OpenRouter
@@ -2645,7 +2658,7 @@ impl From<HistoryReasoning> for routectl_core::CoreHistoryReasoning {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct RetryPolicy {
     /// Default retry-attempts cap per provider in the chain. Used when
@@ -5630,5 +5643,70 @@ inputs_per_mtok = 0.27
 
         // Assert
         assert!(result.is_none(), "no glob matches => None");
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::Config;
+
+    /// The whole `Config` tree renders a JSON schema without panicking.
+    /// Guards the derive coverage: any config-surface type missing the
+    /// `JsonSchema` derive is a compile error, and any structural issue
+    /// (recursion, unsupported shape) surfaces here.
+    #[test]
+    fn config_schema_renders() {
+        let schema = schemars::schema_for!(Config);
+        let value = serde_json::to_value(&schema).expect("schema serializes to JSON");
+        assert!(value.is_object(), "root schema must be a JSON object");
+        assert!(
+            value.pointer("/$defs/ConfigFailureClass").is_some(),
+            "the config-facing failure-class enum must land in the schema $defs"
+        );
+    }
+
+    /// `class_overrides` is declared `BTreeMap<u16, ConfigFailureClass>` but
+    /// serializes with STRING keys via `#[serde(with)]`. The matching
+    /// `#[schemars(with = "BTreeMap<String, ..>")]` attribute is mandatory:
+    /// without it the derive tries to use the serde `with` module path as a
+    /// type and fails to compile. This pins the rendered shape to a
+    /// string-keyed object whose values reference `ConfigFailureClass`, so a
+    /// future edit that drops the attribute is caught by a schema assertion
+    /// as well as by the compiler.
+    #[test]
+    fn class_overrides_renders_string_keyed() {
+        let schema = schemars::schema_for!(Config);
+        let value = serde_json::to_value(&schema).expect("schema serializes to JSON");
+
+        // `runtime` is flattened onto every ProviderEntry variant, so
+        // `class_overrides` appears as a property on each oneOf arm.
+        let arms = value
+            .pointer("/$defs/ProviderEntry/oneOf")
+            .and_then(serde_json::Value::as_array)
+            .expect("ProviderEntry renders as a oneOf of tagged variants");
+
+        let mut seen = 0usize;
+        for arm in arms {
+            let Some(field) = arm.pointer("/properties/class_overrides") else {
+                continue;
+            };
+            seen += 1;
+            assert_eq!(
+                field.pointer("/type").and_then(serde_json::Value::as_str),
+                Some("object"),
+                "class_overrides must be a string-keyed object, got: {field}"
+            );
+            assert_eq!(
+                field
+                    .pointer("/additionalProperties/$ref")
+                    .and_then(serde_json::Value::as_str),
+                Some("#/$defs/ConfigFailureClass"),
+                "class_overrides values must reference ConfigFailureClass, got: {field}"
+            );
+        }
+        assert!(
+            seen > 0,
+            "class_overrides must surface on at least one provider variant"
+        );
     }
 }

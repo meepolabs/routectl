@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use routectl_core::{ChatRequest, Error, Message, Result, Role, schema::MessageContent};
 use routectl_router::{
-    BuildOptions, Config, Router, build_resolved_models, validate_alias_chain_targets,
-    validate_alias_patterns, validate_bedrock_global_config, validate_provider_credential_sources,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
+    BuildOptions, Config, Router, build_resolved_models, collect_config_validation,
 };
 
 use crate::server::CompositeStore;
@@ -21,43 +19,16 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
         Arc::new(CompositeStore::open_default().await?);
     let mut router = Router::new(config.clone());
 
-    // Surface incoherent `[bedrock]` config (e.g. populated
-    // `allowed_body_fields` missing routectl-mandatory keys) here
-    // instead of at first-request 400. Empty lists are pass-through
-    // and accepted; see `validate_bedrock_global_config`.
-    validate_bedrock_global_config(&config)?;
-
-    // Reject empty-string `thinking = ""` on any provider before
-    // dispatch, so the operator gets a clean error rather than silently
-    // emitting `effort: ""` on the routed request.
-    validate_reasoning_defaults(&config)?;
-
-    // Reject `[aliases]` chains pointing at unknown/disabled models.
-    // Mirrors the serve-side guard so `routectl test` against a
-    // misconfigured alias produces the same precise startup error
-    // instead of an UnknownAlias at dispatch time.
-    validate_alias_chain_targets(&config)?;
-
-    // Reject malformed `[aliases]` glob keys (embedded/bare asterisks)
-    // before Router::new warn-and-drops them and the request mis-routes.
-    // Mirrors the serve-side guard.
-    validate_alias_patterns(&config)?;
-
-    // Reject `[retry]` blocks that set both `retry_allowlist` and
-    // `retry_denylist`. Mirrors the serve-side guard so
-    // `routectl test` against a misconfigured retry block surfaces
-    // the conflict immediately.
-    validate_retry_policy(&config)?;
-
-    // Reject malformed `[registry]` glob keys (embedded/bare asterisks)
-    // before query-time cost resolution silently skips them. Mirrors the
-    // serve-side guard.
-    validate_registry_patterns(&config)?;
-
-    // Reject an incoherent provider-level `credential_source` (a
-    // forwarded provider missing the host pin, or carrying a stray
-    // api_key_ref) before dispatch. Mirrors the serve-side guard.
-    validate_provider_credential_sources(&config)?;
+    // Run the shared startup-validation suite before building providers,
+    // fail-fast on the first error so `routectl test` against a
+    // misconfigured alias / retry / bedrock / credential-source block
+    // surfaces the same precise error the serve path produces, instead of
+    // an opaque failure at dispatch time. The collected strings are bare;
+    // wrapping in `Error::Config` re-adds the `config: ` prefix on render.
+    let validation = collect_config_validation(&config);
+    if let Some(first) = validation.errors.into_iter().next() {
+        return Err(Error::Config(first));
+    }
 
     // Same BuildOptions path as `serve` so a `routectl test` run
     // exercises exactly the production translation contract. Without

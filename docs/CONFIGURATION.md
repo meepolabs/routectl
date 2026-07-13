@@ -76,6 +76,31 @@ end-to-end reference; [`examples/bedrock.toml`](../examples/bedrock.toml)
 ships an empirical Bedrock allowlist baseline (16 betas + 16 body
 fields). Copy and edit; do not re-derive.
 
+## Editor autocomplete (JSON Schema)
+
+routectl commits a JSON Schema for the `config.toml` surface at
+[`routectl.schema.json`](../routectl.schema.json) in the repo root. Point
+a schema-aware TOML editor at it for inline field completion, hover
+descriptions, and type checking as you edit. With the Even Better TOML
+VS Code extension you can either add a first-line directive to the config
+file itself:
+
+```toml
+#:schema ./routectl.schema.json
+```
+
+or map the file to the schema in your editor settings
+(`evenBetterToml.schema.associations`).
+
+The schema is generated from routectl's own config types (`cargo run
+--bin gen_schema`) and a golden test fails the build if the committed
+file drifts from those types, so it always matches the binary you built.
+Its root carries an `x-routectl-config-version` marker naming the config
+schema version it was generated against. The schema deliberately does NOT
+pin the `version` field to a single value -- editors must keep accepting
+older, still-migratable configs the binary still loads (see "Catalog:
+prompt-cache economics" below for the v1 -> v2 auto-migration).
+
 ## Listener auth + routing
 
 ```toml
@@ -1836,6 +1861,29 @@ trace logging.
 For active triage of a specific failing request, combine `config show`
 with `ROUTECTL_LOG=routectl=debug` and the `request_id` correlation
 workflow -- see [LOGGING.md](LOGGING.md) for the full triage recipes.
+
+### Error messages: did-you-mean + source lines
+
+routectl parses `config.toml` through a single funnel, so the same
+diagnostics reach every surface that loads config -- `config check`,
+`serve`, and hot reload.
+
+- **Did-you-mean suggestions.** An unknown field, or an unknown enum
+  variant (a mistyped `[providers.X] kind`, a bad `[retry.classes.<class>]`
+  key), is rejected with the offending token AND a `did you mean `Y`?`
+  hint naming the closest real name -- when one is close enough. A token
+  far from every known name gets no guess rather than a misleading one.
+  The candidate list is exactly the one the TOML/serde parser already
+  emits, so it can never drift from the real fields. These fire wherever
+  config is parsed (check / serve / hot reload).
+- **Source lines on `config check`.** Semantic validation errors -- an
+  alias chain naming a missing nickname, a model referencing an unknown
+  provider, a mutually-exclusive `retry_allowlist` + `retry_denylist`
+  pair, a reserved `[retry.classes.feature-unsupported]` override -- are
+  prefixed with `(line N): ` pointing at the line in your `config.toml`
+  that produced them. This locating runs on `config check` only; it is a
+  display aid that never changes which configs are accepted or rejected,
+  and falls back to the plain message when a line cannot be resolved.
 
 ## claude-code as a gateway client
 

@@ -38,12 +38,14 @@ async-stream = "0.3"
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 parking_lot = "0.12"
+strsim = "0.11"
 lru.workspace = true
 url.workspace = true
 tempfile = "3"

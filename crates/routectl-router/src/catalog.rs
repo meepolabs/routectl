@@ -195,7 +195,7 @@ impl CatalogRow {
 ///
 /// `Eq` is deliberately NOT derived: the multipliers are `f32`.
 /// `#[serde(deny_unknown_fields)]` rejects typos at config-load time.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CachePricingOverride {
     #[serde(skip_serializing_if = "Option::is_none")]

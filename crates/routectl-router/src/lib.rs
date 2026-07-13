@@ -15,6 +15,8 @@ pub mod catalog_overlay;
 pub(crate) mod catalog_state;
 pub mod class_policy;
 pub mod config;
+pub mod config_error;
+pub mod config_locate;
 pub mod config_migrate;
 pub mod context_trim;
 pub mod cost_gate;
@@ -25,6 +27,7 @@ pub mod k_estimator;
 pub mod resolved;
 pub mod router;
 pub mod runtime_state;
+pub mod schema_gen;
 pub(crate) mod seat_pool;
 
 pub use catalog::{
@@ -64,6 +67,8 @@ pub use config::{
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
+pub use config_error::parse_config;
+pub use config_locate::locate_dotted_path;
 pub use config_migrate::{MigrationError, MigrationOutcome, migrate_v1_to_v2};
 pub use context_trim::{
     ElisionMark, NearLosslessMarks, SteadyStateTrimParams, SteadyStateTrimPlan, apply_trim_plan,
@@ -74,11 +79,11 @@ pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_ev
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
-    BuildOptions, apply_catalog_overlay, build_provider, build_provider_with_options,
-    build_resolved_models, class_policy_warnings, validate_alias_chain_targets,
-    validate_alias_patterns, validate_class_policy, validate_mitm_config,
-    validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
-    validate_retry_policy,
+    BuildOptions, ConfigValidation, apply_catalog_overlay, build_provider,
+    build_provider_with_options, build_resolved_models, class_policy_warnings,
+    collect_config_validation, validate_alias_chain_targets, validate_alias_patterns,
+    validate_class_policy, validate_mitm_config, validate_provider_credential_sources,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

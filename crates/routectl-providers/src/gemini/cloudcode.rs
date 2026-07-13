@@ -51,7 +51,9 @@ const DEFAULT_TIER: &str = "free-tier";
 const ONBOARD_MAX_ATTEMPTS: u32 = 5;
 
 /// Selects which Gemini wire dialect a provider speaks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum GeminiAuthMode {
     /// Public `generativelanguage.googleapis.com` REST surface with an

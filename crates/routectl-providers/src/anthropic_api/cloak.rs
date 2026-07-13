@@ -40,7 +40,9 @@ const MIN_SENSITIVE_WORD_LEN: usize = 2;
 /// cloak rewrites the outgoing body. `Auto` (default) preserves the
 /// original heuristic behavior exactly: the non-CC heuristic keys off the
 /// presence of an `x-claude-code-session-id` capture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum CloakMode {
     /// Heuristic mode (default): cloak as a non-CC client only when the
@@ -61,7 +63,7 @@ pub enum CloakMode {
 /// always-on tool-name `mcp__` normalization, over the same tool-name JSON
 /// paths, recording reverse entries so renamed names restore on the
 /// response.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolRename {
     /// The tool name as the client sends it (the rename source).
     pub from: String,
@@ -82,7 +84,7 @@ pub struct ToolRename {
 /// derived `Debug` would leak them through a future `dbg!(&cfg.cloak)` or
 /// `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and
 /// `AnthropicApiConfig` both Debug-format this, so the impl is mandatory.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CloakConfig {
     /// Cloak mode. Default `Auto` (original heuristic).

@@ -1,0 +1,1898 @@
+{
+  "$defs": {
+    "AliasValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "Value of one entry in the `[aliases]` table. Either a single model\nnickname (the most common shape) or a fallback chain of nicknames.\nUntagged so the operator-facing TOML stays terse:\n\n```toml\n[aliases]\n\"claude-opus-4-7-20251022\" = \"heavy\"      # single\n\"fast\"                     = [\"small\", \"smaller\"]  # chain\n```"
+    },
+    "AuthKind": {
+      "description": "How the provider authenticates to the Anthropic Messages API.",
+      "oneOf": [
+        {
+          "const": "api-key",
+          "description": "Standard `x-api-key: <key>` header. Default for `sk-ant-api03-...` keys.",
+          "type": "string"
+        },
+        {
+          "const": "oauth-bearer",
+          "description": "OAuth bearer for subscription tokens (e.g. Claude Code's\n`sk-ant-oat01-...` access token). Sends `Authorization: Bearer <key>`.\nThe required `anthropic-beta: oauth-2025-04-20` gate is auto-injected\nvia the pinned beta floor in `build_headers` for the\napi.anthropic.com surface -- no manual `extra_headers` needed.",
+          "type": "string"
+        }
+      ]
+    },
+    "AuthKind2": {
+      "description": "How the provider authenticates to the Responses API.\n\nKebab-case on the TOML wire so config writes look natural:\n  `auth_kind = \"chatgpt-oauth\"`",
+      "oneOf": [
+        {
+          "const": "chatgpt-oauth",
+          "description": "ChatGPT subscription via OAuth bearer JWT. Default.",
+          "type": "string"
+        },
+        {
+          "const": "api-key",
+          "description": "Standard OpenAI API key against `api.openai.com/v1/responses`.",
+          "type": "string"
+        },
+        {
+          "const": "bedrock-mantle",
+          "description": "AWS Bedrock Mantle proxy (OpenAI-shape):\n`Authorization: Bearer <bearer>` using the long-term Bedrock API\nkey (resolved via api_key_ref, typically\nenv://AWS_BEARER_TOKEN_BEDROCK).",
+          "type": "string"
+        }
+      ]
+    },
+    "BedrockApiShapeConfig": {
+      "description": "TOML-side mirror of `routectl_providers::bedrock::BedrockApiShape`.\nWe don't re-export the providers-side enum directly because TOML\nconfigs need to parse cleanly even when the `bedrock` feature is\noff (so non-Bedrock builds stay lean), and serde derives don't\nlike cfg-gated re-exports.",
+      "enum": [
+        "invoke",
+        "converse"
+      ],
+      "type": "string"
+    },
+    "BedrockCredsConfig": {
+      "description": "TOML-side credentials descriptor for a Bedrock provider.\n\nEach variant is tagged by `kind`. Secret-bearing fields hold raw\nsecret-URI strings (`env://`, `file://`, `literal:`) which the\nfactory parses + resolves at provider build time -- same pattern\nas `api_key_ref` on the other provider variants.\n\nExamples:\n```toml\n# Bedrock console short-term API key\ncreds = { kind = \"bearer-key\", key_ref = \"file://<local-path>\" }\n\n# Static AWS access keys\ncreds = { kind = \"static\",\n          access_key_ref  = \"env://AWS_ACCESS_KEY_ID\",\n          secret_key_ref  = \"env://AWS_SECRET_ACCESS_KEY\",\n          session_token_ref = \"env://AWS_SESSION_TOKEN\" }\n\n# Named profile in ~/.aws/credentials (incl. SSO)\ncreds = { kind = \"profile\", name = \"bedrock-prod\" }\n\n# Standard AWS provider chain (env -> profile -> SSO -> IRSA -> IMDS)\ncreds = { kind = \"default-chain\" }\n```",
+      "oneOf": [
+        {
+          "properties": {
+            "key_ref": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "bearer-key",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "access_key_ref": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "static",
+              "type": "string"
+            },
+            "secret_key_ref": {
+              "type": "string"
+            },
+            "session_token_ref": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "access_key_ref",
+            "secret_key_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "profile",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "default-chain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BedrockGlobalConfig": {
+      "description": "Bedrock-wide configuration shared by every `[providers.X]` entry of\n`kind = \"bedrock\"`. Both allowlists below are operator-owned; the\nroutectl binary ships no defaults so AWS schema drift (Anthropic\nadds a beta, Bedrock gates a body field) does not require a\nroutectl release. See `examples/bedrock.toml` for the empirical\n2026-05-12 baseline; copy and tune as your account's gating\nevolves.\n\n**Empty list = pass-through.** Either field, when empty (or the\nentire `[bedrock]` section omitted), disables that filter -- the\nupstream sees the assembled value unchanged. This is the\ndiscovery-mode default: bring up routectl, observe actual traffic\nvia `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then\npopulate the list with what you observe.\n\nStartup validation in `crate::factory::validate_bedrock_global_config`\nkicks in only when `allowed_body_fields` is non-empty, and rejects\na list missing routectl-mandatory keys (`messages`,\n`anthropic_version`, `max_tokens`) or missing `anthropic_beta`\nwhen a `[providers.X] anthropic_beta` floor is set.",
+      "properties": {
+        "allowed_betas": {
+          "default": [],
+          "description": "Bedrock-accepted `anthropic_beta` flags. AWS validates each\nentry independently and 400s the request on the first\nunsupported flag. **Empty list = pass-through** (no filtering;\nevery flag the ingress lifts in is forwarded). Populate via\nTOML to enable filtering. `examples/bedrock.toml` ships the\nempirical 2026-05-12 baseline.\n\nPer-provider `[providers.X] anthropic_beta` is unrelated and\nkeeps its existing semantics (operator-asserted floor that is\nalways sent and bypasses this filter).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_body_fields": {
+          "default": [],
+          "description": "Bedrock-accepted top-level body fields (Invoke) /\n`additionalModelRequestFields` keys (Converse). Bedrock 400s\nany unrecognized field with `\"Extra inputs are not permitted\"`,\nso the Anthropic ingress's forward-compat sweep needs filtering\non the Bedrock egress when this list is non-empty. **Empty\nlist = pass-through** (no filtering; every key in the assembled\nbody / bag is forwarded).\n\nWhen non-empty, must include the routectl-mandatory keys\n(`messages`, `anthropic_version`, `max_tokens`) for requests\nto construct successfully -- startup validation rejects an\nincomplete list with a copy-paste hint.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "CacheCapability": {
+      "additionalProperties": false,
+      "description": "Describes what a provider supports re: Anthropic-style prompt-cache\nbreakpoints. The dispatch path consults this to decide whether to\nauto-emit a top-level `cache_control` breakpoint -- it does so only\nfor providers that actually honor one (anthropic-api) and never for\nproviders that ignore or silently drop it (OpenAI-shape; Bedrock,\nwhich caches only off per-block markers, not a top-level one).\n\nPer-kind defaults are deliberately conservative; an unknown provider\nkind is treated as supporting nothing so routectl never emits a\nbreakpoint to an upstream whose behavior it cannot vouch for.\nOperators override per-entry via the `cache_capability` TOML key\nwhen a non-Anthropic upstream behind an anthropic-api-shaped provider\ndiffers from the default.",
+      "properties": {
+        "cache_hit_observable": {
+          "description": "Whether the upstream reports cache-hit usage (e.g.\n`cache_read_input_tokens` / `cached_tokens`) back in its response.",
+          "type": "boolean"
+        },
+        "supports_top_level_cache_control": {
+          "description": "Whether the upstream honors an explicit top-level Anthropic\n`cache_control` breakpoint. When false the dispatch path must not\nauto-emit one.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supports_top_level_cache_control",
+        "cache_hit_observable"
+      ],
+      "type": "object"
+    },
+    "CacheConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[cache]` config block. Global policy for the\ndispatch-path auto-cache feature. A missing `[cache]` table\ndeserializes to `CacheConfig::default()` (auto-emit enabled), and the\nper-field `#[serde(default)]` keeps an omitted key enabled too.\n\nThis is the GLOBAL kill-switch; each `[providers.X]` entry carries an\noptional `auto_emit_top_level_breakpoint` override consulted only when\nthe global switch is on. The effective decision is \"global on AND\nprovider not explicitly off\".",
+      "properties": {
+        "auto_emit_top_level_breakpoint": {
+          "default": true,
+          "description": "Master switch for dispatch-path auto-emission of a top-level\n`cache_control` ephemeral_5m breakpoint. Default on.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "CachePricingOverride": {
+      "additionalProperties": false,
+      "description": "Field-level operator override for one `(provider_kind, model_glob)`\ncell, deserialized from a LEGACY `[cache_pricing]` TOML entry (retired\nin a later increment). Every\nfield is optional; an omitted field inherits the baked-in value (see\n[`CatalogRow::with_overrides`]).\n\n`Eq` is deliberately NOT derived: the multipliers are `f32`.\n`#[serde(deny_unknown_fields)]` rejects typos at config-load time.",
+      "properties": {
+        "auto_cacher": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "has_storage_rent": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_context_tokens": {
+          "description": "Operator-supplied context window in tokens. `Some` wins over the\nbaked window (or the baked `None`); `None` inherits the baked value\nunchanged. Set this when the baked table's `None` for a cell is\nwrong -- e.g. the operator has confirmed the vendor's real window.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_prefix_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "override_acknowledges_cost_risk": {
+          "default": false,
+          "description": "Operator's explicit acknowledgement that a below-sentinel `wm` is\nintended. Required when `wm` is set below the sentinel; otherwise\nthe merge is rejected.",
+          "type": "boolean"
+        },
+        "rm": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "storage_rent": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ttl_seconds": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "verified_at": {
+          "description": "Operator-supplied verification date (`\"YYYY-MM-DD\"`). Format-\nvalidated but no longer stamped onto the merged row (provenance\nlives on [`EffectiveRow`], not on [`CatalogRow`]). Retained so the\nlegacy-config migration can read it when building an overlay\ncandidate from an existing `[cache_pricing]` entry.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wm": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ClassPolicy": {
+      "additionalProperties": false,
+      "description": "Per-class retry / fallback overlay. Each leaf is independently\noptional: an absent leaf defers to the baked class default, a present\nleaf overrides only itself. Unknown keys are rejected so a typo cannot\nsilently become a no-op.",
+      "properties": {
+        "fallback": {
+          "description": "Override for whether this class falls back to the next provider in\nthe chain. `None` keeps the baked default.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "retry": {
+          "description": "Override for the same-provider retry cap of this class. `None`\nkeeps the baked default.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CloakConfig": {
+      "description": "Opt-in, empty-default configuration surface for the OAuth-egress cloak.\n`CloakConfig::default()` selects the standard cloak: mode `Auto`,\n`strict_mode` false (relocate the client system into the first user\nmessage rather than dropping it), no operator tool renames, no sensitive\nwords.\n\n`Debug` is hand-rolled (NOT derived) to print mode + strict_mode +\nCOUNTS only. The configured `tool_rename` pairs and `sensitive_words`\nare operator content and must never enter Debug output or logs -- a\nderived `Debug` would leak them through a future `dbg!(&cfg.cloak)` or\n`tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and\n`AnthropicApiConfig` both Debug-format this, so the impl is mandatory.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/CloakMode",
+          "default": "auto",
+          "description": "Cloak mode. Default `Auto` (original heuristic)."
+        },
+        "sensitive_words": {
+          "default": [],
+          "description": "Words to obfuscate (zero-width-space insertion) in system blocks\nand message text. Default empty (no obfuscation).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strict_mode": {
+          "default": false,
+          "description": "How the non-CC client's real `system` content is handled after the\n`system` field is reduced to the identity line only. Default false:\nrelocate the client system verbatim into the first user message as a\n`<system-reminder>` block (client behavior preserved). When true:\ndrop the client system entirely (identity-only `system`, no\nreminder). Egress-only: the response never echoes `system`, so there\nis no reverse map for this transform.",
+          "type": "boolean"
+        },
+        "tool_rename": {
+          "default": [],
+          "description": "Operator tool renames, applied after the tool-name normalization.\nDefault empty (no renames). IMPORTANT: because normalization runs\nfirst and prefixes every non-`mcp__` tool with `mcp__`, the `from`\nkey must be the POST-normalization wire name (e.g. `mcp__read_file`,\nnot the client's original `read_file`) or it will silently no-match.",
+          "items": {
+            "$ref": "#/$defs/ToolRename"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "CloakMode": {
+      "description": "Operator-facing cloak mode. Selects how aggressively the OAuth-egress\ncloak rewrites the outgoing body. `Auto` (default) preserves the\noriginal heuristic behavior exactly: the non-CC heuristic keys off the\npresence of an `x-claude-code-session-id` capture.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Heuristic mode (default): cloak as a non-CC client only when the\ninbound request did NOT carry an `x-claude-code-session-id`\ncapture. Identical to the original heuristic behavior.",
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "Always cloak as a non-CC client: stamp the identity block and a\nminted metadata `user_id` regardless of the session-id header.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Skip the cloak entirely: no billing strip, no identity, no\nmetadata, no tool-name normalization, no tool rename, no\nsensitive-word obfuscation. The body goes upstream untouched.",
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigFailureClass": {
+      "description": "The config-facing failure classes an operator can name in\n`config.toml`. Serializes in kebab-case; a key outside this closed set\n(a typo or an unknown class) fails deserialization rather than being\nsilently dropped.",
+      "oneOf": [
+        {
+          "const": "rate-limited",
+          "description": "Upstream rate limit.",
+          "type": "string"
+        },
+        {
+          "const": "auth",
+          "description": "Authentication or authorization rejection.",
+          "type": "string"
+        },
+        {
+          "const": "bad-request",
+          "description": "Caller-side request error.",
+          "type": "string"
+        },
+        {
+          "const": "content-policy",
+          "description": "Rejected by a content / safety policy.",
+          "type": "string"
+        },
+        {
+          "const": "context-window",
+          "description": "Prompt exceeded the model context window.",
+          "type": "string"
+        },
+        {
+          "const": "server-error",
+          "description": "Upstream server-side failure.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "Deadline exceeded.",
+          "type": "string"
+        },
+        {
+          "const": "network-error",
+          "description": "Transport-level failure with no HTTP status.",
+          "type": "string"
+        },
+        {
+          "const": "overloaded",
+          "description": "Upstream signalled temporary overload.",
+          "type": "string"
+        },
+        {
+          "const": "feature-unsupported",
+          "description": "A requested capability is not supported by the upstream.",
+          "type": "string"
+        }
+      ]
+    },
+    "CredentialSource": {
+      "description": "Which credential a provider egress authenticates with. `own` (the\ndefault) preserves prior behavior byte-for-byte: the egress\nauthenticates with routectl's own managed credential. `forwarded`\ninstead relays the client's inbound credential straight through to\nthe upstream untouched. Used ONLY by `ProviderEntry::AnthropicApi`\n(the forwarded-provider credential, pinned to `api.anthropic.com` by\n`validate_provider_credential_sources`) -- the legacy `[mitm]\ncredential_source` field this enum also backed is removed; see\n`preflight_legacy_mitm_credential_source`.",
+      "oneOf": [
+        {
+          "const": "own",
+          "description": "Authenticate to the upstream with routectl's own managed\ncredential (f1 behavior).",
+          "type": "string"
+        },
+        {
+          "const": "forwarded",
+          "description": "Relay the client's inbound credential to the upstream untouched.",
+          "type": "string"
+        }
+      ]
+    },
+    "GeminiAuthMode": {
+      "description": "Selects which Gemini wire dialect a provider speaks.",
+      "oneOf": [
+        {
+          "const": "api-key",
+          "description": "Public `generativelanguage.googleapis.com` REST surface with an\n`x-goog-api-key` header.",
+          "type": "string"
+        },
+        {
+          "const": "cloud-code",
+          "description": "Cloud Code (`cloudcode-pa.googleapis.com`) with a bearer token and\nthe request/response envelope.",
+          "type": "string"
+        }
+      ]
+    },
+    "HistoryReasoning": {
+      "description": "Outgoing-history reasoning policy for openai-compat providers.\n  - `auto` (default): use the dialect's default. DeepSeek and vLLM\n    strip; OpenAI and OpenRouter pass through.\n  - `strip`: force-drop reasoning fields from outgoing assistant\n    messages, regardless of dialect. Use for DeepSeek v3 / vLLM <=\n    0.6 hosts that 400 on echo-back.\n  - `preserve`: emit the dialect-native preserve shape. Required by\n    DeepSeek v4+, which 400s on missing echo-back.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Use the dialect's default (DeepSeek/vLLM strip; OpenAI/OpenRouter\npass through). Backward-compatible.",
+          "type": "string"
+        },
+        {
+          "const": "strip",
+          "description": "Force-strip reasoning fields from outgoing assistant messages.",
+          "type": "string"
+        },
+        {
+          "const": "preserve",
+          "description": "Force-emit the dialect's preserve shape on outgoing assistant\nmessages.",
+          "type": "string"
+        }
+      ]
+    },
+    "LogConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[log]` config block. Each field mirrors a\nwell-known env var:\n\n  - `trace_headers` -> `ROUTECTL_TRACE_HEADERS`\n  - `trace_body_bytes` -> `ROUTECTL_TRACE_BODY_BYTES`\n  - `redact_prompts` -> `ROUTECTL_LOG_REDACT_PROMPTS`\n\nPer-knob resolution: env wins when set; otherwise the field below\n(when `Some(_)`); otherwise the hardcoded default. All fields are\noptional. A missing `[log]` block leaves current behavior\nunchanged.\n\nThe env-filter directive (`ROUTECTL_LOG`, e.g.\n`routectl=info,routectl_core::log_safe=trace`) is intentionally\nout of scope here. It stays env-only because it must reach the\ntracing subscriber BEFORE any config load runs, and the\narchitect-validated design declines to reorder boot to introduce a\nconfig-side fallback for it.",
+      "properties": {
+        "redact_prompts": {
+          "description": "Opt-in for prompt redaction in TRACE-level body logs. Default\noff (verbatim bodies in TRACE).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "trace_body_bytes": {
+          "description": "Cap on the serialized body emitted at TRACE level by the four\nbody-trace helpers. Zero or missing falls through to the\nhardcoded 16 KB default.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "trace_headers": {
+          "description": "Opt-in for the four `trace_*_headers` directions (raw, no\nredaction). Default off.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MitmConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts a first-party upstream\n(e.g. Claude Code talking to `api.anthropic.com`) so routectl can\nobserve and translate the decrypted traffic. Presence of the\n`[mitm]` block gates the feature on, matching the `[server.auth]`\nconvention -- `Config::mitm == None` keeps zero proxy startup and\nzero behavior change.\n\nTransport-only (the f1 shape): this block carries no credential\nknob. Which credential a forwarded egress uses is a per-provider\nchoice (`ProviderEntry::AnthropicApi.credential_source`) -- see\n`preflight_legacy_mitm_credential_source` for the pre-parse check\nthat catches a config still carrying the removed `[mitm]\ncredential_source` key and names the replacement.",
+      "properties": {
+        "cert_dir": {
+          "default": "~/.config/routectl/mitm-certs",
+          "description": "Directory holding the locally-generated MITM CA + leaf\ncertificates. Defaults under `routectl_config_dir()`, alongside\nthe usage db and `config.toml`.",
+          "type": "string"
+        },
+        "listen_port": {
+          "default": 8443,
+          "description": "Local TCP port the MITM listener binds. Must differ from\n`[server] port` -- the listener and the routectl HTTP server\nare separate bound sockets on the same host (enforced by\n`validate_mitm_config`).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mitm_host": {
+          "default": "api.anthropic.com",
+          "description": "TLS SNI / `Host` header the proxy expects from the client and\npresents to the upstream when dialing out. Must be EXACTLY\n`api.anthropic.com` -- a subdomain like `evil.api.anthropic.com`\nis rejected, not matched as a suffix (enforced by\n`validate_mitm_config`).",
+          "type": "string"
+        },
+        "tested_cc_version": {
+          "description": "Free-form Claude Code version this `[mitm]` config was last\nverified against. Consulted at runtime by the MITM proxy: when\nthe version actually observed on a decrypted request's\n`User-Agent` differs from this, it logs a WARNING (once per\ndistinct observed version) but never refuses the request --\n`None` (the default) disables the check entirely.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstream_origin": {
+          "default": "https://api.anthropic.com",
+          "description": "Upstream origin the proxy forwards decrypted requests to. Must\nbe EXACTLY `https://api.anthropic.com` -- no userinfo, path,\nquery, fragment, explicit non-default port, or other host\n(enforced by `validate_mitm_config`). Pinned rather than\npattern-matched: the MITM proxy forwards the client's full-scope\nclaude.ai token, which must never reach a non-Anthropic egress.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ModelEntry": {
+      "additionalProperties": false,
+      "description": "One row in the `[models]` table. Carries the nickname-to-upstream\nbinding plus per-model knobs.\n\nFields that vary per-model belong here. Fields that vary per-\ntransport (auth, base URL, runtime gates) stay on `[providers.X]`.\nTwo fields, `header_extras` and `payload_extras`, live BOTH here and\non every provider variant; the dispatch layer merges them per\nrequest (model wins on key collision; see `Router` merge helpers).\n\nPER-MODEL KNOB RELAY (read before adding a knob here).\nA per-model value the egress reads passes through FOUR struct\ndefinitions, each a deliberate layer, not a redundant copy:\n\n  1. `ModelEntry`                (this struct, config.rs) -- TOML\n     deserialization target; `#[serde(deny_unknown_fields)]`.\n  2. `crate::resolved::ResolvedModel`   -- startup-resolved per\n     nickname; adds the `Arc<dyn Provider>` and may transform the\n     type (e.g. `Vec<String>` -> `Arc<[String]>` for `effort_levels`).\n  3. `crate::router::DispatchTarget`    -- per-request dispatch hop;\n     adds `state_key`, makes `provider` optional.\n  4. `routectl_core::RoutectlInternal`  -- the transport-internal\n     carrier on `ChatRequest`; the egress reads the value here.\n     `apply_layered_overlays` (router.rs) copies it from the\n     `DispatchTarget`.\n\nVerbatim pass-through fields (`supports_adaptive_thinking`,\n`effort_levels`, `max_thinking_budget`, `max_output_tokens`) are\nrelayed unchanged at each hop -- adding one means editing all four\ndefinitions plus the `factory.rs` `ModelEntry` -> `ResolvedModel`\nmapping and the `apply_layered_overlays` copy. The hop is the price\nof the config-crate (TOML serde shape) / core-crate (wire-internal)\nseparation: `reasoning_dialect` / `history_reasoning` even change\ntype at the core boundary (config-side enum -> `Core*` enum via the\n`From` impls below), so a single shared struct cannot span both\ncrates without inverting the `core <- router` dependency.",
+      "properties": {
+        "additional_request_fields": {
+          "description": "Bedrock Converse `additionalModelRequestFields` -- vendor-\nspecific knobs that don't have a top-level Converse slot. The\nBedrock Invoke egress also reads this map for non-routectl-\nmanaged body fields. Other egresses ignore it."
+        },
+        "effort_levels": {
+          "default": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Ordered list of effort levels the operator declares this model\naccepts. Validated at startup: every element must be one of\n`minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the union\nof the Anthropic-shape vocabulary and the OpenAI-shape\nvocabulary; individual egresses clamp to their own subset).\n\nAn empty list means pass-through -- the egress emits whatever\neffort the caller supplied without operator-side filtering.\n\nDefault: `[\"low\", \"medium\", \"high\"]`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "header_extras": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra HTTP headers applied to every outbound request from this\nmodel's route. Merged with the provider's `header_extras` at\ndispatch time; model wins on key collision. The list-valued\n`anthropic-beta` header runs through a comma-split-union-rejoin\npost-pass (ingress -> provider -> model visit order) so all\nthree sources land on one wire header. Auth-reserved keys\n(`authorization`, `x-api-key`, `anthropic-version`) WARN +\ndrop; managed-reserved keys (`host`, `content-type`,\n`content-length`) DEBUG + drop.",
+          "type": "object"
+        },
+        "history_reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HistoryReasoning"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-model openai-compat outgoing-history reasoning policy.\nLives ONLY on `[models.X]` (no provider fallback). See\n[`HistoryReasoning`] docs for v3-vs-v4 motivation."
+        },
+        "max_output_tokens": {
+          "description": "Operator-declared per-model ceiling on the `max_tokens` value\nthe Anthropic-shape egresses (anthropic-api, bedrock-invoke)\ninject when the caller omits the field. `None` (the default)\nfalls through to the hardcoded baseline of 64000.\n\nSet this for models whose upstream-documented ceiling is below\nthe baseline to avoid a 400 on the upstream's per-model\nvalidation. Examples: Anthropic Opus 4 / 4.1 (32000), Sonnet 3.5\n(8000), DeepSeek V3 anthropic-api surface (8000). See\ndocs/CONFIGURATION.md.\n\nOnly consumed by Anthropic-shape egresses (anthropic-api +\nbedrock-invoke); openai-compat, openai-responses, and\nbedrock-converse forward omission cleanly (good-translator\nprinciple: do not inject where the upstream already handles it).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_thinking_budget": {
+          "default": 0,
+          "description": "Maximum thinking-token budget the operator allows for this\nmodel, in tokens. `0` (the default) means no operator cap --\nthe egress uses whatever budget the caller requested or its own\ndefault. Non-zero values are forwarded as the ceiling for the\negress budget negotiation.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "payload_extras": {
+          "description": "Extras merged into the outbound request body. Combined with the\nprovider's `payload_extras` at dispatch time via a deep recursive\nmerge (model wins on leaf collision; nested objects merge\nrecursively). Lands on canonical `req.provider_extras`; each\negress merges that into the wire body via its existing path."
+        },
+        "provider": {
+          "description": "Provider name (a key in the `[providers]` table). The router\nvalidates at startup that every model entry references a known\nprovider.",
+          "type": "string"
+        },
+        "reasoning_dialect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningDialect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-model openai-compat reasoning dialect. Lives ONLY on\n`[models.X]` (no provider fallback) -- v0.6.0 moved the field\noff `[providers.X]` so two models on one provider can speak\ndifferent dialects (DeepSeek's `reasoning_content` vs\nOpenAI's `reasoning_effort` vs OpenRouter's\n`reasoning_details`). Ignored by non-openai-compat egresses."
+        },
+        "reported_model": {
+          "description": "Operator-declared label echoed back in the response `model`\nfield for this model. `None` (the default) makes the response\necho the client's requested alias (`req.model`); `Some(label)`\noverrides that with a fixed public-facing string. An empty\nstring is treated as unset (falls through to `req.model`). Does\nnot affect internal accounting / observability, which key off\n`DispatchMeta.served_model` / `served_upstream`, not `resp.model`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectable": {
+          "default": true,
+          "description": "Whether this model is selectable from the `[aliases]` table.\nDefaults to `true`; flip to `false` to keep an entry around\nwhile wiring without making it servable. Disabled entries\nstill load but `Router::new` errors when an alias chain\nreferences one.",
+          "type": "boolean"
+        },
+        "stream_first_byte_timeout_ms": {
+          "description": "Per-model first-byte timeout for streaming responses. Resolved\nwith precedence per-model > per-provider > global, extending\nthe existing two-tier provider > global resolution on\n`RetryPolicy::stream_first_byte_timeout_ms`.\n\nUse case: opus xhigh adaptive thinking on large prompts can\ntake >90s to emit the first token while non-thinking models\n(haiku, llama) start responding in <5s. A per-model override\nlets opus sit at 300s without forcing every other model to\nwait 5 min on a dead upstream.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "supports_adaptive_thinking": {
+          "default": false,
+          "description": "Whether this model supports the Anthropic adaptive thinking shape\n(Opus 4.7+). Projected via apply_layered_overlays into\nRoutectlInternal.supports_adaptive_thinking; the AnthropicApi\negress reads it at request time. `false` (the default) uses the\nstandard fixed-budget shape or no thinking at all.",
+          "type": "boolean"
+        },
+        "unsupported_features": {
+          "default": [],
+          "description": "Operator-supplied list of feature keys this MODEL does not\nsupport, unioned with the per-provider list (`ProviderEntry::\nunsupported_features`) at filter time. Same key vocabulary and\nconcept as the provider-side field -- a model listed here is\nskipped before dispatch when the request needs any of these\nfeatures -- but keyed at the finer model scope: two nicknames on\none provider (e.g. opus-4-8 vs opus-4-6 on Bedrock) filter\nindependently. A feature is unsupported if EITHER the model OR\nthe provider list contains it. Empty (the default) preserves the\npre-existing provider-only behavior. See feature-key derivation\nin `crates/routectl-router/src/feature_keys.rs`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "upstream": {
+          "description": "Upstream model id. Forwarded to the provider verbatim. For\nBedrock this becomes the `BedrockConfig.model_id` value (the\nAWS inference profile id, e.g.\n`us.anthropic.claude-haiku-4-5-20251001-v1:0`). For OpenAI-\ncompatible egresses it is the wire `model` field.",
+          "type": "string"
+        },
+        "visible_routectl_provider": {
+          "default": true,
+          "description": "Whether the response `routectl_provider` field is exposed to the\nclient for this model. `true` (the default) stamps the served\nupstream provider name onto the response; `false` suppresses it\n(serde drops the absent field). Does not affect internal\naccounting / observability, which key off\n`DispatchMeta.served_provider` / `served_upstream`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider",
+        "upstream"
+      ],
+      "type": "object"
+    },
+    "PricingConfig": {
+      "additionalProperties": false,
+      "description": "Per-million-token pricing for one `[registry.*]` entry. All fields\nare USD per million tokens and all are optional -- routectl ships no\nprice defaults, so any field left unset means \"this dimension is\nunpriced\" and contributes nothing to a derived cost. Cost is computed\nat query time, never persisted, so a corrected price retroactively\nfixes historical rows.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
+      "properties": {
+        "cache_read_per_mtok": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cache_write_1h_per_mtok": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cache_write_5m_per_mtok": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "input_per_mtok": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "output_per_mtok": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ProviderEntry": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Per-provider runtime knobs that gate dispatch: rate limits, circuit\nbreaker, timeouts, capability filters. All fields default to \"off\"\nso omitting the block leaves provider behavior unchanged.",
+          "properties": {
+            "api_key_ref": {
+              "description": "Reference to the API key. One of:\n  - `env://VAR_NAME`             (process env var)\n  - `file:///abs/path/to/key`    (mode-600 file)\n  - `literal:plaintext`          (inline; placeholders only)",
+              "type": "string"
+            },
+            "auto_emit_top_level_breakpoint": {
+              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch (treated as enabled); `Some(false)`\ndisables auto-emit for this provider even when global is on.\nCache policy, NOT a runtime/rate knob -- lives outside\n`runtime`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "cache_capability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CacheCapability"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
+            },
+            "circuit_cooldown_ms": {
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "circuit_failures": {
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "class_overrides": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ConfigFailureClass"
+              },
+              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "type": "object"
+            },
+            "header_extras": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "Provider-level header extras. Merged with the per-model\n`header_extras` at dispatch time; model wins on key\ncollision (list-valued `anthropic-beta` runs through a\ncomma-split-union-rejoin post-pass instead).",
+              "type": "object"
+            },
+            "kind": {
+              "const": "openai-compat",
+              "type": "string"
+            },
+            "payload_extras": {
+              "default": null,
+              "description": "Provider-level payload extras. Deep-merged with the\nper-model `payload_extras` at dispatch time (model wins on\nleaf collision)."
+            },
+            "reduction_enabled": {
+              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider even when\nglobal is on. Reduction policy, NOT a runtime/rate knob --\nlives outside `runtime`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "request_timeout_ms": {
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rpm_limit": {
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "seat_selection": {
+              "$ref": "#/$defs/SeatSelection",
+              "default": "fill-first",
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+            },
+            "stream_first_byte_timeout_ms": {
+              "description": "Per-attempt first-byte timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unsupported_features": {
+              "default": [],
+              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "user_agent": {
+              "default": null,
+              "description": "Override the outbound User-Agent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "base_url",
+            "api_key_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Per-provider runtime knobs that gate dispatch: rate limits, circuit\nbreaker, timeouts, capability filters. All fields default to \"off\"\nso omitting the block leaves provider behavior unchanged.",
+          "properties": {
+            "allowed_betas": {
+              "default": [],
+              "description": "Optional operator-supplied allowlist for `anthropic_beta`\nflags forwarded to api.anthropic.com. Default (empty) is\npass-through.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "anthropic_version": {
+              "default": "2023-06-01",
+              "type": "string"
+            },
+            "api_key_ref": {
+              "default": "",
+              "description": "Reference to the API key, resolved the same way as every\nother provider's `api_key_ref`. Defaulted (empty string) so a\n`credential_source = \"forwarded\"` block can omit it entirely\n-- `validate_provider_credential_sources` then REQUIRES it be\nempty for `forwarded` and non-empty for `own`.",
+              "type": "string"
+            },
+            "auth_kind": {
+              "$ref": "#/$defs/AuthKind",
+              "default": "api-key",
+              "description": "How the Messages API authenticates this provider. Default\nis `api-key` (the standard `x-api-key` header). Use\n`oauth-bearer` when `api_key_ref` resolves to a Claude Code\nsubscription access token (`sk-ant-oat01-...`)."
+            },
+            "auto_emit_top_level_breakpoint": {
+              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "base_url": {
+              "default": "https://api.anthropic.com",
+              "type": "string"
+            },
+            "cache_capability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CacheCapability"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default. Useful when a\nnon-Anthropic upstream behind this anthropic-api-shaped\nprovider does not honor a top-level breakpoint."
+            },
+            "circuit_cooldown_ms": {
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "circuit_failures": {
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "class_overrides": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ConfigFailureClass"
+              },
+              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "type": "object"
+            },
+            "cloak": {
+              "$ref": "#/$defs/CloakConfig",
+              "default": {
+                "mode": "auto",
+                "sensitive_words": [],
+                "strict_mode": false,
+                "tool_rename": []
+              },
+              "description": "Opt-in OAuth-cloak configuration. Omitting the `[cloak]`\nsub-table yields `CloakConfig::default()` (mode `auto`, no\nstrict mode, no tool renames, no sensitive words) -- identical\nto the always-on `mcp_` normalization. TOML surface:\n`[providers.X.cloak]` with `mode` / `strict_mode` /\n`sensitive_words`, and tool renames as an array of tables\n`[[providers.X.cloak.tool_rename]] from=.. to=..`."
+            },
+            "context_management": {
+              "default": false,
+              "description": "When true, routectl emulates Anthropic's\ncontext-management-2025-06-27 beta server-side for this\nprovider. Set this for non-Anthropic anthropic-api providers\n(e.g. DeepSeek's /anthropic surface) that do not honor the\nbeta natively. Default false: routectl forwards the body\nverbatim and the real Anthropic server handles the beta\nitself.",
+              "type": "boolean"
+            },
+            "credential_source": {
+              "$ref": "#/$defs/CredentialSource",
+              "default": "own",
+              "description": "Which credential this provider's Anthropic egress\nauthenticates with. Default `own`: the provider uses\n`api_key_ref`/`auth_kind` exactly as before. `forwarded`\nrelays the client's captured claude.ai bearer instead --\n`validate_provider_credential_sources` requires `base_url`'s\nhost be exactly `api.anthropic.com` and `api_key_ref` be\nempty whenever this is `forwarded`."
+            },
+            "forward_client_headers": {
+              "default": [],
+              "description": "Strict allowlist of inbound `x-claude-code-*` header names\nthe egress is permitted to forward to api.anthropic.com.\nEmpty (default) drops every captured `x-claude-code-*`\nheader at the egress -- secure-by-default for new\nproviders. Names match case-insensitively. Capture happens\nat the Anthropic ingress (defense-in-depth, namespace-\nbounded); this list is the operator's filter on which\ncaptured names actually go upstream.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "header_extras": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "Provider-level header extras. Merged with per-model entries\nat dispatch time.",
+              "type": "object"
+            },
+            "kind": {
+              "const": "anthropic-api",
+              "type": "string"
+            },
+            "max_thinking_entry_bytes": {
+              "description": "Per-entry byte cap on the thinking cache used by the\n`context_management` emulation path. Bounds: `>= 1024` (1\nKiB) and `<= 4 * 1024 * 1024` (4 MiB). When unset the\nruntime falls back to the\n`DEFAULT_MAX_THINKING_ENTRY_BYTES` baseline (1 MiB).\nOperators on memory-constrained hosts tune this down; the\nLRU's worst-case footprint is `THINKING_CACHE_CAP * cap`\n(10000 * 1 MiB ~ 10 GiB at the default).\n\nSetting `0` is treated as unset; a startup WARN is emitted and\nthe default applies.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "payload_extras": {
+              "default": null,
+              "description": "Provider-level payload extras. Deep-merged with per-model\nentries at dispatch time."
+            },
+            "reduction_enabled": {
+              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "request_timeout_ms": {
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rpm_limit": {
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "seat_selection": {
+              "$ref": "#/$defs/SeatSelection",
+              "default": "fill-first",
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+            },
+            "stream_first_byte_timeout_ms": {
+              "description": "Per-attempt first-byte timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unsupported_features": {
+              "default": [],
+              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "user_agent": {
+              "default": null,
+              "description": "Override the outbound User-Agent. Useful for IAM-gated upstreams.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "OpenAI Responses API provider. Three auth surfaces:\n- `chatgpt-oauth`: ChatGPT subscription JWT.\n- `api-key`: standard OpenAI API key.\n- `bedrock-mantle`: Authorization: Bearer <bearer> using the\n  long-term Bedrock API key (resolved via api_key_ref, typically\n  env://AWS_BEARER_TOKEN_BEDROCK).\n\n`base_url` is optional: when unset, the factory picks the\nauth_kind-appropriate default at provider build time.",
+          "properties": {
+            "account_id_ref": {
+              "default": null,
+              "description": "ChatGPT account UUID. Required when `auth_kind =\n\"chatgpt-oauth\"`; must be absent for the other variants.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "api_key_ref": {
+              "description": "Resolves to the bearer JWT (ChatgptOauth), API key (ApiKey),\nor long-term Bedrock API key (BedrockMantle, typically\nenv://AWS_BEARER_TOKEN_BEDROCK).",
+              "type": "string"
+            },
+            "auth_kind": {
+              "$ref": "#/$defs/AuthKind2",
+              "default": "chatgpt-oauth",
+              "description": "Which auth surface to dispatch on. Default\n`chatgpt-oauth`."
+            },
+            "auto_emit_top_level_breakpoint": {
+              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "base_url": {
+              "default": null,
+              "description": "Endpoint base URL. None -> factory picks an auth_kind-\nappropriate default. Operators can pin a specific value\nto point at a staging shard, a localhost mock, etc.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cache_capability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CacheCapability"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
+            },
+            "circuit_cooldown_ms": {
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "circuit_failures": {
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "class_overrides": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ConfigFailureClass"
+              },
+              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "type": "object"
+            },
+            "header_extras": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "Provider-level header extras.",
+              "type": "object"
+            },
+            "kind": {
+              "const": "openai-responses",
+              "type": "string"
+            },
+            "payload_extras": {
+              "default": null,
+              "description": "Provider-level payload extras."
+            },
+            "reduction_enabled": {
+              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "request_timeout_ms": {
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rpm_limit": {
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "seat_selection": {
+              "$ref": "#/$defs/SeatSelection",
+              "default": "fill-first",
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+            },
+            "stream_first_byte_timeout_ms": {
+              "description": "Per-attempt first-byte timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unsupported_features": {
+              "default": [],
+              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "user_agent": {
+              "default": null,
+              "description": "Override the outbound User-Agent. None -> default\n`routectl/<version> codex-cli`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "api_key_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Native AWS Bedrock provider. Speaks SigV4 directly to\n`bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to\nswitch between vendor-specific InvokeModel (default) and\nvendor-neutral Converse.",
+          "properties": {
+            "anthropic_beta": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "api_shape": {
+              "$ref": "#/$defs/BedrockApiShapeConfig",
+              "default": "invoke"
+            },
+            "auto_emit_top_level_breakpoint": {
+              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "cache_capability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CacheCapability"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
+            },
+            "circuit_cooldown_ms": {
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "circuit_failures": {
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "class_overrides": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ConfigFailureClass"
+              },
+              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "type": "object"
+            },
+            "creds": {
+              "$ref": "#/$defs/BedrockCredsConfig"
+            },
+            "header_extras": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "Provider-level header extras.",
+              "type": "object"
+            },
+            "kind": {
+              "const": "bedrock",
+              "type": "string"
+            },
+            "payload_extras": {
+              "default": null,
+              "description": "Provider-level payload extras."
+            },
+            "reduction_enabled": {
+              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "region": {
+              "type": "string"
+            },
+            "request_timeout_ms": {
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rpm_limit": {
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "seat_selection": {
+              "$ref": "#/$defs/SeatSelection",
+              "default": "fill-first",
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+            },
+            "stream_first_byte_timeout_ms": {
+              "description": "Per-attempt first-byte timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unsupported_features": {
+              "default": [],
+              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "user_agent": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "region",
+            "creds"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Native Google Gemini provider (REST v1beta `generateContent`).",
+          "properties": {
+            "api_key_ref": {
+              "description": "Resolves to the Gemini API key (sent as `x-goog-api-key`).",
+              "type": "string"
+            },
+            "auth_mode": {
+              "$ref": "#/$defs/GeminiAuthMode",
+              "default": "api-key",
+              "description": "Selects the Gemini wire dialect. `api-key` (default) uses the\npublic `generativelanguage.googleapis.com` REST surface with the\n`x-goog-api-key` header. `cloud-code` uses the Cloud Code\n(\"antigravity\") surface with an OAuth bearer; in that mode\n`api_key_ref` MUST be an `oauth://<provider>` reference."
+            },
+            "auto_emit_top_level_breakpoint": {
+              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "base_url": {
+              "default": "https://generativelanguage.googleapis.com/v1beta",
+              "description": "Endpoint base URL. Default (api-key mode):\n`https://generativelanguage.googleapis.com/v1beta`. In\n`cloud-code` mode the effective default is\n`cloudcode-pa.googleapis.com`; leave this unset for cloud-code\nunless targeting a test/staging host (it is only forwarded to\nthe provider when it differs from the public-surface default).",
+              "type": "string"
+            },
+            "cache_capability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CacheCapability"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
+            },
+            "circuit_cooldown_ms": {
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "circuit_failures": {
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "class_overrides": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ConfigFailureClass"
+              },
+              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "type": "object"
+            },
+            "header_extras": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "description": "Provider-level header extras.",
+              "type": "object"
+            },
+            "kind": {
+              "const": "gemini",
+              "type": "string"
+            },
+            "payload_extras": {
+              "default": null,
+              "description": "Provider-level payload extras."
+            },
+            "reduction_enabled": {
+              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "request_timeout_ms": {
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rpm_limit": {
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "seat_selection": {
+              "$ref": "#/$defs/SeatSelection",
+              "default": "fill-first",
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+            },
+            "stream_first_byte_timeout_ms": {
+              "description": "Per-attempt first-byte timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "unsupported_features": {
+              "default": [],
+              "description": "Operator-supplied list of feature keys this provider does not\nsupport. Router pre-filters the alias chain before dispatch -- a\nprovider listed here is skipped entirely (not tried-and-fallback)\nwhen the request needs any of these features. Tool-type keys are\nderived from built-in tool `type` strings (e.g. `web_search`,\n`computer_use`). The `structured_output` key is request-derived\n(NOT a tool type): it fires when the request carries\n`output_config.format` or any strict tool, both of which need\nconstrained decoding some upstreams (e.g. a Bedrock Invoke leg)\ncannot enforce. See feature-key derivation in\n`crates/routectl-router/src/feature_keys.rs`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "user_agent": {
+              "default": null,
+              "description": "Override the outbound User-Agent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "api_key_ref"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ReasoningDialect": {
+      "enum": [
+        "openai",
+        "deepseek",
+        "vllm",
+        "raw-think-tag",
+        "openrouter",
+        "passthrough"
+      ],
+      "type": "string"
+    },
+    "ReductionConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[reduction]` config block. Global policy for the\ndispatch-path token-reduction feature. A missing `[reduction]` table\ndeserializes to `ReductionConfig::default()` (reduction disabled), and\nthe per-field `#[serde(default)]` keeps an omitted key disabled too.\n\nThis is the GLOBAL switch; each `[providers.X]` entry carries an\noptional `reduction_enabled` override consulted only when the global\nswitch is on. The effective decision a later dispatch task will consume:\nreduction applies when the global `enabled == true` AND the provider\noverride is not explicitly `Some(false)`. A provider `None` inherits\nthe global setting.\n\n`#[non_exhaustive]` so later tactic sub-configs are non-breaking\nadditions to the Rust API. `#[serde(deny_unknown_fields)]` is the\ncomplementary wire-side choice (matching `CacheConfig`): unknown TOML\nkeys are rejected so a typo surfaces at config-load time rather than\nbeing silently ignored. The two do not conflict -- a config naming a\nfuture field simply requires a binary new enough to know that field.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Master switch for the dispatch-path token-reduction feature.\nDefault off (reduction is opt-in): `bool::default()` is `false`,\nand the derived `Default` keeps reduction disabled.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "RegistryEntry": {
+      "description": "One row in the `[registry]` table. Keyed by an upstream-id glob\n(exact id or trailing-`*` prefix). Carries optional pricing and an\noptional `provider` scope so the same upstream id served by two\nproviders can be priced differently. The block is named `[registry.*]`\ndeliberately to leave room for future capability metadata (e.g.\n`[registry.*.capabilities]`); only `pricing` is built today.\n\n`Eq` is deliberately NOT derived: `PricingConfig` carries `f64`.\n\nUnknown fields are tolerated here (no `deny_unknown_fields`): the\nblock is intended to grow a future `[registry.*.capabilities]`\nsub-table, so a newer config carrying that key must not fail against\nan older binary. `PricingConfig` still rejects typos (its field set\nis stable).",
+      "properties": {
+        "pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RetryPolicy": {
+      "properties": {
+        "backoff_multiplier": {
+          "default": 2.0,
+          "description": "Backoff multiplier per attempt.",
+          "format": "double",
+          "type": "number"
+        },
+        "classes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ClassPolicy"
+          },
+          "description": "Per-error-class policy overlay keyed by the config-facing failure\nclass. A present entry overrides only the leaves it names (retry\ncap and/or fallback), layered over the baked class defaults; an\nabsent entry keeps the baked defaults. An empty map (the default)\nleaves every class at its baked default. See\n[`RetryPolicy::resolved_class`].",
+          "type": "object"
+        },
+        "initial_backoff_ms": {
+          "default": 250,
+          "description": "Initial backoff in ms.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "jitter_ms": {
+          "default": 0,
+          "description": "Random additional ms added to each backoff sleep (0..jitter_ms).\nPrevents thundering-herd retries when many clients fail at once.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 2,
+          "description": "Default retry-attempts cap per provider in the chain. Used when\nno per-error-class override below is set.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_honored_retry_after_ms": {
+          "default": null,
+          "description": "Ceiling on how long the circuit breaker will park a provider in\nresponse to an upstream reset hint (a parsed `Retry-After` value\ncarried on `Error::Upstream`). A reset hint longer than this\nceiling is clamped down to it, so a misbehaving or hostile\nupstream cannot pin a provider out of rotation for an arbitrary\nduration. `None` (the default) uses\n`DEFAULT_MAX_HONORED_RETRY_AFTER_MS` (1 hour). Read via\n[`RetryPolicy::max_honored_retry_after`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "probe_max_tokens": {
+          "default": 1,
+          "description": "Requests with `max_tokens` <= this are treated as availability\nprobes (Claude Code sends `max_tokens=1`); on a rate-limit /\noverload (429/529) they skip retry+fallback and return the\nstatus immediately, since walking the chain is futile and the\nprobe output is unused. `0` disables. Real requests (max_tokens\nabove this) are unaffected.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request_timeout_ms": {
+          "description": "End-to-end per-attempt timeout. `None` means rely on the\nreqwest client's default (no explicit cap). When set, the\nrouter wraps each upstream call in `tokio::time::timeout`\nand treats expiry as a network error (status 0, retryable).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry_allowlist": {
+          "default": [],
+          "description": "Status codes that trigger fallback to the next provider in the\nchain (in addition to network errors). When non-empty, only the\nlisted codes are fallbackable. When empty (the default), the\nresolution falls through to `retry_denylist` or, if that is also\nunset, to \"every 4xx/5xx is fallbackable\". Mutually exclusive\nwith `retry_denylist` -- setting both is a config-load error.",
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "retry_denylist": {
+          "description": "Inverse of `retry_allowlist`: when `Some`, every 4xx/5xx code\nEXCEPT those in the list triggers fallback. `None` means no\ndenylist is active; if `retry_allowlist` is also empty, the\ndefault \"all 4xx/5xx fall back\" predicate applies. Mutually\nexclusive with a non-empty `retry_allowlist` -- setting both\nis a config-load error.",
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "retry_on_429": {
+          "description": "Per-error-class retry caps. When set, override `max_attempts` for\nthat specific class. Useful because rate-limits often clear in\na single retry while flaky 5xx may need more attempts.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry_on_5xx": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry_on_network": {
+          "description": "Network errors (status 0): DNS, TCP connect, TLS handshake,\nrequest body, request timeout. Default is `max_attempts`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stream_first_byte_timeout_ms": {
+          "default": 600000,
+          "description": "First-byte timeout for streaming responses. If the upstream\nhasn't emitted any bytes in this window, the stream is\nabandoned and (if no chunk has been delivered yet) the next\nprovider in the chain is tried.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SeatSelection": {
+      "description": "Per-provider seat-selection strategy for the OAuth credential pool.\nDefault is `fill-first` so a single-seat provider (the common case)\nkeeps its current behavior with no config.",
+      "oneOf": [
+        {
+          "const": "fill-first",
+          "description": "Drain one seat fully before advancing to the next.",
+          "type": "string"
+        },
+        {
+          "const": "round-robin",
+          "description": "Rotate across seats to spread load.",
+          "type": "string"
+        },
+        {
+          "const": "sticky-least-loaded",
+          "description": "Pin each conversation to one seat for prompt-cache affinity, and\nbalance NEW conversations across seats by load. The contract: a\nconversation's first request picks the least-loaded healthy seat at\nbirth; every subsequent request for that conversation routes back to\nthe same seat so its warm prompt cache is preserved (avoiding a cold\nmiss on every turn). If a pinned home goes unhealthy the conversation\nmigrates once to a healthy sibling and stays there (no flapping back).\nThe selection is a best-effort reorder of the walk: the per-seat\ndispatch gate and the fill-first fallback walk stay authoritative, so\na stale or wrong pin only costs locality, never correctness.",
+          "type": "string"
+        }
+      ]
+    },
+    "ServerAuth": {
+      "additionalProperties": false,
+      "properties": {
+        "tokens": {
+          "default": [],
+          "description": "Allowed tokens, stored as SecretRef URIs. Empty list means\n\"no auth required\" (loopback dev default).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ServerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_disable_fallbacks": {
+          "default": true,
+          "description": "When true (default), the `x-routectl-disable-fallbacks` request\nheader lets a client pin a request to a single provider with\nno fallback chain. Useful for tests, dev probing, and\nper-request triage. Set to `false` for hardened multi-tenant\ndeployments where authenticated clients should not be able to\ndisable the gateway's HA story or probe per-provider health.",
+          "type": "boolean"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServerAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Listener-side auth. When `tokens` is non-empty, every request\nmust carry a matching `x-api-key` or `Authorization: Bearer\n<token>` header. Tokens are SecretRef URIs (env://, file://,\nliteral:) and are resolved at startup."
+        },
+        "host": {
+          "default": "127.0.0.1",
+          "description": "Bind host. Defaults to localhost. Refuses non-loopback unless\n`--unsafe-public` is passed on the CLI.",
+          "type": "string"
+        },
+        "max_body_bytes": {
+          "default": 33554432,
+          "description": "Maximum incoming JSON body size for `/v1/chat/completions` and\n`/v1/messages`, in bytes. Defaults to 32 MiB -- comfortably above\nthe largest legitimate Anthropic Messages request (long system\nprompt + many tool defs + long history with cache_control\nbreakpoints) while preventing trivial OOM-DoS via a multi-GB\nPOST. No server-side ceiling is enforced; axum's\n`DefaultBodyLimit` and the OS allocator are the only guards.\nPrefer values under 1 GiB for normal deployments.\nReplaces the pre-v0.8 hardcoded `MAX_BODY_BYTES` (4 MiB) which\nwas too tight for live-traffic claude-code sessions.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "port": {
+          "default": 8787,
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "strict_translation": {
+          "default": false,
+          "description": "When true, lossy translation seams (e.g. cache_control on a\ncanonical -> OpenAI-compat egress) return a 400 instead of\nemitting a `tracing::warn!`. Default false (warn-and-drop)\npreserves dev ergonomics; flip to true for production CI.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ToolRename": {
+      "description": "A single operator-configured tool-name rename. Applied AFTER the\nalways-on tool-name `mcp__` normalization, over the same tool-name JSON\npaths, recording reverse entries so renamed names restore on the\nresponse.",
+      "properties": {
+        "from": {
+          "description": "The tool name as the client sends it (the rename source).",
+          "type": "string"
+        },
+        "to": {
+          "description": "The tool name routectl rewrites it to on the wire (the rename\ntarget).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "TrimConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[trim]` config block. Wraps the deterministic\nsteady-state advisory trimmer's four knobs\n(`crate::context_trim::SteadyStateTrimParams`) for TOML config. A missing\n`[trim]` block deserializes to `TrimConfig::default()`; `to_params()` then\nresolves that to the SAME `SteadyStateTrimParams` as\n`SteadyStateTrimParams::default()`, because every per-field default fn\nbelow delegates to the exact const `SteadyStateTrimParams::default()`\nuses -- one source of truth for \"missing block == current conservative\ndefaults\", never a second hardcoded copy.\n\n`to_params()` is the ONLY constructor for `SteadyStateTrimParams` from\nconfig, and BOTH production consumers (`Router::record_would_trim`,\n`prompt_size::build_steady_state_economics`) call it -- they can never\nresolve to different params from the same `Config`.\n\n`SteadyStateTrimParams` itself is deliberately NOT serde-derived: it is\nthe advisory trimmer's pure-function input (built ad hoc by tests too),\nand coupling it to serde would leak a config-loading concern into a\nmodule that has none today. This wrapper is the wire-side boundary.\n\nNo `enabled` switch, no band knobs, no per-provider override: the\nsteady-state trimmer is an always-on ADVISORY recorder that never mutates\na dispatched request, so there is no \"off\" state to represent.\n`#[non_exhaustive]` leaves room for a later knob without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time instead of silently ignoring it.",
+      "properties": {
+        "clear_at_least_tokens": {
+          "default": 20000,
+          "description": "Minimum tokens the elided span must free for a trim to be proposed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head_keep_messages": {
+          "default": 2,
+          "description": "Number of leading messages kept fully intact (never elided).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keep_recent_messages": {
+          "default": 6,
+          "description": "Number of trailing messages protected from elision.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trigger_tokens": {
+          "default": 100000,
+          "description": "Estimated total tokens at or below which no trim is proposed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "UsageConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[usage]` config block. Controls the\nusage-accounting subsystem. Each field carries a default, so a\nconfig with no `[usage]` block deserializes to the same value as\n`UsageConfig::default()`.\n\nReload semantics: `db_path` is restart-required (the writer opens\nthe db at boot and holds the handle); `enabled` and\n`retention_days` hot-reload on the next config swap. See\n`collect_restart_required_changes` in the CLI server module for the\nclassification.",
+      "properties": {
+        "db_path": {
+          "default": "~/.config/routectl/usage.db",
+          "description": "SQLite database path for persisted usage rows. Defaults to\n`<config-dir>/routectl/usage.db` with the user config dir\nresolved from `XDG_CONFIG_HOME` or `HOME` -- no literal `~`\never reaches SQLite.",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Master switch for the usage-accounting subsystem. Default on.",
+          "type": "boolean"
+        },
+        "retention_days": {
+          "default": 90,
+          "description": "Rows older than this many days are pruned on daemon startup.\nDefault 90.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "aliases": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AliasValue"
+      },
+      "default": {},
+      "description": "v0.6.0 alias table. Each key is a wire `model` value (or a\nsuffix-glob pattern like `claude-opus-*`, or the literal\n`default` catch-all key); each value is either a single model\nnickname or an ordered fallback chain of nicknames -- both\nforms reference `[models.X]` table entries. The wire `model`\nfield on incoming requests resolves through this table.\n\nv0.6.0 collapsed the legacy `[aliases.X.chain]` `provider:model`\nliterals AND the `[ingress.X.aliases]` per-dialect maps AND the\n`default_model` field AND the suffix-glob convention (used\nprimarily by Claude Code and the OpenAI SDK over our ingress)\ninto this single table. See the v0.6.0-rc.1 CHANGELOG for the\nmigration guide.",
+      "type": "object"
+    },
+    "bedrock": {
+      "$ref": "#/$defs/BedrockGlobalConfig",
+      "default": {
+        "allowed_betas": [],
+        "allowed_body_fields": []
+      },
+      "description": "Bedrock-wide settings that apply to every Bedrock provider.\nCarries the operator-supplied `allowed_betas` and\n`allowed_body_fields` lists -- routectl ships no defaults so\nAWS schema drift does not require a routectl release. See\n`examples/bedrock.toml` for the empirical baseline. Future\nshared knobs (e.g. region-default, retry-default) land here too."
+    },
+    "cache": {
+      "$ref": "#/$defs/CacheConfig",
+      "default": {
+        "auto_emit_top_level_breakpoint": true
+      },
+      "description": "Operator-facing `[cache]` block. Controls the dispatch-path\nauto-emission of a top-level Anthropic `cache_control` breakpoint.\nA missing block keeps the default: auto-emit enabled."
+    },
+    "cache_pricing": {
+      "additionalProperties": {
+        "$ref": "#/$defs/CachePricingOverride"
+      },
+      "default": {},
+      "description": "Operator-facing LEGACY `[cache_pricing]` field-level override table\nfor the baked catalog economics rows (`crate::catalog`). Slated for\nretirement once its data migrates into the catalog overlay\n(`crate::catalog_overlay`). Each\nkey is a `\"provider_kind:model_glob\"` selector (e.g.\n`\"openai-compat:grok-*\"`); each value is a sparse\n[`crate::catalog::CachePricingOverride`] -- only the fields the\noperator wants to correct, the rest inheriting the baked-in value.\nAn empty / omitted block is the norm; this exists to patch a cell\nthat drifted before a routectl release can re-bake it. An override\nthat sets `wm` below the conservative sentinel must carry\n`override_acknowledges_cost_risk = true` or the merge is rejected by\nthe consuming cost gate. The selector keys are NOT validated against\nthe baked table here (an unmatched selector is simply inert).",
+      "type": "object"
+    },
+    "log": {
+      "$ref": "#/$defs/LogConfig",
+      "default": {},
+      "description": "Operator-facing `[log]` block. Each field is an optional\nfallback consulted by the runtime log-safe knobs when the\nmatching env var is unset. Env always wins over config; missing\nblock keeps the pre-`[log]` env-only-or-hardcoded behavior. The\nenv-filter directive (`ROUTECTL_LOG`) is intentionally NOT part\nof this block -- it stays env-only."
+    },
+    "mitm": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MitmConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional `[mitm]` block for the MITM front-proxy (TLS-terminating\nlocal listener that fronts a first-party upstream, e.g. Claude\nCode talking to `api.anthropic.com`). Presence gates the feature\non, matching the `[server.auth]` convention -- `None` (the block\nomitted) keeps today's behavior with zero MITM proxy startup."
+    },
+    "models": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ModelEntry"
+      },
+      "default": {},
+      "description": "v0.6.0 model directory. Each entry binds a logical nickname\n(the table key) to a transport (`provider`), an upstream model\nid (`upstream`), and per-model knobs. The `[aliases]` table\nreferences entries by nickname. See the v0.6.0-rc.1 changelog.",
+      "type": "object"
+    },
+    "providers": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ProviderEntry"
+      },
+      "default": {},
+      "description": "Provider definitions keyed by operator-facing name. Carries\ntransport-side knobs only (auth, base URL, headers, runtime\ngates). Per-model knobs (`supports_adaptive_thinking`,\n`effort_levels`, `max_thinking_budget`, `reasoning_dialect`,\n`history_reasoning`, `additional_request_fields`) live on\n`[models.X]` in v0.6.0.",
+      "type": "object"
+    },
+    "reduction": {
+      "$ref": "#/$defs/ReductionConfig",
+      "default": {
+        "enabled": false
+      },
+      "description": "Operator-facing `[reduction]` block. Global switch for the\ndispatch-path token-reduction feature. A missing block keeps the\ndefault: reduction disabled."
+    },
+    "registry": {
+      "additionalProperties": {
+        "$ref": "#/$defs/RegistryEntry"
+      },
+      "default": {},
+      "description": "Operator-facing `[registry]` pricing table. Each key is an\nupstream-id glob (an exact id or a trailing-`*` prefix, parsed\nvia `AliasPattern`); each value carries optional per-million-token\npricing and an optional `provider` scope. routectl ships NO price\ndefaults -- an unlisted upstream is simply unpriced. Cost is\nderived at QUERY time from this table, so correcting a price later\nretroactively fixes the cost of historical rows. The table is\nnamed `[registry.*]` deliberately (room to grow capability\nmetadata later); only pricing is wired today.",
+      "type": "object"
+    },
+    "retry": {
+      "$ref": "#/$defs/RetryPolicy",
+      "default": {
+        "backoff_multiplier": 2.0,
+        "initial_backoff_ms": 250,
+        "jitter_ms": 50,
+        "max_attempts": 2,
+        "max_honored_retry_after_ms": null,
+        "probe_max_tokens": 1,
+        "retry_allowlist": [],
+        "stream_first_byte_timeout_ms": 600000
+      },
+      "description": "Default retry policy applied per-provider attempt."
+    },
+    "server": {
+      "$ref": "#/$defs/ServerConfig",
+      "default": {
+        "allow_disable_fallbacks": true,
+        "auth": null,
+        "host": "127.0.0.1",
+        "max_body_bytes": 33554432,
+        "port": 8787,
+        "strict_translation": false
+      },
+      "description": "Server bind config."
+    },
+    "trim": {
+      "$ref": "#/$defs/TrimConfig",
+      "default": {
+        "clear_at_least_tokens": 20000,
+        "head_keep_messages": 2,
+        "keep_recent_messages": 6,
+        "trigger_tokens": 100000
+      },
+      "description": "Operator-facing `[trim]` block. Tunes the deterministic steady-state\nadvisory trimmer's four knobs. A missing block resolves (via\n`TrimConfig::to_params()`) to `SteadyStateTrimParams::default()` --\nthe trimmer's current conservative behavior is unchanged."
+    },
+    "usage": {
+      "$ref": "#/$defs/UsageConfig",
+      "default": {
+        "db_path": "~/.config/routectl/usage.db",
+        "enabled": true,
+        "retention_days": 90
+      },
+      "description": "Operator-facing `[usage]` block. Controls the usage-accounting\nsubsystem (per-request token/cost rows persisted to a local\nSQLite db). A missing block keeps all defaults: enabled, a db\nunder the user config dir, 90-day retention."
+    },
+    "version": {
+      "default": 1,
+      "description": "Schema-version stamp for this `config.toml`. Absent in the file\n(every pre-v0.9 config) deserializes to `1`. [`CURRENT_CONFIG_VERSION`]\nis `2`: a `version < 2` config's legacy `[cache_pricing]` table is\nretired into the catalog overlay by `crate::config_migrate` the\nfirst time it loads under a v2-aware binary, and this field is\nrewritten to `2` in place. A `version` greater than\n[`CURRENT_CONFIG_VERSION`] is rejected before this struct is even\ndeserialized -- see [`preflight_config_version`].\n\nNOTE: `Config::default()` (plain Rust construction, e.g. in tests)\nyields `0`, not `1` -- the `1` default applies only on the serde\ndeserialize-from-TOML path (an absent key in the file).\n`#[derive(Default)]` cannot special-case one field's constant, and\nevery caller that gates on `version < CURRENT_CONFIG_VERSION`\ntreats `0` and `1` identically, so the two never diverge in\npractice.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "title": "Config",
+  "type": "object",
+  "x-generated": "@generated by `cargo run --bin gen_schema` -- do not edit by hand",
+  "x-routectl-config-version": 2
+}
