@@ -131,7 +131,7 @@ impl OAuthFlow for Anthropic {
         .send()
         .await
         .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
-        decode_token_response(resp, TokenFlow::Exchange).await
+        decode_token_response(resp, None).await
     }
 
     async fn refresh_token(
@@ -167,7 +167,7 @@ impl OAuthFlow for Anthropic {
         .send()
         .await
         .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
-        decode_token_response_traced(resp, &prior_sha8).await
+        decode_token_response_traced(resp, Some(refresh_token), &prior_sha8).await
     }
 }
 
@@ -179,7 +179,8 @@ impl OAuthFlow for Anthropic {
 #[derive(serde::Deserialize)]
 pub(super) struct Resp {
     access_token: String,
-    refresh_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
     #[serde(default = "default_token_type")]
     token_type: String,
     expires_in: u64,
@@ -203,22 +204,24 @@ pub(super) struct AccountField {
 
 /// Shared response decoder for both `exchange_code` and `refresh_token`.
 /// Three discrete steps (status check + parse + map) so each is small
-/// enough to keep in head with its failure modes. `flow` selects how
-/// `invalid_grant` is bucketed: a fresh login that hits invalid_grant
-/// means the auth code is bad (expired, already used, or PKCE/redirect
-/// mismatch); a refresh that hits invalid_grant means the refresh token
-/// is gone.
+/// enough to keep in head with its failure modes. `prior_refresh` is
+/// `Some` on the refresh path (the previous refresh token) and `None` on
+/// the exchange path; it is threaded to `map_to_record` (fallback +
+/// session-id minting) and drives how `invalid_grant` is bucketed: a
+/// fresh login (`None`) that hits invalid_grant means the auth code is
+/// bad (expired, already used, or PKCE/redirect mismatch); a refresh
+/// (`Some`) that hits invalid_grant means the refresh token is gone.
 async fn decode_token_response(
     resp: reqwest::Response,
-    flow: TokenFlow,
+    prior_refresh: Option<&str>,
 ) -> OAuthResult<TokenRecord> {
     let status = resp.status();
     let url = resp.url().to_string();
     let body = read_capped_body(resp).await?;
 
-    check_status_error(status, &url, &body, flow)?;
-    let parsed = parse_token_response_json(&body, flow)?;
-    Ok(map_to_record(parsed, flow))
+    check_status_error(status, &url, &body, prior_refresh.is_some())?;
+    let parsed = parse_token_response_json(&body, prior_refresh.is_some())?;
+    map_to_record(parsed, prior_refresh)
 }
 
 /// Refresh-only variant of [`decode_token_response`] with structured
@@ -237,13 +240,14 @@ async fn decode_token_response(
 /// returned to the caller still conveys the non-sensitive context.
 pub(super) async fn decode_token_response_traced(
     resp: reqwest::Response,
+    prior_refresh: Option<&str>,
     prior_refresh_sha8: &str,
 ) -> OAuthResult<TokenRecord> {
     let status = resp.status();
     let url = resp.url().to_string();
     let body = read_capped_body(resp).await?;
 
-    if let Err(e) = check_status_error(status, &url, &body, TokenFlow::Refresh) {
+    if let Err(e) = check_status_error(status, &url, &body, prior_refresh.is_some()) {
         let kind = error_kind_label(&e);
         tracing::error!(
             status = %status.as_u16(),
@@ -254,7 +258,7 @@ pub(super) async fn decode_token_response_traced(
         return Err(e);
     }
 
-    let parsed = match parse_token_response_json(&body, TokenFlow::Refresh) {
+    let parsed = match parse_token_response_json(&body, prior_refresh.is_some()) {
         Ok(p) => p,
         Err(e) => {
             let kind = error_kind_label(&e);
@@ -269,14 +273,14 @@ pub(super) async fn decode_token_response_traced(
     };
 
     // Pull tracing fields before consuming `parsed` via `map_to_record`.
-    let new_refresh_sha8 = super::sha8(&parsed.refresh_token);
+    let new_refresh_sha8 = parsed.refresh_token.as_deref().map(super::sha8);
     let expires_in = parsed.expires_in;
-    let record = map_to_record(parsed, TokenFlow::Refresh);
+    let record = map_to_record(parsed, prior_refresh)?;
 
     tracing::debug!(
         status = %status.as_u16(),
         expires_in = %expires_in,
-        new_refresh_token_sha8 = %new_refresh_sha8,
+        new_refresh_token_sha8 = %new_refresh_sha8.as_deref().unwrap_or("-"),
         "anthropic refresh response"
     );
 
@@ -294,14 +298,6 @@ const fn error_kind_label(e: &OAuthError) -> &'static str {
         OAuthError::RefreshExpired(_) => "refresh_expired",
         _ => "other",
     }
-}
-
-/// Which token-endpoint call produced the response. Used by
-/// `check_status_error` to bucket `invalid_grant` correctly.
-#[derive(Clone, Copy)]
-pub(super) enum TokenFlow {
-    Exchange,
-    Refresh,
 }
 
 /// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
@@ -329,9 +325,9 @@ async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
 /// invalid_grant body fragment maps to `RefreshExpired` so the operator
 /// gets "re-run routectl login" guidance instead of a generic
 /// "endpoint error".
-/// Map status + body to an `OAuthError`. On 4xx/5xx, branch on `flow`:
-/// a refresh that hits `invalid_grant` is `RefreshExpired` (operator
-/// guidance: re-run login). An exchange that hits the same is
+/// Map status + body to an `OAuthError`. On 4xx/5xx, branch on
+/// `is_refresh`: a refresh that hits `invalid_grant` is `RefreshExpired`
+/// (operator guidance: re-run login). An exchange that hits the same is
 /// `TokenEndpoint` -- the auth code is the thing that died, and the
 /// upstream body explains how (expired / already used / PKCE
 /// mismatch / redirect_uri mismatch).
@@ -339,12 +335,12 @@ fn check_status_error(
     status: reqwest::StatusCode,
     url: &str,
     body: &str,
-    flow: TokenFlow,
+    is_refresh: bool,
 ) -> OAuthResult<()> {
     if status.is_success() {
         return Ok(());
     }
-    if matches!(flow, TokenFlow::Refresh) && body.contains("invalid_grant") {
+    if is_refresh && body.contains("invalid_grant") {
         return Err(OAuthError::RefreshExpired("anthropic".into()));
     }
     // Refresh-flow request bodies carry the long-lived refresh token,
@@ -353,7 +349,7 @@ fn check_status_error(
     // secret leakage into operator-visible errors and logs. The
     // exchange path stays as-is; its body is the authorization code
     // (single-use, short-lived) plus the PKCE verifier (already used).
-    Err(if matches!(flow, TokenFlow::Refresh) {
+    Err(if is_refresh {
         OAuthError::TokenEndpoint(format!("{} {}", status.as_u16(), url))
     } else {
         OAuthError::TokenEndpoint(format!(
@@ -373,9 +369,9 @@ fn check_status_error(
 /// Public-in-crate so tests can drive the deserializer directly with a
 /// fixture string -- the rest of `decode_token_response` is HTTP plumbing
 /// that the fixture would have to fake otherwise.
-pub(super) fn parse_token_response_json(body: &str, flow: TokenFlow) -> OAuthResult<Resp> {
+pub(super) fn parse_token_response_json(body: &str, is_refresh: bool) -> OAuthResult<Resp> {
     serde_json::from_str::<Resp>(body).map_err(|e| {
-        if matches!(flow, TokenFlow::Refresh) {
+        if is_refresh {
             OAuthError::TokenEndpoint(format!("parse token response: {e}"))
         } else {
             OAuthError::TokenEndpoint(format!(
@@ -390,12 +386,32 @@ pub(super) fn parse_token_response_json(body: &str, flow: TokenFlow) -> OAuthRes
 /// `expires_at_unix` against `unix_now()` once at exchange time so a
 /// later clock jump on disk does not corrupt validity.
 ///
-/// `flow` decides whether to mint a `session_id`. A fresh exchange
-/// (login) mints a new one; a refresh leaves it `None` so the OAuth
-/// store preserves the prior value, stable across the credential's
-/// lifetime. Mirrors the codex flow's per-credential session id.
-fn map_to_record(parsed: Resp, flow: TokenFlow) -> TokenRecord {
+/// `refresh_token`: an empty value is treated the same as an absent one --
+/// it can never be used to refresh. On exchange (`prior_refresh == None`)
+/// that is a hard error; on refresh, fall back to the prior validated
+/// token, matching the codex/xai/antigravity providers.
+///
+/// `prior_refresh` also decides whether to mint a `session_id`. A fresh
+/// exchange (login, `None`) mints a new one; a refresh (`Some`) leaves it
+/// `None` so the OAuth store preserves the prior value, stable across the
+/// credential's lifetime. Mirrors the codex flow's per-credential session
+/// id.
+fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<TokenRecord> {
     let now = unix_now();
+
+    let refresh_token = match (
+        parsed.refresh_token.filter(|rt| !rt.is_empty()),
+        prior_refresh,
+    ) {
+        (Some(rt), _) => rt,
+        (None, Some(prior)) => prior.to_string(),
+        (None, None) => {
+            return Err(OAuthError::TokenEndpoint(
+                "token response missing refresh_token".into(),
+            ));
+        }
+    };
+
     let scopes = parsed
         .scope
         .map(|s| s.split_whitespace().map(String::from).collect())
@@ -408,14 +424,14 @@ fn map_to_record(parsed: Resp, flow: TokenFlow) -> TokenRecord {
         })
         .unwrap_or_default();
 
-    let session_id = match flow {
-        TokenFlow::Exchange => Some(uuid::Uuid::new_v4().to_string()),
-        TokenFlow::Refresh => None,
+    let session_id = match prior_refresh {
+        None => Some(uuid::Uuid::new_v4().to_string()),
+        Some(_) => None,
     };
 
-    TokenRecord {
+    Ok(TokenRecord {
         access_token: SecretToken::new(parsed.access_token),
-        refresh_token: SecretToken::new(parsed.refresh_token),
+        refresh_token: SecretToken::new(refresh_token),
         token_type: parsed.token_type,
         expires_at_unix: now.saturating_add(parsed.expires_in),
         scopes,
@@ -423,7 +439,7 @@ fn map_to_record(parsed: Resp, flow: TokenFlow) -> TokenRecord {
         obtained_at_unix: now,
         session_id,
         cloud_project_id: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -465,12 +481,12 @@ mod tests {
             "scope": "user:inference user:profile",
             "account": { "email": "u@example.com", "account_id": "acc-123" }
         }"#;
-        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
+        let parsed = parse_token_response_json(body, false).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("acc-123")
         );
-        let rec = map_to_record(parsed, TokenFlow::Exchange);
+        let rec = map_to_record(parsed, None).unwrap();
         assert_eq!(rec.access_token.expose(), "AT");
         assert_eq!(rec.refresh_token.expose(), "RT");
         assert_eq!(rec.scopes.len(), 2);
@@ -486,7 +502,7 @@ mod tests {
             "expires_in": 100,
             "account": { "uuid": "uuid-form-123" }
         }"#;
-        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
+        let parsed = parse_token_response_json(body, false).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("uuid-form-123")
@@ -502,11 +518,77 @@ mod tests {
             "expires_in": 100,
             "account": { "id": "id-form-456" }
         }"#;
-        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
+        let parsed = parse_token_response_json(body, false).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("id-form-456")
         );
+    }
+
+    #[test]
+    fn exchange_rejects_empty_refresh_token() {
+        // An upstream response carrying an empty refresh_token deserializes
+        // fine (the field is present) but is unusable -- an empty token can
+        // never be refreshed later. On the exchange path (no prior token to
+        // fall back to) it must be rejected rather than stored verbatim.
+        let body = r#"{
+            "access_token": "AT",
+            "refresh_token": "",
+            "expires_in": 3600
+        }"#;
+        let parsed = parse_token_response_json(body, false).unwrap();
+        let err = map_to_record(parsed, None).unwrap_err();
+        match err {
+            OAuthError::TokenEndpoint(m) => assert!(m.contains("refresh_token"), "got: {m}"),
+            other => panic!("expected TokenEndpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_with_empty_refresh_token_preserves_prior() {
+        // On the refresh path an empty refresh_token falls back to the prior
+        // validated token, matching the codex/xai/antigravity providers --
+        // never storing the empty value.
+        let body = r#"{
+            "access_token": "AT",
+            "refresh_token": "",
+            "expires_in": 3600
+        }"#;
+        let parsed = parse_token_response_json(body, true).unwrap();
+        let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
+        assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
+    }
+
+    #[test]
+    fn exchange_rejects_absent_refresh_token() {
+        // The refresh_token key omitted entirely exercises the
+        // #[serde(default)] path (None), which is treated the same as an
+        // empty string: unusable. On the exchange path (no prior token to
+        // fall back to) it must be rejected rather than stored.
+        let body = r#"{
+            "access_token": "AT",
+            "expires_in": 3600
+        }"#;
+        let parsed = parse_token_response_json(body, false).unwrap();
+        let err = map_to_record(parsed, None).unwrap_err();
+        match err {
+            OAuthError::TokenEndpoint(m) => assert!(m.contains("refresh_token"), "got: {m}"),
+            other => panic!("expected TokenEndpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_with_absent_refresh_token_preserves_prior() {
+        // The refresh_token key omitted entirely (the #[serde(default)]
+        // path, None) falls back to the prior validated token just like the
+        // empty-string case -- never storing an unusable value.
+        let body = r#"{
+            "access_token": "AT",
+            "expires_in": 3600
+        }"#;
+        let parsed = parse_token_response_json(body, true).unwrap();
+        let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
+        assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
     }
 
     #[test]
@@ -515,7 +597,7 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             "https://example.invalid/v1/oauth/token",
             r#"{"error":"invalid_grant"}"#,
-            TokenFlow::Refresh,
+            true,
         )
         .unwrap_err();
         match err {
@@ -534,7 +616,7 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             "https://example.invalid/v1/oauth/token",
             r#"{"error":"invalid_grant","error_description":"code expired"}"#,
-            TokenFlow::Exchange,
+            false,
         )
         .unwrap_err();
         match err {
@@ -552,7 +634,7 @@ mod tests {
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             "https://example.invalid/v1/oauth/token",
             "boom",
-            TokenFlow::Exchange,
+            false,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -568,8 +650,8 @@ mod tests {
             "refresh_token": "RT",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
-        let rec = map_to_record(parsed, TokenFlow::Exchange);
+        let parsed = parse_token_response_json(body, false).unwrap();
+        let rec = map_to_record(parsed, None).unwrap();
         let sid = rec.session_id.expect("exchange must mint a session_id");
         // Must parse as a valid UUID v4.
         let parsed_uuid = uuid::Uuid::parse_str(&sid).expect("session_id must be a valid uuid");
@@ -590,8 +672,8 @@ mod tests {
             "refresh_token": "RT",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, TokenFlow::Refresh).unwrap();
-        let rec = map_to_record(parsed, TokenFlow::Refresh);
+        let parsed = parse_token_response_json(body, true).unwrap();
+        let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert!(
             rec.session_id.is_none(),
             "refresh must leave session_id None for the store to preserve the prior value"
