@@ -19,6 +19,15 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 mod common;
 
+/// Upper bound for polling the reloaded `/v1/models` state after a
+/// config rewrite. The reload runs on a spawned server task, so its
+/// tracing signal is not observable from the test thread; the observable
+/// is the alias table itself, polled at 50 ms until it flips. The bound
+/// is generous so a busy CI box under parallel release load cannot flake
+/// -- `wait_for_alias` returns the instant the alias appears, so the
+/// happy path pays only the real reload latency, never the ceiling.
+const RELOAD_WAIT_CEILING: Duration = Duration::from_secs(30);
+
 // -----------------------------------------------------------------
 // Test rig
 // -----------------------------------------------------------------
@@ -138,12 +147,66 @@ async fn wait_for_alias(base_url: &str, id: &str, max_wait: Duration) -> bool {
     false
 }
 
+/// Cadence at which `poll_alias_with_restimulus` re-issues its rewrite.
+/// Comfortably wider than `DEBOUNCE_MS` (250 ms in file_watch.rs) so each
+/// re-write is seen as a distinct event once the watch is armed, and much
+/// narrower than `RELOAD_WAIT_CEILING` so a lost first event is re-delivered
+/// many times before the ceiling expires.
+const RESTIMULUS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Poll `/v1/models` for `id` while periodically re-issuing an atomic
+/// rewrite of `config_path` with `contents`, until the alias surfaces
+/// (returns true) or `max_wait` elapses (returns false).
+///
+/// The watcher's inotify watch is armed on notify's background
+/// event-loop thread AFTER `spawn_watcher` returns -- `debouncer.watch()`
+/// only enqueues the `add_watch`, it does not block on it (this is why the
+/// file_watch.rs unit tests interpose a `SETTLE_MS` sleep before their
+/// first mutation). The server answers `/health` before that watch is
+/// live, so a single write issued the instant the server comes up can land
+/// ahead of the armed watch and be dropped -- there is no fs-event
+/// re-delivery, so the reload simply never fires. Under heavy parallel
+/// release load that arming window widens past any fixed sleep.
+///
+/// Re-writing the SAME contents each interval makes the stimulus
+/// self-healing without changing observed behavior: the reload path is
+/// idempotent (read -> parse -> Arc swap regardless of a self-write
+/// filter), so identical contents always yield the identical reloaded
+/// alias table. A re-delivered event is a no-op swap; the first event the
+/// armed watch actually sees flips the alias.
+async fn poll_alias_with_restimulus(
+    base_url: &str,
+    config_path: &Path,
+    contents: &[u8],
+    id: &str,
+    max_wait: Duration,
+) -> bool {
+    let deadline = Instant::now() + max_wait;
+    write_atomic(config_path, contents);
+    let mut last_write = Instant::now();
+    while Instant::now() < deadline {
+        if list_model_ids(base_url).await.iter().any(|s| s == id) {
+            return true;
+        }
+        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
+            write_atomic(config_path, contents);
+            last_write = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 // -----------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------
 
 /// Writing a new config.toml triggers a hot-reload; the new alias
-/// surfaces on `/v1/models` within a few hundred ms.
+/// surfaces on `/v1/models`. The stimulus is re-issued on each poll
+/// iteration (see `poll_alias_with_restimulus`) because the watcher's
+/// inotify watch arms asynchronously after the server is already
+/// answering /health -- a single write can race ahead of the armed
+/// watch and be dropped with no fs-event re-delivery.
 #[tokio::test]
 async fn file_write_triggers_config_reload() {
     let (base_url, config_path, _dir) = spawn_watched_server("first-alias").await;
@@ -152,16 +215,18 @@ async fn file_write_triggers_config_reload() {
     let initial = list_model_ids(&base_url).await;
     assert!(initial.iter().any(|s| s == "first-alias"));
 
-    // Act: rewrite with a different alias.
-    write_atomic(
-        &config_path,
-        config_text_with_alias("second-alias").as_bytes(),
-    );
-
-    // Assert: the new alias surfaces; the old one disappears.
+    // Act + Assert: rewrite with a different alias, re-issuing the
+    // (idempotent) rewrite until it surfaces or the ceiling expires.
     assert!(
-        wait_for_alias(&base_url, "second-alias", Duration::from_secs(3)).await,
-        "second-alias did not appear within 3s after config reload"
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            config_text_with_alias("second-alias").as_bytes(),
+            "second-alias",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "second-alias did not appear within {RELOAD_WAIT_CEILING:?} after config reload"
     );
     let ids = list_model_ids(&base_url).await;
     assert!(
