@@ -38,12 +38,14 @@ use std::path::Path;
 
 use routectl_core::{Error, Result};
 use routectl_router::{
-    Config, ConfigWriteError, EditOutcome, PathError, PathShape, edit_config_toml, parse_config,
-    preflight_config_version, preflight_legacy_mitm_credential_source, validate_config_path,
+    EditOutcome, PathError, PathShape, edit_config_toml, parse_config, validate_config_path,
 };
 use toml_edit::{DocumentMut, Item, Table};
 
-use super::config::validation_report;
+use super::edit_pipeline::{
+    RelockValidationError, confirm_high_consequence, gate, preflight, render_gate_errors,
+    render_write_error,
+};
 use crate::config_classify::{collect_high_consequence_changes, collect_restart_required_changes};
 
 /// What edit the pipeline performs. `Set` carries the raw value string
@@ -72,14 +74,6 @@ pub enum SetResult {
     /// A high-consequence edit was declined at the confirmation prompt.
     Aborted,
 }
-
-/// The `edit_fn` closure's error: the candidate re-validated under the lock
-/// against the SAME bytes step 5 already accepted, yet failed. The
-/// revision check makes the re-read deterministic, so this is a
-/// belt-and-suspenders guard, not a path an ordinary edit reaches.
-#[derive(Debug, thiserror::Error)]
-#[error("config candidate failed re-validation under the write lock")]
-struct RelockValidationError;
 
 /// Run the config-edit pipeline against `config_path`. Prints the human
 /// result line and emits the audit event on a real write; returns the
@@ -191,41 +185,6 @@ pub fn run(config_path: &Path, dotted_path: &str, kind: EditKind, yes: bool) -> 
     })
 }
 
-/// Raw preflights matching the loader: refuse a config whose version is out
-/// of bounds (older or newer than this build writes) before any edit touches
-/// it, and reject the removed `[mitm] credential_source` key with its
-/// actionable message. The version wording -- including the `config migrate`
-/// pointer for a too-old file -- is single-sourced in
-/// `preflight_config_version`, so the CLI and the loader never diverge.
-fn preflight(raw_text: &str) -> Result<()> {
-    preflight_config_version(raw_text).map_err(|e| Error::Config(e.to_string()))?;
-    preflight_legacy_mitm_credential_source(raw_text).map_err(|e| Error::Config(e.to_string()))?;
-    Ok(())
-}
-
-/// Parse the shared validation gate: `parse_config` (free did-you-mean) then
-/// the centralized `validate_*` suite the reload path also runs. Returns the
-/// validated `Config` or the rendered error lines.
-fn gate(candidate_text: &str) -> std::result::Result<Config, Vec<String>> {
-    let config = parse_config(candidate_text).map_err(|e| vec![e])?;
-    let report = validation_report(&config, Some(candidate_text));
-    if report.errors.is_empty() {
-        Ok(config)
-    } else {
-        Err(report.errors)
-    }
-}
-
-fn render_gate_errors(errors: &[String]) {
-    eprintln!(
-        "config rejected ({} error(s)); nothing written:",
-        errors.len()
-    );
-    for e in errors {
-        eprintln!("  - {e}");
-    }
-}
-
 /// Map a schema path-validation failure to a user error, giving array
 /// targets the hand-edit-only message this version's scope calls for.
 fn render_path_error(err: PathError) -> Error {
@@ -235,10 +194,6 @@ fn render_path_error(err: PathError) -> Error {
         )),
         other => Error::Config(other.to_string()),
     }
-}
-
-fn render_write_error(err: ConfigWriteError<RelockValidationError>) -> Error {
-    Error::Config(err.to_string())
 }
 
 fn parse_document(text: &str) -> Result<DocumentMut> {
@@ -314,26 +269,6 @@ fn infer_scalar(raw: &str) -> Item {
     } else {
         toml_edit::value(raw)
     }
-}
-
-/// Prompt before a high-consequence (egress-defining) edit. `--yes` bypasses
-/// it. Called BEFORE the write lock is acquired, never while holding it.
-fn confirm_high_consequence(fields: &[&str], yes: bool) -> bool {
-    if yes {
-        return true;
-    }
-    use std::io::Write as _;
-    println!(
-        "this edit changes egress-defining settings: {}",
-        fields.join(", ")
-    );
-    print!("apply anyway? [y/N] ");
-    let _ = std::io::stdout().flush();
-    let mut input = String::new();
-    if std::io::stdin().read_line(&mut input).is_err() {
-        return false;
-    }
-    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 #[cfg(test)]

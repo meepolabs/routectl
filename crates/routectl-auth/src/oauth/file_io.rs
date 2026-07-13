@@ -6,11 +6,13 @@
 //! `Ok(CredentialsFile::empty())` on `NotFound` so first-run servers
 //! do not have to special-case the missing file.
 //!
-//! Write flow: serialize to a temp file in the SAME directory (so
-//! `rename` is atomic within one filesystem), `fsync` the temp file,
-//! `rename` over the target. The old file remains valid if the rename
-//! fails. On Unix, the temp file is created with mode `0o600` so a
-//! partial write never has wider permissions than the final.
+//! Write flow: serialize to JSON and hand the bytes to the crate's
+//! shared `0o600` atomic writer ([`crate::atomic_write`]): temp file in
+//! the SAME directory (created `0o600` before any bytes are written, so a
+//! partial write never has wider perms), `fsync` the temp file, atomic
+//! `rename` over the target, then `fsync` the parent directory so the
+//! rename survives a crash. The old file remains valid if the rename
+//! fails.
 
 use std::path::{Path, PathBuf};
 
@@ -141,90 +143,18 @@ pub async fn save(path: &Path, file: &CredentialsFile) -> OAuthResult<()> {
         .map_err(|e| OAuthError::Internal(format!("save task failed: {e}")))?
 }
 
-/// Top-level driver that delegates to the three discrete steps below.
-/// Each helper is small enough to fit in a head with the surrounding
-/// failure modes; the original single `save_blocking` had grown too
-/// dense to read that way.
+/// Serialize the credentials and hand the bytes to the crate's shared
+/// `0o600` atomic writer, which owns the temp-file + fsync + rename +
+/// parent-dir fsync sequence. Every writer failure (including the
+/// no-parent-directory case that the old inline path reported as
+/// `Internal`) surfaces as `OAuthError::Io` -- they are all filesystem
+/// faults from the caller's perspective.
 fn save_blocking(path: &Path, file: &CredentialsFile) -> OAuthResult<()> {
-    ensure_dir(path)?;
-    let tmp = write_to_temp(path, file)?;
-    atomic_rename(tmp, path)
-}
-
-/// Step 1: ensure the parent directory exists with `0o700` perms.
-/// Idempotent on every save -- cheap and self-healing if the operator
-/// chmodded the dir wider by accident.
-fn ensure_dir(path: &Path) -> OAuthResult<()> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(parent)
-        .map_err(|e| OAuthError::Io(format!("create_dir_all {}: {e}", parent.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Best-effort: the file itself still gets 0o600 inside
-        // `write_to_temp`, so a stripped dir bit is not a security
-        // failure (just a slightly looser umbrella).
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
-    Ok(())
-}
-
-/// Step 2: serialize the credentials, write to a tempfile in the same
-/// directory, and `fsync` it. Returns the `NamedTempFile` so the caller
-/// can rename it onto the target path.
-fn write_to_temp(path: &Path, file: &CredentialsFile) -> OAuthResult<tempfile::NamedTempFile> {
-    use std::io::Write;
-
-    let display = path.display().to_string();
-    let parent = path
-        .parent()
-        .ok_or_else(|| OAuthError::Internal(format!("path has no parent: {display}")))?;
-
     // Pretty-print for human inspection (`routectl whoami` reads
     // structured; operators occasionally `cat` the file).
     let json = serde_json::to_vec_pretty(file)
         .map_err(|e| OAuthError::Internal(format!("serialize: {e}")))?;
-
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".credentials.tmp.")
-        .suffix(".json")
-        .tempfile_in(parent)
-        .map_err(|e| OAuthError::Io(format!("tempfile in {}: {e}", parent.display())))?;
-
-    // On Unix, force 0o600 BEFORE writing so a partial write never has
-    // wider permissions than the final.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tmp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| OAuthError::Io(format!("chmod tempfile: {e}")))?;
-    }
-
-    tmp.write_all(&json)
-        .map_err(|e| OAuthError::Io(format!("write tempfile: {e}")))?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| OAuthError::Io(format!("fsync tempfile: {e}")))?;
-
-    Ok(tmp)
-}
-
-/// Step 3: persist the tempfile onto the final path via `rename`
-/// (atomic on POSIX within one filesystem), then re-set 0o600 as
-/// defense-in-depth in case a paranoid umask stripped bits.
-fn atomic_rename(tmp: tempfile::NamedTempFile, path: &Path) -> OAuthResult<()> {
-    let display = path.display().to_string();
-    tmp.persist(path)
-        .map_err(|e| OAuthError::Io(format!("rename to {display}: {e}")))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::atomic_write::write_0600_atomic(path, &json).map_err(OAuthError::Io)
 }
 
 #[cfg(test)]

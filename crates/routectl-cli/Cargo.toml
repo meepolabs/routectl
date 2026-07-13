@@ -42,6 +42,10 @@ chrono.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 dirs = "6"
 subtle = "2"
+# Hidden interactive API-key prompt for `provider add` (reads from the TTY
+# without echoing). The one new dependency the secret-source breadth needs;
+# stdin/env/file capture use std + routectl-auth's ManagedSecretStore.
+rpassword = "7"
 # `config migrate --dry-run` on a legacy (v1) file renders the candidate by
 # running the IO-performing v1->v2 rung against a throwaway copy, so a dry-run
 # provably cannot touch the real config or overlay. Already a runtime dep of
@@ -78,6 +82,13 @@ http-body.workspace = true
 libc = "0.2"
 
 [features]
+# Default-on forward of routectl-router's `gemini` feature, so the shipped
+# binary can add and route Gemini providers. `provider add` cfg-gates its
+# Gemini support behind this feature, mirroring the router's own cfg gate on
+# the `Gemini` variant -- a build with the feature off compiles cleanly and
+# simply does not offer the kind.
+default = ["gemini"]
+gemini = ["routectl-router/gemini"]
 # Enable live integration tests that hit real providers using API keys
 # from the environment (OPENROUTER_API_KEY, NIM_API_KEY, ANTHROPIC_API_KEY,
 # AWS_BEARER_TOKEN_BEDROCK, etc.). Tests skip cleanly when their key is
