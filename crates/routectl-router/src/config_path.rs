@@ -338,13 +338,13 @@ mod tests {
 
     #[test]
     fn array_target_is_rejected() {
-        let err = validate_config_path("retry.retry_allowlist").unwrap_err();
+        let err = validate_config_path("bedrock.allowed_betas").unwrap_err();
         assert!(matches!(err, PathError::ArrayTarget { .. }));
     }
 
     #[test]
     fn indexing_into_array_is_rejected() {
-        let err = validate_config_path("retry.retry_allowlist.0").unwrap_err();
+        let err = validate_config_path("bedrock.allowed_betas.0").unwrap_err();
         assert!(matches!(err, PathError::ArrayTarget { .. }));
     }
 

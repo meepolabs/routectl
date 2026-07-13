@@ -1673,32 +1673,6 @@ pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()>
     Ok(())
 }
 
-/// Validate the `[retry]` block: enforce that `retry_allowlist` and
-/// `retry_denylist` are mutually exclusive. Setting a non-empty
-/// `retry_allowlist` together with `retry_denylist = Some(_)` would
-/// otherwise leave the operator's intent ambiguous; the predicate
-/// in `RetryPolicy::is_fallbackable_status` resolves to the allowlist
-/// (everything else is terminal) but the denylist would be silently
-/// ignored, masking the misconfiguration. Surface the conflict at
-/// startup so the operator picks one.
-///
-/// Call once per process startup alongside the other validators.
-pub fn validate_retry_policy(config: &crate::config::Config) -> Result<()> {
-    use routectl_core::Error;
-
-    let r = &config.retry;
-    if !r.retry_allowlist.is_empty() && r.retry_denylist.is_some() {
-        return Err(Error::Config(
-            "[retry]: `retry_allowlist` and `retry_denylist` are \
-             mutually exclusive; pick one (allowlist for an explicit \
-             set of fallback codes, denylist for `400..=599 except \
-             these`)"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 /// The four config-facing classes a `[providers.X.class_overrides]` remap
 /// may target. All four are terminal, non-retrying classes under the
 /// baked defaults (see `class_policy::baked_class_defaults`) -- a remap
@@ -1799,7 +1773,7 @@ pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
 /// hard-rejects on. Each finding here is a config smell the operator
 /// probably didn't intend, not a misconfiguration the loader must refuse.
 ///
-/// Three checks, each producing zero or more warning lines:
+/// Two checks, each producing zero or more warning lines:
 ///
 ///   - A `class_overrides` remap whose SOURCE status is a health signal
 ///     ([`is_health_status`]: 408, 429, or any 500..=599). Since
@@ -1812,25 +1786,10 @@ pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
 ///     leaves `None`). Parses fine and does nothing; almost always a
 ///     leftover the operator forgot to fill in or clear out.
 ///
-///   - A `[retry.classes.<c>]` block that is shadowed for one or more
-///     codes by an explicit `retry_allowlist` / `retry_denylist` entry.
-///     `RetryPolicy::explicit_status_override` gives the raw-code listing
-///     precedence over class policy for exactly the codes it names, so
-///     the class block's leaves are inert for those codes even though
-///     the block itself is well-formed. The shadow test classifies each
-///     explicit code with `provider_kind: None` (the union token table);
-///     this is an approximation for the warning (a provider-specific
-///     token lift could move a real request's classification), not a
-///     precise per-provider check -- fine for an advisory message.
-///
 /// Call once per process startup (or `routectl config check`) alongside
 /// [`validate_class_policy`]; unlike that function, warnings never fail
 /// the load.
 pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
-    use crate::class_policy::ConfigFailureClass;
-    use routectl_core::Error;
-    use routectl_core::failure_class::classify;
-
     let mut warnings = Vec::new();
 
     for (provider_name, entry) in &config.providers {
@@ -1846,38 +1805,11 @@ pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
         }
     }
 
-    // A non-empty `retry_allowlist` gives `explicit_status_override` an
-    // opinion on every 4xx/5xx code (member = allow, non-member = deny),
-    // not just the codes it names -- so the shadow set must walk the
-    // full status range through the precedence function itself rather
-    // than re-deriving "which codes are explicit" from the list
-    // contents. A `retry_denylist` only opines on the codes it names.
-    let explicit_codes: Vec<u16> = (400..=599)
-        .filter(|status| config.retry.explicit_status_override(*status).is_some())
-        .collect();
-
     for (class, policy) in &config.retry.classes {
         if policy.retry.is_none() && policy.fallback.is_none() {
             warnings.push(format!(
                 "[retry.classes.{}]: `retry` and `fallback` are both unset -- this block \
                  has no effect",
-                class_token(*class),
-            ));
-        }
-
-        let shadowing_codes: Vec<u16> = explicit_codes
-            .iter()
-            .copied()
-            .filter(|code| {
-                let classified = classify(&Error::upstream("routectl", *code, ""), None);
-                ConfigFailureClass::from_failure_class(&classified.class) == Some(*class)
-            })
-            .collect();
-        if !shadowing_codes.is_empty() {
-            warnings.push(format!(
-                "[retry.classes.{}]: shadowed for status code(s) {shadowing_codes:?} by the \
-                 explicit retry_allowlist/retry_denylist -- explicit raw codes win for \
-                 those codes",
                 class_token(*class),
             ));
         }
@@ -2004,92 +1936,6 @@ mod class_policy_validation_tests {
             warnings
                 .iter()
                 .any(|w| w.contains("server-error") && w.contains("no effect")),
-            "warnings: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn warns_when_a_class_block_is_shadowed_by_an_explicit_allowlist_code() {
-        // Arrange: status 500 classifies (with provider_kind None) as
-        // `server-error`, and the explicit allowlist names it directly --
-        // shadowing the `[retry.classes.server-error]` block for that code.
-        let mut cfg = Config::default();
-        cfg.retry.classes.insert(
-            ConfigFailureClass::ServerError,
-            ClassPolicy {
-                retry: Some(2),
-                fallback: None,
-            },
-        );
-        cfg.retry.retry_allowlist = vec![500];
-
-        // Act
-        let warnings = class_policy_warnings(&cfg);
-
-        // Assert
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("server-error") && w.contains("500") && w.contains("shadowed")),
-            "warnings: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn warns_when_a_nonempty_allowlist_shadows_a_class_it_never_names() {
-        // Arrange: a non-empty `retry_allowlist` gives
-        // `explicit_status_override` an opinion on every 4xx/5xx code
-        // (member = allow, non-member = deny) -- not just the codes it
-        // names. `retry_allowlist = [500]` never mentions 529, but 529
-        // is fully shadowed (explicitly denied) all the same, so the
-        // `[retry.classes.overloaded]` block is inert.
-        let mut cfg = Config::default();
-        cfg.retry.classes.insert(
-            ConfigFailureClass::Overloaded,
-            ClassPolicy {
-                retry: Some(2),
-                fallback: None,
-            },
-        );
-        cfg.retry.retry_allowlist = vec![500];
-
-        // Act
-        let warnings = class_policy_warnings(&cfg);
-
-        // Assert
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("overloaded") && w.contains("529") && w.contains("shadowed")),
-            "warnings: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn denylist_shadow_only_covers_the_codes_it_names() {
-        // Arrange: unlike a non-empty allowlist, `retry_denylist` only
-        // opines on the codes it lists -- `explicit_status_override`
-        // returns `None` (no override) for every other 4xx/5xx code, so
-        // the shadow set for a denylist config stays exactly the named
-        // codes.
-        let mut cfg = Config::default();
-        cfg.retry.classes.insert(
-            ConfigFailureClass::ServerError,
-            ClassPolicy {
-                retry: Some(2),
-                fallback: None,
-            },
-        );
-        cfg.retry.retry_denylist = Some(vec![501]);
-
-        // Act
-        let warnings = class_policy_warnings(&cfg);
-
-        // Assert: shadowed for 501 only, not for every server-error code.
-        assert!(
-            warnings.iter().any(|w| {
-                w.contains("server-error") && w.contains("shadowed") && w.contains("[501]")
-            }),
             "warnings: {warnings:?}"
         );
     }
@@ -2520,9 +2366,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_alias_patterns(config) {
-        errors.push(bare_validation_message(e));
-    }
-    if let Err(e) = validate_retry_policy(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_registry_patterns(config) {
@@ -5034,13 +4877,6 @@ mod collect_config_validation_tests {
         toml::from_str("[aliases]\nfast = \"ghost\"\n").expect("must parse")
     }
 
-    /// `retry_allowlist` and `retry_denylist` set together -- trips
-    /// `validate_retry_policy`.
-    fn conflicting_retry_lists_config() -> Config {
-        toml::from_str("[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n")
-            .expect("must parse")
-    }
-
     /// The reserved `[retry.classes.feature-unsupported]` override -- trips
     /// `validate_class_policy`.
     fn reserved_class_override_config() -> Config {
@@ -5060,22 +4896,6 @@ mod collect_config_validation_tests {
         assert!(
             validation.errors[0].contains("ghost"),
             "error should name the unknown target: {}",
-            validation.errors[0]
-        );
-    }
-
-    #[test]
-    fn collects_the_conflicting_retry_lists_error() {
-        let validation = collect_config_validation(&conflicting_retry_lists_config());
-        assert_eq!(
-            validation.errors.len(),
-            1,
-            "exactly one validator should fire: {:?}",
-            validation.errors
-        );
-        assert!(
-            validation.errors[0].contains("mutually exclusive"),
-            "error should flag the allowlist/denylist conflict: {}",
             validation.errors[0]
         );
     }

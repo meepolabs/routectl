@@ -6,10 +6,11 @@
 //! (a stale schema version, an unknown key, a value that fails the shared
 //! validation gate) leaves the file byte-identical:
 //!
-//!   1. RAW version preflight on the snapshot bytes FIRST -- a config older
-//!      than [`CURRENT_CONFIG_VERSION`] is refused here, before any
-//!      shared-loader call that would migrate it in place. The legacy-key
-//!      preflight runs raw alongside it.
+//!   1. RAW version preflight on the snapshot bytes FIRST -- a config whose
+//!      `version` is out of bounds (older or newer than this build writes)
+//!      is refused here with the single-sourced `preflight_config_version`
+//!      message, before any shared-loader call. A too-old file is never
+//!      migrated in place. The legacy-key preflight runs raw alongside it.
 //!   2. Schema-driven path validation ([`validate_config_path`]); `set`
 //!      requires a scalar leaf (a table target is rejected), while `unset`
 //!      may also target a whole table node to drop an override block.
@@ -37,9 +38,8 @@ use std::path::Path;
 
 use routectl_core::{Error, Result};
 use routectl_router::{
-    CURRENT_CONFIG_VERSION, Config, ConfigWriteError, EditOutcome, PathError, PathShape,
-    edit_config_toml, parse_config, preflight_config_version,
-    preflight_legacy_mitm_credential_source, validate_config_path,
+    Config, ConfigWriteError, EditOutcome, PathError, PathShape, edit_config_toml, parse_config,
+    preflight_config_version, preflight_legacy_mitm_credential_source, validate_config_path,
 };
 use toml_edit::{DocumentMut, Item, Table};
 
@@ -191,18 +191,14 @@ pub fn run(config_path: &Path, dotted_path: &str, kind: EditKind, yes: bool) -> 
     })
 }
 
-/// Raw preflights matching the loader: refuse a config older than this
-/// build writes (before any migrating loader touches it), and reject the
-/// removed `[mitm] credential_source` key with its actionable message.
+/// Raw preflights matching the loader: refuse a config whose version is out
+/// of bounds (older or newer than this build writes) before any edit touches
+/// it, and reject the removed `[mitm] credential_source` key with its
+/// actionable message. The version wording -- including the `config migrate`
+/// pointer for a too-old file -- is single-sourced in
+/// `preflight_config_version`, so the CLI and the loader never diverge.
 fn preflight(raw_text: &str) -> Result<()> {
-    let found = preflight_config_version(raw_text).map_err(|e| Error::Config(e.to_string()))?;
-    if found < CURRENT_CONFIG_VERSION {
-        return Err(Error::Config(format!(
-            "config version {found} predates the {CURRENT_CONFIG_VERSION} this build writes; \
-             migrate it first (a `config migrate` command lands in a later release) or edit it \
-             with a routectl binary that matches its version. Nothing was written."
-        )));
-    }
+    preflight_config_version(raw_text).map_err(|e| Error::Config(e.to_string()))?;
     preflight_legacy_mitm_credential_source(raw_text).map_err(|e| Error::Config(e.to_string()))?;
     Ok(())
 }
@@ -344,8 +340,8 @@ fn confirm_high_consequence(fields: &[&str], yes: bool) -> bool {
 mod tests {
     use super::*;
 
-    const V2_BASE: &str = "\
-version = 2
+    const V3_BASE: &str = "\
+version = 3
 
 [server]
 host = \"127.0.0.1\"
@@ -402,7 +398,7 @@ default = \"gpt\"
         let dir = tempfile::tempdir().unwrap();
         let body = "\
 # operator note
-version = 2
+version = 3
 
 [retry]
 max_attempts = 2
@@ -457,30 +453,30 @@ default = \"gpt\"
 
     #[test]
     fn bad_type_leaves_file_unchanged() {
-        assert_no_write(V2_BASE, "server.port", "not-a-number");
+        assert_no_write(V3_BASE, "server.port", "not-a-number");
     }
 
     #[test]
     fn unknown_path_leaves_file_unchanged() {
-        assert_no_write(V2_BASE, "server.nope", "1");
+        assert_no_write(V3_BASE, "server.nope", "1");
     }
 
     #[test]
     fn array_target_leaves_file_unchanged() {
-        assert_no_write(V2_BASE, "retry.retry_allowlist", "429");
+        assert_no_write(V3_BASE, "bedrock.allowed_betas", "429");
     }
 
     #[test]
     fn invalid_cross_field_leaves_file_unchanged() {
         // An alias pointing at an undefined model target passes the parse
         // but fails the shared cross-field validator suite.
-        assert_no_write(V2_BASE, "aliases.broken", "no-such-model");
+        assert_no_write(V3_BASE, "aliases.broken", "no-such-model");
     }
 
     #[test]
     fn legacy_key_trip_leaves_file_unchanged() {
         let body = "\
-version = 2
+version = 3
 
 [server]
 host = \"127.0.0.1\"
@@ -536,7 +532,7 @@ default = \"gpt\"
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, body, "v1 file must be byte-identical after refusal");
         assert!(
-            !after.contains("version = 2"),
+            !after.contains("version = 3"),
             "no version stamp may be written"
         );
     }
@@ -548,7 +544,7 @@ default = \"gpt\"
     #[test]
     fn restart_required_field_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V2_BASE);
+        let path = write_config(dir.path(), V3_BASE);
 
         let result = set(&path, "usage.retention_days", "30").expect("set");
         match result {
@@ -567,7 +563,7 @@ default = \"gpt\"
     #[test]
     fn no_op_set_reports_no_change_and_no_restart_notice() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V2_BASE);
+        let path = write_config(dir.path(), V3_BASE);
         let before = std::fs::read(&path).unwrap();
 
         let result = set(&path, "server.port", "8787").expect("set");
@@ -586,7 +582,7 @@ default = \"gpt\"
     #[test]
     fn high_consequence_edit_bypassed_by_yes() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V2_BASE);
+        let path = write_config(dir.path(), V3_BASE);
 
         let result =
             set(&path, "providers.fast.base_url", "http://127.0.0.1:2").expect("set with --yes");
@@ -607,7 +603,7 @@ default = \"gpt\"
         // yes=false and a non-interactive stdin (EOF) -> confirm returns
         // false -> abort with the file untouched.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V2_BASE);
+        let path = write_config(dir.path(), V3_BASE);
         let before = std::fs::read(&path).unwrap();
 
         let result = run(
@@ -632,7 +628,7 @@ default = \"gpt\"
     #[test]
     fn emits_one_audit_event_without_the_value() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V2_BASE);
+        let path = write_config(dir.path(), V3_BASE);
 
         let events = routectl_testkit::capture_events(|| {
             set(&path, "usage.retention_days", "30").expect("set");
@@ -670,7 +666,7 @@ default = \"gpt\"
     /// Config whose only retry override is a single sparse class leaf, so
     /// removing it empties the whole `[retry.classes.*]` chain.
     const RETRY_OVERRIDE: &str = "\
-version = 2
+version = 3
 
 [server]
 host = \"127.0.0.1\"
@@ -741,10 +737,10 @@ default = \"gpt\"
         // as the map it is, not silently no-op. (Bare keys precede section
         // headers in TOML, hence the fixture layout.)
         let dir = tempfile::tempdir().unwrap();
-        let body = V2_BASE
+        let body = V3_BASE
             .replace(
-                "version = 2\n",
-                "version = 2\naliases = { default = \"gpt\", second = \"gpt\" }\n",
+                "version = 3\n",
+                "version = 3\naliases = { default = \"gpt\", second = \"gpt\" }\n",
             )
             .replace("[aliases]\ndefault = \"gpt\"\n", "");
         let path = write_config(dir.path(), &body);
@@ -760,10 +756,10 @@ default = \"gpt\"
     #[test]
     fn set_reaches_into_an_inline_table() {
         let dir = tempfile::tempdir().unwrap();
-        let body = V2_BASE
+        let body = V3_BASE
             .replace(
-                "version = 2\n",
-                "version = 2\naliases = { default = \"gpt\" }\n",
+                "version = 3\n",
+                "version = 3\naliases = { default = \"gpt\" }\n",
             )
             .replace("[aliases]\ndefault = \"gpt\"\n", "");
         let path = write_config(dir.path(), &body);
@@ -780,7 +776,7 @@ default = \"gpt\"
     fn unset_keeps_parent_with_a_surviving_sibling_key() {
         let dir = tempfile::tempdir().unwrap();
         let body = "\
-version = 2
+version = 3
 
 [server]
 host = \"127.0.0.1\"
@@ -819,7 +815,7 @@ default = \"gpt\"
     fn unset_keeps_parent_with_a_surviving_sibling_table() {
         let dir = tempfile::tempdir().unwrap();
         let body = "\
-version = 2
+version = 3
 
 [server]
 host = \"127.0.0.1\"
@@ -874,7 +870,7 @@ default = \"gpt\"
         let dir = tempfile::tempdir().unwrap();
         let body = "\
 # operator note
-version = 2
+version = 3
 
 [server]
 host = \"127.0.0.1\"
@@ -914,7 +910,7 @@ default = \"gpt\"
     #[test]
     fn unset_missing_key_reports_no_change_without_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V2_BASE);
+        let path = write_config(dir.path(), V3_BASE);
         let before = std::fs::read(&path).unwrap();
 
         let result = unset(&path, "retry.max_attempts").expect("unset missing key");
@@ -954,7 +950,7 @@ default = \"gpt\"
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, body, "v1 file must be byte-identical after refusal");
         assert!(
-            !after.contains("version = 2"),
+            !after.contains("version = 3"),
             "no version stamp may be written"
         );
     }
@@ -965,7 +961,7 @@ default = \"gpt\"
         // serde default) makes the candidate fail the parse gate, so
         // nothing is written.
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), V2_BASE);
+        let path = write_config(dir.path(), V3_BASE);
         let before = std::fs::read(&path).unwrap();
 
         let err = unset(&path, "models.gpt.upstream");

@@ -205,7 +205,6 @@ fn default_test_retry() -> RetryPolicy {
     r.max_attempts = 1;
     r.initial_backoff_ms = 1;
     r.backoff_multiplier = 1.0;
-    r.retry_allowlist = vec![429, 500, 502, 503, 504];
     r
 }
 
@@ -379,13 +378,27 @@ async fn complete_falls_back_on_429() {
 }
 
 #[tokio::test]
-async fn complete_does_not_fall_back_on_4xx_other_than_429() {
+async fn complete_does_not_fall_back_on_4xx_when_class_pins_no_fallback() {
+    // Post raw-status retirement, fallback is decided per failure class.
+    // A bare 400 (BadRequest) falls back by baked default; an operator
+    // pins it terminal with `[retry.classes.bad-request] fallback = false`,
+    // the replacement for the retired raw allow/deny lists.
+    use routectl_router::class_policy::{ClassPolicy, ConfigFailureClass};
     let p1 = MockProvider::new("p1", vec![Behavior::Status(400)]);
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
     let (k, v) = chain_alias("fast", &["m1", "m2"]);
     aliases.insert(k, v);
-    let r = build_router_v6(
+
+    let mut retry = default_test_retry();
+    retry.classes.insert(
+        ConfigFailureClass::BadRequest,
+        ClassPolicy {
+            retry: Some(0),
+            fallback: Some(false),
+        },
+    );
+    let r = build_router_v6_with_retry(
         aliases,
         vec![
             ("m1".into(), "p1".into(), "m".into()),
@@ -395,6 +408,7 @@ async fn complete_does_not_fall_back_on_4xx_other_than_429() {
             ("p1".into(), p1.clone() as Arc<dyn Provider>),
             ("p2".into(), p2.clone() as Arc<dyn Provider>),
         ],
+        retry,
     );
 
     let err = r
@@ -471,7 +485,6 @@ async fn complete_retries_within_provider_then_falls_back() {
     rp.max_attempts = 3;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     let r = build_router_v6_with_retry(
         aliases,
         vec![
@@ -682,7 +695,6 @@ async fn retry_on_429_overrides_max_attempts() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![408, 429, 500, 502, 503, 504];
     rp.retry_on_429 = Some(4);
     let r = build_router_v6_with_retry(
         aliases,
@@ -708,7 +720,6 @@ async fn retry_on_5xx_independent_of_429() {
     rp.max_attempts = 5;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     rp.retry_on_5xx = Some(1);
     rp.retry_on_429 = Some(5);
     let r = build_router_v6_with_retry(
@@ -771,7 +782,6 @@ async fn request_timeout_translates_to_network_error_and_retries() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![];
     rp.retry_on_network = Some(3);
     rp.request_timeout_ms = Some(20);
     let r = build_router_v6_with_retry(
@@ -798,7 +808,6 @@ async fn per_attempt_jitter_does_not_break_retries() {
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
     rp.jitter_ms = 5;
-    rp.retry_allowlist = vec![503];
     let r = build_router_v6_with_retry(
         aliases,
         vec![("m".into(), "p".into(), "m".into())],
@@ -885,7 +894,6 @@ async fn circuit_breaker_skips_provider_after_consecutive_failures() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();
@@ -932,7 +940,6 @@ async fn disable_fallbacks_propagates_first_error() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     let r = build_router_v6_with_retry(
         aliases.clone(),
         vec![
@@ -1004,7 +1011,6 @@ async fn retries_consume_rpm_tokens_and_fall_through_when_bucket_empty() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     rp.retry_on_5xx = Some(5);
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
@@ -1060,7 +1066,6 @@ async fn retries_count_toward_circuit_breaker_threshold() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     rp.retry_on_5xx = Some(5);
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
@@ -1342,7 +1347,6 @@ async fn half_open_probe_is_single_under_concurrent_load() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();
@@ -1426,7 +1430,6 @@ async fn dropped_stream_releases_half_open_probe_and_reopens_breaker() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();
@@ -1482,7 +1485,6 @@ async fn dropped_steady_state_stream_does_not_trip_breaker() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();
@@ -1977,7 +1979,6 @@ async fn gate_blocked_dispatch_has_zero_attempts_but_named_provider() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_allowlist = vec![503];
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();

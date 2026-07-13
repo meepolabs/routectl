@@ -36,13 +36,15 @@
 //! the READ side of the old sidecar format ([`PricingVerifications`],
 //! [`load_verifications`], [`merge_verifications_into`],
 //! [`load_and_merge_verifications`]) -- but ONLY as a read path consumed by
-//! the v1 -> v2 config migration (`server::load_effective_config`, which
-//! calls [`load_and_merge_verifications`] to fold any historical sidecar
-//! stamps into `config.cache_pricing` before the migrator moves them into
-//! the catalog overlay). Nothing in the CLI writes the sidecar anymore --
-//! `verify` now stamps the overlay directly -- so the write side
-//! (`save_verification` / the atomic sidecar writer) is gone. The read side
-//! stays until v1 config support itself is dropped.
+//! the v1 -> v2 config migration ([`load_and_merge_verifications`] folds any
+//! historical sidecar stamps into `config.cache_pricing` before the migrator
+//! moves them into the catalog overlay). The config LOADER no longer runs
+//! that migration -- it preflight-rejects a too-old config and points the
+//! operator at `config migrate`, which owns the ladder that consumes this
+//! read path. Nothing in the CLI writes the sidecar anymore -- `verify` now
+//! stamps the overlay directly -- so the write side (`save_verification` /
+//! the atomic sidecar writer) is gone. The read side stays until v1 config
+//! support itself is dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -142,10 +144,11 @@ pub fn merge_verifications_into(config: &mut Config, v: &PricingVerifications) -
 /// and skips the merge. Individual entries with a malformed date are dropped
 /// with a per-entry warning.
 ///
-/// Called ONLY by the v1 -> v2 config migration path (`server::
-/// load_effective_config`, gated on `config.version < CURRENT_CONFIG_VERSION`)
-/// so any historical sidecar stamp reaches the migrator's `cache_pricing`
-/// input exactly once, before it folds into the catalog overlay.
+/// Called ONLY by the v1 -> v2 config migration path (the `config migrate`
+/// ladder) so any historical sidecar stamp reaches the migrator's
+/// `cache_pricing` input exactly once, before it folds into the catalog
+/// overlay. The config loader no longer runs the migration -- it rejects a
+/// too-old config instead -- so this is not on any load path.
 pub fn load_and_merge_verifications(config: &mut Config) {
     let path = verifications_path();
     match load_verifications(&path) {

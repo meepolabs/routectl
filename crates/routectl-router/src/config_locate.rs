@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn top_level_table_header_maps_to_its_line() {
-        let raw = "version = 2\n\n[retry]\nretry_allowlist = [500]\n";
+        let raw = "version = 3\n\n[retry]\nmax_attempts = 2\n";
 
         assert_eq!(locate_dotted_path(raw, "retry"), Some(3));
     }

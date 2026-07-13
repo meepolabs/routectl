@@ -264,6 +264,25 @@ enum ConfigCmd {
     },
     /// Print the example config to stdout.
     Example,
+    /// Migrate a legacy `config.toml` forward to the current schema version,
+    /// re-validating the result through the same shared gate as `config set`
+    /// before an atomic write. A v1 file chains v1->v2->v3 (folding the
+    /// retired `[cache_pricing]` table into the catalog overlay); a v2 file
+    /// migrates v2->v3, retiring the per-status `retry_allowlist` /
+    /// `retry_denylist` keys. A config whose retry lists carry behavior that
+    /// cannot be folded losslessly is refused with hand-edit guidance and
+    /// nothing is written. The write requires acknowledgement -- an
+    /// interactive `y`, or `--force` when non-interactive.
+    Migrate {
+        /// Render the exact rewritten candidate plus a change summary without
+        /// writing anything (needs no acknowledgement).
+        #[arg(long)]
+        dry_run: bool,
+        /// Acknowledge the schema break without an interactive prompt
+        /// (required to migrate in a non-interactive run).
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -491,6 +510,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigCmd::Example => {
                 if let Err(e) = commands::config::example() {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            ConfigCmd::Migrate { dry_run, force } => {
+                let config_path = resolve_config_path(cli.config.as_deref());
+                if let Err(e) = commands::config_migrate_cmd::run(&config_path, dry_run, force) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }

@@ -38,6 +38,7 @@ const RELOAD_WAIT_CEILING: Duration = Duration::from_secs(30);
 fn config_text_with_alias(alias: &str) -> String {
     format!(
         r#"
+version = 3
 [server]
 host = "127.0.0.1"
 port = 0
@@ -285,6 +286,7 @@ async fn invalid_toml_keeps_old_config() {
 fn config_text_with_reserved_class_override(alias: &str) -> String {
     format!(
         r#"
+version = 3
 [server]
 host = "127.0.0.1"
 port = 0
@@ -378,6 +380,7 @@ async fn feature_unsupported_class_override_rejected_old_router_stays_live() {
 fn config_text_with_unknown_server_field(alias: &str) -> String {
     format!(
         r#"
+version = 3
 [server]
 host = "127.0.0.1"
 port = 0
@@ -770,6 +773,7 @@ default = "claude"
 fn config_text_with_rate_limited_cap(upstream_uri: &str, retry_cap: u32) -> String {
     format!(
         r#"
+version = 3
 [server]
 host = "127.0.0.1"
 port = 0
@@ -833,13 +837,13 @@ async fn same_provider_dispatch_count(
     after - before
 }
 
-/// A version-2 config (so `config set`'s raw version preflight accepts it)
+/// A current-version config (so `config set`'s raw version preflight accepts it)
 /// carrying one provider, one model, and a single alias. `config set` edits
 /// this in place through the shared write primitive; the running server's
 /// file watcher then hot-reloads the atomic rename.
-fn v2_config_with_alias(alias: &str) -> String {
+fn v3_config_with_alias(alias: &str) -> String {
     format!(
-        r#"version = 2
+        r#"version = 3
 
 [server]
 host = "127.0.0.1"
@@ -866,7 +870,7 @@ upstream = "gpt-4o"
 /// and hot-reloads, so the newly-added alias surfaces on `/v1/models`.
 #[tokio::test]
 async fn config_set_valid_edit_hot_reloads() {
-    let (base_url, dir) = spawn_server_with_config_text(&v2_config_with_alias("set-before")).await;
+    let (base_url, dir) = spawn_server_with_config_text(&v3_config_with_alias("set-before")).await;
     let config_path = dir.path().join("config.toml");
 
     // Sanity: only the seeded alias is present.
@@ -894,7 +898,7 @@ async fn config_set_valid_edit_hot_reloads() {
 /// a reload (the old alias remains, no candidate alias appears).
 #[tokio::test]
 async fn config_set_failed_candidate_makes_no_watcher_visible_write() {
-    let (base_url, dir) = spawn_server_with_config_text(&v2_config_with_alias("stable")).await;
+    let (base_url, dir) = spawn_server_with_config_text(&v3_config_with_alias("stable")).await;
     let config_path = dir.path().join("config.toml");
     let before = std::fs::read(&config_path).unwrap();
 

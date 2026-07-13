@@ -19,12 +19,11 @@ use crate::class_policy::{ClassPolicy, ConfigFailureClass};
 pub struct Config {
     /// Schema-version stamp for this `config.toml`. Absent in the file
     /// (every pre-v0.9 config) deserializes to `1`. [`CURRENT_CONFIG_VERSION`]
-    /// is `2`: a `version < 2` config's legacy `[cache_pricing]` table is
-    /// retired into the catalog overlay by `crate::config_migrate` the
-    /// first time it loads under a v2-aware binary, and this field is
-    /// rewritten to `2` in place. A `version` greater than
-    /// [`CURRENT_CONFIG_VERSION`] is rejected before this struct is even
-    /// deserialized -- see [`preflight_config_version`].
+    /// is `3`. A `version` that does not equal [`CURRENT_CONFIG_VERSION`]
+    /// is rejected before this struct is deserialized -- a too-old file is
+    /// pointed at `config migrate` (which chains the v1->v2 and v2->v3
+    /// transforms), a too-new file at a binary upgrade. See
+    /// [`preflight_config_version`]. The loader never migrates on load.
     ///
     /// NOTE: `Config::default()` (plain Rust construction, e.g. in tests)
     /// yields `0`, not `1` -- the `1` default applies only on the serde
@@ -160,15 +159,19 @@ pub struct Config {
 
 /// Current config schema version this build writes and fully understands.
 /// `1` -> `2` retires the legacy `[cache_pricing]` override table into the
-/// catalog overlay (`crate::config_migrate`).
-pub const CURRENT_CONFIG_VERSION: u32 = 2;
+/// catalog overlay; `2` -> `3` retires the raw-status retry
+/// allow/deny escape hatch in favor of per-class policy
+/// (`[retry.classes.*]` / provider `class_overrides`). Both transforms
+/// run via `crate::config_migrate` under `config migrate`.
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 const fn default_config_version() -> u32 {
     1
 }
 
-/// Error from [`preflight_config_version`]: the config file names a schema
-/// version newer than this build understands.
+/// The config file names a schema version newer than this build
+/// understands. Kept a distinct type so the too-new posture (upgrade the
+/// binary) stays separate from the too-old posture (migrate the config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "config version {found} is newer than the {supported} this build supports; upgrade \
@@ -179,30 +182,72 @@ pub struct VersionTooNewError {
     pub supported: u32,
 }
 
+/// Outcome of [`preflight_config_version`] when the file's schema version is
+/// out of bounds either way. Both bounds fail closed here, before any typed
+/// parse or in-place migration, so a too-old config is never mutated on
+/// load. The single wording every caller shares -- the loader and the
+/// `config` CLI both surface these Display strings verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigVersionError {
+    #[error(transparent)]
+    TooNew(#[from] VersionTooNewError),
+
+    /// The config predates what this build writes. Names `config migrate`
+    /// as the fix rather than mutating the file on load.
+    #[error(
+        "config version {found} predates the {supported} this build writes; run \
+         `config migrate` to bring it forward, or edit it with a routectl binary that \
+         matches its version. Nothing was written."
+    )]
+    TooOld { found: u32, supported: u32 },
+}
+
 /// Read the `version` key straight off the RAW TOML text, before `Config`'s
 /// full (`#[serde(deny_unknown_fields)]`) deserialize runs. A config written
 /// by a newer routectl may carry fields this build does not know about;
 /// deserializing it directly would fail with a confusing "unknown field"
 /// error that buries the real cause. This preflight catches that case
-/// explicitly: a `version` greater than [`CURRENT_CONFIG_VERSION`] fails
-/// closed here with a clear message. Callers wire this in at both cold
-/// startup (propagate the error, fail hard) and hot config reload (reject
-/// the reload, keep the prior router live).
+/// explicitly and, in the same pass, rejects a config OLDER than this build
+/// writes: a `version` outside `[CURRENT_CONFIG_VERSION, CURRENT_CONFIG_VERSION]`
+/// fails closed here with a clear message. The too-old branch points at
+/// `config migrate` and, crucially, never mutates the file -- the loader no
+/// longer migrates on load.
 ///
-/// A missing `version` key, TOML that fails to parse at all, or a
-/// `version` that is not a plain non-negative integer are all left for the
-/// normal typed deserialize to report -- this function only ever returns
-/// an error for the one case it exists to catch, so it never masks a
-/// genuine syntax error behind a version message.
-pub fn preflight_config_version(raw_toml: &str) -> Result<u32, VersionTooNewError> {
-    let found = toml::from_str::<toml::Value>(raw_toml)
-        .ok()
-        .and_then(|v| v.get("version").and_then(toml::Value::as_integer))
-        .and_then(|v| u32::try_from(v).ok())
-        .unwrap_or_else(default_config_version);
+/// This preflight only ever speaks about the `version` key, so it never
+/// masks a genuine error behind a version message. TOML that fails to parse
+/// at all, or a `version` that is present but is not a plain non-negative
+/// integer, fall through as `Ok` -- the normal typed deserialize reports
+/// those with a precise syntax / type error. A MISSING `version` key is the
+/// one value this reads as legacy `1`: a config with no `version` predates
+/// the schema and so surfaces the too-old message. Callers wire this in at
+/// both cold startup (propagate the error, fail hard) and hot config reload
+/// (reject the reload, keep the prior router live).
+pub fn preflight_config_version(raw_toml: &str) -> Result<u32, ConfigVersionError> {
+    // A TOML parse failure is not ours to report -- let the typed deserialize
+    // surface the real syntax error.
+    let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
+        return Ok(default_config_version());
+    };
+
+    let found = match value.get("version") {
+        // Absent key -> legacy v1 config.
+        None => default_config_version(),
+        // Present but not a non-negative integer that fits: leave the type
+        // error for the typed deserialize rather than mislabel it too-old.
+        Some(v) => match v.as_integer().and_then(|i| u32::try_from(i).ok()) {
+            Some(n) => n,
+            None => return Ok(default_config_version()),
+        },
+    };
 
     if found > CURRENT_CONFIG_VERSION {
-        return Err(VersionTooNewError {
+        return Err(ConfigVersionError::TooNew(VersionTooNewError {
+            found,
+            supported: CURRENT_CONFIG_VERSION,
+        }));
+    }
+    if found < CURRENT_CONFIG_VERSION {
+        return Err(ConfigVersionError::TooOld {
             found,
             supported: CURRENT_CONFIG_VERSION,
         });
@@ -224,8 +269,8 @@ pub fn validate_cache_pricing_retired(config: &Config) -> Result<(), String> {
             "config version {} carries a non-empty [cache_pricing] table ({} entries), but \
              [cache_pricing] is retired as of version {CURRENT_CONFIG_VERSION} -- it should \
              have been migrated into the catalog overlay by the v1->v2 migrator \
-             (crate::config_migrate::migrate_v1_to_v2); set `version` back below \
-             {CURRENT_CONFIG_VERSION} to re-run the migration, or remove [cache_pricing] by hand",
+             (crate::config_migrate::migrate_v1_to_v2); run `config migrate` to fold it \
+             forward, or remove [cache_pricing] by hand",
             config.version,
             config.cache_pricing.len(),
         ));
@@ -236,8 +281,28 @@ pub fn validate_cache_pricing_retired(config: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod config_version_tests {
     use super::{
-        CURRENT_CONFIG_VERSION, Config, preflight_config_version, validate_cache_pricing_retired,
+        CURRENT_CONFIG_VERSION, Config, ConfigVersionError, preflight_config_version,
+        validate_cache_pricing_retired,
     };
+
+    #[test]
+    fn shipped_example_config_parses_and_passes_preflight() {
+        // The example config is shipped verbatim (embedded in `config
+        // example`, copied to the config dir by operators). It must carry
+        // the CURRENT schema version and parse as a typed Config, or the
+        // documented copy-to-config-dir flow is dead on arrival -- pin it so
+        // this class of break (a stale/absent `version` stamp) can't recur.
+        let example = include_str!("../../../examples/config.toml");
+
+        assert_eq!(
+            preflight_config_version(example),
+            Ok(CURRENT_CONFIG_VERSION),
+            "example config must preflight at the current schema version"
+        );
+        let config: Config = toml::from_str(example).expect("example config must parse as Config");
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        validate_cache_pricing_retired(&config).expect("example must not carry retired tables");
+    }
 
     #[test]
     fn absent_version_key_deserializes_to_one() {
@@ -252,34 +317,89 @@ mod config_version_tests {
     fn explicit_current_version_round_trips() {
         // Arrange / Act
         let config: Config =
-            toml::from_str("version = 2\n[server]\nhost = \"127.0.0.1\"\n").expect("parse");
+            toml::from_str("version = 3\n[server]\nhost = \"127.0.0.1\"\n").expect("parse");
 
         // Assert
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
     }
 
     #[test]
-    fn preflight_accepts_absent_version() {
-        assert_eq!(preflight_config_version("[server]\nhost = \"x\"\n"), Ok(1));
+    fn preflight_rejects_absent_version_as_too_old() {
+        // An absent `version` key defaults to `1`, which predates the
+        // current schema, so the loader must reject it rather than migrate.
+        let err = preflight_config_version("[server]\nhost = \"x\"\n")
+            .expect_err("absent version defaults below current and must be rejected");
+
+        match err {
+            ConfigVersionError::TooOld { found, supported } => {
+                assert_eq!(found, 1);
+                assert_eq!(supported, CURRENT_CONFIG_VERSION);
+            }
+            other => panic!("expected TooOld, got {other:?}"),
+        }
+        assert!(err.to_string().contains("config migrate"), "err: {err}");
+    }
+
+    #[test]
+    fn preflight_does_not_mask_malformed_toml_as_too_old() {
+        // Unparseable TOML must fall through so the typed deserialize can
+        // report the real syntax error -- never a spurious `config migrate`
+        // hint.
+        assert_eq!(
+            preflight_config_version("this is = = not valid toml"),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn preflight_does_not_mask_non_integer_version_as_too_old() {
+        // A `version` that is present but the wrong type falls through to the
+        // typed deserialize, which reports the precise type error.
+        assert_eq!(
+            preflight_config_version("version = \"two\"\n[server]\nhost = \"x\"\n"),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_version_older_than_current() {
+        // A stale explicit `version` is rejected with the migrate pointer,
+        // never silently upgraded on load.
+        let err = preflight_config_version("version = 1\n[server]\nhost = \"x\"\n")
+            .expect_err("version 1 predates current and must be rejected");
+
+        match err {
+            ConfigVersionError::TooOld { found, supported } => {
+                assert_eq!(found, 1);
+                assert_eq!(supported, CURRENT_CONFIG_VERSION);
+            }
+            other => panic!("expected TooOld, got {other:?}"),
+        }
+        assert!(err.to_string().contains("config migrate"), "err: {err}");
     }
 
     #[test]
     fn preflight_accepts_current_version() {
         assert_eq!(
-            preflight_config_version("version = 2\n[server]\nhost = \"x\"\n"),
-            Ok(2)
+            preflight_config_version("version = 3\n[server]\nhost = \"x\"\n"),
+            Ok(3)
         );
     }
 
     #[test]
     fn preflight_rejects_version_newer_than_current() {
         // Act
-        let err = preflight_config_version("version = 3\n[server]\nhost = \"x\"\n")
-            .expect_err("version 3 must be rejected");
+        let err = preflight_config_version("version = 4\n[server]\nhost = \"x\"\n")
+            .expect_err("version 4 must be rejected");
 
         // Assert
-        assert_eq!(err.found, 3);
-        assert_eq!(err.supported, CURRENT_CONFIG_VERSION);
+        match err {
+            ConfigVersionError::TooNew(inner) => {
+                assert_eq!(inner.found, 4);
+                assert_eq!(inner.supported, CURRENT_CONFIG_VERSION);
+            }
+            other => panic!("expected TooNew, got {other:?}"),
+        }
     }
 
     /// Preflight must catch a too-new version BEFORE the full deserialize
@@ -291,7 +411,10 @@ mod config_version_tests {
         let raw = "version = 99\nsome_field_from_the_future = true\n[server]\nhost = \"x\"\n";
 
         let err = preflight_config_version(raw).expect_err("version 99 must be rejected");
-        assert_eq!(err.found, 99);
+        match err {
+            ConfigVersionError::TooNew(inner) => assert_eq!(inner.found, 99),
+            other => panic!("expected TooNew, got {other:?}"),
+        }
 
         // The typed deserialize is never reached for this input in the
         // real load path; confirm it WOULD have failed with the confusing
@@ -2675,23 +2798,6 @@ pub struct RetryPolicy {
     /// Prevents thundering-herd retries when many clients fail at once.
     #[serde(default)]
     pub jitter_ms: u64,
-    /// Status codes that trigger fallback to the next provider in the
-    /// chain (in addition to network errors). When non-empty, only the
-    /// listed codes are fallbackable. When empty (the default), the
-    /// resolution falls through to `retry_denylist` or, if that is also
-    /// unset, to "every 4xx/5xx is fallbackable". Mutually exclusive
-    /// with `retry_denylist` -- setting both is a config-load error.
-    #[serde(default)]
-    pub retry_allowlist: Vec<u16>,
-
-    /// Inverse of `retry_allowlist`: when `Some`, every 4xx/5xx code
-    /// EXCEPT those in the list triggers fallback. `None` means no
-    /// denylist is active; if `retry_allowlist` is also empty, the
-    /// default "all 4xx/5xx fall back" predicate applies. Mutually
-    /// exclusive with a non-empty `retry_allowlist` -- setting both
-    /// is a config-load error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry_denylist: Option<Vec<u16>>,
 
     /// Per-error-class retry caps. When set, override `max_attempts` for
     /// that specific class. Useful because rate-limits often clear in
@@ -2758,8 +2864,6 @@ impl Default for RetryPolicy {
             initial_backoff_ms: default_backoff_ms(),
             backoff_multiplier: default_backoff_multiplier(),
             jitter_ms: 50,
-            retry_allowlist: Vec::new(),
-            retry_denylist: None,
             retry_on_429: None,
             retry_on_5xx: None,
             retry_on_network: None,
@@ -4252,94 +4356,6 @@ api_key_ref = "literal:sk-ant-test"
 }
 
 impl RetryPolicy {
-    /// True when the given upstream HTTP status (>= 400) is eligible
-    /// for fallback to the next provider in the chain. Status 0
-    /// (network errors) is handled separately in `should_fallback` and
-    /// always falls back regardless of this predicate.
-    ///
-    /// Resolution order:
-    ///
-    ///   1. `retry_allowlist` non-empty -- contains check (any code in
-    ///      the list is fallbackable; everything else is terminal).
-    ///   2. `retry_denylist` is `Some` -- 400..=599 minus the list is
-    ///      fallbackable; everything else is terminal.
-    ///   3. otherwise -- every 400..=599 is fallbackable.
-    ///
-    /// `retry_allowlist` non-empty AND `retry_denylist` `Some` is a
-    /// config-load error (`validate_retry_policy`); this method
-    /// preserves the allowlist's outcome if both are nevertheless
-    /// constructed in code.
-    pub fn is_fallbackable_status(&self, status: u16) -> bool {
-        if !(400..=599).contains(&status) {
-            return false;
-        }
-        if !self.retry_allowlist.is_empty() {
-            return self.retry_allowlist.contains(&status);
-        }
-        if let Some(denylist) = &self.retry_denylist {
-            return !denylist.contains(&status);
-        }
-        true
-    }
-
-    /// Raw-status escape hatch: when an operator has explicitly named a
-    /// status in `retry_allowlist` or `retry_denylist`, that naming wins
-    /// over whatever a failure-class policy (429 vs. 5xx vs. network)
-    /// would otherwise decide for the same code. Centralizing the
-    /// precedence check here means every future consumer that layers
-    /// class-level retry policy on top of this one calls this method
-    /// first and only falls back to class policy on `None` -- so the
-    /// "an explicit list entry beats the class default" rule is encoded
-    /// exactly once instead of re-derived at each call site.
-    ///
-    /// Returns:
-    ///   - `Some(true)` -- `retry_allowlist` is non-empty and contains
-    ///     `status`.
-    ///   - `Some(false)` -- `retry_allowlist` is non-empty but does not
-    ///     contain `status` (an allowlist that doesn't name a code is an
-    ///     explicit exclude for it), OR `retry_allowlist` is empty and
-    ///     `retry_denylist` is `Some` and contains `status`.
-    ///   - `None` -- neither list applies to `status`, i.e. no explicit
-    ///     override exists and the caller should fall through to class
-    ///     policy.
-    pub fn explicit_status_override(&self, status: u16) -> Option<bool> {
-        if !self.retry_allowlist.is_empty() {
-            return Some(self.retry_allowlist.contains(&status));
-        }
-        if let Some(denylist) = &self.retry_denylist {
-            return if denylist.contains(&status) {
-                Some(false)
-            } else {
-                None
-            };
-        }
-        None
-    }
-
-    /// Resolve the retry cap for a given upstream HTTP status code.
-    /// Returns 0 for non-retryable errors.
-    ///
-    /// Both the 429 arm and the 5xx arm are gated on
-    /// `is_fallbackable_status`. A status excluded by the allowlist
-    /// (or named in the denylist) is treated as non-retryable here AND
-    /// as non-fallbackable in `should_fallback`, so it propagates
-    /// immediately to the caller. This is intentional: an operator who
-    /// excludes a status from the fallback predicate is asking routectl
-    /// to surface the error verbatim, and silently retrying anyway
-    /// would contradict that.
-    pub fn retries_for_status(&self, status: u16) -> u32 {
-        match status {
-            0 => self.retry_on_network.unwrap_or(self.max_attempts),
-            429 if self.is_fallbackable_status(429) => {
-                self.retry_on_429.unwrap_or(self.max_attempts)
-            }
-            s if (500..600).contains(&s) && self.is_fallbackable_status(s) => {
-                self.retry_on_5xx.unwrap_or(self.max_attempts)
-            }
-            _ => 0,
-        }
-    }
-
     /// Maximum attempts a single provider can ever consume regardless
     /// of error class. The router uses this as a hard ceiling so a
     /// misconfigured policy can't loop forever.
@@ -4399,172 +4415,12 @@ const fn default_backoff_multiplier() -> f64 {
 }
 
 #[cfg(test)]
-mod is_fallbackable_status_tests {
-    //! Cover every branch of `RetryPolicy::is_fallbackable_status`
-    //! plus the mutually-exclusive `validate_retry_policy` guard.
-    //! Each test names the input shape it exercises.
+mod retry_policy_field_tests {
+    //! Serde round-trip and default-impl pins for `RetryPolicy` fields
+    //! (probe/backstop/honored-retry-after knobs) plus adjacent config
+    //! deny-unknown-field guards. Each test names the input shape it
+    //! exercises.
     use super::RetryPolicy;
-
-    fn policy() -> RetryPolicy {
-        RetryPolicy::default()
-    }
-
-    #[test]
-    fn allowlist_hit_returns_true() {
-        let mut p = policy();
-        p.retry_allowlist = vec![503];
-        p.retry_denylist = None;
-        assert!(p.is_fallbackable_status(503));
-    }
-
-    #[test]
-    fn allowlist_miss_returns_false() {
-        let mut p = policy();
-        p.retry_allowlist = vec![503];
-        p.retry_denylist = None;
-        // 500 is a 5xx but not in the allowlist -- terminal.
-        assert!(!p.is_fallbackable_status(500));
-    }
-
-    #[test]
-    fn denylist_hit_returns_false() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = Some(vec![501]);
-        assert!(!p.is_fallbackable_status(501));
-    }
-
-    #[test]
-    fn denylist_miss_returns_true_for_4xx_5xx() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = Some(vec![501]);
-        // 503 is in 4xx..=5xx and not in the denylist -- fallbackable.
-        assert!(p.is_fallbackable_status(503));
-    }
-
-    #[test]
-    fn neither_set_returns_true_for_4xx_and_5xx() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = None;
-        assert!(p.is_fallbackable_status(400), "400 must fall back");
-        assert!(p.is_fallbackable_status(429), "429 must fall back");
-        assert!(p.is_fallbackable_status(500), "500 must fall back");
-        assert!(p.is_fallbackable_status(599), "599 must fall back");
-    }
-
-    #[test]
-    fn neither_set_returns_false_for_2xx() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = None;
-        // 2xx are never fallbackable; the predicate is gated on
-        // 400..=599 even when neither list is configured.
-        assert!(!p.is_fallbackable_status(200));
-        assert!(!p.is_fallbackable_status(204));
-        assert!(!p.is_fallbackable_status(301));
-    }
-
-    /// 400-fallbackability under the SHIPPED Default impl is load-bearing for
-    /// structured-output rescue on Bedrock: a fallback triggered by a 400
-    /// carries the request to an alternate provider. A future Default that
-    /// ships a denylist containing 400 would silently break SO rescue.
-    /// This test pins the actual Default impl, not a hand-zeroed policy.
-    #[test]
-    fn default_policy_400_is_fallbackable() {
-        assert!(
-            RetryPolicy::default().is_fallbackable_status(400),
-            "default RetryPolicy must treat 400 as fallbackable (load-bearing for SO rescue)"
-        );
-        // Companion: a policy with 400 in the denylist must yield false,
-        // documenting the break mode so an operator who reaches for
-        // retry_denylist = [400] understands the consequence.
-        let blocking = RetryPolicy {
-            retry_denylist: Some(vec![400]),
-            ..Default::default()
-        };
-        assert!(
-            !blocking.is_fallbackable_status(400),
-            "a denylist containing 400 must block 400-fallback (breaks SO rescue)"
-        );
-    }
-
-    #[test]
-    fn default_policy_retries_520_via_fallthrough() {
-        // With the default RetryPolicy (empty allowlist + None denylist),
-        // 520 is fallbackable because the predicate's "every 4xx/5xx"
-        // branch fires, not because 520 is on a hard-coded list.
-        let policy = RetryPolicy::default();
-        let retries = policy.retries_for_status(520);
-        assert_eq!(retries, policy.max_attempts);
-    }
-
-    #[test]
-    fn denylist_only_toml_parses_and_validates() {
-        // Regression: a config containing only `retry_denylist = [422]`
-        // (no `retry_allowlist`) must deserialize, validate, and yield
-        // the expected predicate behavior. Before the fix, the implicit
-        // non-empty default for `retry_allowlist` collided with
-        // `retry_denylist` in `validate_retry_policy`, breaking
-        // denylist-only configs.
-        use crate::config::Config;
-        use crate::factory::validate_retry_policy;
-
-        let toml_text = r"
-[retry]
-retry_denylist = [422]
-";
-        let cfg: Config = toml::from_str(toml_text).expect("parse denylist-only");
-        let p = &cfg.retry;
-        assert!(
-            p.retry_allowlist.is_empty(),
-            "default retry_allowlist must be empty; got: {:?}",
-            p.retry_allowlist
-        );
-        assert_eq!(p.retry_denylist, Some(vec![422]));
-
-        // Predicate semantics: every 4xx/5xx except 422 falls back.
-        assert!(p.is_fallbackable_status(503), "503 must fall back");
-        assert!(p.is_fallbackable_status(500), "500 must fall back");
-        assert!(p.is_fallbackable_status(404), "404 must fall back");
-        assert!(!p.is_fallbackable_status(422), "422 must NOT fall back");
-
-        validate_retry_policy(&cfg).expect("denylist-only config must validate");
-    }
-
-    #[test]
-    fn validate_retry_policy_rejects_both_set() {
-        // Mutually exclusive: non-empty allowlist + Some denylist is
-        // a config-load error.
-        use crate::config::Config;
-        use crate::factory::validate_retry_policy;
-
-        let mut cfg = Config::default();
-        cfg.retry.retry_allowlist = vec![503];
-        cfg.retry.retry_denylist = Some(vec![501]);
-        let err = validate_retry_policy(&cfg).expect_err("must reject both-set");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("retry_allowlist") && msg.contains("retry_denylist"),
-            "error must name both fields; got: {msg}"
-        );
-
-        // Sanity: each on its own is fine.
-        let mut cfg2 = Config::default();
-        cfg2.retry.retry_allowlist = vec![503];
-        cfg2.retry.retry_denylist = None;
-        validate_retry_policy(&cfg2).expect("allowlist alone must validate");
-
-        let mut cfg3 = Config::default();
-        cfg3.retry.retry_allowlist = vec![];
-        cfg3.retry.retry_denylist = Some(vec![501]);
-        validate_retry_policy(&cfg3).expect("denylist alone must validate");
-
-        // Default config (empty allowlist, None denylist) must validate.
-        let cfg4 = Config::default();
-        validate_retry_policy(&cfg4).expect("default config must validate");
-    }
 
     #[test]
     fn probe_max_tokens_defaults_to_one_when_omitted() {
@@ -4897,102 +4753,6 @@ tokens = ["literal:abc", "env://TOK"]
 }
 
 #[cfg(test)]
-mod explicit_status_override_tests {
-    //! Cover every branch of `RetryPolicy::explicit_status_override`.
-    use super::RetryPolicy;
-
-    fn policy() -> RetryPolicy {
-        RetryPolicy::default()
-    }
-
-    #[test]
-    fn allowlist_hit_returns_some_true() {
-        let mut p = policy();
-        p.retry_allowlist = vec![503];
-        p.retry_denylist = None;
-        assert_eq!(p.explicit_status_override(503), Some(true));
-    }
-
-    #[test]
-    fn allowlist_set_but_miss_returns_some_false() {
-        let mut p = policy();
-        p.retry_allowlist = vec![503];
-        p.retry_denylist = None;
-        // 500 is a 5xx but not named in the allowlist -- an
-        // allowlist-set-but-miss is an explicit exclude, not "defer to
-        // class policy".
-        assert_eq!(p.explicit_status_override(500), Some(false));
-    }
-
-    #[test]
-    fn denylist_hit_returns_some_false() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = Some(vec![501]);
-        assert_eq!(p.explicit_status_override(501), Some(false));
-    }
-
-    #[test]
-    fn denylist_miss_returns_none() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = Some(vec![501]);
-        // 503 is not named in the denylist -- no explicit override,
-        // defer to class policy.
-        assert_eq!(p.explicit_status_override(503), None);
-    }
-
-    #[test]
-    fn neither_list_set_returns_none() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = None;
-        assert_eq!(p.explicit_status_override(503), None);
-    }
-
-    #[test]
-    fn allowlist_hit_outside_error_range_returns_some_true() {
-        // The override is a pure list-membership check with no range
-        // gating (unlike `is_fallbackable_status`), so a status outside
-        // 400..=599 still resolves via allowlist/denylist membership.
-        let mut p = policy();
-        p.retry_allowlist = vec![200];
-        p.retry_denylist = None;
-        assert_eq!(p.explicit_status_override(200), Some(true));
-    }
-
-    #[test]
-    fn allowlist_miss_outside_error_range_returns_some_false() {
-        let mut p = policy();
-        p.retry_allowlist = vec![200];
-        p.retry_denylist = None;
-        assert_eq!(p.explicit_status_override(201), Some(false));
-    }
-
-    #[test]
-    fn denylist_hit_outside_error_range_returns_some_false() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = Some(vec![200]);
-        assert_eq!(p.explicit_status_override(200), Some(false));
-    }
-
-    #[test]
-    fn denylist_miss_outside_error_range_returns_none() {
-        let mut p = policy();
-        p.retry_allowlist = vec![];
-        p.retry_denylist = Some(vec![200]);
-        assert_eq!(p.explicit_status_override(201), None);
-    }
-
-    #[test]
-    fn neither_list_set_outside_error_range_returns_none() {
-        let neither = policy();
-        assert_eq!(neither.explicit_status_override(200), None);
-    }
-}
-
-#[cfg(test)]
 mod mitm_config_tests {
     //! `[mitm]` schema round-trip: absence leaves the feature off,
     //! presence fills in every documented default, explicit values
@@ -5254,73 +5014,6 @@ credential_source = "forwarded"
         assert!(
             msg.contains("credential_source") || msg.contains("unknown field"),
             "expected unknown-field error naming credential_source; got: {msg}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod retries_for_status_tests {
-    //! Pin the symmetry contract: both the 429 arm and the 5xx arm of
-    //! `retries_for_status` honor `is_fallbackable_status`. A status
-    //! excluded from the fallback predicate (via allowlist miss or
-    //! denylist hit) must also return 0 from `retries_for_status`.
-    use super::RetryPolicy;
-
-    /// Regression guard: default policy (no allowlist/denylist
-    /// restrictions) must still retry 429 up to max_attempts.
-    #[test]
-    fn default_policy_retries_429_unchanged() {
-        let p = RetryPolicy::default();
-        assert!(
-            p.is_fallbackable_status(429),
-            "default policy: 429 must be fallbackable"
-        );
-        assert_eq!(
-            p.retries_for_status(429),
-            p.max_attempts,
-            "default policy: retries_for_status(429) must equal max_attempts"
-        );
-    }
-
-    /// When an operator puts 429 in `retry_denylist`, both
-    /// `is_fallbackable_status` and `retries_for_status` must return
-    /// false / 0 -- the error propagates verbatim.
-    #[test]
-    fn denylist_excludes_429_makes_it_non_retryable() {
-        let p = RetryPolicy {
-            retry_allowlist: vec![],
-            retry_denylist: Some(vec![429]),
-            ..RetryPolicy::default()
-        };
-        assert!(
-            !p.is_fallbackable_status(429),
-            "denylist=[429]: is_fallbackable_status must be false"
-        );
-        assert_eq!(
-            p.retries_for_status(429),
-            0,
-            "denylist=[429]: retries_for_status(429) must be 0"
-        );
-    }
-
-    /// When an operator uses an explicit `retry_allowlist` that does
-    /// not include 429 (e.g. only [500, 502]), 429 is excluded from
-    /// the fallback predicate and must also be non-retryable.
-    #[test]
-    fn allowlist_without_429_makes_it_non_retryable() {
-        let p = RetryPolicy {
-            retry_allowlist: vec![500, 502],
-            retry_denylist: None,
-            ..RetryPolicy::default()
-        };
-        assert!(
-            !p.is_fallbackable_status(429),
-            "allowlist=[500,502]: 429 not in list, must not be fallbackable"
-        );
-        assert_eq!(
-            p.retries_for_status(429),
-            0,
-            "allowlist=[500,502]: retries_for_status(429) must be 0"
         );
     }
 }

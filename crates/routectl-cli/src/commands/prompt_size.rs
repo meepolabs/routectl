@@ -1729,6 +1729,7 @@ fast = "sonnet"
     /// end-to-end tests can write the SAME config to a real file on disk.
     fn economics_config_toml() -> &'static str {
         r#"
+version = 3
 [providers.anthro]
 kind = "anthropic-api"
 api_key_ref = "literal:placeholder"

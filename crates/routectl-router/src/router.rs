@@ -1919,7 +1919,6 @@ impl Router {
                             do_fallback,
                             retry_cap_for(&cf.class, &policy),
                             debits,
-                            raw_override_label(explicit_status_decision(&e, &policy)),
                             is_probe,
                             is_forwarded,
                         );
@@ -2695,7 +2694,6 @@ impl Router {
                             do_fallback,
                             retry_cap_for(&cf.class, &policy),
                             debits,
-                            raw_override_label(explicit_status_decision(&e, &policy)),
                             is_probe,
                             is_forwarded,
                         );
@@ -2784,7 +2782,6 @@ impl Router {
         fallback: bool,
         retry_cap: u32,
         debit: bool,
-        raw_override: &'static str,
         is_probe: bool,
         is_forwarded: bool,
     ) {
@@ -2821,7 +2818,6 @@ impl Router {
             fallback,
             retry_cap,
             debit,
-            raw_override,
             is_probe,
             is_forwarded,
             remapped,
@@ -4306,21 +4302,6 @@ const fn is_capability_error(err: &Error) -> bool {
     )
 }
 
-/// The operator's explicit per-status escape hatch, consulted only for a
-/// real upstream HTTP status (`400..=599`). Status 0 (no HTTP status
-/// reached) and every non-upstream error yield `None` so they never
-/// consult the list -- preserving the historical rule that a network /
-/// status-0 failure always falls back and always uses the network retry
-/// cap regardless of the allow/deny lists.
-fn explicit_status_decision(err: &Error, policy: &RetryPolicy) -> Option<bool> {
-    match err {
-        Error::Upstream { status, .. } if (400..=599).contains(status) => {
-            policy.explicit_status_override(*status)
-        }
-        _ => None,
-    }
-}
-
 /// Which dispatch surface an error arm belongs to. Carried as a stable
 /// `surface` field on the router's class-decision observability events so
 /// operators can tell a completion failure from a stream failure.
@@ -4402,17 +4383,6 @@ const fn matched_by_label(matched_by: MatchedBy) -> &'static str {
     }
 }
 
-/// Stable label for the operator's explicit per-status override decision:
-/// `none` (no list applies), `allow` (allowlisted / retryable), or `deny`
-/// (excluded / denylisted).
-const fn raw_override_label(decision: Option<bool>) -> &'static str {
-    match decision {
-        None => "none",
-        Some(true) => "allow",
-        Some(false) => "deny",
-    }
-}
-
 /// The same-provider retry cap for `class` under `policy` -- the value the
 /// retry branch compares `attempts_made` against. Delegates to
 /// [`RetryPolicy::resolved_class`], which layers any operator per-class
@@ -4441,7 +4411,6 @@ struct ClassDecisionObs<'a> {
     fallback: bool,
     retry_cap: u32,
     debit: bool,
-    raw_override: &'static str,
     is_probe: bool,
     is_forwarded: bool,
     /// Whether the operator's per-provider `class_overrides` replaced the
@@ -4473,7 +4442,6 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             fallback = obs.fallback,
             retry_cap = obs.retry_cap,
             debit = obs.debit,
-            raw_override = obs.raw_override,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
             remapped = obs.remapped,
@@ -4493,7 +4461,6 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             fallback = obs.fallback,
             retry_cap = obs.retry_cap,
             debit = obs.debit,
-            raw_override = obs.raw_override,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
             remapped = obs.remapped,
@@ -4543,9 +4510,8 @@ fn emit_feature_unsupported(
 
 /// The upstream HTTP status carried by `err`, for the per-provider class
 /// remap lookup ONLY: `Some` for an [`Error::Upstream`] status in
-/// `400..=599`, `None` for status 0 and every non-upstream variant.
-/// Mirrors the range `explicit_status_decision` consults, but this seam
-/// consults the target's own `class_overrides`, never `policy`.
+/// `400..=599`, `None` for status 0 and every non-upstream variant. This
+/// seam consults the target's own `class_overrides`, never `policy`.
 fn upstream_status_for_remap(err: &Error) -> Option<u16> {
     match err {
         Error::Upstream { status, .. } if (400..=599).contains(status) => Some(*status),
@@ -4583,11 +4549,9 @@ fn apply_remap(
 /// caller-shaped or capability faults that retrying the same seat would
 /// never fix, and (fail-closed) for any class the classifier gains later.
 ///
-/// Deliberately independent of the fallback/retry decision and of the
-/// operator's `explicit_status_override`: routing (whether to advance the
-/// chain) and health accounting (whether the seat looks unhealthy) are
-/// separate concerns. An operator denylisting a status changes routing,
-/// not whether a 429 / 5xx is evidence of upstream health.
+/// Deliberately independent of the fallback/retry decision: routing
+/// (whether to advance the chain) and health accounting (whether the seat
+/// looks unhealthy) are separate concerns.
 const fn class_debits(class: &FailureClass) -> bool {
     matches!(
         class,
@@ -4619,11 +4583,6 @@ fn should_fallback(
     if let Error::UnknownProvider(_) = err {
         return true;
     }
-    // An operator naming the status in an allow/deny list wins over the
-    // class default, mirroring the old is_fallbackable_status gating.
-    if let Some(explicit) = explicit_status_decision(err, policy) {
-        return explicit;
-    }
     policy.resolved_class(class).1
 }
 
@@ -4638,12 +4597,6 @@ fn should_retry_same_provider(
     // retry attempts against a rate-limited/overloaded provider (429 /
     // 529). All other error classes fall through to the cap below.
     if is_probe && probe_fast_fail_status(err).is_some() {
-        return false;
-    }
-    // An explicit exclude (allowlist omitting the status, or denylist
-    // naming it) forbids retry outright, mirroring the old
-    // is_fallbackable_status gating inside the 429 / 5xx retry arms.
-    if explicit_status_decision(err, policy) == Some(false) {
         return false;
     }
     let cap = retry_cap_for(class, policy);
@@ -4817,236 +4770,15 @@ mod tests {
     #[test]
     fn should_fallback_status_zero_is_always_true() {
         // status 0 == network error (DNS, TCP, TLS, request body,
-        // request timeout). `should_fallback` returns true unconditionally
-        // regardless of how the operator set `retry_allowlist` or
-        // `retry_denylist`; the predicate only governs HTTP-status
-        // outcomes (>= 400). This pins the always-true contract so a
-        // future refactor of `is_fallbackable_status` can't accidentally
-        // break network-error fallback.
+        // request timeout). `should_fallback` returns true for the
+        // network-error class default; the predicate governs HTTP-status
+        // outcomes (>= 400) via per-class policy, and a status-0 network
+        // error resolves through the NetworkError class, which falls back
+        // by default.
         let err = Error::upstream("p", 0, "tcp connect refused");
         let class = classify(&err, None).class;
-
-        // (1) Default policy (allowlist populated, denylist None).
-        let policy_default = RetryPolicy::default();
-        assert!(should_fallback(&err, &class, &policy_default, false));
-
-        // (2) Empty allowlist (would otherwise mean "no HTTP fallback").
-        let policy_empty_allow = RetryPolicy {
-            retry_allowlist: vec![],
-            retry_denylist: None,
-            ..RetryPolicy::default()
-        };
-        assert!(should_fallback(&err, &class, &policy_empty_allow, false));
-
-        // (3) Denylist set (governs HTTP statuses, not status 0).
-        let policy_deny = RetryPolicy {
-            retry_allowlist: vec![],
-            retry_denylist: Some(vec![501]),
-            ..RetryPolicy::default()
-        };
-        assert!(should_fallback(&err, &class, &policy_deny, false));
-    }
-
-    // --- Differential oracle: class-based predicates vs pre-class rules ---
-    //
-    // The class rewire of `should_fallback` / `should_retry_same_provider`
-    // must be behavior-preserving. These reference functions reimplement
-    // the PRE-CHANGE logic verbatim (the old `is_fallbackable_status` /
-    // `retries_for_status` plus the old error-variant match arms). The
-    // grid below asserts the live predicates equal them for every cell, so
-    // the expected values are an independent reimplementation, never a
-    // capture of post-change output.
-
-    fn old_is_fallbackable_status(policy: &RetryPolicy, status: u16) -> bool {
-        if !(400..=599).contains(&status) {
-            return false;
-        }
-        if !policy.retry_allowlist.is_empty() {
-            return policy.retry_allowlist.contains(&status);
-        }
-        if let Some(denylist) = &policy.retry_denylist {
-            return !denylist.contains(&status);
-        }
-        true
-    }
-
-    fn old_retries_for_status(policy: &RetryPolicy, status: u16) -> u32 {
-        match status {
-            0 => policy.retry_on_network.unwrap_or(policy.max_attempts),
-            429 if old_is_fallbackable_status(policy, 429) => {
-                policy.retry_on_429.unwrap_or(policy.max_attempts)
-            }
-            s if (500..600).contains(&s) && old_is_fallbackable_status(policy, s) => {
-                policy.retry_on_5xx.unwrap_or(policy.max_attempts)
-            }
-            _ => 0,
-        }
-    }
-
-    fn old_should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
-        if is_probe && probe_fast_fail_status(err).is_some() {
-            return false;
-        }
-        match err {
-            Error::Upstream { status: 0, .. } => true,
-            Error::Upstream { status, .. } => old_is_fallbackable_status(policy, *status),
-            Error::Streaming(_) => true,
-            Error::UnknownProvider(_) => true,
-            _ => false,
-        }
-    }
-
-    fn old_retry_cap(err: &Error, policy: &RetryPolicy) -> u32 {
-        match err {
-            Error::Upstream { status, .. } => old_retries_for_status(policy, *status),
-            Error::Streaming(_) => policy.retry_on_network.unwrap_or(policy.max_attempts),
-            _ => 0,
-        }
-    }
-
-    fn old_should_retry(
-        err: &Error,
-        policy: &RetryPolicy,
-        attempts_made: u32,
-        is_probe: bool,
-    ) -> bool {
-        if is_probe && probe_fast_fail_status(err).is_some() {
-            return false;
-        }
-        attempts_made < old_retry_cap(err, policy)
-    }
-
-    #[test]
-    fn retry_fallback_predicates_match_pre_class_semantics() {
-        // Error shapes per status: bare upstream, one representative
-        // upstream-type lift from each same-row set (content policy,
-        // context window, overloaded, feature-unsupported), and a
-        // transport Streaming error (status-independent).
-        fn shapes(status: u16) -> Vec<Error> {
-            vec![
-                Error::upstream("p", status, "body"),
-                Error::upstream_full(
-                    "p",
-                    status,
-                    "body",
-                    None,
-                    Some("content_policy_violation".into()),
-                    None,
-                ),
-                Error::upstream_full(
-                    "p",
-                    status,
-                    "body",
-                    None,
-                    Some("context_length_exceeded".into()),
-                    None,
-                ),
-                Error::upstream_full(
-                    "p",
-                    status,
-                    "body",
-                    None,
-                    Some("overloaded_error".into()),
-                    None,
-                ),
-                Error::upstream_full(
-                    "p",
-                    status,
-                    "body",
-                    None,
-                    Some("unsupported_parameter".into()),
-                    None,
-                ),
-                Error::Streaming(format!("wire reset near {status}")),
-            ]
-        }
-
-        // Named statuses exercised by every list-shaped policy so both a
-        // hit and a miss appear for allow / deny lists across the grid.
-        let listed = vec![429u16, 500, 503, 400, 401];
-        let policies: Vec<(&str, RetryPolicy)> = vec![
-            ("default", RetryPolicy::default()),
-            (
-                "caps_only",
-                RetryPolicy {
-                    retry_on_429: Some(5),
-                    retry_on_5xx: Some(3),
-                    retry_on_network: Some(7),
-                    ..RetryPolicy::default()
-                },
-            ),
-            (
-                "allowlist_nocaps",
-                RetryPolicy {
-                    retry_allowlist: listed.clone(),
-                    ..RetryPolicy::default()
-                },
-            ),
-            (
-                "allowlist_caps",
-                RetryPolicy {
-                    retry_allowlist: listed.clone(),
-                    retry_on_429: Some(5),
-                    retry_on_5xx: Some(3),
-                    retry_on_network: Some(7),
-                    ..RetryPolicy::default()
-                },
-            ),
-            (
-                "denylist_nocaps",
-                RetryPolicy {
-                    retry_denylist: Some(listed.clone()),
-                    ..RetryPolicy::default()
-                },
-            ),
-            (
-                "denylist_caps",
-                RetryPolicy {
-                    retry_denylist: Some(listed.clone()),
-                    retry_on_429: Some(5),
-                    retry_on_5xx: Some(3),
-                    retry_on_network: Some(7),
-                    ..RetryPolicy::default()
-                },
-            ),
-        ];
-
-        // attempts_made must span past the largest possible cap (7) so the
-        // retry predicate's step-function is pinned exactly, not just its
-        // zero/non-zero shape.
-        let attempts_range = 0u32..=8;
-
-        let statuses = std::iter::once(0u16).chain(400..=599);
-        let mut cells = 0usize;
-        for status in statuses {
-            for err in shapes(status) {
-                let class = classify(&err, None).class;
-                for (pname, policy) in &policies {
-                    for is_probe in [false, true] {
-                        cells += 1;
-                        assert_eq!(
-                            should_fallback(&err, &class, policy, is_probe),
-                            old_should_fallback(&err, policy, is_probe),
-                            "should_fallback mismatch: status={status} policy={pname} \
-                             is_probe={is_probe} err={err:?}",
-                        );
-                        for attempts in attempts_range.clone() {
-                            assert_eq!(
-                                should_retry_same_provider(
-                                    &err, &class, policy, attempts, is_probe
-                                ),
-                                old_should_retry(&err, policy, attempts, is_probe),
-                                "should_retry mismatch: status={status} policy={pname} \
-                                 is_probe={is_probe} attempts={attempts} err={err:?}",
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        // Guard the grid actually ran (201 statuses x 6 shapes x 6
-        // policies x 2 probe states).
-        assert_eq!(cells, 201 * 6 * 6 * 2);
+        let policy = RetryPolicy::default();
+        assert!(should_fallback(&err, &class, &policy, false));
     }
 
     // --- Per-class operator overrides route through `resolved_class` ---
@@ -11645,31 +11377,38 @@ mod circuit_breaker_slot_release_tests {
     async fn complete_half_open_non_fallbackable_429_does_not_lock_breaker() {
         // Regression: a NON-probe request hits a half-open provider that
         // returns 429 under a policy that excludes 429 from fallback
-        // (`retry_allowlist=[500]`). do_fallback is false and the 429 is
-        // also non-retryable, so the dispatch surfaces verbatim. Under
-        // class-based debit the excluded 429 DOES debit (RateLimited is a
-        // health class -- accounting is decoupled from routing), but the
-        // half-open slot must still be settled exactly once so the breaker
-        // is not left locked open. With a zero cooldown the re-trip is
-        // immediately half-open-eligible, so the second dispatch must still
-        // reach the upstream.
+        // (`[retry.classes.rate-limited] fallback = false, retry = 0`).
+        // do_fallback is false and the 429 is also non-retryable, so the
+        // dispatch surfaces verbatim. Under class-based debit the excluded
+        // 429 DOES debit (RateLimited is a health class -- accounting is
+        // decoupled from routing), but the half-open slot must still be
+        // settled exactly once so the breaker is not left locked open.
+        // With a zero cooldown the re-trip is immediately half-open-eligible,
+        // so the second dispatch must still reach the upstream.
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: Arc<dyn Provider> = Arc::new(Probe429Provider {
             id: "p".into(),
             calls: calls.clone(),
         });
-        // retry_allowlist=[500] excludes 429: do_fallback=false AND
-        // retries_for_status(429)=0 (exclusion wins over retry_on_429), so
-        // the attempt is neither retried nor fallen back -- it hits the
-        // terminal non-fallbackable release. Zero backoff/jitter keep the
-        // test instant.
+        // rate-limited class fallback=false + retry=0: do_fallback=false AND
+        // the 429 is non-retryable, so the attempt is neither retried nor
+        // fallen back -- it hits the terminal non-fallbackable release. Zero
+        // backoff/jitter keep the test instant.
+        let mut classes = std::collections::BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::RateLimited,
+            ClassPolicy {
+                retry: Some(0),
+                fallback: Some(false),
+            },
+        );
         let retry = RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 0,
             backoff_multiplier: 1.0,
             jitter_ms: 0,
-            retry_allowlist: vec![500],
-            retry_on_429: Some(2),
+            classes,
             ..RetryPolicy::default()
         };
         let router = build_router_with_provider_and_retry(provider, retry);
@@ -11899,13 +11638,15 @@ mod circuit_breaker_slot_release_tests {
         );
     }
 
-    /// A reset on a NON-fallbackable error (a 400 named in the denylist)
-    /// does not force a retry or a park: the error terminates exactly as
-    /// today (R12 -- the reset never changes a fallback/retry decision).
+    /// A reset on a NON-fallbackable error (a 400 whose class is pinned
+    /// non-fallbackable) does not force a retry or a park: the error
+    /// terminates exactly as today (R12 -- the reset never changes a
+    /// fallback/retry decision).
     #[tokio::test]
     async fn non_fallbackable_error_with_retry_after_still_terminates() {
         // Arrange: a 400 (client error) that is NOT fallbackable, carrying
         // a large reset hint. Threshold 5 so any stray park is observable.
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
             id: "p".into(),
@@ -11913,8 +11654,16 @@ mod circuit_breaker_slot_release_tests {
             retry_after: Some(Duration::from_mins(1)),
             calls: calls.clone(),
         });
+        let mut classes = std::collections::BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::BadRequest,
+            ClassPolicy {
+                retry: Some(0),
+                fallback: Some(false),
+            },
+        );
         let retry = RetryPolicy {
-            retry_denylist: Some(vec![400]),
+            classes,
             ..RetryPolicy::default()
         };
         let router = build_router_with_breaker(provider, retry, 5, 1_000);
@@ -12543,13 +12292,15 @@ mod circuit_breaker_slot_release_tests {
     }
 
     #[tokio::test]
-    async fn denylisted_429_still_debits_breaker() {
+    async fn non_fallbackable_429_still_debits_breaker() {
         // Intended delta: health accounting is decoupled from routing. An
-        // operator denylisting 429 (retry_denylist=[429]) makes do_fallback
-        // false -- before the rewire that suppressed the debit. Now the
-        // debit keys off the RateLimited class, not the fallback decision,
-        // so a denylisted 429 STILL debits the breaker while surfacing
-        // verbatim (no fallback, no retry).
+        // operator pinning the rate-limited class non-fallbackable
+        // (`[retry.classes.rate-limited] fallback = false`) makes
+        // do_fallback false -- before the rewire that suppressed the debit.
+        // Now the debit keys off the RateLimited class, not the fallback
+        // decision, so a non-fallbackable 429 STILL debits the breaker while
+        // surfacing verbatim (no fallback, no retry).
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
             id: "p".into(),
@@ -12557,8 +12308,16 @@ mod circuit_breaker_slot_release_tests {
             retry_after: None,
             calls: calls.clone(),
         });
+        let mut classes = std::collections::BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::RateLimited,
+            ClassPolicy {
+                retry: Some(0),
+                fallback: Some(false),
+            },
+        );
         let retry = RetryPolicy {
-            retry_denylist: Some(vec![429]),
+            classes,
             ..no_retry_policy()
         };
         let router = build_router_with_breaker(provider, retry, 1, 60_000);
@@ -12567,16 +12326,16 @@ mod circuit_breaker_slot_release_tests {
 
         assert!(
             matches!(err, Error::Upstream { status: 429, .. }),
-            "a denylisted 429 must surface verbatim (no fallback); got {err:?}",
+            "a non-fallbackable 429 must surface verbatim (no fallback); got {err:?}",
         );
         assert!(
             breaker_open_at(&router, Instant::now()),
-            "a denylisted 429 must STILL debit the breaker (accounting decoupled from routing)",
+            "a non-fallbackable 429 must STILL debit the breaker (accounting decoupled from routing)",
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "denylisted 429 is terminal: one upstream call, no retry, no fallback",
+            "non-fallbackable 429 is terminal: one upstream call, no retry, no fallback",
         );
     }
 
@@ -15123,7 +14882,6 @@ mod observability_seam_tests {
         assert_eq!(ev.field("surface"), Some("complete"));
         assert_eq!(ev.field("fallback"), Some("false"));
         assert_eq!(ev.field("debit"), Some("false"));
-        assert_eq!(ev.field("raw_override"), Some("none"));
 
         assert_no_body_leak_in_seam(&events);
         assert_eq!(router.metrics.unknown_failure_classifications_total(), 1);
@@ -15178,7 +14936,6 @@ mod observability_seam_tests {
         assert_eq!(ev.field("fallback"), Some("true"));
         assert_eq!(ev.field("debit"), Some("false"));
         assert_eq!(ev.field("retry_cap"), Some("0"));
-        assert_eq!(ev.field("raw_override"), Some("none"));
         assert_eq!(ev.field("is_probe"), Some("false"));
         assert_eq!(ev.field("is_forwarded"), Some("false"));
 
@@ -15200,9 +14957,6 @@ mod observability_seam_tests {
         assert_eq!(matched_by_label(MatchedBy::Variant), "variant");
         assert_eq!(matched_by_label(MatchedBy::Status), "status");
         assert_eq!(matched_by_label(MatchedBy::UpstreamType), "upstream_type");
-        assert_eq!(raw_override_label(None), "none");
-        assert_eq!(raw_override_label(Some(true)), "allow");
-        assert_eq!(raw_override_label(Some(false)), "deny");
     }
 }
 
