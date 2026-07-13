@@ -428,17 +428,6 @@ pub fn is_cataloged_provider_kind(kind: &str) -> bool {
     TABLE.iter().any(|cell| cell.provider_kind == kind)
 }
 
-/// The distinct provider-kind tokens present in the baked table. Used by
-/// [`validate_overrides`] to surface a likely-typo provider_kind as a
-/// non-fatal warning. A `"*"` provider selector is a legitimate catch-all
-/// and is intentionally absent here (it is handled before the typo check).
-const BAKED_PROVIDER_KINDS: &[&str] = &[
-    "anthropic-api",
-    "bedrock",
-    "openai-responses",
-    "openai-compat",
-];
-
 /// True when a selector's model glob matches `model`. A `"*"` glob is the
 /// catch-all (treated as a match WITHOUT calling [`AliasPattern`], which
 /// rejects a bare `*`); any other glob defers to the alias-glob matcher.
@@ -582,9 +571,7 @@ pub fn validate_overrides(
             CachePricingSelector::parse(key).map_err(|e| format!("[cache_pricing.{key}]: {e}"))?;
         ov.validate()
             .map_err(|e| format!("[cache_pricing.{key}]: {e}"))?;
-        if selector.provider_kind != "*"
-            && !BAKED_PROVIDER_KINDS.contains(&selector.provider_kind.as_str())
-        {
+        if selector.provider_kind != "*" && !is_cataloged_provider_kind(&selector.provider_kind) {
             tracing::warn!(
                 selector = key.as_str(),
                 provider_kind = selector.provider_kind.as_str(),
