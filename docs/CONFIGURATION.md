@@ -1584,6 +1584,127 @@ routectl catalog disable openai-compat:retired-model-*
 **`pricing` alias.** `routectl pricing ...` is a hidden alias for
 `routectl catalog ...`, kept for muscle memory; it is dropped at 1.0.
 
+## Inspecting the effective config (`config show --effective`)
+
+`routectl config show` dumps `config.toml` verbatim, secrets redacted.
+Adding `--effective` appends a provenance-annotated view of the two
+surfaces where MORE THAN ONE LAYER can supply a value -- so you can see
+which layer actually won without cross-referencing the baked table, the
+overlay, and the retry defaults by hand. Every other config field is
+trivially whatever `config.toml` says, so it is not re-annotated (that
+would be noise).
+
+The derivation is pure: it runs the SAME `(provider_kind, upstream)`
+catalog lookups the router runs at chain-build, over the loaded config
+and `catalog_overlay.json`. It resolves no secrets, builds no provider,
+and makes no network call, so it is safe to run against any config.
+
+Two sections are printed:
+
+- **model catalog cells** -- one row per `[models.X]` entry, showing its
+  `provider_kind/upstream` selector and the merged catalog cell. The
+  `source=` tag reads the same as `catalog list`:
+  - `baked` -- the value came from the compiled-in baked table (no
+    overlay cell for this selector);
+  - `import` -- an overlay cell written by `catalog import` (or migrated
+    from a legacy `[cache_pricing]` entry);
+  - `user` -- an overlay cell an operator wrote (`catalog set` /
+    `catalog verify`);
+  - `disabled` -- the overlay explicitly disabled this selector
+    (overlay `null`); pricing falls back to the conservative sentinel;
+  - `missing` -- neither layer has a row (an unpriced upstream).
+- **retry class policy** -- one row per failure class, showing the
+  resolved `retry`/`fallback` pair and a `source=` tag:
+  - `config` -- a `[retry.classes.<class>]` leaf set this class;
+  - `baked-default` -- no operator leaf, so the baked class default
+    applies (see "Per-class retry and fallback policy").
+
+```sh
+routectl config show --effective
+```
+
+## Editing config from the CLI (`config set` / `config unset`)
+
+`routectl config set <path> <value>` edits one scalar leaf of
+`config.toml` in place, addressed by its dotted path:
+
+```sh
+routectl config set server.port 8788
+routectl config set retry.classes.server-error.retry 4
+routectl config set usage.enabled true
+```
+
+The value's scalar type is inferred: `true`/`false` become a boolean,
+an integer parses to an int, a decimal to a float, and anything else is
+a string. A mistyped value is caught by the validation gate below, not
+by inference.
+
+Every edit runs the same pipeline before a single byte reaches disk, so
+a rejected edit leaves the file byte-identical:
+
+- **Version preflight.** A config older than the schema version this
+  binary writes is refused outright (a matching-version binary or the
+  future `config migrate` is the fix) -- `config set` never migrates a
+  file as a side effect of editing it.
+- **Path validation.** The dotted path is checked against the config
+  schema before any mutation. An unknown key is rejected with the valid
+  sibling keys named at that level; a path into an array is rejected
+  (array values are hand-edit-only in this version); a path that names a
+  whole table rather than a scalar leaf is rejected.
+- **Full re-validation.** The edited document is re-parsed and run
+  through the SAME validator suite `config check` and `serve` use. Any
+  error (a bad type, an alias pointing at an unknown model, an
+  incoherent cross-field combination) is rendered and the write is
+  abandoned.
+- **High-consequence confirmation.** An egress-defining change -- a
+  provider `base_url` or `credential_source`, a `[mitm]` origin or host
+  -- prompts for confirmation first. `--yes` bypasses the prompt for
+  scripting.
+- **Atomic, format-preserving write.** The write goes through a
+  sibling advisory lock and a base-bytes revision check (an out-of-band
+  edit between read and commit is reported as a conflict, with nothing
+  written), then an atomic rename. Comments and key ordering survive.
+
+A running daemon's file watcher picks up the rename and hot-reloads
+automatically. Fields that only apply at startup (`[server]` bind and
+listener auth, the `[log]` knobs, `usage.db_path`,
+`usage.retention_days`, and the whole `[mitm]` block) are still written,
+and `config set` prints exactly which ones need a restart to take
+effect. A no-op set (the value already matches) writes nothing and
+prints no restart notice.
+
+### Removing an override (`config unset`)
+
+`routectl config unset <path>` removes one override so the value falls
+back to whatever it inherits -- a shared knob, or the baked catalog
+default -- rather than assigning a new one:
+
+```sh
+routectl config unset retry.classes.server-error.retry
+routectl config unset retry.classes.server-error
+```
+
+It runs the identical pipeline as `config set` (version preflight, path
+validation, full re-validation, high-consequence confirmation, atomic
+format-preserving write, restart-required reporting, one audit event),
+differing only in the mutation and in two path rules:
+
+- **Recursive empty-parent prune.** Removing a key that leaves its
+  parent table empty removes that table too, and so on up the chain --
+  an empty override table is treated as absent (a leftover `[retry.classes.server-error]`
+  with nothing under it would be ambiguous). A parent that keeps any
+  sibling key or sub-table is left in place. In the first example above,
+  removing the last leaf under `[retry.classes.server-error]` drops that
+  table; if it was the only class override, `[retry.classes]` and an
+  otherwise-empty `[retry]` go with it.
+- **A whole table may be the target.** Unlike `set`, `unset` accepts a
+  path that names a table node (the second example), dropping the entire
+  override block in one call.
+
+Removing a key that is not set writes nothing (there is no override to
+remove) and reports no change. Comments and key ordering elsewhere in
+the file survive, exactly as with `set`.
+
 ## Prompt-cache auto-emission (`[cache]`)
 
 When a caller sends no `cache_control` breakpoint of its own, routectl

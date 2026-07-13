@@ -225,8 +225,43 @@ enum Cmd {
 enum ConfigCmd {
     /// Validate config syntax + provider references.
     Check,
-    /// Print the resolved config (secrets redacted).
-    Show,
+    /// Print the resolved config (secrets redacted). With `--effective`,
+    /// also print the provenance-annotated view: catalog cells tagged
+    /// baked/import/user/disabled, retry classes tagged config/baked-default.
+    Show {
+        /// Append the provenance-annotated effective view (catalog cells +
+        /// retry class policy) after the plain config dump.
+        #[arg(long)]
+        effective: bool,
+    },
+    /// Set a config value by dotted path (e.g. `server.port 8788`),
+    /// re-validating the whole file through the shared gate before an
+    /// atomic write. The value's scalar type is inferred (bool / int /
+    /// float / string). An egress-defining change (a provider `base_url`
+    /// or `credential_source`, a `[mitm]` origin) prompts for confirmation
+    /// unless `--yes` is given.
+    Set {
+        /// Dotted config path to the scalar leaf to set.
+        path: String,
+        /// The value to assign; its scalar type is inferred.
+        value: String,
+        /// Skip the confirmation prompt for a high-consequence edit.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Remove a config override by dotted path (e.g. `retry.max_attempts`),
+    /// so the value falls back to its inherited or catalog default. Parent
+    /// tables the removal empties are pruned. The whole file is re-validated
+    /// through the shared gate before an atomic write. Removing an
+    /// egress-defining override prompts for confirmation unless `--yes` is
+    /// given; removing a key that is not set writes nothing.
+    Unset {
+        /// Dotted config path to the key (or override table) to remove.
+        path: String,
+        /// Skip the confirmation prompt for a high-consequence edit.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Print the example config to stdout.
     Example,
 }
@@ -414,9 +449,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
-            ConfigCmd::Show => {
-                let config = load_config(cli.config.as_deref())?;
-                if let Err(e) = commands::config::show(&config) {
+            ConfigCmd::Show { effective } => {
+                let result = if effective {
+                    let loaded = load_config_with_overlay(cli.config.as_deref())?;
+                    commands::config_effective::show_effective(
+                        &loaded.config,
+                        &loaded.catalog_overlay,
+                    )
+                } else {
+                    let config = load_config(cli.config.as_deref())?;
+                    commands::config::show(&config)
+                };
+                if let Err(e) = result {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            ConfigCmd::Set { path, value, yes } => {
+                let config_path = resolve_config_path(cli.config.as_deref());
+                if let Err(e) = commands::config_edit::run(
+                    &config_path,
+                    &path,
+                    commands::config_edit::EditKind::Set(value),
+                    yes,
+                ) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            ConfigCmd::Unset { path, yes } => {
+                let config_path = resolve_config_path(cli.config.as_deref());
+                if let Err(e) = commands::config_edit::run(
+                    &config_path,
+                    &path,
+                    commands::config_edit::EditKind::Unset,
+                    yes,
+                ) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }

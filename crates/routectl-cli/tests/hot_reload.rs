@@ -768,6 +768,92 @@ async fn same_provider_dispatch_count(
     after - before
 }
 
+/// A version-2 config (so `config set`'s raw version preflight accepts it)
+/// carrying one provider, one model, and a single alias. `config set` edits
+/// this in place through the shared write primitive; the running server's
+/// file watcher then hot-reloads the atomic rename.
+fn v2_config_with_alias(alias: &str) -> String {
+    format!(
+        r#"version = 2
+
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[providers.fast]
+kind = "openai-compat"
+base_url = "http://127.0.0.1:1"
+api_key_ref = "literal:test-key"
+
+[models.gpt-4o]
+provider = "fast"
+upstream = "gpt-4o"
+
+[aliases]
+{alias} = "gpt-4o"
+"#
+    )
+}
+
+/// A valid `config set` edits `config.toml` through the shared write
+/// primitive; the running server's file watcher picks up the atomic rename
+/// and hot-reloads, so the newly-added alias surfaces on `/v1/models`.
+#[tokio::test]
+async fn config_set_valid_edit_hot_reloads() {
+    let (base_url, dir) = spawn_server_with_config_text(&v2_config_with_alias("set-before")).await;
+    let config_path = dir.path().join("config.toml");
+
+    // Sanity: only the seeded alias is present.
+    let initial = list_model_ids(&base_url).await;
+    assert!(initial.iter().any(|s| s == "set-before"), "{initial:?}");
+
+    // Act: add a new alias via the write pipeline (yes bypasses any prompt).
+    routectl_cli::commands::config_edit::run(
+        &config_path,
+        "aliases.set-after",
+        routectl_cli::commands::config_edit::EditKind::Set("gpt-4o".to_string()),
+        true,
+    )
+    .expect("valid set must succeed");
+
+    // Assert: the watcher hot-reloads and the new alias surfaces.
+    assert!(
+        wait_for_alias(&base_url, "set-after", Duration::from_secs(3)).await,
+        "config set did not hot-reload the new alias within 3s"
+    );
+}
+
+/// A `config set` whose candidate fails the shared validation gate writes
+/// NOTHING: the file stays byte-identical and the running server never sees
+/// a reload (the old alias remains, no candidate alias appears).
+#[tokio::test]
+async fn config_set_failed_candidate_makes_no_watcher_visible_write() {
+    let (base_url, dir) = spawn_server_with_config_text(&v2_config_with_alias("stable")).await;
+    let config_path = dir.path().join("config.toml");
+    let before = std::fs::read(&config_path).unwrap();
+
+    // A non-numeric value for a numeric field fails the re-parse gate.
+    let err = routectl_cli::commands::config_edit::run(
+        &config_path,
+        "server.port",
+        routectl_cli::commands::config_edit::EditKind::Set("not-a-port".to_string()),
+        true,
+    );
+    assert!(err.is_err(), "an invalid candidate must be refused");
+
+    // The file is byte-identical: nothing the watcher could observe changed.
+    assert_eq!(std::fs::read(&config_path).unwrap(), before);
+
+    // Give the watcher a beat; the old alias must still be live.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let ids = list_model_ids(&base_url).await;
+    assert!(
+        ids.iter().any(|s| s == "stable"),
+        "old alias must remain: {ids:?}"
+    );
+}
+
 /// A `[retry.classes.rate-limited]` cap raised across a reload takes
 /// effect on the REBUILT router: a single client request dispatched
 /// against an upstream that always returns 429 hits that upstream
