@@ -35,6 +35,33 @@ use crate::{SecretRef, SecretStore};
 /// tuning.
 pub const REFRESH_LEAD_SECS: u64 = 300;
 
+/// Outcome of a local-only credential probe (`probe_local`). Reports
+/// token presence for one provider from the in-memory cache without any
+/// network I/O -- consumed by the activation compute to decide whether a
+/// routectl-owned provider is usable. Discriminants only: no field ever
+/// carries a token, path, or other secret value.
+///
+/// `#[non_exhaustive]` because future credential sources (e.g. a managed
+/// file producer) may add outcome variants without breaking callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocalProbe {
+    /// A usable credential exists: the access token is unexpired, OR a
+    /// refresh token is stored (an expired access token with a refresh
+    /// token revives transparently on first use, so calling it
+    /// deactivated would flap inventory across idle periods).
+    Present,
+    /// A record exists but the access token is expired AND no refresh
+    /// token is stored -- nothing can revive it without a fresh login.
+    Expired,
+    /// No record for the provider in the cache.
+    Missing,
+    /// No oauth store exists to probe (HOME/XDG absent). Produced by the
+    /// caller when the composite store has no oauth arm, never by
+    /// `probe_local` itself.
+    StoreUnavailable,
+}
+
 /// Routectl-managed OAuth credentials store. Cheap to clone; the
 /// inner state is `Arc`-shared so multiple `Provider` instances can
 /// share one store (and one per-provider refresh single-flight gate).
@@ -293,6 +320,40 @@ impl OAuthStore {
             .keys()
             .cloned()
             .collect()
+    }
+
+    /// Read-only credential probe for one provider. Reports token
+    /// presence from the in-memory cache WITHOUT any network I/O -- never
+    /// calls `get`/`refresh_under_lock`, never touches the token endpoint.
+    /// Consumed by the activation compute; the resolution semantics are
+    /// deliberately more lenient than `get`'s near-expiry refresh trigger.
+    ///
+    /// Any seat of the provider (bare or labeled) resolving counts as
+    /// `Present`. `Present` when a seat's access token is unexpired
+    /// (raw `expires_at_unix > now`, NOT the 300s near-expiry lead) OR a
+    /// refresh token is stored. `Expired` when a record exists but every
+    /// seat's access token is expired AND carries no refresh token.
+    /// `Missing` when no record exists for the provider. Never returns
+    /// `StoreUnavailable` -- that is a caller-side value for when no oauth
+    /// store exists at all.
+    pub async fn probe_local(&self, provider_id: &str) -> LocalProbe {
+        let guard = self.inner.file.read().await;
+        let seats = guard.seats_for_provider(provider_id);
+        if seats.is_empty() {
+            return LocalProbe::Missing;
+        }
+        let now = unix_now();
+        for seat in &seats {
+            let Some(rec) = guard.get(seat) else {
+                continue;
+            };
+            let unexpired = rec.expires_at_unix > now;
+            let has_refresh = !rec.refresh_token.expose().is_empty();
+            if unexpired || has_refresh {
+                return LocalProbe::Present;
+            }
+        }
+        LocalProbe::Expired
     }
 
     /// Snapshot all known provider records (for `routectl whoami`).
@@ -2429,6 +2490,147 @@ mod tests {
         assert!(
             result.is_ok(),
             "non-oauth ref must be a no-op, not an error"
+        );
+    }
+
+    // ---- probe_local ----
+
+    /// A record with a specific access-token expiry and an EMPTY refresh
+    /// token -- the "no refresh token stored" shape probe_local reads as
+    /// non-revivable once expired.
+    fn rec_no_refresh(expires_at: u64) -> TokenRecord {
+        TokenRecord {
+            access_token: SecretToken::new("tok-abc"),
+            refresh_token: SecretToken::new(""),
+            token_type: "Bearer".into(),
+            expires_at_unix: expires_at,
+            scopes: vec!["user:inference".into()],
+            account: AccountInfo::default(),
+            obtained_at_unix: 0,
+            session_id: None,
+            cloud_project_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_local_present_when_access_token_unexpired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        assert_eq!(store.probe_local("anthropic").await, LocalProbe::Present);
+    }
+
+    #[tokio::test]
+    async fn probe_local_present_when_near_expiry_but_not_yet_expired() {
+        // Inside the 300s refresh lead but NOT yet expired: probe_local
+        // uses raw `expires_at_unix > now`, so this is Present (no
+        // inventory flap on the refresh lead).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_no_refresh(unix_now() + 10))
+            .await
+            .unwrap();
+        assert_eq!(store.probe_local("anthropic").await, LocalProbe::Present);
+    }
+
+    #[tokio::test]
+    async fn probe_local_present_when_expired_but_refresh_token_stored() {
+        // Expired access token but a refresh token is stored: revives
+        // transparently on first use, so Present rather than Expired.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        // rec_at seeds a non-empty refresh token ("rtok-xyz").
+        store
+            .write_record("anthropic", rec_at(unix_now().saturating_sub(10)))
+            .await
+            .unwrap();
+        assert_eq!(store.probe_local("anthropic").await, LocalProbe::Present);
+    }
+
+    #[tokio::test]
+    async fn probe_local_expired_when_expired_and_no_refresh_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_no_refresh(unix_now().saturating_sub(10)))
+            .await
+            .unwrap();
+        assert_eq!(store.probe_local("anthropic").await, LocalProbe::Expired);
+    }
+
+    #[tokio::test]
+    async fn probe_local_missing_when_no_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        assert_eq!(store.probe_local("anthropic").await, LocalProbe::Missing);
+    }
+
+    #[tokio::test]
+    async fn probe_local_present_when_any_seat_resolves() {
+        // The default seat is expired-no-refresh (would be Expired alone),
+        // but a labeled seat is healthy: ANY seat resolving counts as
+        // Present.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_no_refresh(unix_now().saturating_sub(10)))
+            .await
+            .unwrap();
+        store
+            .write_record("anthropic#seat-b", rec_named("tok-b", unix_now() + 3600))
+            .await
+            .unwrap();
+        assert_eq!(store.probe_local("anthropic").await, LocalProbe::Present);
+    }
+
+    #[tokio::test]
+    async fn probe_local_never_triggers_refresh() {
+        // Using the fake OAuthFlow seam: probe_local must NOT invoke the
+        // refresh flow for present, near-expiry, or expired inputs. Seed
+        // all three seat shapes and assert zero refresh calls.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        // Present (fresh) default seat.
+        seed.write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        // Near-expiry seat (inside the 300s lead) -- get() would refresh
+        // this; probe_local must not.
+        seed.write_record("anthropic#near", rec_named("tok-near", unix_now() + 10))
+            .await
+            .unwrap();
+        // Expired-no-refresh seat.
+        seed.write_record(
+            "anthropic#dead",
+            rec_no_refresh(unix_now().saturating_sub(10)),
+        )
+        .await
+        .unwrap();
+        drop(seed);
+
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+            "tok-should-not-be-minted".into(),
+        )));
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        // Any seat resolving makes the aggregate Present; the point of
+        // this test is the refresh-call count, not the discriminant.
+        let _ = store.probe_local("anthropic").await;
+        assert_eq!(
+            flow.call_count(),
+            0,
+            "probe_local must never touch the refresh flow"
         );
     }
 }

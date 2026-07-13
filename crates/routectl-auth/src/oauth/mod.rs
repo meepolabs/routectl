@@ -37,7 +37,7 @@ pub mod types;
 pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
-pub use store::OAuthStore;
+pub use store::{LocalProbe, OAuthStore};
 pub use types::{
     AccountInfo, CredentialsFile, SCHEMA_VERSION, SecretToken, TokenRecord, seat_key, unix_now,
 };
