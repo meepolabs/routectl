@@ -123,7 +123,7 @@ async fn config_check_passes_for_valid_config() {
         .aliases
         .insert("fast".into(), AliasValue::Single("fast-model".into()));
 
-    commands::config::check(&config)
+    commands::config::check(&config, None)
         .await
         .expect("valid config should check ok");
 }
@@ -141,7 +141,7 @@ async fn config_check_fails_for_alias_pointing_at_unknown_nickname() {
         .aliases
         .insert("fast".into(), AliasValue::Single("ghost".into()));
 
-    match commands::config::check(&config).await {
+    match commands::config::check(&config, None).await {
         Err(routectl_core::Error::Config(msg)) => {
             assert!(msg.contains("error"), "got: {msg}");
         }
@@ -182,7 +182,7 @@ async fn config_check_fails_when_default_alias_points_to_unknown_nickname() {
         AliasValue::Single("nonexistent-nickname".into()),
     );
 
-    match commands::config::check(&config).await {
+    match commands::config::check(&config, None).await {
         Err(routectl_core::Error::Config(_)) => {}
         Ok(()) => panic!("expected config error for unknown default-alias target"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
@@ -200,7 +200,7 @@ async fn config_check_fails_when_model_references_unknown_provider() {
         .aliases
         .insert("default".into(), AliasValue::Single("orphan".into()));
 
-    match commands::config::check(&config).await {
+    match commands::config::check(&config, None).await {
         Err(routectl_core::Error::Config(_)) => {}
         Ok(()) => panic!("expected config error for unknown provider reference"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
@@ -218,7 +218,7 @@ async fn config_check_passes_when_default_alias_is_valid() {
         .aliases
         .insert("default".into(), AliasValue::Single("fast-model".into()));
 
-    commands::config::check(&config)
+    commands::config::check(&config, None)
         .await
         .expect("default = existing nickname must check ok");
 }
@@ -234,7 +234,7 @@ async fn config_check_fails_for_empty_alias_chain() {
         .aliases
         .insert("empty".into(), AliasValue::Chain(Vec::new()));
 
-    match commands::config::check(&config).await {
+    match commands::config::check(&config, None).await {
         Err(routectl_core::Error::Config(_)) => {}
         Ok(()) => panic!("expected config error for empty alias chain"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
@@ -256,7 +256,7 @@ async fn config_check_fails_for_forwarded_provider_on_non_anthropic_host() {
             .with_credential_source(CredentialSource::Forwarded),
     );
 
-    match commands::config::check(&config).await {
+    match commands::config::check(&config, None).await {
         Err(routectl_core::Error::Config(_)) => {}
         Ok(()) => panic!("expected config error for forwarded provider off the pinned host"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
@@ -279,7 +279,7 @@ async fn config_check_passes_for_clean_forwarded_provider() {
             .with_credential_source(CredentialSource::Forwarded),
     );
 
-    commands::config::check(&config)
+    commands::config::check(&config, None)
         .await
         .expect("clean forwarded provider alongside an own-credential provider must check ok");
 }
@@ -865,5 +865,263 @@ fn empty_label_is_rejected_at_runtime() {
     assert!(
         stderr.contains("--label must not be empty"),
         "expected empty-label guidance, got: {stderr}"
+    );
+}
+
+// -- did-you-mean enhancer, surfaced through the two CLI entry points that
+// funnel through the shared config loader (`server::load_effective_config`
+// -> `routectl_router::parse_config`). The hot-reload surface is covered in
+// tests/hot_reload.rs. All three share the one parse funnel, so an unknown
+// field's suggestion reaches every subcommand for free.
+
+/// `routectl config check` against a config carrying an unknown field must
+/// fail with the enhanced parse error: serde's `unknown field` message
+/// plus the `did you mean` hint naming the closest real field.
+#[test]
+fn config_check_surfaces_did_you_mean_for_unknown_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, "[server]\nprt = 8080\n").unwrap();
+    let path = config_path.to_str().unwrap();
+
+    let (code, stderr) = run_routectl(&["--config", path, "config", "check"]);
+    assert_ne!(code, 0, "an unknown field must fail config check: {stderr}");
+    assert!(
+        stderr.contains("did you mean `port`?"),
+        "expected a did-you-mean suggestion on config check, got: {stderr}"
+    );
+}
+
+/// Serve cold start against the same unknown-field config fails hard at the
+/// pre-bind config load, carrying the same enhanced message. Proves the
+/// suggestion rides the startup path, not just the offline check.
+#[test]
+fn serve_cold_start_surfaces_did_you_mean_for_unknown_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, "[server]\nprt = 8080\n").unwrap();
+    let path = config_path.to_str().unwrap();
+
+    let (code, stderr) = run_routectl(&["--config", path, "serve"]);
+    assert_ne!(
+        code, 0,
+        "an unknown field must abort serve cold start: {stderr}"
+    );
+    assert!(
+        stderr.contains("did you mean `port`?"),
+        "expected a did-you-mean suggestion on serve cold start, got: {stderr}"
+    );
+}
+
+/// Run `routectl <args...>` with a sandboxed (empty) XDG dir and return
+/// `(exit_code, stdout, stderr)`. `check`'s rendered error list prints to
+/// stdout; [`run_routectl`] captures only stderr, so this variant is used
+/// where the assertion needs the stdout report.
+fn run_routectl_full(args: &[&str]) -> (i32, String, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .output()
+        .expect("spawn routectl binary");
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    (code, stdout, stderr)
+}
+
+/// `config check` is the SHOWCASE validation surface: against a config that
+/// PARSES but is semantically invalid (`retry_allowlist` and `retry_denylist`
+/// set together), the real binary must exit non-zero AND render the full
+/// error list with the source-line prefix -- not abort on the load-time
+/// fail-fast gate that would print only the first plain error. `version = 2`
+/// keeps the file at the current version so no migration rewrites it and the
+/// `[retry]` block stays on its written line.
+#[test]
+fn config_check_renders_source_line_for_semantically_invalid_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    // `[retry]` is line 3 (version, blank line, then the block header).
+    std::fs::write(
+        &config_path,
+        "version = 2\n\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n",
+    )
+    .unwrap();
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, stderr) = run_routectl_full(&["--config", path, "config", "check"]);
+    assert_ne!(
+        code, 0,
+        "a semantically-invalid config must fail check; stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("(line 3): ") && stdout.contains("[retry]"),
+        "expected the retry conflict rendered with its source line, got stdout: {stdout}"
+    );
+}
+
+/// The same semantically-invalid config must still be rejected fail-fast by
+/// `serve` cold start: the load-time validation gate is unchanged for every
+/// caller other than `check`. Serve surfaces the FIRST error plainly (no
+/// `config check:` report, no line-prefixed multi-error list).
+#[test]
+fn serve_rejects_semantically_invalid_config_fail_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "version = 2\n\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n",
+    )
+    .unwrap();
+    let path = config_path.to_str().unwrap();
+
+    let (code, stdout, stderr) = run_routectl_full(&["--config", path, "serve"]);
+    assert_ne!(
+        code, 0,
+        "serve must reject the semantically-invalid config; stdout: {stdout}, stderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("[retry]"),
+        "expected the retry conflict surfaced, got stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        !combined.contains("config check:"),
+        "serve must not run the check report, got stdout: {stdout}, stderr: {stderr}"
+    );
+}
+
+// -- centralized config-validation suite: the shared ordered function is
+// wired into every config surface, so the SAME bad configs are rejected on
+// all four caller paths (config check, test, prompt-size, serve pre-parse
+// gate). These pin the no-fork acceptance from the centralization work.
+
+/// Alias pointing at a nickname that is neither a `[models]` entry nor
+/// another alias key (`validate_alias_chain_targets`).
+fn cfg_unknown_alias_target() -> Config {
+    toml::from_str("[aliases]\nfast = \"ghost\"\n").expect("fixture must parse")
+}
+
+/// `retry_allowlist` and `retry_denylist` set together
+/// (`validate_retry_policy`).
+fn cfg_conflicting_retry_lists() -> Config {
+    toml::from_str("[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n")
+        .expect("fixture must parse")
+}
+
+/// The reserved `[retry.classes.feature-unsupported]` override
+/// (`validate_class_policy`).
+fn cfg_reserved_class_override() -> Config {
+    toml::from_str("[retry.classes.feature-unsupported]\nfallback = false\n")
+        .expect("fixture must parse")
+}
+
+fn bad_config_fixtures() -> Vec<(&'static str, Config)> {
+    vec![
+        ("unknown-alias-target", cfg_unknown_alias_target()),
+        ("conflicting-retry-lists", cfg_conflicting_retry_lists()),
+        ("reserved-class-override", cfg_reserved_class_override()),
+    ]
+}
+
+#[tokio::test]
+async fn config_check_rejects_each_centralized_bad_config() {
+    for (name, config) in bad_config_fixtures() {
+        match commands::config::check(&config, None).await {
+            Err(routectl_core::Error::Config(_)) => {}
+            Ok(()) => panic!("config check must reject `{name}`"),
+            Err(other) => panic!("expected Config error for `{name}`, got: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_command_rejects_each_centralized_bad_config() {
+    for (name, config) in bad_config_fixtures() {
+        match commands::test::run(config, "fast", "Hi.").await {
+            Err(routectl_core::Error::Config(_)) => {}
+            Ok(()) => panic!("test command must reject `{name}` before dispatch"),
+            Err(other) => panic!("expected Config error for `{name}`, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn prompt_size_rejects_each_centralized_bad_config() {
+    use routectl_cli::commands::prompt_size::{self, ProjectionArgs};
+    use routectl_router::CatalogOverlay;
+    use std::path::Path;
+
+    // Validation runs before the request fixture is read, so a
+    // non-existent path never matters -- the bad config fails first.
+    let missing = Path::new("/nonexistent/request.json");
+    let overlay = CatalogOverlay::default();
+    let projection = ProjectionArgs {
+        hypothetical_d: None,
+        hypothetical_k: None,
+        c_after: None,
+        ttl_tier: "5m",
+        steady_state: false,
+    };
+
+    for (name, config) in bad_config_fixtures() {
+        match prompt_size::run(config, &overlay, "fast", missing, projection) {
+            Err(routectl_core::Error::Config(_)) => {}
+            Ok(()) => panic!("prompt-size must reject `{name}` before reading the fixture"),
+            Err(other) => panic!("expected Config error for `{name}`, got: {other:?}"),
+        }
+    }
+}
+
+// -- semantic-error source-line rendering (config check's richer renderer).
+// The rendered error/warning lines are printed by `check`; `validation_report`
+// exposes the same rendering without the secret-store IO so it is testable.
+
+/// A `[retry]` conflict error must be prefixed with the source line the
+/// `[retry]` block sits on when the raw config text is available.
+#[test]
+fn validation_report_prefixes_semantic_error_with_source_line() {
+    // `[retry]` is the 4th line (header, blank line, then the block).
+    let raw = "[server]\nhost = \"127.0.0.1\"\n\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n";
+    let config: Config = toml::from_str(raw).expect("fixture must parse");
+
+    let report = commands::config::validation_report(&config, Some(raw));
+
+    let retry_err = report
+        .errors
+        .iter()
+        .find(|e| e.contains("[retry]"))
+        .expect("the retry-list conflict must be reported");
+    assert!(
+        retry_err.starts_with("(line 4): "),
+        "expected a source-line prefix, got: {retry_err}"
+    );
+}
+
+/// When the derived key/path cannot be located in the supplied text, the
+/// renderer keeps the plain message rather than inventing a line number.
+#[test]
+fn validation_report_falls_back_to_plain_when_path_not_locatable() {
+    // The retry-list conflict derives the path `retry`, but the text handed
+    // to the report carries no `[retry]` block -- locate returns None and the
+    // message stays plain.
+    let cfg_raw = "[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n";
+    let config: Config = toml::from_str(cfg_raw).expect("fixture must parse");
+    let unrelated_raw = "[server]\nhost = \"127.0.0.1\"\n";
+
+    let report = commands::config::validation_report(&config, Some(unrelated_raw));
+
+    let retry_err = report
+        .errors
+        .iter()
+        .find(|e| e.contains("[retry]"))
+        .expect("the retry-list conflict must be reported");
+    assert!(
+        !retry_err.starts_with("(line "),
+        "expected a plain fallback with no line prefix, got: {retry_err}"
+    );
+    assert!(
+        retry_err.starts_with("config: [retry]"),
+        "expected the bare validator message, got: {retry_err}"
     );
 }

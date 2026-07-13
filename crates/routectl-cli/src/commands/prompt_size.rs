@@ -21,10 +21,8 @@ use routectl_core::{ChatRequest, Error, Result, scan_volatile};
 use routectl_router::{
     ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CatalogOverlay,
     Config, EffectiveRow, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig,
-    break_even_k, evaluate, lookup_baked_with_overrides, lookup_overlay_cell, merge,
-    propose_steady_state_trim, validate_alias_chain_targets, validate_alias_patterns,
-    validate_bedrock_global_config, validate_overrides, validate_provider_credential_sources,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
+    break_even_k, collect_config_validation, evaluate, lookup_baked_with_overrides,
+    lookup_overlay_cell, merge, propose_steady_state_trim,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -490,20 +488,17 @@ pub fn run(
     request_path: &Path,
     projection: ProjectionArgs,
 ) -> Result<()> {
-    // Same cheap config-validation guards `routectl test` runs, so a
-    // misconfigured alias surfaces a clean error rather than a confusing
-    // resolution miss. None of these resolve secrets or touch the network.
-    validate_bedrock_global_config(&config)?;
-    validate_reasoning_defaults(&config)?;
-    validate_alias_chain_targets(&config)?;
-    validate_alias_patterns(&config)?;
-    validate_retry_policy(&config)?;
-    validate_registry_patterns(&config)?;
-    validate_provider_credential_sources(&config)?;
-    // Reject a degenerate `[cache_pricing]` override (unparseable selector or
-    // a multiplier that breaks the break-even math) here too, so the advisory
-    // projection never silently prices off a bad override.
-    validate_overrides(&config.cache_pricing).map_err(Error::Config)?;
+    // Same cheap config-validation guards `routectl test` and the serve
+    // path run, through the shared ordered suite, so a misconfigured
+    // alias / override surfaces a clean error rather than a confusing
+    // resolution miss or a silent bad-price. None of these resolve
+    // secrets or touch the network. Fail-fast on the first error; the
+    // collected strings are bare, so wrapping in `Error::Config` re-adds
+    // the `config: ` prefix on render.
+    let validation = collect_config_validation(&config);
+    if let Some(first) = validation.errors.into_iter().next() {
+        return Err(Error::Config(first));
+    }
 
     let text = fs::read_to_string(request_path).map_err(|e| {
         Error::Config(format!(

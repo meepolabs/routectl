@@ -2464,6 +2464,85 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Collected outcome of the shared config-validation suite:
+/// `errors` are hard-fail conditions, `warnings` are advisory.
+///
+/// Every string is a BARE message with no leading error-kind prefix: the
+/// `Error::Config` Display prefix (`config: `) of the `Error`-returning
+/// validators is stripped here once, and the `String`-returning validators
+/// are already bare. Each caller owns its own wrapping -- `config check`
+/// and the `serve` pre-parse gate re-add a `config: ` prefix for their
+/// rendered output, while `test` / `prompt-size` re-wrap in `Error::Config`
+/// (whose Display re-adds the same prefix). Keeping the collection uniform
+/// means no caller has to normalize the prefix itself.
+#[derive(Debug, Default, Clone)]
+pub struct ConfigValidation {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Reduce a validator `Error` to its bare message. The suite's
+/// `Error`-returning validators all produce `Error::Config`, whose Display
+/// carries a `config: ` prefix; take the inner message directly so every
+/// collected string is uniformly bare. Any other variant (none expected on
+/// this path) falls back to its full Display.
+fn bare_validation_message(e: routectl_core::Error) -> String {
+    match e {
+        routectl_core::Error::Config(msg) => msg,
+        other => other.to_string(),
+    }
+}
+
+/// Run the whole `validate_*` suite in ONE deterministic order and
+/// collect every error + warning. This is the single ordered invocation
+/// point every config surface (`config check`, `test`, `prompt-size`, and
+/// the `serve` pre-parse gate) routes through, so a validator can never be
+/// silently missing from one path while present in another. The error
+/// taxonomy is unchanged: each check rejects exactly the configs it
+/// rejected before; only the invocation is centralized.
+///
+/// The `[mitm]` validator is intentionally NOT part of this suite -- it is
+/// specific to the router build path and stays there.
+pub fn collect_config_validation(config: &Config) -> ConfigValidation {
+    let mut errors: Vec<String> = Vec::new();
+
+    if let Err(e) = crate::config::validate_cache_pricing_retired(config) {
+        errors.push(e);
+    }
+    #[cfg(feature = "bedrock")]
+    if let Err(e) = validate_bedrock_global_config(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_reasoning_defaults(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_alias_chain_targets(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_alias_patterns(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_retry_policy(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_registry_patterns(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_class_policy(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_provider_credential_sources(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = crate::catalog::validate_overrides(&config.cache_pricing) {
+        errors.push(e);
+    }
+
+    let warnings = class_policy_warnings(config);
+
+    ConfigValidation { errors, warnings }
+}
+
 #[cfg(test)]
 mod base_url_validation_tests {
     use super::validate_base_url_scheme;
@@ -4941,5 +5020,90 @@ mod gemini_cloud_code_factory_tests {
             ),
             other => panic!("expected Error::Config, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod collect_config_validation_tests {
+    use super::collect_config_validation;
+    use crate::config::Config;
+
+    /// Alias pointing at a nickname that is neither a `[models]` entry nor
+    /// another alias key -- trips `validate_alias_chain_targets`.
+    fn unknown_alias_target_config() -> Config {
+        toml::from_str("[aliases]\nfast = \"ghost\"\n").expect("must parse")
+    }
+
+    /// `retry_allowlist` and `retry_denylist` set together -- trips
+    /// `validate_retry_policy`.
+    fn conflicting_retry_lists_config() -> Config {
+        toml::from_str("[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n")
+            .expect("must parse")
+    }
+
+    /// The reserved `[retry.classes.feature-unsupported]` override -- trips
+    /// `validate_class_policy`.
+    fn reserved_class_override_config() -> Config {
+        toml::from_str("[retry.classes.feature-unsupported]\nfallback = false\n")
+            .expect("must parse")
+    }
+
+    #[test]
+    fn collects_the_unknown_alias_target_error() {
+        let validation = collect_config_validation(&unknown_alias_target_config());
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("ghost"),
+            "error should name the unknown target: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_conflicting_retry_lists_error() {
+        let validation = collect_config_validation(&conflicting_retry_lists_config());
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("mutually exclusive"),
+            "error should flag the allowlist/denylist conflict: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_reserved_class_override_error() {
+        let validation = collect_config_validation(&reserved_class_override_config());
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("feature-unsupported")
+                && validation.errors[0].contains("reserved"),
+            "error should flag the reserved class: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn a_clean_config_produces_no_errors() {
+        let validation = collect_config_validation(&Config::default());
+        assert!(
+            validation.errors.is_empty(),
+            "default config must pass the whole suite: {:?}",
+            validation.errors
+        );
     }
 }

@@ -301,6 +301,92 @@ async fn feature_unsupported_class_override_rejected_old_router_stays_live() {
     );
 }
 
+// -----------------------------------------------------------------
+// did-you-mean parse-error enhancer on the reload path
+// -----------------------------------------------------------------
+
+/// Same base config as `config_text_with_alias` but with an unknown
+/// `prt` key inside `[server]` -- a typo of `port`. Structurally valid
+/// TOML that `deny_unknown_fields` rejects at parse time, so the
+/// enhancer (`routectl_router::parse_config`) appends a `did you mean
+/// `port`?` hint to serde's `unknown field` message.
+fn config_text_with_unknown_server_field(alias: &str) -> String {
+    format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+prt = 8080
+
+[providers.fast]
+kind = "openai-compat"
+base_url = "http://127.0.0.1:1"
+api_key_ref = "literal:test-key"
+
+[models.gpt-4o]
+provider = "fast"
+upstream = "gpt-4o"
+
+[aliases]
+{alias} = "gpt-4o"
+"#
+    )
+}
+
+/// The enhanced parse error flows through the SAME `load_effective_config`
+/// seam the reload path rejects at: an unknown `[server]` field surfaces
+/// serde's `unknown field` message PLUS the `did you mean` hint. Exercising
+/// the seam directly pins the enhanced message without depending on watcher
+/// timing (companion to the end-to-end test below).
+#[test]
+fn unknown_field_suggestion_surfaces_through_load_effective_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        config_text_with_unknown_server_field("unused"),
+    )
+    .unwrap();
+
+    let err = match routectl_cli::server::load_effective_config(&config_path) {
+        Ok(_) => panic!("an unknown field must be rejected at load"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("unknown field `prt`") && err.contains("did you mean `port`?"),
+        "load error must carry the enhanced did-you-mean message, got: {err}"
+    );
+}
+
+/// End-to-end companion: writing an unknown-field config at the running
+/// server's watched path must NOT swap the live router -- the reload is
+/// rejected at parse time (the loader logs a structured warn and keeps the
+/// prior config, exactly like `partial_write_keeps_old_config` and the
+/// class-policy reject above). The old alias stays visible on `/v1/models`
+/// and the candidate's alias never surfaces.
+#[tokio::test]
+async fn unknown_field_reload_rejected_old_router_stays_live() {
+    let (base_url, config_path, _dir) = spawn_watched_server("field-stable").await;
+
+    write_atomic(
+        &config_path,
+        config_text_with_unknown_server_field("field-rejected").as_bytes(),
+    );
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let ids = list_model_ids(&base_url).await;
+    assert!(
+        ids.iter().any(|s| s == "field-stable"),
+        "old alias must remain after an unknown-field-rejected reload: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|s| s == "field-rejected"),
+        "the rejected candidate's alias must never surface: {ids:?}"
+    );
+}
+
 /// Five sequential rewrites of the config (each with a unique
 /// alias) all complete without dead-locking. The final alias is
 /// what `/v1/models` returns. Pins the no-filter design's

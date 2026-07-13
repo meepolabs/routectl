@@ -25,7 +25,9 @@ pub const OPERATOR_REMAP_CAPABILITY: &str = "operator-remap";
 /// `config.toml`. Serializes in kebab-case; a key outside this closed set
 /// (a typo or an unknown class) fails deserialization rather than being
 /// silently dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConfigFailureClass {
     /// Upstream rate limit.
@@ -54,7 +56,7 @@ pub enum ConfigFailureClass {
 /// optional: an absent leaf defers to the baked class default, a present
 /// leaf overrides only itself. Unknown keys are rejected so a typo cannot
 /// silently become a no-op.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ClassPolicy {
     /// Override for the same-provider retry cap of this class. `None`

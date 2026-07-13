@@ -56,7 +56,9 @@ use sse::SseState;
 pub use cloak::{CloakConfig, CloakMode, ToolRename};
 
 /// How the provider authenticates to the Anthropic Messages API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthKind {
     /// Standard `x-api-key: <key>` header. Default for `sk-ant-api03-...` keys.

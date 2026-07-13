@@ -1391,6 +1391,28 @@ async fn handle_config_reload(
 /// a hot reload logs a warn and keeps the prior config + router live
 /// (`read_parse_validate_config` below does exactly that).
 pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
+    let loaded = load_effective_config_unvalidated(path)?;
+    validate_effective_config(&loaded.config)?;
+    Ok(loaded)
+}
+
+/// The parse + migrate + overlay body of [`load_effective_config`], WITHOUT
+/// the fail-fast [`validate_effective_config`] gate.
+///
+/// Only `config check` uses this: it is the showcase surface that runs the
+/// FULL shared validator suite itself and renders EVERY error with a source
+/// line, so it must receive a parseable-but-semantically-invalid config
+/// intact rather than have the load abort on the first semantic error.
+///
+/// Parse-level failures (unreadable file, version too new, unknown fields,
+/// the legacy `[mitm] credential_source` key) still return `Err` here -- a
+/// config that does not parse has nothing for `check` to render against, and
+/// this keeps the did-you-mean / migration guidance those preflights emit.
+///
+/// Every other caller (serve cold start, hot reload, test, prompt-size) goes
+/// through [`load_effective_config`], which wraps this and keeps the
+/// fail-fast validation posture unchanged.
+pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
 
@@ -1410,7 +1432,7 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     // that names the exact provider-block replacement.
     routectl_router::preflight_legacy_mitm_credential_source(&text).map_err(|e| e.to_string())?;
 
-    let mut config: Config = toml::from_str(&text)
+    let mut config: Config = routectl_router::parse_config(&text)
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
 
     let overlay_path = routectl_router::overlay_default_path();
@@ -1433,8 +1455,6 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     let catalog_overlay = routectl_router::load_catalog_overlay(&overlay_path)
         .map_err(|e| format!("catalog overlay load error: {e}"))?;
 
-    validate_effective_config(&config)?;
-
     Ok(LoadedConfig {
         config,
         catalog_overlay,
@@ -1456,16 +1476,17 @@ pub struct LoadedConfig {
 /// redundant: this is the cheap fail-fast gate before the heavier router
 /// rebuild).
 fn validate_effective_config(config: &Config) -> Result<(), String> {
-    routectl_router::validate_cache_pricing_retired(config)?;
-    routectl_router::validate_bedrock_global_config(config).map_err(|e| e.to_string())?;
-    routectl_router::validate_reasoning_defaults(config).map_err(|e| e.to_string())?;
-    routectl_router::validate_alias_chain_targets(config).map_err(|e| e.to_string())?;
-    routectl_router::validate_alias_patterns(config).map_err(|e| e.to_string())?;
-    routectl_router::validate_retry_policy(config).map_err(|e| e.to_string())?;
-    routectl_router::validate_registry_patterns(config).map_err(|e| e.to_string())?;
-    routectl_router::validate_class_policy(config).map_err(|e| e.to_string())?;
-    routectl_router::validate_provider_credential_sources(config).map_err(|e| e.to_string())?;
-    Ok(())
+    // The suite returns bare messages; re-add the `config: ` prefix so the
+    // surfaced error reads the same as when these validators propagated
+    // through `Error::Config`'s Display on this path.
+    match routectl_router::collect_config_validation(config)
+        .errors
+        .into_iter()
+        .next()
+    {
+        Some(first) => Err(format!("config: {first}")),
+        None => Ok(()),
+    }
 }
 
 /// Read, parse, and validate the config at `path` via the shared
@@ -3040,6 +3061,44 @@ default = "claude"
         // Assert
         assert!(err.contains("sneaky"), "err: {err}");
         assert!(err.contains("forwarded"), "err: {err}");
+    }
+
+    /// The serve/reload pre-parse gate (`validate_effective_config`, called
+    /// by `load_effective_config`) routes through the same centralized
+    /// suite as `config check` / `test` / `prompt-size`, so the identical
+    /// bad configs are rejected here too. Pins the no-fork acceptance on
+    /// the fourth caller path.
+    #[test]
+    #[serial_test::serial]
+    fn load_effective_config_rejects_each_centralized_bad_config() {
+        // `version = 2` skips the v1 -> v2 migration so each case exercises
+        // only the validation gate.
+        let cases = [
+            (
+                "unknown-alias-target",
+                "version = 2\n[aliases]\nfast = \"ghost\"\n",
+            ),
+            (
+                "conflicting-retry-lists",
+                "version = 2\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n",
+            ),
+            (
+                "reserved-class-override",
+                "version = 2\n[retry.classes.feature-unsupported]\nfallback = false\n",
+            ),
+        ];
+
+        for (name, body) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+            let cfg_path = dir.path().join("config.toml");
+            std::fs::write(&cfg_path, body).expect("write config.toml");
+
+            assert!(
+                load_effective_config(&cfg_path).is_err(),
+                "serve pre-parse gate must reject `{name}`"
+            );
+        }
     }
 
     /// Hot-reload posture: a config edited to a too-new `version`

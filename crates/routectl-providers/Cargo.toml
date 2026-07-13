@@ -50,6 +50,7 @@ default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses", "gem
 routectl-core.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
