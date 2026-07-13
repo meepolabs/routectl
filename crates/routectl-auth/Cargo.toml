@@ -24,7 +24,6 @@ oauth = [
     "dep:subtle",
     "dep:zeroize",
     "dep:webbrowser",
-    "dep:tempfile",
 ]
 
 [dependencies]
@@ -36,6 +35,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["fs", "rt", "sync"] }
 uuid.workspace = true
+# Shared by the crate-wide atomic secret writer (`atomic_write`), used
+# on both the oauth and lean builds, so it is not gated behind `oauth`.
+tempfile = "3"
 
 # OAuth-only deps. Gated behind the `oauth` feature so the lean build
 # (no OAuth) does not pull in axum / reqwest / webbrowser etc.
@@ -48,12 +50,10 @@ rand = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 webbrowser = { version = "1", optional = true }
-tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid.workspace = true
-tempfile = "3"
 serial_test = "3"
 wiremock.workspace = true
 http.workspace = true

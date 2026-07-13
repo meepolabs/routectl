@@ -126,6 +126,16 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+    /// Add or overwrite a provider entry in `config.toml`, routed through
+    /// the same atomic, re-validated write path as `config set`. The secret
+    /// is supplied by reference (`--secret-ref`) or environment variable
+    /// (`--api-key-env`) -- never a bare value on argv. A new or overwritten
+    /// provider block is egress-defining and prompts for confirmation unless
+    /// `--yes` is given.
+    Provider {
+        #[command(subcommand)]
+        action: ProviderCmd,
+    },
     /// Offline report of a request fixture's token footprint and what
     /// routectl's cache / reduction machinery would do to it. Never
     /// dispatches upstream and never resolves secrets or touches the network.
@@ -282,6 +292,57 @@ enum ConfigCmd {
         /// (required to migrate in a non-interactive run).
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCmd {
+    /// Add a provider block to `config.toml` (or overwrite one with
+    /// `--force`). The credential is given by reference only.
+    Add {
+        /// Provider kind. `openai-compat` (requires `--base-url`),
+        /// `anthropic-api` (base URL defaults to api.anthropic.com; pair
+        /// with `--credential-source forwarded` for a no-key forwarded
+        /// provider), or `anthropic` (oauth-backed -- delegates to the
+        /// `login` flow and stores an `oauth://` ref).
+        #[arg(long)]
+        kind: String,
+        /// Operator-facing provider name; the `[providers.<name>]` key.
+        #[arg(long)]
+        name: String,
+        /// Upstream base URL. Required for `openai-compat`; optional for
+        /// `anthropic-api` (its constructor supplies the default).
+        #[arg(long = "base-url")]
+        base_url: Option<String>,
+        /// Environment variable holding the API key; stored as
+        /// `api_key_ref = "env://<VAR>"` after verifying it resolves now.
+        #[arg(long = "api-key-env", group = "secret_source")]
+        api_key_env: Option<String>,
+        /// A secret reference written verbatim to `api_key_ref`
+        /// (`env://VAR`, `file:///abs/key`, `literal:...`, `oauth://...`).
+        #[arg(long = "secret-ref", group = "secret_source")]
+        secret_ref: Option<String>,
+        /// Read the API key from stdin (pipe it in), capturing it to the
+        /// managed 0600 `file://` store. Errors immediately if stdin is a
+        /// TTY -- it never blocks waiting for keyboard input.
+        #[arg(long = "api-key-stdin", group = "secret_source")]
+        api_key_stdin: bool,
+        /// Credential source for an `anthropic-api` provider: `own`
+        /// (default -- routectl's configured key) or `forwarded` (relay the
+        /// client's captured claude.ai bearer; captures no key, pins the
+        /// base URL to api.anthropic.com).
+        #[arg(
+            long = "credential-source",
+            value_parser = clap::builder::PossibleValuesParser::new(["own", "forwarded"])
+        )]
+        credential_source: Option<String>,
+        /// Overwrite an existing provider of the same name (still prompts
+        /// for the egress-defining confirmation unless `--yes`).
+        #[arg(long)]
+        force: bool,
+        /// Skip the high-consequence confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -522,6 +583,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Cmd::Provider { action } => match action {
+            ProviderCmd::Add {
+                kind,
+                name,
+                base_url,
+                api_key_env,
+                secret_ref,
+                api_key_stdin,
+                credential_source,
+                force,
+                yes,
+            } => {
+                let config_path = resolve_config_path(cli.config.as_deref());
+                let args = commands::provider_add::ProviderAddArgs {
+                    kind,
+                    name,
+                    base_url,
+                    api_key_env,
+                    secret_ref,
+                    api_key_stdin,
+                    credential_source,
+                    force,
+                    yes,
+                };
+                if let Err(e) = commands::provider_add::run(&config_path, args).await {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
         Cmd::PromptSize {
             alias,
             request,
@@ -746,6 +837,98 @@ mod tests {
             cli.cmd,
             Cmd::Catalog {
                 action: CatalogCmd::List
+            }
+        ));
+    }
+
+    /// The secret-source arg group is mutually exclusive: `--api-key-env`
+    /// and `--secret-ref` together is a clap-layer rejection, so a bare
+    /// value never has two competing sources to resolve.
+    #[test]
+    fn provider_add_rejects_two_secret_sources() {
+        let result = Cli::try_parse_from([
+            "routectl",
+            "provider",
+            "add",
+            "--kind",
+            "openai-compat",
+            "--name",
+            "x",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--api-key-env",
+            "SOME_VAR",
+            "--secret-ref",
+            "file:///abs/key",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap must reject two secret sources at once"
+        );
+    }
+
+    /// `--api-key-stdin` joins the same mutually-exclusive group, so it
+    /// cannot be combined with `--api-key-env` (or `--secret-ref`).
+    #[test]
+    fn provider_add_rejects_stdin_plus_env() {
+        let result = Cli::try_parse_from([
+            "routectl",
+            "provider",
+            "add",
+            "--kind",
+            "openai-compat",
+            "--name",
+            "x",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--api-key-stdin",
+            "--api-key-env",
+            "SOME_VAR",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap must reject --api-key-stdin together with --api-key-env"
+        );
+    }
+
+    /// `--credential-source` only accepts the two known values.
+    #[test]
+    fn provider_add_rejects_unknown_credential_source() {
+        let result = Cli::try_parse_from([
+            "routectl",
+            "provider",
+            "add",
+            "--kind",
+            "anthropic-api",
+            "--name",
+            "x",
+            "--credential-source",
+            "bogus",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap must reject an unknown --credential-source value"
+        );
+    }
+
+    /// A single secret source parses cleanly to the `provider add` variant.
+    #[test]
+    fn provider_add_accepts_one_secret_source() {
+        let cli = Cli::parse_from([
+            "routectl",
+            "provider",
+            "add",
+            "--kind",
+            "anthropic-api",
+            "--name",
+            "claude",
+            "--secret-ref",
+            "env://ANTHROPIC_API_KEY",
+        ]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Provider {
+                action: ProviderCmd::Add { .. }
             }
         ));
     }
