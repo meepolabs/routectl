@@ -282,9 +282,76 @@ fn token_in(ty: Option<&str>, code: Option<&str>, set: &[&str]) -> bool {
     matched_token(ty, code, set).is_some()
 }
 
+/// Taxonomy-derived class guidance for a bare HTTP status, for the config
+/// migrator's fail-closed refusal text.
+///
+/// A bare status has no provider- and body-independent failure class: the
+/// migrator sees only the numeric code, never the provider or response-body
+/// tokens that can lift it. `primary` is the class a bare status resolves to
+/// with no provider and no tokens (the union table, [`classify`] with
+/// `provider_kind = None`). `alternatives` are the OTHER classes the same
+/// status can resolve to once body tokens are present: 503 lifts to
+/// [`FailureClass::Overloaded`]; a 4xx lifts to [`FailureClass::ContentPolicy`]
+/// / [`FailureClass::ContextWindow`] / [`FailureClass::FeatureUnsupported`].
+/// A [`FailureClass::FeatureUnsupported`] alternative carries an empty
+/// `capability` -- the concrete capability is a per-token body detail the
+/// migrator never sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusClassGuidance {
+    /// The status the guidance describes.
+    pub status: u16,
+    /// The class a bare status resolves to with no provider / body tokens.
+    pub primary: FailureClass,
+    /// Other classes the same status can resolve to on body tokens, in
+    /// taxonomy order. Empty when the status is unambiguous.
+    pub alternatives: Vec<FailureClass>,
+}
+
+/// Derive [`StatusClassGuidance`] for any `status`, reusing the real
+/// [`classify_upstream`] path -- never a hand-duplicated status->class table,
+/// so a taxonomy change cannot drift the guidance.
+///
+/// Panic-free for any `u16`: a status outside `{0} U 400..=599` yields the
+/// classifier's fallback class with no alternatives.
+pub fn class_guidance_for_status(status: u16) -> StatusClassGuidance {
+    let primary = classify_upstream(status, None, None, None).class;
+    let mut alternatives = Vec::new();
+    for token in union_lift_tokens() {
+        let lifted = match classify_upstream(status, Some(token), Some(token), None).class {
+            FailureClass::FeatureUnsupported { .. } => FailureClass::FeatureUnsupported {
+                capability: String::new(),
+            },
+            other => other,
+        };
+        if lifted != primary && !alternatives.contains(&lifted) {
+            alternatives.push(lifted);
+        }
+    }
+    StatusClassGuidance {
+        status,
+        primary,
+        alternatives,
+    }
+}
+
+/// Every token that can trigger a same-row lift in the provider-agnostic
+/// union table, so the reachable alternatives are read from the real
+/// taxonomy rather than restated.
+fn union_lift_tokens() -> impl Iterator<Item = &'static str> {
+    let t = &tables::UNION;
+    t.content_policy
+        .iter()
+        .chain(t.context_window)
+        .chain(t.overloaded)
+        .chain(t.feature_unsupported)
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ClassifiedFailure, FailureClass, MatchedBy, classify, tables};
+    use super::{
+        ClassifiedFailure, FailureClass, MatchedBy, class_guidance_for_status, classify, tables,
+    };
     use crate::error::Error;
 
     /// Build an `Error::Upstream` carrying a status and optional
@@ -727,6 +794,80 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // --- Status-to-class refusal guidance ---
+
+    #[test]
+    fn guidance_for_plain_5xx_is_server_error_with_no_alternatives() {
+        // Arrange + Act
+        let got = class_guidance_for_status(500);
+
+        // Assert
+        assert_eq!(got.primary, FailureClass::ServerError);
+        assert!(got.alternatives.is_empty(), "{:?}", got.alternatives);
+    }
+
+    #[test]
+    fn guidance_for_429_is_rate_limited_with_no_alternatives() {
+        // Arrange + Act
+        let got = class_guidance_for_status(429);
+
+        // Assert
+        assert_eq!(got.primary, FailureClass::RateLimited);
+        assert!(got.alternatives.is_empty(), "{:?}", got.alternatives);
+    }
+
+    #[test]
+    fn guidance_for_503_surfaces_server_error_overloaded_ambiguity() {
+        // Arrange + Act
+        let got = class_guidance_for_status(503);
+
+        // Assert: bare 503 is ServerError, but an overloaded body token
+        // lifts it to Overloaded -- the ambiguity the migrator must name.
+        assert_eq!(got.primary, FailureClass::ServerError);
+        assert_eq!(got.alternatives, vec![FailureClass::Overloaded]);
+    }
+
+    #[test]
+    fn guidance_for_generic_4xx_is_bad_request_with_body_lift_alternatives() {
+        // Arrange + Act
+        let got = class_guidance_for_status(400);
+
+        // Assert: bare 400 is BadRequest; body tokens can lift it to the
+        // sibling client-error classes, in taxonomy order.
+        assert_eq!(got.primary, FailureClass::BadRequest);
+        assert_eq!(
+            got.alternatives,
+            vec![
+                FailureClass::ContentPolicy,
+                FailureClass::ContextWindow,
+                FailureClass::FeatureUnsupported {
+                    capability: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn guidance_for_non_4xx_5xx_status_is_unknown_with_no_alternatives() {
+        // Arrange + Act: a status outside the classified range.
+        let got = class_guidance_for_status(200);
+
+        // Assert
+        assert_eq!(got.primary, FailureClass::Unknown);
+        assert!(got.alternatives.is_empty(), "{:?}", got.alternatives);
+    }
+
+    #[test]
+    fn guidance_is_panic_free_for_every_u16() {
+        for status in 0..=u16::MAX {
+            // Act: must not panic for any status.
+            let got = class_guidance_for_status(status);
+
+            // Assert: the status round-trips onto the guidance.
+            assert_eq!(got.status, status);
         }
     }
 }

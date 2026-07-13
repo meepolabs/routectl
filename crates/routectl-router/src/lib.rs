@@ -67,11 +67,11 @@ pub use catalog_state::{
     selector_key as catalog_state_selector_key,
 };
 pub use config::{
-    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, Config, HistoryReasoning,
-    LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, PricingConfig,
-    ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RegistryEntry,
-    RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig, VersionTooNewError,
-    preflight_config_version, preflight_legacy_mitm_credential_source,
+    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, Config, ConfigVersionError,
+    HistoryReasoning, LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry,
+    PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
+    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
+    VersionTooNewError, preflight_config_version, preflight_legacy_mitm_credential_source,
     validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
@@ -81,7 +81,10 @@ pub use config_effective::{
 };
 pub use config_error::parse_config;
 pub use config_locate::locate_dotted_path;
-pub use config_migrate::{MigrationError, MigrationOutcome, migrate_v1_to_v2};
+pub use config_migrate::{
+    MigrateError, MigrationError, MigrationOutcome, Refusal, RefusalSource, StepOutcome,
+    V1Migration, migrate_to_current, migrate_v1_to_v2, migrate_v2_to_v3,
+};
 pub use config_path::{PathError, PathShape, validate_config_path};
 pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};
 pub use context_trim::{
@@ -97,7 +100,7 @@ pub use factory::{
     build_provider_with_options, build_resolved_models, class_policy_warnings,
     collect_config_validation, validate_alias_chain_targets, validate_alias_patterns,
     validate_class_policy, validate_mitm_config, validate_provider_credential_sources,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
+    validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

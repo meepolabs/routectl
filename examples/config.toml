@@ -2,6 +2,11 @@
 # ~/.config/routectl/config.toml and edit. Validate with:
 #   routectl config check
 
+# Schema version this file targets. routectl refuses a config older than
+# the schema the running binary writes; run `routectl config migrate` to
+# bring an older file forward. See docs/CONFIGURATION.md.
+version = 3
+
 # routectl config has three first-class tables:
 #
 # [providers.X]   Transport + auth ONLY. How to reach an upstream.
@@ -204,13 +209,11 @@ max_attempts                  = 2
 initial_backoff_ms            = 250
 backoff_multiplier            = 2.0
 jitter_ms                     = 50
-# Default behavior (omit both lists): every 4xx/5xx falls back. To
-# narrow, set EITHER `retry_allowlist` (only these codes fall back)
-# OR `retry_denylist` (everything in 400..=599 except these falls
-# back). The two are mutually exclusive -- setting both is a
-# config-load error.
-# retry_allowlist             = [408, 429, 500, 502, 503, 504]
-# retry_denylist              = [422]
+# Fallback/retry is decided per failure CLASS, not per raw status code.
+# Every 4xx/5xx falls back under the baked class defaults; to narrow or
+# widen a specific class, set `[retry.classes.<class>]` (e.g.
+# `[retry.classes.server-error] fallback = false`) or a per-provider
+# `[providers.X.class_overrides]` remap. See docs/CONFIGURATION.md.
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 # retry_on_429 = 1

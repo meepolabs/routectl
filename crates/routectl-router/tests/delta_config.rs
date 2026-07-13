@@ -9,10 +9,10 @@
 //!   an absent leaf inherits the baked class default, a present leaf
 //!   overrides only itself, and each class key is independent
 //!   (`RetryPolicy::resolved_class`);
-//! - plain serde for Vec fields (`retry_allowlist`) -- a list is one
+//! - plain serde for Vec fields (`bedrock.allowed_betas`) -- a list is one
 //!   atomic value taken wholesale from the file, never element-merged.
 //!
-//! Contract rules pinned (config-schema v2, layering section):
+//! Contract rules pinned (config-schema v3, layering section):
 //!   1. maps override one class key without restating the rest;
 //!   2. every `ClassPolicy` leaf is `Option`: absent = inherit;
 //!   3. maps merge per-key, Vecs replace whole;
@@ -67,20 +67,20 @@ retry = 4
 
 #[test]
 fn vec_field_is_taken_whole_from_the_file_never_element_merged() {
-    // Arrange: two configs that each set retry_allowlist to a different
-    // whole list, plus one that omits it entirely.
+    // Arrange: two configs that each set bedrock.allowed_betas to a
+    // different whole list, plus one that omits it entirely.
     let with_pair =
-        parse_config("[retry]\nretry_allowlist = [500, 502]\n").expect("valid config parses");
+        parse_config("[bedrock]\nallowed_betas = [\"a\", \"b\"]\n").expect("valid config parses");
     let with_single =
-        parse_config("[retry]\nretry_allowlist = [429]\n").expect("valid config parses");
+        parse_config("[bedrock]\nallowed_betas = [\"c\"]\n").expect("valid config parses");
     let omitted = parse_config("[retry]\nmax_attempts = 6\n").expect("valid config parses");
 
     // Assert: each load holds EXACTLY its file's list -- no union with the
     // baked (empty) default, and no accumulation across loads.
-    assert_eq!(with_pair.retry.retry_allowlist, vec![500, 502]);
-    assert_eq!(with_single.retry.retry_allowlist, vec![429]);
+    assert_eq!(with_pair.bedrock.allowed_betas, vec!["a", "b"]);
+    assert_eq!(with_single.bedrock.allowed_betas, vec!["c"]);
     // An omitted Vec is the baked default (empty), not something merged in.
-    assert!(omitted.retry.retry_allowlist.is_empty());
+    assert!(omitted.bedrock.allowed_betas.is_empty());
 }
 
 #[test]

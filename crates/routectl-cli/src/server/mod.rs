@@ -785,19 +785,12 @@ pub(crate) async fn build_router_from_config_with_overlay(
     // still reports ok.
     routectl_router::validate_alias_patterns(&config)?;
 
-    // Reject `[retry]` blocks that set both `retry_allowlist` and
-    // `retry_denylist`. The two are mutually exclusive predicates;
-    // failing here surfaces the conflict at startup rather than
-    // letting the silently-ignored denylist mask operator intent.
-    routectl_router::validate_retry_policy(&config)?;
-
     // Reject the reserved `[retry.classes.feature-unsupported]` key and
     // any `[providers.X.class_overrides]` remap targeting a class the
     // router retries or debits for health. Advisory findings on the
     // same surface (a health-status source remapped away from breaker
-    // accounting, an empty `ClassPolicy` block, a class block shadowed
-    // by an explicit retry_allowlist/retry_denylist code) are logged
-    // rather than rejected.
+    // accounting, an empty `ClassPolicy` block) are logged rather than
+    // rejected.
     routectl_router::validate_class_policy(&config)?;
     for warning in routectl_router::class_policy_warnings(&config) {
         tracing::warn!(warning = %warning, "class policy warning");
@@ -1547,23 +1540,21 @@ async fn handle_config_reload(
 }
 
 /// SINGLE shared config loader: preflight the schema `version`, parse
-/// `config.toml`, run the v1 -> v2 migration when the file is still
-/// `version < CURRENT_CONFIG_VERSION` (folding the LEGACY
-/// `pricing_verifications.json` sidecar + `[cache_pricing]` overrides into
-/// the catalog overlay via `routectl_router::migrate_v1_to_v2`), load
-/// the catalog overlay (fail-closed per `routectl_router::load_catalog_overlay`'s
-/// matrix), and run the startup validators. Used by BOTH the CLI's
-/// cold-start `load_config` (`main.rs`) and this module's hot-reload path
-/// (`read_parse_validate_config`) -- PRE-EXISTING split-brain this closed:
-/// only the cold-start path used to merge the sidecar, so a config reload
-/// silently dropped sidecar / `[cache_pricing]` data. A reload now re-reads
-/// the overlay from disk too -- both a config-file touch and a dedicated
-/// overlay-file write (`WatchTarget::CatalogOverlay` in `file_watch.rs`)
-/// trigger this same re-read via `ReloadRequest::Config` /
-/// `ReloadRequest::CatalogOverlay`.
-/// A `version` newer than this build supports fails closed here too (a
+/// `config.toml`, load the catalog overlay (fail-closed per
+/// `routectl_router::load_catalog_overlay`'s matrix), and run the startup
+/// validators. Used by BOTH the CLI's cold-start `load_config` (`main.rs`)
+/// and this module's hot-reload path (`read_parse_validate_config`) --
+/// PRE-EXISTING split-brain this closed: only the cold-start path used to
+/// merge the sidecar, so a config reload silently dropped sidecar /
+/// `[cache_pricing]` data. A reload now re-reads the overlay from disk too
+/// -- both a config-file touch and a dedicated overlay-file write
+/// (`WatchTarget::CatalogOverlay` in `file_watch.rs`) trigger this same
+/// re-read via `ReloadRequest::Config` / `ReloadRequest::CatalogOverlay`.
+/// The load NEVER migrates the file in place: a `version` outside the
+/// range this build writes fails closed in the preflight (a too-old file
+/// points at `config migrate`; a too-new file at upgrading routectl). A
 /// cold-start error propagates; a reload rejects and keeps the prior
-/// router live, same posture as every other load failure below).
+/// router live, same posture as every other load failure below.
 ///
 /// The loaded overlay rides back on [`LoadedConfig::catalog_overlay`] --
 /// callers that build a Router thread it into
@@ -1581,18 +1572,21 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     Ok(loaded)
 }
 
-/// The parse + migrate + overlay body of [`load_effective_config`], WITHOUT
-/// the fail-fast [`validate_effective_config`] gate.
+/// The parse + overlay body of [`load_effective_config`], WITHOUT the
+/// fail-fast [`validate_effective_config`] gate.
 ///
 /// Only `config check` uses this: it is the showcase surface that runs the
 /// FULL shared validator suite itself and renders EVERY error with a source
 /// line, so it must receive a parseable-but-semantically-invalid config
 /// intact rather than have the load abort on the first semantic error.
 ///
-/// Parse-level failures (unreadable file, version too new, unknown fields,
-/// the legacy `[mitm] credential_source` key) still return `Err` here -- a
-/// config that does not parse has nothing for `check` to render against, and
-/// this keeps the did-you-mean / migration guidance those preflights emit.
+/// Parse-level failures (unreadable file, version out of range, unknown
+/// fields, the legacy `[mitm] credential_source` key) still return `Err`
+/// here -- a config that does not parse has nothing for `check` to render
+/// against, and this keeps the did-you-mean / migration guidance those
+/// preflights emit. In particular a too-old `version` is REJECTED with the
+/// `config migrate` pointer on this path identically to the serve/reload
+/// path; neither path mutates the file on load.
 ///
 /// Every other caller (serve cold start, hot reload, test, prompt-size) goes
 /// through [`load_effective_config`], which wraps this and keeps the
@@ -1602,12 +1596,13 @@ pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, St
         .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
 
     // PREFLIGHT: read `version` off the raw TOML before the full,
-    // `deny_unknown_fields` typed deserialize below -- a config written by
-    // a newer routectl may carry fields this build does not know about,
-    // and deserializing it directly would fail with a confusing
-    // "unknown field" error that buries the real cause. A hot
-    // reload hitting this error rejects and keeps the prior router live
-    // (the caller of this function on that path, `read_parse_validate_config`,
+    // `deny_unknown_fields` typed deserialize below. This rejects a config
+    // whose schema version is out of the range this build writes -- a
+    // too-new file (whose unknown fields would otherwise fail the typed
+    // parse with a confusing "unknown field" error) and, equally, a too-old
+    // file (pointed at `config migrate`, never mutated on load). A hot
+    // reload hitting either rejects and keeps the prior router live (the
+    // caller of this function on that path, `read_parse_validate_config`,
     // already treats any `Err` from here that way).
     routectl_router::preflight_config_version(&text).map_err(|e| e.to_string())?;
 
@@ -1617,25 +1612,10 @@ pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, St
     // that names the exact provider-block replacement.
     routectl_router::preflight_legacy_mitm_credential_source(&text).map_err(|e| e.to_string())?;
 
-    let mut config: Config = routectl_router::parse_config(&text)
+    let config: Config = routectl_router::parse_config(&text)
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
 
     let overlay_path = routectl_router::overlay_default_path();
-
-    // v1 -> v2 MIGRATION: the legacy `[cache_pricing]` table and the
-    // `pricing_verifications.json` sidecar both fold into the catalog
-    // overlay, then config.toml is rewritten to `version = 2`. Gated on
-    // the file's OWN version so this runs exactly once per config; at
-    // `version >= CURRENT_CONFIG_VERSION` the sidecar is intentionally
-    // NOT merged here (it already landed in the overlay during
-    // migration -- merging it again would double-apply it).
-    if config.version < routectl_router::CURRENT_CONFIG_VERSION {
-        crate::commands::catalog::load_and_merge_verifications(&mut config);
-        routectl_router::migrate_v1_to_v2(&config.cache_pricing, path, &overlay_path)
-            .map_err(|e| format!("config migration error: {e}"))?;
-        config.version = routectl_router::CURRENT_CONFIG_VERSION;
-        config.cache_pricing.clear();
-    }
 
     let catalog_overlay = routectl_router::load_catalog_overlay(&overlay_path)
         .map_err(|e| format!("catalog overlay load error: {e}"))?;
@@ -1646,8 +1626,7 @@ pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, St
     })
 }
 
-/// Return of [`load_effective_config`]: the parsed (and, when still `version
-/// < CURRENT_CONFIG_VERSION`, migrated-forward) `Config` alongside the
+/// Return of [`load_effective_config`]: the parsed `Config` alongside the
 /// catalog overlay loaded from the SAME call, so a caller building a Router
 /// (`build_router_from_config_with_overlay`) never has the two drift apart
 /// by loading them at different times.
@@ -2366,7 +2345,7 @@ default = "claude"
     #[cfg(test)]
     fn usage_config_text(enabled: bool, db_path: &std::path::Path) -> String {
         format!(
-            "[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+            "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
              [usage]\nenabled = {enabled}\ndb_path = \"{}\"\nretention_days = 0\n",
             db_path.display()
         )
@@ -2449,7 +2428,11 @@ default = "claude"
         let dir = tempfile::tempdir().unwrap();
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
-        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 0\n").unwrap();
+        std::fs::write(
+            &cfg_path,
+            "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .unwrap();
 
         let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
         let mut initial_config = Config::default();
@@ -2532,7 +2515,11 @@ default = "claude"
         let dir = tempfile::tempdir().unwrap();
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
-        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 0\n").unwrap();
+        std::fs::write(
+            &cfg_path,
+            "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .unwrap();
 
         let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
         let mut config = Config::default();
@@ -2613,7 +2600,11 @@ default = "claude"
         let config_dir = dir.path().join("routectl");
         std::fs::create_dir_all(&config_dir).unwrap();
         let cfg_path = config_dir.join("config.toml");
-        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 0\n").unwrap();
+        std::fs::write(
+            &cfg_path,
+            "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .unwrap();
 
         let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
         let mut initial_config = Config::default();
@@ -2963,86 +2954,61 @@ default = "claude"
         }
     }
 
-    /// The pre-existing split-brain this closed: startup
-    /// (`main.rs`'s `load_config`) used to merge the `pricing_verifications.json`
-    /// sidecar into `config.cache_pricing`, but the hot-reload path
-    /// (`read_parse_validate_config`) never called that merge at all, so a
-    /// config reload silently dropped sidecar data. Both paths now call the
-    /// SAME `load_effective_config`; this test drives that shared function
-    /// directly (what the reload path calls).
-    ///
-    /// The v1 -> v2 migration superseded the ORIGINAL assertion here (the
-    /// sidecar stamp used to
-    /// stay in `config.cache_pricing` after load): a config with no
-    /// explicit `version` is `version < CURRENT_CONFIG_VERSION`, so this
-    /// load now also runs the v1 -> v2 migration, which folds the merged
-    /// sidecar stamp into the catalog overlay and clears
-    /// `config.cache_pricing`. The split-brain fix (the merge itself still
-    /// runs before migration reads `cache_pricing`) is unchanged; only
-    /// where the data ends up is different.
+    /// A config older than this build writes is REJECTED at load, never
+    /// migrated in place. Both the serve/reload loader
+    /// (`load_effective_config`) and the `config check` unvalidated path
+    /// (`load_effective_config_unvalidated`) must reject it identically,
+    /// point at `config migrate`, and leave the file byte-identical -- the
+    /// mutate-on-load incident class this replaces.
     #[test]
     #[serial_test::serial]
-    fn load_effective_config_folds_the_legacy_sidecar_merge_into_the_overlay() {
-        // Arrange: a config.toml with no `[cache_pricing]` entry for this
-        // selector, plus a `pricing_verifications.json` sidecar stamp for
-        // it, under an isolated `XDG_CONFIG_HOME`.
+    fn load_rejects_a_too_old_config_and_leaves_it_byte_identical() {
+        // Arrange: a v1 config (no explicit `version`) under an isolated
+        // temp dir -- never the live config, per the loader learnings.
         let dir = tempfile::tempdir().expect("tempdir");
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
-        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 4000\n")
-            .expect("write config.toml");
+        let body = "[server]\nhost = \"127.0.0.1\"\nport = 4000\n";
+        std::fs::write(&cfg_path, body).expect("write config.toml");
 
-        let sidecar_dir = dir.path().join("routectl");
-        std::fs::create_dir_all(&sidecar_dir).expect("create sidecar dir");
-        std::fs::write(
-            sidecar_dir.join("pricing_verifications.json"),
-            r#"{"verified":{"openai-compat:grok-*":"2026-06-30"}}"#,
-        )
-        .expect("write sidecar");
+        // Act: the serve/reload path.
+        let serve_err = match load_effective_config(&cfg_path) {
+            Ok(_) => panic!("a too-old config must be rejected on the serve path"),
+            Err(e) => e,
+        };
+        // Act: the `config check` unvalidated path.
+        let check_err = match load_effective_config_unvalidated(&cfg_path) {
+            Ok(_) => panic!("a too-old config must be rejected on the check path"),
+            Err(e) => e,
+        };
 
-        // Act: load via the SAME function the reload path
-        // (`read_parse_validate_config`) calls.
-        let loaded = load_effective_config(&cfg_path).expect("load must succeed");
+        // Assert: both reject with the single-sourced migrate pointer.
+        for err in [&serve_err, &check_err] {
+            assert!(err.contains("config migrate"), "err: {err}");
+            assert!(
+                err.contains(&routectl_router::CURRENT_CONFIG_VERSION.to_string()),
+                "err: {err}"
+            );
+        }
 
-        // Assert: migration ran (version bumped, cache_pricing cleared) and
-        // the sidecar stamp landed in the catalog overlay, not
-        // `config.cache_pricing`.
-        assert_eq!(
-            loaded.config.version,
-            routectl_router::CURRENT_CONFIG_VERSION
-        );
-        assert!(loaded.config.cache_pricing.is_empty());
-        assert!(
-            loaded
-                .catalog_overlay
-                .cells
-                .contains_key("openai-compat:grok-*"),
-            "the sidecar stamp must be folded into the catalog overlay by migration",
-        );
-
-        // Assert: config.toml itself was rewritten to version = 2.
-        let rewritten = std::fs::read_to_string(&cfg_path).expect("read rewritten config");
-        assert!(rewritten.contains("version = 2"), "rewritten: {rewritten}");
+        // Assert: the file was not touched -- no stamp, no rewrite.
+        let after = std::fs::read_to_string(&cfg_path).expect("read config after reject");
+        assert_eq!(after, body, "a rejected config must stay byte-identical");
     }
 
-    /// At `version >= CURRENT_CONFIG_VERSION`, the legacy sidecar is
-    /// intentionally NOT merged -- migration already folded it into the
-    /// overlay when the file was first upgraded to v2; merging it again on
-    /// every subsequent load would double-apply the same stamp through two
-    /// independent merge paths.
+    /// A current-version config loads unchanged: it passes the preflight,
+    /// the load never merges the legacy sidecar or mutates the file, and the
+    /// overlay -- untouched by this load -- stays as it was on disk.
     #[test]
     #[serial_test::serial]
-    fn load_effective_config_ignores_the_sidecar_at_current_version() {
-        // Arrange: a v2 config (no [cache_pricing] -- already migrated),
-        // plus a sidecar file that would otherwise reintroduce a stamp.
+    fn load_leaves_a_current_version_config_unchanged() {
+        // Arrange: a v2 config, plus a sidecar file that the load must NOT
+        // fold in (the load no longer merges sidecars at any version).
         let dir = tempfile::tempdir().expect("tempdir");
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
-        std::fs::write(
-            &cfg_path,
-            "version = 2\n[server]\nhost = \"127.0.0.1\"\nport = 4000\n",
-        )
-        .expect("write config.toml");
+        let body = "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 4000\n";
+        std::fs::write(&cfg_path, body).expect("write config.toml");
 
         let sidecar_dir = dir.path().join("routectl");
         std::fs::create_dir_all(&sidecar_dir).expect("create sidecar dir");
@@ -3055,11 +3021,18 @@ default = "claude"
         // Act
         let loaded = load_effective_config(&cfg_path).expect("load must succeed");
 
-        // Assert: the sidecar stamp is NOT merged into cache_pricing (which
-        // would then fail `validate_cache_pricing_retired`), and the
-        // overlay -- untouched by this load -- stays empty.
+        // Assert: version preserved, nothing folded, file byte-identical.
+        assert_eq!(
+            loaded.config.version,
+            routectl_router::CURRENT_CONFIG_VERSION
+        );
         assert!(loaded.config.cache_pricing.is_empty());
         assert!(loaded.catalog_overlay.cells.is_empty());
+        let after = std::fs::read_to_string(&cfg_path).expect("read config after load");
+        assert_eq!(
+            after, body,
+            "a current-version config must not be rewritten"
+        );
     }
 
     /// Cold-start posture: a config whose `version` is newer than this
@@ -3099,15 +3072,14 @@ default = "claude"
     #[test]
     #[serial_test::serial]
     fn load_effective_config_rejects_forwarded_provider_on_non_anthropic_host() {
-        // Arrange: `version = 2` skips the v1 -> v2 migration path so this
-        // test exercises only the credential-source validator, not the
-        // migration's file rewrite.
+        // Arrange: a current-version config so the load path exercises
+        // only the credential-source validator, not the version preflight.
         let dir = tempfile::tempdir().expect("tempdir");
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,
-            "version = 2\n\
+            "version = 3\n\
              [providers.sneaky]\n\
              kind = \"anthropic-api\"\n\
              base_url = \"https://evil.example.com\"\n\
@@ -3135,20 +3107,16 @@ default = "claude"
     #[test]
     #[serial_test::serial]
     fn load_effective_config_rejects_each_centralized_bad_config() {
-        // `version = 2` skips the v1 -> v2 migration so each case exercises
-        // only the validation gate.
+        // The loader preflight-rejects a stale version, and each remaining
+        // case is a valid v3 config that a centralized validator refuses.
         let cases = [
             (
                 "unknown-alias-target",
-                "version = 2\n[aliases]\nfast = \"ghost\"\n",
-            ),
-            (
-                "conflicting-retry-lists",
-                "version = 2\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n",
+                "version = 3\n[aliases]\nfast = \"ghost\"\n",
             ),
             (
                 "reserved-class-override",
-                "version = 2\n[retry.classes.feature-unsupported]\nfallback = false\n",
+                "version = 3\n[retry.classes.feature-unsupported]\nfallback = false\n",
             ),
         ];
 
@@ -3171,13 +3139,13 @@ default = "claude"
     #[tokio::test]
     #[serial_test::serial]
     async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_router() {
-        // Arrange: a good v2 config, an initial router built from it.
+        // Arrange: a good current-version config, an initial router built from it.
         let dir = tempfile::tempdir().unwrap();
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,
-            "version = 2\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+            "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
         )
         .unwrap();
 

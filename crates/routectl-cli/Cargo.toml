@@ -42,6 +42,11 @@ chrono.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 dirs = "6"
 subtle = "2"
+# `config migrate --dry-run` on a legacy (v1) file renders the candidate by
+# running the IO-performing v1->v2 rung against a throwaway copy, so a dry-run
+# provably cannot touch the real config or overlay. Already a runtime dep of
+# routectl-router (config_write), promoted here for the same discipline.
+tempfile = "3"
 # Per-process MITM seam nonce generation (proxy::split stamper +
 # ingress::MitmSeamNonce): OS CSPRNG bytes, base64url-encoded.
 rand.workspace = true
@@ -92,7 +97,6 @@ futures = { workspace = true }
 # needed by the MITM proxy's TLS-handshake tests (`proxy::ca`).
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util", "io-util"] }
 insta.workspace = true
-tempfile = "3"
 serial_test = "3"
 # Used by the `routectl usage` command tests to seed rows directly into a
 # temp usage DB via raw SQL. Test-only; the release binary never links it.

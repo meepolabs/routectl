@@ -601,17 +601,16 @@ unsupported_features   = ["web_search"]
 ## Retry and fallback defaults
 
 The default `[retry]` block falls back on every 4xx/5xx upstream
-response: `retry_allowlist` defaults to `[]` and `retry_denylist`
-defaults to `None`, so `RetryPolicy::is_fallbackable_status`
-(`crates/routectl-router/src/config.rs`) takes the "every 4xx/5xx"
-fall-through branch. This is the safest default for Cloudflare-fronted
-upstreams (opencode.ai, openrouter.ai, etc.), which surface
-upstream-origin failures through extended 5xx codes (520-527, 530)
-and would otherwise need each code listed by hand. Operators with
-bespoke upstream behavior can override either `retry_allowlist` (an
-explicit set of fallback codes -- everything else is terminal) OR
-`retry_denylist` (`400..=599` minus the listed codes) -- the two are
-mutually exclusive and setting both is a config-load error.
+response: fallback is decided per failure CLASS, and the baked class
+matrix (see below) marks every class fallbackable except `unknown`.
+This is the safest default for Cloudflare-fronted upstreams
+(opencode.ai, openrouter.ai, etc.), which surface upstream-origin
+failures through extended 5xx codes (520-527, 530). Operators with
+bespoke upstream behavior narrow or widen a specific class through
+`[retry.classes.<class>]` (a global per-class overlay) or a
+`[providers.X.class_overrides]` per-provider status remap -- the
+raw-status `retry_allowlist` / `retry_denylist` escape hatch was
+retired in config schema v3.
 
 ```toml
 [retry]
@@ -619,16 +618,15 @@ max_attempts                  = 2
 initial_backoff_ms            = 250
 backoff_multiplier            = 2.0
 jitter_ms                     = 50
-# Default: omit both lists -- every 4xx/5xx falls back. To narrow,
-# set EITHER an allowlist OR a denylist (not both):
-# retry_allowlist             = [408, 429, 500, 502, 503, 504]
-# retry_denylist              = [422]
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 probe_max_tokens              = 1             # fast-fail availability probes
 # Per-error-class caps (each overrides max_attempts for that class only):
 # retry_on_429                = 1             # rate-limits usually clear in one retry
 # retry_on_network            = 2             # flaky DNS/TLS/connect
+# To pin a class terminal (never fall back), set a per-class overlay:
+# [retry.classes.bad-request]
+# fallback = false
 ```
 
 `probe_max_tokens` (default `1`) fast-fails availability probes. A
@@ -656,13 +654,11 @@ classes independently avoids over- or under-retrying any one of them.
 | `retry_on_5xx`     | Option<u32> | None    | Cap for 5xx responses. Unset -> falls back to `max_attempts`. |
 | `retry_on_network` | Option<u32> | None    | Cap for network errors (status 0: DNS, TCP connect, TLS handshake, request body, request timeout). Unset -> effectively `max_attempts`. |
 
-Resolution lives in `RetryPolicy::retries_for_status`
-(`crates/routectl-router/src/config.rs`): each knob, when `Some`,
-replaces `max_attempts` for THAT class only. Both the 429 arm and the
-5xx arm are gated on `is_fallbackable_status` -- a 429 (or 5xx) that
-the allowlist excludes or the denylist names is non-retryable and
-yields 0 retries regardless of `retry_on_429` / `retry_on_5xx`, so it
-propagates to the caller immediately. They ship commented in
+Resolution lives in `RetryPolicy::resolved_class`
+(`crates/routectl-router/src/class_policy.rs`): each knob, when `Some`,
+feeds the retry-same cap for its class family. A class pinned
+non-fallbackable via `[retry.classes.<class>].fallback = false` is
+terminal regardless of its `retry_on_*` cap. They ship commented in
 [`examples/config.toml`](../examples/config.toml).
 
 Each `retry_on_*` knob above is exactly the retry-same cap source the
@@ -771,21 +767,15 @@ the upstream is actually unhealthy.
 
 #### Precedence
 
-1. An explicit `retry_allowlist` / `retry_denylist` entry naming a
-   status wins over class policy for THAT status only
-   (`RetryPolicy::explicit_status_override`).
-2. Otherwise, class policy (`resolved_class`, including any
-   `[retry.classes]` override and any `class_overrides` remap) governs.
-
-A non-empty `retry_allowlist` is not "named codes only": it decides
-EVERY `4xx`/`5xx` code (member = allow, non-member = deny), so it
-shadows class policy wholesale, not just for the codes it lists. A
-`retry_denylist` stays narrower -- it only opines on the codes it
-names.
-
-The raw lists remain the raw-status escape hatch: a code whose class
-default doesn't fit can be pinned by status without touching class
-policy at all.
+Class policy (`resolved_class`, including any `[retry.classes]` overlay
+and any `class_overrides` remap) governs the retry/fallback decision
+for every status. The probe fast-fail and the `UnknownProvider`
+always-fallback short-circuits are the only checks ahead of it. (The
+raw-status `retry_allowlist` / `retry_denylist` escape hatch that
+formerly took precedence per code was retired in config schema v3 --
+pin a class terminal with `[retry.classes.<class>].fallback = false`
+or remap a specific status with `[providers.X.class_overrides]`
+instead.)
 
 ### Honoring upstream resets (`max_honored_retry_after_ms`)
 
@@ -1999,8 +1989,8 @@ diagnostics reach every surface that loads config -- `config check`,
   config is parsed (check / serve / hot reload).
 - **Source lines on `config check`.** Semantic validation errors -- an
   alias chain naming a missing nickname, a model referencing an unknown
-  provider, a mutually-exclusive `retry_allowlist` + `retry_denylist`
-  pair, a reserved `[retry.classes.feature-unsupported]` override -- are
+  provider, a reserved `[retry.classes.feature-unsupported]` override --
+  are
   prefixed with `(line N): ` pointing at the line in your `config.toml`
   that produced them. This locating runs on `config check` only; it is a
   display aid that never changes which configs are accepted or rejected,

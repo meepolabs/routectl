@@ -881,7 +881,7 @@ fn empty_label_is_rejected_at_runtime() {
 fn config_check_surfaces_did_you_mean_for_unknown_field() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
-    std::fs::write(&config_path, "[server]\nprt = 8080\n").unwrap();
+    std::fs::write(&config_path, "version = 3\n[server]\nprt = 8080\n").unwrap();
     let path = config_path.to_str().unwrap();
 
     let (code, stderr) = run_routectl(&["--config", path, "config", "check"]);
@@ -899,7 +899,7 @@ fn config_check_surfaces_did_you_mean_for_unknown_field() {
 fn serve_cold_start_surfaces_did_you_mean_for_unknown_field() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
-    std::fs::write(&config_path, "[server]\nprt = 8080\n").unwrap();
+    std::fs::write(&config_path, "version = 3\n[server]\nprt = 8080\n").unwrap();
     let path = config_path.to_str().unwrap();
 
     let (code, stderr) = run_routectl(&["--config", path, "serve"]);
@@ -931,20 +931,20 @@ fn run_routectl_full(args: &[&str]) -> (i32, String, String) {
 }
 
 /// `config check` is the SHOWCASE validation surface: against a config that
-/// PARSES but is semantically invalid (`retry_allowlist` and `retry_denylist`
-/// set together), the real binary must exit non-zero AND render the full
+/// PARSES but is semantically invalid (a reserved `[retry.classes.feature-unsupported]`
+/// override), the real binary must exit non-zero AND render the full
 /// error list with the source-line prefix -- not abort on the load-time
-/// fail-fast gate that would print only the first plain error. `version = 2`
-/// keeps the file at the current version so no migration rewrites it and the
-/// `[retry]` block stays on its written line.
+/// fail-fast gate that would print only the first plain error. `version = 3`
+/// keeps the file at the current version so it loads and the block stays on
+/// its written line.
 #[test]
 fn config_check_renders_source_line_for_semantically_invalid_config() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
-    // `[retry]` is line 3 (version, blank line, then the block header).
+    // The reserved class block is line 3 (version, blank line, then header).
     std::fs::write(
         &config_path,
-        "version = 2\n\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n",
+        "version = 3\n\n[retry.classes.feature-unsupported]\nfallback = false\n",
     )
     .unwrap();
     let path = config_path.to_str().unwrap();
@@ -955,8 +955,8 @@ fn config_check_renders_source_line_for_semantically_invalid_config() {
         "a semantically-invalid config must fail check; stdout: {stdout}, stderr: {stderr}"
     );
     assert!(
-        stdout.contains("(line 3): ") && stdout.contains("[retry]"),
-        "expected the retry conflict rendered with its source line, got stdout: {stdout}"
+        stdout.contains("(line 3): ") && stdout.contains("[retry.classes.feature-unsupported]"),
+        "expected the reserved-class error rendered with its source line, got stdout: {stdout}"
     );
 }
 
@@ -970,7 +970,7 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
     let config_path = dir.path().join("config.toml");
     std::fs::write(
         &config_path,
-        "version = 2\n\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n",
+        "version = 3\n\n[retry.classes.feature-unsupported]\nfallback = false\n",
     )
     .unwrap();
     let path = config_path.to_str().unwrap();
@@ -982,8 +982,8 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
     );
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("[retry]"),
-        "expected the retry conflict surfaced, got stdout: {stdout}, stderr: {stderr}"
+        combined.contains("[retry.classes.feature-unsupported]"),
+        "expected the reserved-class error surfaced, got stdout: {stdout}, stderr: {stderr}"
     );
     assert!(
         !combined.contains("config check:"),
@@ -1002,13 +1002,6 @@ fn cfg_unknown_alias_target() -> Config {
     toml::from_str("[aliases]\nfast = \"ghost\"\n").expect("fixture must parse")
 }
 
-/// `retry_allowlist` and `retry_denylist` set together
-/// (`validate_retry_policy`).
-fn cfg_conflicting_retry_lists() -> Config {
-    toml::from_str("[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n")
-        .expect("fixture must parse")
-}
-
 /// The reserved `[retry.classes.feature-unsupported]` override
 /// (`validate_class_policy`).
 fn cfg_reserved_class_override() -> Config {
@@ -1019,7 +1012,6 @@ fn cfg_reserved_class_override() -> Config {
 fn bad_config_fixtures() -> Vec<(&'static str, Config)> {
     vec![
         ("unknown-alias-target", cfg_unknown_alias_target()),
-        ("conflicting-retry-lists", cfg_conflicting_retry_lists()),
         ("reserved-class-override", cfg_reserved_class_override()),
     ]
 }
@@ -1077,12 +1069,14 @@ fn prompt_size_rejects_each_centralized_bad_config() {
 // The rendered error/warning lines are printed by `check`; `validation_report`
 // exposes the same rendering without the secret-store IO so it is testable.
 
-/// A `[retry]` conflict error must be prefixed with the source line the
-/// `[retry]` block sits on when the raw config text is available.
+/// A `[retry.classes.feature-unsupported]` reserved-class error must be
+/// prefixed with the source line the block sits on when the raw config text
+/// is available.
 #[test]
 fn validation_report_prefixes_semantic_error_with_source_line() {
-    // `[retry]` is the 4th line (header, blank line, then the block).
-    let raw = "[server]\nhost = \"127.0.0.1\"\n\n[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n";
+    // The reserved class block is the 4th line (header, blank line, then it).
+    let raw =
+        "[server]\nhost = \"127.0.0.1\"\n\n[retry.classes.feature-unsupported]\nfallback = false\n";
     let config: Config = toml::from_str(raw).expect("fixture must parse");
 
     let report = commands::config::validation_report(&config, Some(raw));
@@ -1090,8 +1084,8 @@ fn validation_report_prefixes_semantic_error_with_source_line() {
     let retry_err = report
         .errors
         .iter()
-        .find(|e| e.contains("[retry]"))
-        .expect("the retry-list conflict must be reported");
+        .find(|e| e.contains("[retry.classes.feature-unsupported]"))
+        .expect("the reserved-class error must be reported");
     assert!(
         retry_err.starts_with("(line 4): "),
         "expected a source-line prefix, got: {retry_err}"
@@ -1102,10 +1096,10 @@ fn validation_report_prefixes_semantic_error_with_source_line() {
 /// renderer keeps the plain message rather than inventing a line number.
 #[test]
 fn validation_report_falls_back_to_plain_when_path_not_locatable() {
-    // The retry-list conflict derives the path `retry`, but the text handed
-    // to the report carries no `[retry]` block -- locate returns None and the
-    // message stays plain.
-    let cfg_raw = "[retry]\nretry_allowlist = [500]\nretry_denylist = [502]\n";
+    // The reserved-class error derives the path `retry.classes.feature-unsupported`,
+    // but the text handed to the report carries no such block -- locate returns
+    // None and the message stays plain.
+    let cfg_raw = "[retry.classes.feature-unsupported]\nfallback = false\n";
     let config: Config = toml::from_str(cfg_raw).expect("fixture must parse");
     let unrelated_raw = "[server]\nhost = \"127.0.0.1\"\n";
 
@@ -1114,14 +1108,14 @@ fn validation_report_falls_back_to_plain_when_path_not_locatable() {
     let retry_err = report
         .errors
         .iter()
-        .find(|e| e.contains("[retry]"))
-        .expect("the retry-list conflict must be reported");
+        .find(|e| e.contains("[retry.classes.feature-unsupported]"))
+        .expect("the reserved-class error must be reported");
     assert!(
         !retry_err.starts_with("(line "),
         "expected a plain fallback with no line prefix, got: {retry_err}"
     );
     assert!(
-        retry_err.starts_with("config: [retry]"),
+        retry_err.starts_with("config: [retry.classes.feature-unsupported]"),
         "expected the bare validator message, got: {retry_err}"
     );
 }
