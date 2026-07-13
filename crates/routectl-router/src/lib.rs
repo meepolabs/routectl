@@ -4,6 +4,7 @@
 //! resolves an incoming request's `model` against the configured aliases, and
 //! walks the fallback chain on `5xx`/`429`/timeout errors.
 
+pub mod activation;
 pub mod catalog;
 pub(crate) mod catalog_baked;
 #[doc(hidden)]
@@ -30,10 +31,15 @@ pub mod runtime_state;
 pub mod schema_gen;
 pub(crate) mod seat_pool;
 
+pub use activation::{
+    ActivatedChange, ActivationDelta, ActivationEntry, ActivationState, ActivationStatus,
+    DeactivatedChange, UnresolvedReason, compute_activation, diff as diff_activation,
+};
 pub use catalog::{
     BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
-    baked_table_rows, is_stale_today, lookup, lookup_baked_with_overrides, lookup_overlay_cell,
-    lookup_with_overrides, merge, stale_after_days, validate_overrides,
+    baked_table_rows, is_cataloged_provider_kind, is_stale_today, lookup,
+    lookup_baked_with_overrides, lookup_overlay_cell, lookup_with_overrides, merge,
+    stale_after_days, validate_overrides,
 };
 pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
 pub use catalog_import::{

@@ -24,7 +24,7 @@ use routectl_cli::handlers::ingress_handle::ingress_handle;
 use routectl_cli::ingress::MitmSeamNonce;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::server::AppState;
-use routectl_router::{Config, MitmConfig, Router};
+use routectl_router::{ActivationState, Config, MitmConfig, Router};
 use routectl_testkit::{CapturedEvent, with_capture};
 use routectl_usage::UsageWriter;
 use serde_json::{Value, json};
@@ -56,6 +56,7 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
     let state = Arc::new(AppState {
         router: Arc::new(ArcSwap::from_pointee(router)),
         usage,
+        activation: Arc::new(ArcSwap::from_pointee(ActivationState::default())),
         mitm_seam_nonce: Arc::new(MitmSeamNonce::generate()),
     });
     (state, dir)

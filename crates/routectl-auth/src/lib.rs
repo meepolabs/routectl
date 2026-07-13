@@ -9,4 +9,6 @@ pub use secret_ref::SecretRef;
 pub use store::SecretStore;
 
 #[cfg(feature = "oauth")]
-pub use oauth::{LoginOptions, OAuthError, OAuthStore, OAuthStoreProjectCache, SecretToken};
+pub use oauth::{
+    LocalProbe, LoginOptions, OAuthError, OAuthStore, OAuthStoreProjectCache, SecretToken,
+};

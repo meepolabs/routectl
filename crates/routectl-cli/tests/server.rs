@@ -554,6 +554,128 @@ async fn chat_completions_unknown_model_without_default_returns_error() {
     assert_eq!(body["error"]["type"], "unknown_alias");
 }
 
+/// Set an env var for the test's duration and restore the prior value on
+/// drop so an assertion failure cannot leak `XDG_CONFIG_HOME` into sibling
+/// tests.
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+impl EnvGuard {
+    // SAFETY: process-env mutation is unsynchronized, so every test that
+    // constructs an EnvGuard MUST be #[serial_test::serial]; sibling tests
+    // in this binary pass explicit config paths and do not read
+    // XDG_CONFIG_HOME, so no non-serial reader races the mutation.
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+}
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see EnvGuard::set -- restore runs under the same
+        // #[serial_test::serial] test that created the guard.
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn activated_inventory_never_synthesizes_routes() {
+    // A fully-activated OAuth inventory (a seeded, unexpired anthropic
+    // credential) must not leak into routing: with an EMPTY config (no
+    // providers / models / aliases), /v1/models stays empty and a direct
+    // dispatch still 404s UnknownAlias. Activation state lives on AppState
+    // as a sibling of the router swap -- physically outside the Router the
+    // dispatch path reads -- so it is unreachable from routing by
+    // construction. This pins that guarantee end-to-end over the HTTP
+    // surface.
+    use tokio::net::TcpListener;
+
+    let xdg = tempfile::tempdir().unwrap();
+    let _guard = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+
+    // Seed <xdg>/routectl/credentials.json with a Present anthropic token so
+    // the startup activation compute marks anthropic Activated.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let creds = json!({
+        "schema_version": 1,
+        "providers": {
+            "anthropic": {
+                "access_token": "activated-inventory-token",
+                "refresh_token": "activated-inventory-refresh",
+                "token_type": "Bearer",
+                "expires_at_unix": now + 3600,
+                "scopes": ["user:inference"],
+                "obtained_at_unix": now
+            }
+        }
+    });
+    let creds_path = xdg.path().join("routectl").join("credentials.json");
+    std::fs::create_dir_all(creds_path.parent().unwrap()).unwrap();
+    std::fs::write(&creds_path, serde_json::to_vec_pretty(&creds).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    // Empty config: no providers, models, or aliases at all.
+    let config = crate::common::isolate_usage_db(Arc::new(Config::default()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move {
+        routectl_cli::server::serve_on_listener(config, listener, None)
+            .await
+            .expect("server failed");
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let client = reqwest::Client::new();
+
+    // /v1/models lists ZERO entries -- activation synthesized no models.
+    let models: Value = client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        models["data"].as_array().map(Vec::len),
+        Some(0),
+        "activated inventory must not add any /v1/models entries: {models}"
+    );
+
+    // A direct dispatch still 404s UnknownAlias -- no ResolvedModel was
+    // synthesized from the activated provider.
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "an activated but unconfigured provider must not become routable"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "unknown_alias");
+}
+
 #[tokio::test]
 async fn server_fails_startup_when_referenced_provider_cannot_build() {
     // A provider whose creds can't resolve is fine if no model

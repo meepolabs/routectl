@@ -421,6 +421,47 @@ The human message reads `cache policy: auto-emit top-level breakpoint
 operator confirm at a glance which cache behaviors are live for this
 process without grepping the config.
 
+## Auto-activation inventory audit events
+
+routectl tracks which of its own OAuth providers (anthropic, codex, xai,
+antigravity) currently carry a usable LOCAL credential -- computed at
+server boot and recomputed on every config or credentials reload. Each
+transition into or out of the activated set emits one audit event. All
+share the stable message `activation inventory` (grep this to isolate the
+trail). The probe is local-only: it reads the in-memory OAuth token cache
+and never touches the network.
+
+| Level | Trigger condition | Key fields | Message |
+|---|---|---|---|
+| INFO | A provider became activated | `provider`, `kind`, `trigger`, `transition=activated`, `referenced_by_aliases` | `activation inventory` |
+| INFO | A provider became unresolved (lost its credential) | `provider`, `kind`, `trigger`, `transition=deactivated`, `reason`, `referenced_by_aliases` | `activation inventory` |
+| WARN | No OAuth credential store to probe (no HOME/XDG) | `trigger` | `activation inventory: no OAuth credential store available to probe` |
+
+Nothing is emitted when a recompute changes nothing (a routine token
+refresh that keeps every provider activated is silent). Field vocabulary:
+
+| Field | Meaning |
+|---|---|
+| `provider` | OAuth provider id (`anthropic`, `codex`, `xai`, `antigravity`). |
+| `kind` | The provider's own-credential config kind (`anthropic-api`, `openai-responses`, `openai-compat`, `gemini`). |
+| `trigger` | What caused the recompute: `startup`, `config_change`, or `credentials_change`. |
+| `transition` | `activated` or `deactivated`. |
+| `reason` | Deactivation reason code (deactivated only): `oauth_missing`, `oauth_expired`, `oauth_store_unavailable`, `not_cataloged`, or `unknown`. |
+| `referenced_by_aliases` | `true` when a configured provider consumes this credential AND is reachable via the alias table; `false` for a bare login with no matching config. |
+
+These fields carry only display-safe discriminants -- never a token, a
+filesystem path, or an env value. The initially-activated set at boot
+surfaces as `transition=activated` events with `trigger=startup`.
+
+```bash
+# Watch activation transitions (login / logout / expiry) live.
+ROUTECTL_LOG=info ./routectl serve 2>&1 | grep "activation inventory"
+
+# Only the deactivation reason codes.
+ROUTECTL_LOG=info ./routectl serve 2>&1 \
+  | grep "activation inventory" | grep transition=deactivated
+```
+
 ## Context-reduction log shapes
 
 The dispatch-path context reducer (see CONFIGURATION.md, "Context

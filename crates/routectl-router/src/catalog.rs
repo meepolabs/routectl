@@ -415,6 +415,19 @@ pub fn lookup(provider_kind: &str, model: &str, tier: Option<&str>) -> CatalogRo
         .unwrap_or_else(CatalogRow::sentinel)
 }
 
+/// True when the baked catalog table carries at least one row for
+/// `kind` -- the stable `kind_str()` provider-kind discriminant
+/// (`anthropic-api`, `openai-compat`, ...). Derived from [`TABLE`]
+/// itself, so it cannot drift from the cataloged kind set.
+///
+/// The coupling guard for callers (e.g. activation gating) that need to
+/// ask "is this provider kind cataloged?" without reaching into the
+/// baked-table internals ([`BakedCell`] / [`TABLE`] stay private).
+#[must_use]
+pub fn is_cataloged_provider_kind(kind: &str) -> bool {
+    TABLE.iter().any(|cell| cell.provider_kind == kind)
+}
+
 /// The distinct provider-kind tokens present in the baked table. Used by
 /// [`validate_overrides`] to surface a likely-typo provider_kind as a
 /// non-fatal warning. A `"*"` provider selector is a legitimate catch-all
@@ -892,6 +905,16 @@ mod tests {
         assert_eq!(r.rm, 0.10);
         assert_eq!(r.ttl_seconds, 300);
         assert_eq!(r.min_prefix_tokens, SENTINEL_MIN_PREFIX_TOKENS);
+    }
+
+    #[test]
+    fn is_cataloged_provider_kind_matches_baked_kinds_only() {
+        // Known stable kind_str discriminants present in the baked table.
+        assert!(is_cataloged_provider_kind("anthropic-api"));
+        assert!(is_cataloged_provider_kind("openai-compat"));
+
+        // A nonsense kind is not cataloged.
+        assert!(!is_cataloged_provider_kind("not-a-real-kind"));
     }
 
     #[test]
