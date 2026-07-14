@@ -931,4 +931,80 @@ default = \"gpt\"
             "the value must never be audited"
         );
     }
+
+    // -----------------------------------------------------------------
+    // Secret hygiene: a gate parse failure never echoes the offending
+    // source line or a verbatim mistyped value (either may carry a
+    // `literal:` credential). config set/unset renders gate failures
+    // through the shared redacting gate.
+    // -----------------------------------------------------------------
+
+    const FAKE_SECRET: &str = "sk-THIS-IS-A-FAKE-CREDENTIAL-value";
+
+    #[test]
+    fn gate_parse_failure_does_not_echo_a_secret_bearing_source_line() {
+        // An unknown field carrying a fake secret value: parse_config rejects
+        // it, and toml's diagnostic would frame the offending source line --
+        // carrying the secret -- unless the preview is redacted.
+        let candidate = format!(
+            "version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = 8787\nbogus_secret_key = \"{FAKE_SECRET}\"\n"
+        );
+
+        let errors = gate(&candidate).expect_err("an unknown field must fail the gate");
+        for e in &errors {
+            assert!(
+                !e.contains("FAKE-CREDENTIAL"),
+                "the secret-bearing source line must be redacted, got: {e}"
+            );
+        }
+        // The failure kind still classes the error and the header keeps the
+        // line/column for locating it; only the user-controlled value/name go.
+        assert!(
+            errors.iter().any(|e| e.contains("unknown field")),
+            "the redacted error must still class the failure, got: {errors:?}"
+        );
+        assert!(
+            errors.iter().all(|e| !e.contains("bogus_secret_key")),
+            "the user-controlled field name must be dropped, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn gate_type_mismatch_in_non_string_field_does_not_survive() {
+        // A fake secret mistyped into the numeric `port` field: serde renders
+        // `invalid type: string "...", expected u16`, embedding it verbatim on
+        // a clause the snippet-row filter never sees -- it must still be gone.
+        let candidate =
+            format!("version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = \"{FAKE_SECRET}\"\n");
+
+        let errors = gate(&candidate).expect_err("a type mismatch must fail the gate");
+        for e in &errors {
+            assert!(
+                !e.contains("FAKE-CREDENTIAL"),
+                "the mistyped secret must not survive redaction, got: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_quoted_secret_key_does_not_survive() {
+        // A `literal:` credential used as a quoted TOML key surfaces as the
+        // backtick token of an `unknown field` clause; it must be dropped while
+        // the schema candidate names survive.
+        let candidate = format!(
+            "version = 3\n\n[server]\nhost = \"127.0.0.1\"\nport = 8787\n\"literal:{FAKE_SECRET}\" = 1\n"
+        );
+
+        let errors = gate(&candidate).expect_err("a quoted secret key must fail the gate");
+        for e in &errors {
+            assert!(
+                !e.contains("FAKE-CREDENTIAL"),
+                "the quoted secret key must not survive redaction, got: {e}"
+            );
+            assert!(
+                !e.contains("literal:"),
+                "the literal credential prefix must not survive, got: {e}"
+            );
+        }
+    }
 }
