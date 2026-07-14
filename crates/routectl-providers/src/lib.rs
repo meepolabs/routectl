@@ -8,9 +8,12 @@
 //!     --features openai-compat,anthropic-api
 //!
 //! Per-model quirks (e.g. "drop temperature for o3-mini",
-//! "use adaptive thinking for Opus 4.7+") live in [`model_profile`] as a
-//! single declarative table consumed by every provider.
+//! "use adaptive thinking for Opus 4.7+") live in `model_profile` as a
+//! single declarative table. Only the openai-compat egress reads it
+//! today, so it is gated on that feature to stay dead-code-free in lean
+//! single-feature builds.
 
+#[cfg(feature = "openai-compat")]
 pub(crate) mod model_profile;
 
 pub(crate) mod http_client;
