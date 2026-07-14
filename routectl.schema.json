@@ -263,6 +263,32 @@
       },
       "type": "object"
     },
+    "CapabilityConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window), and each per-field `#[serde(default)]`\nkeeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets.\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.",
+      "properties": {
+        "decay_hours": {
+          "default": 48,
+          "description": "Hours a learned negative acts before it lapses into a single\nre-probe. Default 48.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Master switch for the learned-capability subsystem. Default on.",
+          "type": "boolean"
+        },
+        "inferred_window_hours": {
+          "default": 1,
+          "description": "Hours a pending single-observation inferred signal waits for a\nconfirming second observation before it resets. Default 1.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ClassPolicy": {
       "additionalProperties": false,
       "description": "Per-class retry / fallback overlay. Each leaf is independently\noptional: an absent leaf defers to the baked class default, a present\nleaf overrides only itself. Unknown keys are rejected so a typo cannot\nsilently become a no-op.",
@@ -1766,6 +1792,15 @@
       "default": {},
       "description": "Operator-facing LEGACY `[cache_pricing]` field-level override table\nfor the baked catalog economics rows (`crate::catalog`). Slated for\nretirement once its data migrates into the catalog overlay\n(`crate::catalog_overlay`). Each\nkey is a `\"provider_kind:model_glob\"` selector (e.g.\n`\"openai-compat:grok-*\"`); each value is a sparse\n[`crate::catalog::CachePricingOverride`] -- only the fields the\noperator wants to correct, the rest inheriting the baked-in value.\nAn empty / omitted block is the norm; this exists to patch a cell\nthat drifted before a routectl release can re-bake it. An override\nthat sets `wm` below the conservative sentinel must carry\n`override_acknowledges_cost_risk = true` or the merge is rejected by\nthe consuming cost gate. The selector keys are NOT validated against\nthe baked table here (an unmatched selector is simply inert).",
       "type": "object"
+    },
+    "capability": {
+      "$ref": "#/$defs/CapabilityConfig",
+      "default": {
+        "decay_hours": 48,
+        "enabled": true,
+        "inferred_window_hours": 1
+      },
+      "description": "Operator-facing `[capability]` block. Kill switch plus tempo knobs\nfor the learned-capability subsystem. A missing block keeps all\ndefaults: enabled, a 48h decay window, a 1h inferred-signal window.\nThe table is deliberately top-level (not nested under `[server]`)\nso a later override layer can nest per-target overrides under the\nsame parent."
     },
     "log": {
       "$ref": "#/$defs/LogConfig",

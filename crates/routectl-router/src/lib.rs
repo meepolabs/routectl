@@ -5,6 +5,7 @@
 //! walks the fallback chain on `5xx`/`429`/timeout errors.
 
 pub mod activation;
+pub mod capability_matcher;
 pub mod catalog;
 pub(crate) mod catalog_baked;
 #[doc(hidden)]
@@ -29,6 +30,7 @@ pub mod factory;
 pub(crate) mod feature_keys;
 pub mod glob;
 pub mod k_estimator;
+pub mod learned_capability;
 pub mod resolved;
 pub mod router;
 pub mod runtime_state;
