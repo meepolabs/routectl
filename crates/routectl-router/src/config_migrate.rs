@@ -513,8 +513,9 @@ fn nearest_class_token(class: &FailureClass) -> Option<String> {
 /// intended for it.
 fn guidance_for_code(code: u16, intended_fallback: bool) -> String {
     let g = class_guidance_for_status(code);
-    let primary = nearest_class_token(&g.primary)
-        .unwrap_or_else(|| "(no stable class -- classify by hand)".to_string());
+    let Some(primary) = nearest_class_token(&g.primary) else {
+        return format!("status {code} has no failure class; remove it or classify by hand");
+    };
     let alternatives: Vec<String> = g
         .alternatives
         .iter()
@@ -1329,6 +1330,22 @@ mod tests {
         assert_eq!(*source, RefusalSource::Both);
         assert_eq!(*codes, vec![503, 400]);
         assert_eq!(doc.to_string(), before);
+    }
+
+    #[test]
+    fn guidance_for_out_of_taxonomy_status_renders_prose_not_placeholder_key() {
+        // Arrange: 999 is a valid u16 (so it is not Malformed) but has no
+        // stable failure class.
+        let out_of_taxonomy = 999u16;
+
+        // Act
+        let line = guidance_for_code(out_of_taxonomy, true);
+
+        // Assert: prose guidance, never a bracketed pseudo-key.
+        assert!(line.contains("has no failure class"), "{line}");
+        assert!(line.contains("classify by hand"), "{line}");
+        assert!(!line.contains("[retry.classes."), "{line}");
+        assert!(!line.contains("(no stable class"), "{line}");
     }
 
     // -----------------------------------------------------------------------
