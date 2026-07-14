@@ -9,8 +9,8 @@
 use rusqlite::Connection;
 
 use crate::schema::{
-    CREATE_META_TABLE, CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS,
-    META_SCHEMA_VERSION, SCHEMA_VERSION,
+    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_META_TABLE, CREATE_REQUESTS_TABLE,
+    CREATE_TS_START_INDEX, META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 
 /// Errors raised while migrating the usage DB. The caller can degrade
@@ -261,6 +261,28 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v8 -> v9 step atomically: create the `capability_learn_events`
+/// table, bump `PRAGMA user_version` to 9, and update the human-readable
+/// `meta.schema_version` row. All in one transaction so a crash mid-step
+/// rolls back rather than landing a table-without-version state. The DDL is
+/// `CREATE TABLE IF NOT EXISTS`, so a re-run is a no-op.
+///
+/// Unlike the column-adding steps, this creates a WHOLE NEW TABLE. A fresh
+/// DB reaches this arm too (v0->v1 stamps user_version=1, and the loop runs
+/// every step up to `SCHEMA_VERSION`), so `IF NOT EXISTS` covers both the
+/// fresh-create and the migrated-open paths.
+fn migrate_v8_to_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(CREATE_CAPABILITY_LEARN_EVENTS_TABLE)?;
+    tx.execute_batch("PRAGMA user_version = 9")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "9"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -313,6 +335,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             5 => migrate_v5_to_v6(conn)?,
             6 => migrate_v6_to_v7(conn)?,
             7 => migrate_v7_to_v8(conn)?,
+            8 => migrate_v8_to_v9(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
