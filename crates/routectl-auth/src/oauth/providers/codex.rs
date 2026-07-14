@@ -477,9 +477,11 @@ pub(super) fn parse_token_response_json(body: &str, is_refresh: bool) -> OAuthRe
 /// - `expires_at_unix` comes from the access_token JWT's `exp` claim --
 ///   an absolute Unix timestamp, NOT `now + expires_in`. A JWT without
 ///   `exp` saturates to 0 (looks expired everywhere; the safe direction).
-/// - `refresh_token`: on refresh, fall back to `prior_refresh` when the
-///   upstream omits a fresh one. On exchange (`prior_refresh == None`),
-///   a missing refresh_token is a hard error.
+/// - `refresh_token`: a present-but-empty value is treated the same as an
+///   absent one -- it can never be used to refresh. On refresh, fall back
+///   to `prior_refresh` when the upstream omits (or empties) it. On
+///   exchange (`prior_refresh == None`), a missing refresh_token is a hard
+///   error.
 /// - `account_id` comes from the access_token JWT's nested auth claim;
 ///   `email` falls back to the id_token JWT when present.
 fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<TokenRecord> {
@@ -487,7 +489,10 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         .access_token
         .ok_or_else(|| OAuthError::TokenEndpoint("token response missing access_token".into()))?;
 
-    let refresh_token = match (parsed.refresh_token, prior_refresh) {
+    let refresh_token = match (
+        parsed.refresh_token.filter(|rt| !rt.is_empty()),
+        prior_refresh,
+    ) {
         (Some(rt), _) => rt,
         (None, Some(prior)) => prior.to_string(),
         (None, None) => {
@@ -623,6 +628,22 @@ mod tests {
         // one (OpenAI rotates lazily).
         let access = jwt(serde_json::json!({ "exp": 1_900_000_000u64 }));
         let body = serde_json::json!({ "access_token": access }).to_string();
+        let parsed = parse_token_response_json(&body, true).unwrap();
+        let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
+        assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
+    }
+
+    #[test]
+    fn refresh_with_empty_refresh_token_preserves_prior() {
+        // A present-but-empty refresh_token on the refresh path is treated
+        // as absent -- fall back to the prior validated token rather than
+        // storing the unusable empty value.
+        let access = jwt(serde_json::json!({ "exp": 1_900_000_000u64 }));
+        let body = serde_json::json!({
+            "access_token": access,
+            "refresh_token": ""
+        })
+        .to_string();
         let parsed = parse_token_response_json(&body, true).unwrap();
         let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
