@@ -1,3 +1,4 @@
+#![cfg(feature = "oauth")]
 //! Refresh-flow tracing coverage for the codex (chatgpt-oauth) OAuth
 //! provider. Drives the refresh response decoder through both the
 //! success and the 401-`refresh_token_expired` paths under a captured
