@@ -1,3 +1,4 @@
+#![cfg(feature = "oauth")]
 //! Refresh-flow tracing coverage for the xAI (Grok) OAuth provider. Drives
 //! the refresh response decoder through both the success and the
 //! 400/401-`invalid_grant` paths under a captured `tracing` subscriber and
