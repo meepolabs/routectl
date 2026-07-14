@@ -1,0 +1,28 @@
+---
+source: crates/routectl-providers/tests/legacy_capability_config_equivalence.rs
+expression: body
+---
+{
+  "additionalModelRequestFields": {
+    "anthropic_beta": [
+      "context-1m-2025-08-07"
+    ],
+    "top_k": 40
+  },
+  "additionalModelResponseFieldPaths": [
+    "/stop_sequence"
+  ],
+  "inferenceConfig": {
+    "maxTokens": 64
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "hello"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

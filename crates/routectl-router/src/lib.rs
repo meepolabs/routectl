@@ -32,6 +32,7 @@ pub(crate) mod feature_keys;
 pub mod glob;
 pub mod k_estimator;
 pub mod learned_capability;
+pub mod override_registry;
 pub mod resolved;
 pub mod router;
 pub mod runtime_state;
@@ -71,12 +72,12 @@ pub use catalog_state::{
     selector_key as catalog_state_selector_key,
 };
 pub use config::{
-    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, Config, ConfigVersionError,
-    HistoryReasoning, LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry,
-    PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
-    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
-    VersionTooNewError, preflight_config_version, preflight_legacy_mitm_credential_source,
-    validate_cache_pricing_retired,
+    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CapabilityConfig, Config,
+    ConfigVersionError, HistoryReasoning, LegacyMitmCredentialSourceError, LogConfig, MitmConfig,
+    ModelEntry, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
+    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig,
+    TrimConfig, UsageConfig, VersionTooNewError, preflight_config_version,
+    preflight_legacy_mitm_credential_source, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
@@ -88,6 +89,7 @@ pub use config_locate::locate_dotted_path;
 pub use config_migrate::{
     MigrateError, MigrationError, MigrationOutcome, Refusal, RefusalSource, StepOutcome,
     V1Migration, migrate_to_current, migrate_v1_to_v2, migrate_v2_to_v3,
+    normalize_capability_overrides,
 };
 pub use config_path::{PathError, PathShape, validate_config_path};
 pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};
@@ -114,6 +116,10 @@ pub use k_estimator::{
     Confidence, EstimateSource, K_SESSION_CAPACITY, KEstimate, KEstimator, KQuery, KSessionKey,
     KSessionStore, KSessionWindow, LedgerBackedK, LedgerReader, LedgerSampleRow, Sample,
     ShadowOutcome, ShadowStore, rebuild_into,
+};
+pub use override_registry::{
+    OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,
+    validate_capability_overrides,
 };
 pub use resolved::ResolvedModel;
 pub use router::{

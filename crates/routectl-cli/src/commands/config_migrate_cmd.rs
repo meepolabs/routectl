@@ -45,7 +45,7 @@ use routectl_core::{Error, Result};
 use routectl_router::{
     CURRENT_CONFIG_VERSION, CachePricingOverride, Config, ConfigWriteError, EditOutcome,
     MigrateError, Refusal, StepOutcome, V1Migration, edit_config_toml, migrate_to_current,
-    migrate_v2_to_v3, parse_config,
+    migrate_v2_to_v3, normalize_capability_overrides, parse_config,
 };
 use toml_edit::DocumentMut;
 
@@ -235,8 +235,17 @@ pub fn run_at(
         snapshot
     };
 
+    // The same-version v3 normalization runs for a file already at the
+    // current version; a lower version runs the version-bump rung instead.
+    // The commit closure must reproduce EXACTLY the transform the main flow
+    // gated, so it dispatches on the same condition.
+    let normalize_only = from_version >= CURRENT_CONFIG_VERSION;
     let result = edit_config_toml::<CommitError, _>(config_path, &base, |d| {
-        migrate_v2_to_v3(d).map_err(CommitError::Refused)?;
+        if normalize_only {
+            normalize_capability_overrides(d).map_err(CommitError::Refused)?;
+        } else {
+            migrate_v2_to_v3(d).map_err(CommitError::Refused)?;
+        }
         match gate(&d.to_string()) {
             Ok(_) => Ok(EditOutcome::Modified),
             Err(_) => Err(CommitError::Revalidation),
@@ -269,10 +278,18 @@ pub fn run_at(
         "written",
         None,
     );
-    println!(
-        "migrated config to version {to_version}. Restart any running routectl daemon onto the \
-         matching binary to pick up the change."
-    );
+    if from_version == to_version {
+        println!(
+            "normalized config at version {to_version} (folded legacy `unsupported_features` \
+             into [capability.overrides]). Restart any running routectl daemon onto the matching \
+             binary to pick up the change."
+        );
+    } else {
+        println!(
+            "migrated config to version {to_version}. Restart any running routectl daemon onto \
+             the matching binary to pick up the change."
+        );
+    }
     Ok(MigrateResult::Migrated { from_version })
 }
 
@@ -444,6 +461,7 @@ const fn refusal_kind(refusal: &Refusal) -> &'static str {
     match refusal {
         Refusal::BehaviorBearing { .. } => "behavior_bearing",
         Refusal::Malformed { .. } => "malformed",
+        Refusal::EgressAllowlist { .. } => "egress_allowlist",
     }
 }
 
@@ -467,8 +485,47 @@ fn removed_keys(snapshot_text: &str, from_version: u32) -> Vec<String> {
         if from_version <= LEGACY_CONFIG_VERSION && doc.contains_key("cache_pricing") {
             removed.push("[cache_pricing] (folded into the catalog overlay)".to_string());
         }
+        if from_version >= CURRENT_CONFIG_VERSION {
+            collect_unsupported_features_removals(&doc, &mut removed);
+        }
     }
     removed
+}
+
+/// Append the provider / model `unsupported_features` keys the same-version
+/// v3 normalization folds into `[capability.overrides]`, for the dry-run
+/// summary.
+fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<String>) {
+    if let Some(providers) = doc.get("providers").and_then(|i| i.as_table_like()) {
+        for (name, item) in providers.iter() {
+            if item
+                .as_table_like()
+                .is_some_and(|t| t.contains_key("unsupported_features"))
+            {
+                removed.push(format!(
+                    "[providers.{name}].unsupported_features (folded into \
+                     [capability.overrides.{name}].unsupported)"
+                ));
+            }
+        }
+    }
+    if let Some(models) = doc.get("models").and_then(|i| i.as_table_like()) {
+        for (nick, item) in models.iter() {
+            let Some(entry) = item.as_table_like() else {
+                continue;
+            };
+            if entry.contains_key("unsupported_features") {
+                let provider = entry.get("provider").and_then(|p| p.as_str());
+                match provider {
+                    Some(provider) => removed.push(format!(
+                        "[models.{nick}].unsupported_features (folded into \
+                         [capability.overrides.\"{provider}:{nick}\"].unsupported)"
+                    )),
+                    None => removed.push(format!("[models.{nick}].unsupported_features")),
+                }
+            }
+        }
+    }
 }
 
 fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, removed: &[String]) {
@@ -478,7 +535,11 @@ fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, remo
         println!();
     }
     println!("--- end candidate ---");
-    println!("summary: migrates config from version {from_version} to {to_version}");
+    if from_version == to_version {
+        println!("summary: normalizes config at version {to_version} (no version bump)");
+    } else {
+        println!("summary: migrates config from version {from_version} to {to_version}");
+    }
     if removed.is_empty() {
         println!("  (no keys removed; version stamp only)");
     } else {
@@ -952,5 +1013,161 @@ default = \"gpt\"
             .expect("a migrate audit event");
         assert_eq!(audit.field("outcome"), Some("refused"));
         assert_eq!(audit.field("refusal_kind"), Some("behavior_bearing"));
+    }
+
+    // -----------------------------------------------------------------
+    // Same-version v3 normalization: legacy unsupported_features fold into
+    // [capability.overrides]; egress allowlists and conflicts refuse.
+    // -----------------------------------------------------------------
+
+    /// A v3 config carrying legacy provider AND model `unsupported_features`
+    /// plus a valid provider/model/alias so the folded result passes the gate.
+    const V3_WITH_LEGACY: &str = "\
+# operator note: keep me
+version = 3
+
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[providers.fast]
+kind = \"openai-compat\"
+base_url = \"http://127.0.0.1:1\"
+api_key_ref = \"literal:test-key\"
+unsupported_features = [\"web_search\"]
+
+[models.gpt]
+provider = \"fast\"
+upstream = \"gpt-4o\"
+unsupported_features = [\"computer_use\"]
+
+[aliases]
+default = \"gpt\"
+";
+
+    /// A plain v3 config with no legacy fields at all.
+    const V3_CLEAN: &str = "\
+version = 3
+
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[providers.fast]
+kind = \"openai-compat\"
+base_url = \"http://127.0.0.1:1\"
+api_key_ref = \"literal:test-key\"
+
+[models.gpt]
+provider = \"fast\"
+upstream = \"gpt-4o\"
+
+[aliases]
+default = \"gpt\"
+";
+
+    #[test]
+    fn v3_legacy_lists_normalize_into_capability_overrides_and_keys_removed() {
+        let f = fixture(V3_WITH_LEGACY);
+        let result = run_at(&f.config, &f.overlay, false, true).expect("normalize");
+        assert_eq!(result, MigrateResult::Migrated { from_version: 3 });
+
+        let text = read(&f.config);
+        assert!(!text.contains("unsupported_features"), "{text}");
+        assert!(text.contains("version = 3"), "{text}");
+        assert!(text.contains("[capability.overrides.fast]"), "{text}");
+        assert!(
+            text.contains("[capability.overrides.\"fast:gpt\"]"),
+            "{text}"
+        );
+        assert!(text.contains("# operator note: keep me"), "{text}");
+        // The committed file re-validates and loads with no legacy keys left.
+        gate(&text).expect("normalized config must pass the gate");
+    }
+
+    #[test]
+    fn v3_no_legacy_fields_is_already_current_and_writes_nothing() {
+        let f = fixture(V3_CLEAN);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let result = run_at(&f.config, &f.overlay, false, true).expect("already current");
+        assert_eq!(result, MigrateResult::AlreadyCurrent);
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "a plain v3 file must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn v3_egress_allowlist_refuses_byte_identical() {
+        let body = V3_WITH_LEGACY.replace(
+            "[server]\n",
+            "[bedrock]\nallowed_betas = [\"beta-1\"]\n\n[server]\n",
+        );
+        let f = fixture(&body);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let err = run_at(&f.config, &f.overlay, false, true).expect_err("egress allowlist refuses");
+        assert!(err.to_string().contains("allowed_betas"), "err: {err}");
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "a refused normalization must leave the file byte-identical"
+        );
+    }
+
+    #[test]
+    fn v3_egress_allowlist_refusal_audit_names_the_kind() {
+        let body = V3_WITH_LEGACY.replace(
+            "[server]\n",
+            "[bedrock]\nallowed_betas = [\"beta-1\"]\n\n[server]\n",
+        );
+        let f = fixture(&body);
+        let events = routectl_testkit::capture_events(|| {
+            let _ = run_at(&f.config, &f.overlay, false, true);
+        });
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("outcome"), Some("refused"));
+        assert_eq!(audit.field("refusal_kind"), Some("egress_allowlist"));
+    }
+
+    #[test]
+    fn v3_conflicting_cell_refuses_via_the_gate_byte_identical() {
+        // Legacy provider list routes `web_search` away while a new
+        // force_supported entry marks the SAME cell supported: after folding
+        // the legacy list into `unsupported`, the shared gate's conflict
+        // check rejects, and the file stays byte-identical.
+        let body = V3_WITH_LEGACY.replace(
+            "[aliases]\n",
+            "[capability.overrides.fast]\nforce_supported = [\"web_search\"]\n\n[aliases]\n",
+        );
+        let f = fixture(&body);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let err = run_at(&f.config, &f.overlay, false, true).expect_err("conflict must refuse");
+        assert!(err.to_string().contains("config error"), "err: {err}");
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "a conflicting normalization must leave the file byte-identical"
+        );
+    }
+
+    #[test]
+    fn v3_normalize_dry_run_renders_candidate_and_writes_nothing() {
+        let f = fixture(V3_WITH_LEGACY);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let result = run_at(&f.config, &f.overlay, true, false).expect("dry-run");
+        assert_eq!(result, MigrateResult::DryRun);
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "dry-run must not write"
+        );
     }
 }
