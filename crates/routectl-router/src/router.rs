@@ -4,7 +4,7 @@
 //! with exponential backoff. Per-provider runtime gates (RPM bucket,
 //! circuit breaker) skip unhealthy providers in the chain.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -15,12 +15,14 @@ use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, RoutectlInternal,
     TokenCount,
     cache_control::{MAX_BREAKPOINTS, compute_frozen_floor, validate_source},
+    capability::{SignalTier, normalize_capability_key},
     context_reduction::{ReductionOutcome, apply_json_minify},
     failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify},
     sanitize_for_log, scan_volatile,
 };
 use serde_json::Value;
 
+use crate::capability_matcher::match_capability;
 use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::{
     AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
@@ -152,6 +154,26 @@ pub struct Router {
     /// treats the first turn after a reload as `FirstSeen`, which is the
     /// safe default (no false misfire on a fresh fingerprint after a reload).
     shadow_store: Arc<crate::k_estimator::ShadowStore>,
+    /// In-memory learned-capability registry (the `k_session_store`
+    /// pattern): per-(target, feature) negatives the dispatch path learns
+    /// from upstream request faults. Interior-locked and mutated through
+    /// `&self`, so it is held behind an `Arc` and shared, never cloned per
+    /// request. Constructed from the `[capability]` decay / inferred-window
+    /// knobs; the kill switch is NOT read here (the act / learn sites gate
+    /// on it). Carried across a hot-reload by `carry_over_learned_from`,
+    /// but ONLY when the catalog version and overlay revision are both
+    /// unchanged -- either bump invalidates every learned negative because
+    /// the fresher pricing / capability truth must win.
+    learned_capabilities: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
+    /// Baked catalog table version this Router was built against
+    /// (`catalog_baked::CATALOG_VERSION`). Compared old-vs-new in
+    /// `carry_over_learned_from`: a bump invalidates the learned registry.
+    catalog_version: u32,
+    /// Catalog-overlay revision this Router was built against. Zero until
+    /// `note_overlay_revision` records the revision the resolved-model
+    /// table was stamped with. Compared old-vs-new in
+    /// `carry_over_learned_from`: a change invalidates the learned registry.
+    overlay_revision: u64,
     /// Lock-free router-side observability counters. Not carried over on
     /// a hot-reload rebuild (a reset is benign for observability, same
     /// rationale as `round_robin`).
@@ -185,6 +207,26 @@ struct RouterMetrics {
     /// `FailureClass::FeatureUnsupported` (a requested capability the
     /// upstream rejected). Bumped at both dispatch error arms.
     feature_unsupported_total: AtomicU64,
+    /// Learned negatives that reached the acting state (self-identifying
+    /// on the first observation, inferred on the confirming second).
+    /// Bumped by the learn path (later act / learn wiring).
+    learned_negatives_total: AtomicU64,
+    /// Re-probes admitted after a learned negative's decay window lapsed.
+    /// Bumped by the dispatch path when it claims the single probe slot
+    /// (later act / learn wiring).
+    probe_attempts_total: AtomicU64,
+    /// Admitted re-probes that hit the same capability rejection again.
+    /// Bumped when a probe outcome is settled as a same-capability
+    /// rejection (later act / learn wiring).
+    probe_failures_total: AtomicU64,
+    /// Learned registries dropped on a hot-reload because the catalog
+    /// version or overlay revision changed. Bumped by
+    /// `carry_over_learned_from`.
+    invalidations_total: AtomicU64,
+    /// Requests whose chain survived only via the de-prioritized learned
+    /// tail (D17 soft-drop). Bumped by the dispatch path when the tail is
+    /// entered (later D17 wiring).
+    d17_tail_total: AtomicU64,
 }
 
 impl RouterMetrics {
@@ -196,6 +238,26 @@ impl RouterMetrics {
     fn incr_feature_unsupported(&self) {
         self.feature_unsupported_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_learned_negatives(&self) {
+        self.learned_negatives_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_probe_attempts(&self) {
+        self.probe_attempts_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_probe_failures(&self) {
+        self.probe_failures_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_invalidations(&self) {
+        self.invalidations_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_d17_tail(&self) {
+        self.d17_tail_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read the cumulative unknown-upstream-classification count.
@@ -211,6 +273,34 @@ impl RouterMetrics {
     #[cfg(test)]
     fn feature_unsupported_total(&self) -> u64 {
         self.feature_unsupported_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative learned-registry invalidation count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn invalidations_total(&self) -> u64 {
+        self.invalidations_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative admitted-re-probe count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn probe_attempts_total(&self) -> u64 {
+        self.probe_attempts_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative same-capability re-probe-failure count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn probe_failures_total(&self) -> u64 {
+        self.probe_failures_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative D17 learned-tail entry count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn d17_tail_total(&self) -> u64 {
+        self.d17_tail_total.load(Ordering::Relaxed)
     }
 }
 
@@ -242,6 +332,40 @@ impl RouterOptions {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// A single learned-capability observation captured on a dispatch error
+/// arm, riding out on [`DispatchMeta`] to the usage-capture layer. The
+/// router does not depend on the ledger writer, so learn events travel
+/// on the dispatch meta rather than being written here.
+///
+/// `feature_key` is already normalized (via `normalize_capability_key`),
+/// so the writer and any future warm-rebuild replayer key off identical
+/// strings. `remapped` is always `false` by construction (the capture
+/// gate rejects a config-remapped class); it is carried so a replay can
+/// filter defensively. No request body, prompt, or upstream message text
+/// ever enters this struct -- only the classifier's structured facts.
+#[derive(Debug, Clone)]
+pub struct CapabilityLearnEvent {
+    /// Breaker state key (nickname-or-provider) of the rejecting target.
+    pub state_key: String,
+    /// Normalized capability key the rejection named.
+    pub feature_key: String,
+    /// Stable provider-kind token of the rejecting target.
+    pub provider_kind: String,
+    /// Whether the evidence was self-identifying or inferred.
+    pub signal_tier: SignalTier,
+    /// Observation count on the entry after this observation.
+    pub observations: u32,
+    /// The upstream request-fault status (400 or 422) that carried the
+    /// rejection.
+    pub upstream_status: u16,
+    /// Always `false` here (a remapped class never reaches capture);
+    /// persisted for defensive replay filtering.
+    pub remapped: bool,
+    /// The request's derived feature set at capture time. Replay verifies
+    /// the learned capability was actually in flight.
+    pub request_features: Vec<String>,
 }
 
 /// Router-scoped accounting facts about how a single dispatch was
@@ -401,6 +525,13 @@ pub struct DispatchMeta {
     /// near-lossless pass did not run (below trigger) OR the resolved
     /// row's context window is unknown (fail-closed). Recording only.
     pub would_trim_context_fraction: Option<f64>,
+    /// Learned-capability observations captured on the dispatch error
+    /// arm(s) for this request. Empty on the common (non-capability)
+    /// path; carries one event per eligible, deduped, acting observation
+    /// (self-identifying on the first, inferred on the confirming second)
+    /// so the usage-capture layer can persist them without the router
+    /// depending on the ledger writer.
+    pub learned_capabilities: Vec<CapabilityLearnEvent>,
 }
 
 impl DispatchMeta {
@@ -432,6 +563,7 @@ impl DispatchMeta {
             would_trim_recorder_version: None,
             would_trim_raw_marks: None,
             would_trim_context_fraction: None,
+            learned_capabilities: Vec::new(),
         }
     }
 
@@ -485,24 +617,31 @@ pub struct DispatchedStream {
 /// filter's decision seam reads at the right level of intent.
 type FeatureKey = String;
 
-/// Which static list flagged a feature as unsupported for a target.
-/// The feature filter's decision site returns this so the skip log can
-/// distinguish a provider-scoped restriction from a model-scoped one.
-/// A later increment adds a `Learned` variant here for the adaptive cache.
+/// What flagged a feature as unsupported for a target. The feature
+/// filter's decision site returns this so the skip log can distinguish a
+/// provider-scoped restriction from a model-scoped one, and so the filter
+/// loop can tell a hard static drop from a soft learned de-prioritization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterSource {
     /// Matched the per-provider `unsupported_features` list.
     ProviderStatic,
     /// Matched the per-model `unsupported_features` list.
     ModelStatic,
+    /// Matched a non-expired acting negative in the learned-capability
+    /// registry. A soft signal: the target is de-prioritized to the tail,
+    /// never hard-dropped.
+    Learned,
 }
 
 impl FilterSource {
-    /// Stable lowercase token for the skip-log `source` field.
+    /// Stable lowercase token for the skip-log `source` field. The
+    /// `"learned"` token is a CONTRACT consumed by downstream features
+    /// (action dispatch, doctor labels, the future status endpoint).
     const fn as_str(self) -> &'static str {
         match self {
             Self::ProviderStatic => "provider",
             Self::ModelStatic => "model",
+            Self::Learned => "learned",
         }
     }
 }
@@ -642,6 +781,28 @@ struct DispatchTarget {
     /// native `matched_by`. Empty (the default, and the value every
     /// constructor starts with) leaves native classification untouched.
     class_overrides: BTreeMap<u16, FailureClass>,
+    /// Catalog capability priors for this target, merged (baked + overlay)
+    /// and copied off `ResolvedModel::effective_row` at chain expansion. An
+    /// absent key means NO PRIOR (distinct from `Some(false)`, an asserted
+    /// absence). Empty when the resolved cell is `Disabled` / `Missing` or
+    /// carries no capability data. The third precedence baseline
+    /// (override -> learned -> prior); read via
+    /// [`DispatchTarget::capability_prior`]. NO filter behavior consumes it
+    /// yet -- the prior-driven drop lands when the override layer wires the
+    /// full precedence chain.
+    capabilities: BTreeMap<String, bool>,
+}
+
+impl DispatchTarget {
+    /// The catalog capability prior for `feature`: `Some(true)` /
+    /// `Some(false)` when the resolved cell asserts support / absence, or
+    /// `None` when the cell carries no prior for the key. The lowest-
+    /// precedence baseline in the override -> learned -> prior chain; NO
+    /// filter consumes it in this increment.
+    #[allow(dead_code)]
+    fn capability_prior(&self, feature: &str) -> Option<bool> {
+        self.capabilities.get(feature).copied()
+    }
 }
 
 impl Router {
@@ -690,6 +851,16 @@ impl Router {
             crate::k_estimator::LedgerBackedK::new(k_session_store.clone()),
         );
         let shadow_store = Arc::new(crate::k_estimator::ShadowStore::default());
+        // Registry tempo comes from the `[capability]` knobs (hours ->
+        // Duration); the kill switch is deliberately NOT read here -- the
+        // act / learn sites gate on it, so a disabled subsystem keeps the
+        // registry resident but inert and a hot re-enable is instant.
+        let learned_capabilities =
+            Arc::new(crate::learned_capability::LearnedCapabilityRegistry::new(
+                Duration::from_hours(config.capability.decay_hours),
+                Duration::from_hours(config.capability.inferred_window_hours),
+                crate::learned_capability::DEFAULT_MAX_ENTRIES,
+            ));
         let has_forwarded_provider = config
             .providers
             .values()
@@ -705,6 +876,9 @@ impl Router {
             k_session_store,
             k_estimator,
             shadow_store,
+            learned_capabilities,
+            catalog_version: crate::catalog_baked::CATALOG_VERSION,
+            overlay_revision: 0,
             metrics: RouterMetrics::default(),
             has_forwarded_provider,
         }
@@ -839,6 +1013,57 @@ impl Router {
     pub fn carry_over_k_store_from(&mut self, previous: &Self) {
         self.k_session_store
             .import_entries(previous.k_session_store.export_entries());
+    }
+
+    /// Record the catalog-overlay revision this Router was stamped
+    /// against. Called by the CLI builder immediately after the resolved
+    /// models are merged with the overlay, so `carry_over_learned_from`
+    /// can detect a revision change across a hot-reload and invalidate the
+    /// learned registry. Left at zero for build paths that apply no
+    /// overlay (which never carry learned state anyway).
+    pub const fn note_overlay_revision(&mut self, revision: u64) {
+        self.overlay_revision = revision;
+    }
+
+    /// Carry the previous Router's learned-capability registry into this
+    /// freshly-built Router during a hot-reload -- but ONLY when the
+    /// catalog version AND the overlay revision are both unchanged.
+    ///
+    /// The learned negatives are inferences about how a target priced or
+    /// rejected a capability under the catalog / overlay in force when they
+    /// were learned. If either the baked catalog version or the overlay
+    /// revision changed, that pricing / capability truth is now fresher
+    /// than anything the registry holds, so clear-on-change wins: the new
+    /// Router starts with an EMPTY registry (its construction default) and
+    /// re-learns from live traffic. Restart-re-probe is the accepted model;
+    /// a full clear trivially satisfies "fresher truth is never silently
+    /// overridden."
+    ///
+    /// When both are unchanged, every entry rides across at full fidelity
+    /// (decay windows, in-flight probe slots, backoff counters intact) so a
+    /// config-only reload does not un-learn a valid negative.
+    ///
+    /// Called by the hot-reload coordinator in routectl-cli immediately
+    /// after building a replacement Router and before swapping it in,
+    /// alongside the other carry-over calls.
+    pub fn carry_over_learned_from(&mut self, previous: &Self) {
+        let catalog_changed = self.catalog_version != previous.catalog_version;
+        let overlay_changed = self.overlay_revision != previous.overlay_revision;
+        if catalog_changed || overlay_changed {
+            self.metrics.incr_invalidations();
+            tracing::warn!(
+                catalog_changed,
+                overlay_changed,
+                previous_catalog_version = previous.catalog_version,
+                catalog_version = self.catalog_version,
+                previous_overlay_revision = previous.overlay_revision,
+                overlay_revision = self.overlay_revision,
+                "catalog/overlay changed across reload; clearing learned-capability registry",
+            );
+            return;
+        }
+        self.learned_capabilities
+            .import_entries(previous.learned_capabilities.export_entries());
     }
 
     /// Record one live cache-reuse observation into the per-session K
@@ -1385,7 +1610,16 @@ impl Router {
     /// AND every chain entry got filtered. The error message names the
     /// offending feature key(s) so the operator's triage starts from
     /// the right place.
-    fn dispatch_chain_for_request(&self, req: &ChatRequest) -> Result<Vec<DispatchTarget>> {
+    ///
+    /// The second tuple element carries the re-probes the filter admitted
+    /// (a lapsed learned negative whose single probe slot this request
+    /// claimed). Each one MUST be settled by the dispatch path -- success,
+    /// same-capability rejection, or other error -- or the entry's
+    /// `in_flight` slot latches and the target routes away permanently.
+    fn dispatch_chain_for_request(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<(Vec<DispatchTarget>, Vec<ProbeAdmission>)> {
         let chain = self.dispatch_chain(
             &req.model,
             req.routectl_internal.inbound_session_key.as_deref(),
@@ -1393,7 +1627,9 @@ impl Router {
         let tools = req.tools.as_deref().unwrap_or(&[]);
         let features =
             crate::feature_keys::derive_feature_keys(tools, req.provider_extras.as_ref());
-        self.filter_chain_by_features(chain, &features, &req.model)
+        let mut admissions = Vec::new();
+        let chain = self.filter_chain_by_features(chain, &features, &req.model, &mut admissions)?;
+        Ok((chain, admissions))
     }
 
     /// Filter the resolved chain by request features. Per-provider
@@ -1414,13 +1650,30 @@ impl Router {
         chain: Vec<DispatchTarget>,
         features: &[String],
         alias: &str,
+        admissions: &mut Vec<ProbeAdmission>,
     ) -> Result<Vec<DispatchTarget>> {
         if features.is_empty() || chain.is_empty() {
             return Ok(chain);
         }
-        let mut filtered: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
+        // SOFT-DROP: a static (provider / model) match hard-drops the
+        // target; a learned match moves it to a de-prioritized tail. The
+        // result is [supported...] ++ [learned tail], each in original
+        // chain order.
+        let mut supported: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
+        let mut tail: Vec<DispatchTarget> = Vec::new();
         for target in chain {
-            match self.unsupported_feature_for_target(&target, features) {
+            match self.unsupported_feature_for_target(&target, features, admissions) {
+                None => supported.push(target),
+                Some((feature, FilterSource::Learned)) => {
+                    tracing::debug!(
+                        provider = %target.provider_name,
+                        model = %target.nickname.as_deref().unwrap_or(""),
+                        feature = %feature,
+                        source = %FilterSource::Learned.as_str(),
+                        "target de-prioritized to tail: learned-capability negative",
+                    );
+                    tail.push(target);
+                }
                 Some((feature, source)) => {
                     tracing::debug!(
                         provider = %target.provider_name,
@@ -1430,12 +1683,11 @@ impl Router {
                         "target skipped: feature in unsupported_features list",
                     );
                 }
-                None => {
-                    filtered.push(target);
-                }
             }
         }
-        if filtered.is_empty() {
+        // NotImplemented fires ONLY when the static lists hard-dropped
+        // every entry (nothing survived, not even the learned tail).
+        if supported.is_empty() && tail.is_empty() {
             let feature_list = features.join(", ");
             tracing::warn!(
                 alias = %alias,
@@ -1448,7 +1700,20 @@ impl Router {
                 format!("no provider in chain supports features: {feature_list}"),
             ));
         }
-        Ok(filtered)
+        // A chain alive SOLELY via the learned tail proceeds into route-
+        // away-with-floor territory: WARN and count the D17 tail entry.
+        if supported.is_empty() {
+            self.metrics.incr_d17_tail();
+            tracing::warn!(
+                alias = %alias,
+                features = %features.join(", "),
+                tail_len = tail.len(),
+                "alias chain survives only via the de-prioritized learned tail; \
+                 attempting learned-negative targets as a route-away floor",
+            );
+        }
+        supported.extend(tail);
+        Ok(supported)
     }
 
     /// The single decision site for "is any requested feature
@@ -1456,20 +1721,25 @@ impl Router {
     /// FIRST matched `(feature, source)` or `None` if the target
     /// supports every requested feature.
     ///
-    /// The union is over two static lists: the per-PROVIDER list (keyed
-    /// on `target.provider_name`, via the provider table) and the
-    /// per-MODEL list (carried on the target, keyed on its nickname).
-    /// A feature is unsupported if EITHER list contains it. Provider is
-    /// consulted first, so a feature listed at both scopes reports
-    /// `ProviderStatic`.
+    /// The union is over two static lists plus the learned registry: the
+    /// per-PROVIDER list (keyed on `target.provider_name`, via the provider
+    /// table), the per-MODEL list (carried on the target, keyed on its
+    /// nickname), and -- when the kill switch is on -- a non-expired acting
+    /// learned negative for this `(state_key, feature)`. Static lists are
+    /// consulted FIRST so a feature listed statically reports its static
+    /// source (and hard-drops) ahead of any learned signal; provider is
+    /// consulted before model.
     ///
-    /// A later increment adds a `Learned` arm here -- this stays the one
-    /// decision site so the adaptive cache plugs in without touching the
-    /// filter loop.
+    /// The learned consult is admission-bearing: an expired negative whose
+    /// re-probe slot this caller claims returns `None` (route to the target
+    /// and test it), counting the probe attempt as a side effect and
+    /// recording the claim in `admissions` so the dispatch path can settle
+    /// it. The `in_flight` flip itself happens inside `acting_negative_for`.
     fn unsupported_feature_for_target(
         &self,
         target: &DispatchTarget,
         features: &[FeatureKey],
+        admissions: &mut Vec<ProbeAdmission>,
     ) -> Option<(FeatureKey, FilterSource)> {
         let provider_unsupported = self
             .config
@@ -1488,6 +1758,47 @@ impl Router {
                 .any(|u| u == feature)
             {
                 return Some((feature.clone(), FilterSource::ModelStatic));
+            }
+        }
+        // Learned pass: consult the adaptive registry only when the kill
+        // switch is on and the target carries a provider kind (legacy /
+        // direct-construction targets without one skip the registry).
+        // Scan EVERY feature: an earlier feature's `ProbeAdmitted` must not
+        // short-circuit a later feature's `RouteAway`, and `acting_negative_for`
+        // flips `in_flight` as a side effect on `ProbeAdmitted`, so every
+        // admission has to reach `admissions` for its guard to settle the slot
+        // -- dropping one leaks `in_flight` and blocks that feature from ever
+        // re-probing. Any `RouteAway` tail-drops the target after the full scan.
+        if self.config.capability.enabled
+            && let Some(provider_kind) = target.provider_kind
+        {
+            let now = Instant::now();
+            let mut route_away: Option<FeatureKey> = None;
+            for feature in features {
+                match self.learned_capabilities.acting_negative_for(
+                    &target.state_key,
+                    feature,
+                    provider_kind,
+                    now,
+                ) {
+                    crate::learned_capability::RoutingDecision::RouteAway(_) => {
+                        if route_away.is_none() {
+                            route_away = Some(feature.clone());
+                        }
+                    }
+                    crate::learned_capability::RoutingDecision::ProbeAdmitted => {
+                        self.metrics.incr_probe_attempts();
+                        admissions.push(ProbeAdmission {
+                            state_key: target.state_key.clone(),
+                            feature: normalize_capability_key(feature, provider_kind),
+                            provider_kind,
+                        });
+                    }
+                    crate::learned_capability::RoutingDecision::Allow => {}
+                }
+            }
+            if let Some(feature) = route_away {
+                return Some((feature, FilterSource::Learned));
             }
         }
         None
@@ -1518,7 +1829,15 @@ impl Router {
         opts: RouterOptions,
         meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
-        let chain = self.dispatch_chain_for_request(&req)?;
+        let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
+        // Re-probes the chain filter admitted, indexed by the target that
+        // must settle each. Consumed per chain-iteration into a
+        // `LearnedProbeGuard` so the probe settles exactly once regardless of
+        // how the target's dispatch concludes.
+        let mut pending_probes: HashMap<String, ProbeAdmission> = probe_admissions
+            .into_iter()
+            .map(|admission| (admission.state_key.clone(), admission))
+            .collect();
         // Whether the CLIENT'S request carried a captured forwarded
         // bearer, computed ONCE before the chain loop (mirroring
         // `is_probe` below). This is a request-global observability
@@ -1546,11 +1865,29 @@ impl Router {
         let auto_cache_plan =
             AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
         let mut last_err: Option<Error> = None;
+        // One learned-capability observation per request per
+        // (state_key, feature): the error arm fires per attempt, so this
+        // set stops a same-request retry from manufacturing a second
+        // observation. See `observe_for_learning`.
+        let mut learn_dedupe: HashSet<(String, String)> = HashSet::new();
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
             let state_key = target.state_key.as_str();
             let model = target.upstream.as_str();
+            // Learned re-probe settle guard for THIS target, scoped to the
+            // whole chain-iteration (persists across same-provider retries,
+            // drops -> OtherError on any exit). Inert unless the filter
+            // admitted a probe for this state_key.
+            let mut learned_probe_guard = match pending_probes.remove(state_key) {
+                Some(admission) => LearnedProbeGuard::armed(
+                    self.learned_capabilities.clone(),
+                    admission.state_key,
+                    admission.feature,
+                    admission.provider_kind,
+                ),
+                None => LearnedProbeGuard::inert(),
+            };
             let Some(provider) = target.provider.clone() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
                 if opts.disable_fallbacks {
@@ -1754,6 +2091,9 @@ impl Router {
                         // else the client's requested alias. Internal
                         // accounting keys off `DispatchMeta`, not this field.
                         resp.model = resolve_reported_model(target, &req.model);
+                        // A 2xx proves the capability is not rejected: clear
+                        // any learned negative this dispatch re-probed.
+                        learned_probe_guard.settle_success();
                         return Ok(resp);
                     }
                     Err(e) => {
@@ -1922,6 +2262,17 @@ impl Router {
                             is_probe,
                             is_forwarded,
                         );
+                        self.observe_for_learning(
+                            &e,
+                            &cf,
+                            remapped,
+                            target,
+                            is_forwarded,
+                            &req,
+                            &mut learn_dedupe,
+                            meta,
+                            &mut learned_probe_guard,
+                        );
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
                             // slot this attempt claimed. A no-op when a
@@ -2073,7 +2424,21 @@ impl Router {
     /// to bypass an operator rate limit or an open breaker.
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        let chain = self.dispatch_chain_for_request(&req)?;
+        let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
+        // A token-count is not a messages-capability test, so a re-probe the
+        // filter admitted here settles OtherError: release the in_flight slot
+        // and leave the entry expired for the next real request to re-probe,
+        // never latching it in flight.
+        let now = Instant::now();
+        for admission in probe_admissions {
+            self.learned_capabilities.record_probe_outcome(
+                &admission.state_key,
+                &admission.feature,
+                admission.provider_kind,
+                crate::learned_capability::ProbeOutcome::OtherError,
+                now,
+            );
+        }
         let mut saw_capable = false;
         for candidate in chain {
             if candidate.provider_kind != Some(COUNT_TOKENS_CAPABLE_KIND) {
@@ -2330,7 +2695,13 @@ impl Router {
         opts: RouterOptions,
         meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        let chain = self.dispatch_chain_for_request(&req)?;
+        let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
+        // See `complete_inner`: re-probes the filter admitted, indexed by the
+        // target that must settle each into a `LearnedProbeGuard`.
+        let mut pending_probes: HashMap<String, ProbeAdmission> = probe_admissions
+            .into_iter()
+            .map(|admission| (admission.state_key.clone(), admission))
+            .collect();
         // See `complete_inner`: request-global observability dimension
         // ONLY, fed to `emit_class_observability`. The per-target
         // `use_forwarded_credential` flag drives the model-rewrite
@@ -2347,11 +2718,27 @@ impl Router {
         let auto_cache_plan =
             AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
         let mut last_err: Option<Error> = None;
+        // One learned-capability observation per request per
+        // (state_key, feature): the error arm fires per attempt, so this
+        // set stops a same-request retry from manufacturing a second
+        // observation. See `observe_for_learning`.
+        let mut learn_dedupe: HashSet<(String, String)> = HashSet::new();
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
             let state_key = target.state_key.as_str();
             let model = target.upstream.as_str();
+            // See `complete_inner`: learned re-probe settle guard, scoped to
+            // the whole chain-iteration; drops -> OtherError on any exit.
+            let mut learned_probe_guard = match pending_probes.remove(state_key) {
+                Some(admission) => LearnedProbeGuard::armed(
+                    self.learned_capabilities.clone(),
+                    admission.state_key,
+                    admission.feature,
+                    admission.provider_kind,
+                ),
+                None => LearnedProbeGuard::inert(),
+            };
             let Some(provider) = target.provider.clone() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
                 if opts.disable_fallbacks {
@@ -2548,6 +2935,9 @@ impl Router {
                         // BreakerAccounting owns the tail. Disarm so a drop here
                         // does not free a slot a later probe may hold.
                         probe_guard.disarm();
+                        // A first chunk proves the capability is not rejected:
+                        // clear any learned negative this dispatch re-probed.
+                        learned_probe_guard.settle_success();
                         // Stamp the client-visible label on every Ok chunk
                         // (including the terminal / usage-only chunk) before
                         // the breaker wrap. The closure owns the label String
@@ -2697,6 +3087,17 @@ impl Router {
                             is_probe,
                             is_forwarded,
                         );
+                        self.observe_for_learning(
+                            &e,
+                            &cf,
+                            remapped,
+                            target,
+                            is_forwarded,
+                            &req,
+                            &mut learn_dedupe,
+                            meta,
+                            &mut learned_probe_guard,
+                        );
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
                             // slot this attempt claimed. A no-op when a
@@ -2823,6 +3224,126 @@ impl Router {
             remapped,
             remap_status,
         });
+    }
+
+    /// Learn-path capture, called from both dispatch error arms beside
+    /// [`Router::emit_class_observability`]. On an eligible, deduped
+    /// capability rejection it records a learned negative in the registry,
+    /// emits a structured WARN, and (once the entry is acting) rides a
+    /// [`CapabilityLearnEvent`] out on `meta`.
+    ///
+    /// Every gate short-circuits, so a common (non-capability) failure
+    /// pays only the cheap early checks. The full eligibility gate (all
+    /// must hold): the kill switch is on; the upstream fault is a request
+    /// fault (400/422); the class was not operator-remapped; the request
+    /// did not carry a forwarded bearer; the matcher attributes the fault
+    /// to a capability; that capability is not the operator-remap
+    /// provenance token; and the capability is in the request's re-derived
+    /// feature set (the local-validation guardrail against learning a
+    /// negative for a capability the request never asked for).
+    ///
+    /// `dedupe` carries one entry per `(state_key, feature_key)` for the
+    /// life of a single request: the error arm fires per attempt, so a
+    /// same-request retry (or a per-target re-entry) must never manufacture
+    /// a second observation and falsely confirm an inferred signal.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_for_learning(
+        &self,
+        err: &Error,
+        cf: &ClassifiedFailure,
+        remapped: bool,
+        target: &DispatchTarget,
+        is_forwarded: bool,
+        req: &ChatRequest,
+        dedupe: &mut HashSet<(String, String)>,
+        meta: &mut DispatchMeta,
+        probe_guard: &mut LearnedProbeGuard,
+    ) {
+        if !self.config.capability.enabled {
+            return;
+        }
+        let Error::Upstream {
+            status: status @ (400 | 422),
+            ..
+        } = err
+        else {
+            return;
+        };
+        let upstream_status = *status;
+        if remapped || is_forwarded {
+            return;
+        }
+        let Some(provider_kind) = target.provider_kind else {
+            return;
+        };
+        let Some((feature_key, tier)) = match_capability(provider_kind, err, cf) else {
+            return;
+        };
+        if feature_key == crate::class_policy::OPERATOR_REMAP_CAPABILITY {
+            return;
+        }
+        let request_features = crate::feature_keys::derive_feature_keys(
+            req.tools.as_deref().unwrap_or(&[]),
+            req.provider_extras.as_ref(),
+        );
+        if !request_features.iter().any(|f| f == &feature_key) {
+            return;
+        }
+        let state_key = target.state_key.clone();
+        // If this target was admitted as the single re-probe for this same
+        // capability, the rejection SETTLES the probe (capped backoff owns the
+        // observation bump and expiry) instead of feeding the observe path.
+        // The dedupe key is inserted too, so a same-request retry that hits
+        // this arm again does not re-observe the entry the probe refreshed.
+        if probe_guard.matches(&state_key, &feature_key, provider_kind) {
+            probe_guard.settle_same_capability();
+            self.metrics.incr_probe_failures();
+            dedupe.insert((state_key, feature_key));
+            return;
+        }
+        // One observation per request per (state_key, feature): a retry or
+        // per-target re-entry that hits this arm again is dropped here.
+        if !dedupe.insert((state_key.clone(), feature_key.clone())) {
+            return;
+        }
+
+        let outcome = self.learned_capabilities.observe(
+            &state_key,
+            &feature_key,
+            provider_kind,
+            tier,
+            Instant::now(),
+        );
+        let acting = matches!(outcome, crate::learned_capability::ObserveOutcome::Acting);
+        let observations = self
+            .learned_capabilities
+            .snapshot()
+            .into_iter()
+            .find(|entry| entry.state_key == state_key && entry.feature_key == feature_key)
+            .map_or(0, |entry| entry.observations);
+
+        tracing::warn!(
+            state_key = %state_key,
+            feature_key = %feature_key,
+            signal_tier = tier.as_str(),
+            observations,
+            acting,
+            "learned-capability negative observed",
+        );
+
+        if acting {
+            self.metrics.incr_learned_negatives();
+            meta.learned_capabilities.push(CapabilityLearnEvent {
+                state_key,
+                feature_key,
+                provider_kind: provider_kind.to_string(),
+                signal_tier: tier,
+                observations,
+                upstream_status,
+                remapped,
+                request_features,
+            });
+        }
     }
 
     /// Run RPM bucket + circuit breaker. Returns `Some((kind, err))` if
@@ -3803,10 +4324,21 @@ fn resolve_reported_model(target: &DispatchTarget, req_model: &str) -> String {
     }
 }
 
+/// The merged catalog capability priors for a resolved model, cloned off
+/// its `EffectiveRow`. Empty when the cell is `Disabled` / `Missing` (the
+/// conservative no-prior baseline) or carries no capability data.
+fn catalog_capabilities(effective_row: &EffectiveRow) -> BTreeMap<String, bool> {
+    effective_row
+        .priced()
+        .map(|row| row.capabilities.clone())
+        .unwrap_or_default()
+}
+
 /// Convert a chain of `Arc<ResolvedModel>` into the `DispatchTarget`
 /// shape the dispatch loop walks. Hoisted out of `dispatch_chain`
 /// so the three resolution branches share one builder.
 fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
+    let capabilities = catalog_capabilities(&m.effective_row);
     DispatchTarget {
         provider_name: m.provider_name.clone(),
         provider_kind: None,
@@ -3830,6 +4362,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         model: m,
         selection_decision: None,
         class_overrides: BTreeMap::new(),
+        capabilities,
     }
 }
 
@@ -3847,6 +4380,7 @@ fn dispatch_target_for_seat(
     seat: &crate::seat_pool::SeatTarget,
     provider_kind: Option<&'static str>,
 ) -> DispatchTarget {
+    let capabilities = catalog_capabilities(&m.effective_row);
     DispatchTarget {
         provider_name: m.provider_name.clone(),
         provider_kind,
@@ -3868,6 +4402,7 @@ fn dispatch_target_for_seat(
         model: m.clone(),
         selection_decision: None,
         class_overrides: BTreeMap::new(),
+        capabilities,
     }
 }
 
@@ -4034,6 +4569,118 @@ impl Drop for ProbeSlotGuard {
             // this drop, freeing it here opens at most a transient extra probe
             // window -- never a failure record, never a latch.
             state.lock().release_probe_slot();
+        }
+    }
+}
+
+/// A lapsed learned negative whose single re-probe slot a request claimed
+/// while filtering its chain. `feature` is the NORMALIZED capability key, so
+/// settling it targets the exact registry entry `acting_negative_for`
+/// claimed. Carried out of the filter so the dispatch path can settle the
+/// probe.
+struct ProbeAdmission {
+    state_key: String,
+    feature: String,
+    provider_kind: &'static str,
+}
+
+/// Settles a learned-capability re-probe when the dispatch of its admitted
+/// target concludes -- the [`ProbeSlotGuard`] pattern applied to the learned
+/// registry's `in_flight` slot rather than the breaker's.
+///
+/// Armed for a target the chain filter admitted as the single re-probe for
+/// `(state_key, feature)`; inert otherwise. Held across the whole
+/// chain-iteration (including same-provider retries, which stay within the
+/// iteration). A definitive verdict settles explicitly and disarms:
+/// [`settle_success`](Self::settle_success) clears the entry,
+/// [`settle_same_capability`](Self::settle_same_capability) refreshes it with
+/// capped backoff. Any other way of leaving the target -- fallback, terminal
+/// error, gate block, cancellation -- drops the guard, which records
+/// `OtherError`: the `in_flight` slot is released and the entry stays expired
+/// so the next request re-probes (a transient must never clear a valid
+/// negative).
+struct LearnedProbeGuard {
+    /// `Some` while armed; `None` once an outcome settled the probe or the
+    /// target was never a re-probe admission.
+    registry: Option<Arc<crate::learned_capability::LearnedCapabilityRegistry>>,
+    state_key: String,
+    feature: String,
+    provider_kind: &'static str,
+}
+
+impl LearnedProbeGuard {
+    /// Arm a guard for a target admitted as the single re-probe.
+    const fn armed(
+        registry: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
+        state_key: String,
+        feature: String,
+        provider_kind: &'static str,
+    ) -> Self {
+        Self {
+            registry: Some(registry),
+            state_key,
+            feature,
+            provider_kind,
+        }
+    }
+
+    /// An inert guard for a target that was not a re-probe admission; its
+    /// drop is a no-op.
+    const fn inert() -> Self {
+        Self {
+            registry: None,
+            state_key: String::new(),
+            feature: String::new(),
+            provider_kind: "",
+        }
+    }
+
+    /// True when this guard tracks a live probe for exactly this key.
+    fn matches(&self, state_key: &str, feature: &str, provider_kind: &str) -> bool {
+        self.registry.is_some()
+            && self.state_key == state_key
+            && self.feature == feature
+            && self.provider_kind == provider_kind
+    }
+
+    /// The probe succeeded (2xx): clear the entry, then disarm.
+    fn settle_success(&mut self) {
+        if let Some(registry) = self.registry.take() {
+            registry.record_probe_outcome(
+                &self.state_key,
+                &self.feature,
+                self.provider_kind,
+                crate::learned_capability::ProbeOutcome::Success,
+                Instant::now(),
+            );
+        }
+    }
+
+    /// The probe hit the same capability rejection again: refresh with capped
+    /// backoff, then disarm.
+    fn settle_same_capability(&mut self) {
+        if let Some(registry) = self.registry.take() {
+            registry.record_probe_outcome(
+                &self.state_key,
+                &self.feature,
+                self.provider_kind,
+                crate::learned_capability::ProbeOutcome::SameCapabilityRejection,
+                Instant::now(),
+            );
+        }
+    }
+}
+
+impl Drop for LearnedProbeGuard {
+    fn drop(&mut self) {
+        if let Some(registry) = &self.registry {
+            registry.record_probe_outcome(
+                &self.state_key,
+                &self.feature,
+                self.provider_kind,
+                crate::learned_capability::ProbeOutcome::OtherError,
+                Instant::now(),
+            );
         }
     }
 }
@@ -5051,6 +5698,156 @@ mod tests {
         );
         let observed_windows: Vec<&KSessionWindow> = entries.iter().map(|(_, w)| w).collect();
         assert_eq!(observed_windows, vec![&win_b, &win_c, &win_a]);
+    }
+
+    #[test]
+    fn router_new_builds_learned_registry_reflecting_config_knobs() {
+        use routectl_core::capability::SignalTier;
+        use std::time::{Duration, Instant};
+
+        // Arrange: a `[capability]` block with a non-default 1h decay so the
+        // smoke test can prove the registry was built from the config knobs
+        // (not the registry's own hard-coded default).
+        let mut config = Config::default();
+        config.capability.decay_hours = 1;
+        config.capability.inferred_window_hours = 1;
+        let router = Router::new(Arc::new(config));
+
+        // Assert: a fresh registry is present and empty.
+        assert!(router.learned_capabilities.is_empty());
+
+        // A self-identifying negative acts, then lapses into a re-probe
+        // exactly at the configured 1h decay -- not the registry default.
+        let t0 = Instant::now();
+        router.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            t0,
+        );
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "nick",
+                "web_search",
+                "openai-compat",
+                t0 + Duration::from_mins(30),
+            ),
+            crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+            "must still act well inside the configured decay window",
+        );
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "nick",
+                "web_search",
+                "openai-compat",
+                t0 + Duration::from_hours(1) + Duration::from_secs(1),
+            ),
+            crate::learned_capability::RoutingDecision::ProbeAdmitted,
+            "must lapse into a re-probe just past the configured 1h decay",
+        );
+    }
+
+    #[test]
+    fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
+        use routectl_core::capability::SignalTier;
+        use std::time::Instant;
+
+        // Arrange: learn a negative in the outgoing Router; both Routers
+        // share the same catalog version and overlay revision (the
+        // config-only reload case).
+        let config = Arc::new(Config::default());
+        let before = Router::new(config.clone());
+        before.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+        let mut after = Router::new(config);
+        assert_eq!(after.catalog_version, before.catalog_version);
+        assert_eq!(after.overlay_revision, before.overlay_revision);
+
+        // Act
+        after.carry_over_learned_from(&before);
+
+        // Assert: the negative rode across untouched; no invalidation.
+        assert_eq!(after.learned_capabilities.snapshot().len(), 1);
+        assert_eq!(after.metrics.invalidations_total(), 0);
+    }
+
+    #[test]
+    fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
+        use routectl_core::capability::SignalTier;
+        use std::time::Instant;
+
+        // Arrange
+        let config = Arc::new(Config::default());
+        let before = Router::new(config.clone());
+        before.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+        let mut after = Router::new(config);
+        // Simulate a baked-catalog version bump across the rebuild.
+        after.catalog_version = before.catalog_version + 1;
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            after.carry_over_learned_from(&before);
+        });
+
+        // Assert: fresher catalog truth wins -- registry starts empty, one
+        // WARN names the catalog trigger, invalidation counter bumped.
+        assert!(after.learned_capabilities.is_empty());
+        assert_eq!(after.metrics.invalidations_total(), 1);
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("catalog bump must emit a WARN");
+        assert_eq!(warn.field("catalog_changed"), Some("true"));
+        assert_eq!(warn.field("overlay_changed"), Some("false"));
+    }
+
+    #[test]
+    fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
+        use routectl_core::capability::SignalTier;
+        use std::time::Instant;
+
+        // Arrange: the outgoing Router was built against overlay revision 3.
+        let config = Arc::new(Config::default());
+        let mut before = Router::new(config.clone());
+        before.note_overlay_revision(3);
+        before.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+        // The rebuild picked up a newer overlay revision.
+        let mut after = Router::new(config);
+        after.note_overlay_revision(4);
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            after.carry_over_learned_from(&before);
+        });
+
+        // Assert: overlay change invalidates -- empty registry, one WARN
+        // naming the overlay trigger, invalidation counter bumped.
+        assert!(after.learned_capabilities.is_empty());
+        assert_eq!(after.metrics.invalidations_total(), 1);
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("overlay revision change must emit a WARN");
+        assert_eq!(warn.field("overlay_changed"), Some("true"));
+        assert_eq!(warn.field("catalog_changed"), Some("false"));
     }
 
     #[test]
@@ -7325,6 +8122,213 @@ mod resolved_models_tests {
             Err(other) => panic!("expected Error::Config from depth cap, got {other:?}"),
             Ok(_) => panic!("expected Error::Config from depth cap, got Ok(...)"),
         }
+    }
+
+    // ---- Learned-capability act path (D17 soft-drop + probe admission) ----
+
+    fn learned_provider_config() -> Arc<Config> {
+        let mut config = Config::default();
+        config.providers.insert(
+            "test-prov".into(),
+            ProviderEntry::anthropic_api("literal:k"),
+        );
+        Arc::new(config)
+    }
+
+    fn learned_target(router: &Router, nickname: &str, unsupported: &[&str]) -> DispatchTarget {
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "test-prov".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let model = ResolvedModel::new(nickname, "test-prov", p, "claude-x")
+            .with_unsupported_features(unsupported.iter().map(|s| (*s).to_string()).collect());
+        router
+            .expand_chain_to_targets(vec![Arc::new(model)], None)
+            .pop()
+            .expect("one target for a non-seat model")
+    }
+
+    #[test]
+    fn filter_source_learned_stringifies_to_contract_token() {
+        assert_eq!(FilterSource::Learned.as_str(), "learned");
+    }
+
+    #[test]
+    fn learned_negative_deprioritizes_target_to_tail() {
+        let router = Router::new(learned_provider_config());
+        let front = learned_target(&router, "front", &[]);
+        let back = learned_target(&router, "back", &[]);
+        router.learned_capabilities.observe(
+            "front",
+            "web_search",
+            "anthropic-api",
+            routectl_core::capability::SignalTier::SelfIdentifying,
+            std::time::Instant::now(),
+        );
+        let features = vec!["web_search".to_string()];
+
+        let out = router
+            .filter_chain_by_features(vec![front, back], &features, "alias", &mut Vec::new())
+            .expect("a supported survivor keeps the chain non-empty");
+
+        // Result = [supported...] ++ [learned tail]: back survives up front,
+        // the learned-negative "front" is de-prioritized to the tail.
+        let order: Vec<&str> = out.iter().map(|t| t.state_key.as_str()).collect();
+        assert_eq!(order, vec!["back", "front"]);
+        assert_eq!(
+            router.metrics.d17_tail_total(),
+            0,
+            "a supported survivor is not a tail-only entry",
+        );
+    }
+
+    #[test]
+    fn static_unsupported_emptying_chain_returns_not_implemented() {
+        let router = Router::new(learned_provider_config());
+        let only = learned_target(&router, "only", &["web_search"]);
+        let features = vec!["web_search".to_string()];
+
+        let result =
+            router.filter_chain_by_features(vec![only], &features, "alias", &mut Vec::new());
+
+        assert!(
+            matches!(result, Err(Error::NotImplemented(..))),
+            "a static hard-drop of the whole chain must fail",
+        );
+    }
+
+    #[test]
+    fn sole_learned_tail_target_still_attempts_and_counts_d17() {
+        let router = Router::new(learned_provider_config());
+        let only = learned_target(&router, "only", &[]);
+        router.learned_capabilities.observe(
+            "only",
+            "web_search",
+            "anthropic-api",
+            routectl_core::capability::SignalTier::SelfIdentifying,
+            std::time::Instant::now(),
+        );
+        let features = vec!["web_search".to_string()];
+
+        let events = routectl_testkit::capture_events(|| {
+            let out = router
+                .filter_chain_by_features(vec![only], &features, "alias", &mut Vec::new())
+                .expect("a learned-only chain proceeds into the de-prioritized tail");
+            assert_eq!(out.len(), 1, "the sole tail target is still attempted");
+            assert_eq!(out[0].state_key, "only");
+        });
+
+        assert_eq!(router.metrics.d17_tail_total(), 1);
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("entering the learned tail must WARN");
+        assert_eq!(warn.field("tail_len"), Some("1"));
+    }
+
+    #[test]
+    fn kill_switch_off_skips_the_learned_consult() {
+        let mut config = Config::default();
+        config.capability.enabled = false;
+        config.providers.insert(
+            "test-prov".into(),
+            ProviderEntry::anthropic_api("literal:k"),
+        );
+        let router = Router::new(Arc::new(config));
+        let front = learned_target(&router, "front", &[]);
+        let back = learned_target(&router, "back", &[]);
+        router.learned_capabilities.observe(
+            "front",
+            "web_search",
+            "anthropic-api",
+            routectl_core::capability::SignalTier::SelfIdentifying,
+            std::time::Instant::now(),
+        );
+        let features = vec!["web_search".to_string()];
+
+        let out = router
+            .filter_chain_by_features(vec![front, back], &features, "alias", &mut Vec::new())
+            .expect("kill switch off leaves the chain intact");
+
+        // The learned negative is ignored: original order, nothing tailed.
+        let order: Vec<&str> = out.iter().map(|t| t.state_key.as_str()).collect();
+        assert_eq!(order, vec!["front", "back"]);
+        assert_eq!(router.metrics.d17_tail_total(), 0);
+    }
+
+    #[test]
+    fn expired_learned_negative_admits_one_probe_through_filter() {
+        // A zero decay window makes a negative expired the instant it is
+        // observed, so the next filter pass claims the single re-probe slot.
+        let mut config = Config::default();
+        config.capability.decay_hours = 0;
+        config.providers.insert(
+            "test-prov".into(),
+            ProviderEntry::anthropic_api("literal:k"),
+        );
+        let router = Router::new(Arc::new(config));
+        let only = learned_target(&router, "only", &[]);
+        router.learned_capabilities.observe(
+            "only",
+            "web_search",
+            "anthropic-api",
+            routectl_core::capability::SignalTier::SelfIdentifying,
+            std::time::Instant::now(),
+        );
+        let features = vec!["web_search".to_string()];
+
+        // First pass: the lapsed negative admits a probe -> the target stays
+        // in the supported set (routed to), and the probe is counted.
+        let out = router
+            .filter_chain_by_features(vec![only.clone()], &features, "alias", &mut Vec::new())
+            .expect("an admitted probe routes to the target");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].state_key, "only");
+        assert_eq!(router.metrics.probe_attempts_total(), 1);
+        assert_eq!(router.metrics.d17_tail_total(), 0);
+
+        // Second pass: the probe slot is claimed (in_flight) -> concurrent
+        // lookups keep routing away, landing the target in the tail.
+        let out2 = router
+            .filter_chain_by_features(vec![only], &features, "alias", &mut Vec::new())
+            .expect("a claimed in-flight probe routes away into the tail");
+        assert_eq!(out2.len(), 1);
+        assert_eq!(
+            router.metrics.probe_attempts_total(),
+            1,
+            "exactly one probe is admitted per decay lapse",
+        );
+        assert_eq!(router.metrics.d17_tail_total(), 1);
+    }
+
+    #[test]
+    fn dispatch_target_carries_catalog_capability_prior() {
+        use crate::catalog::{CatalogRow, EffectiveRow, Source};
+
+        let router = Router::new(learned_provider_config());
+        let mut row = CatalogRow::sentinel();
+        row.capabilities.insert("web_search".to_string(), false);
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "test-prov".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let model = ResolvedModel::new("only", "test-prov", p, "claude-x").with_effective_row(
+            EffectiveRow::Present {
+                row,
+                source: Source::Baked,
+                verified_at: "2026-01-01".to_string(),
+            },
+        );
+
+        let target = router
+            .expand_chain_to_targets(vec![Arc::new(model)], None)
+            .pop()
+            .expect("one target");
+
+        // Present key returns the prior; an absent key is NO PRIOR (None),
+        // distinct from Some(false). No filter consumes it in this increment.
+        assert_eq!(target.capability_prior("web_search"), Some(false));
+        assert_eq!(target.capability_prior("computer_use"), None);
     }
 }
 
@@ -9910,17 +10914,29 @@ mod feature_filter_tests {
 
         // Provider-scoped match.
         assert_eq!(
-            router.unsupported_feature_for_target(&target, &["web_search".to_string()]),
+            router.unsupported_feature_for_target(
+                &target,
+                &["web_search".to_string()],
+                &mut Vec::new()
+            ),
             Some(("web_search".to_string(), FilterSource::ProviderStatic)),
         );
         // Model-scoped match.
         assert_eq!(
-            router.unsupported_feature_for_target(&target, &["structured_output".to_string()]),
+            router.unsupported_feature_for_target(
+                &target,
+                &["structured_output".to_string()],
+                &mut Vec::new()
+            ),
             Some(("structured_output".to_string(), FilterSource::ModelStatic)),
         );
         // Supported feature -> None.
         assert_eq!(
-            router.unsupported_feature_for_target(&target, &["computer_use".to_string()]),
+            router.unsupported_feature_for_target(
+                &target,
+                &["computer_use".to_string()],
+                &mut Vec::new()
+            ),
             None,
         );
         // Both scopes list a (different) feature: the FIRST requested
@@ -9930,8 +10946,125 @@ mod feature_filter_tests {
             router.unsupported_feature_for_target(
                 &target,
                 &["web_search".to_string(), "structured_output".to_string()],
+                &mut Vec::new(),
             ),
             Some(("web_search".to_string(), FilterSource::ProviderStatic)),
+        );
+    }
+
+    #[test]
+    fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
+        // Regression: a target carrying an EXPIRED (probe-due) learned
+        // negative on one feature AND an acting negative on another, hit by a
+        // request that names both. The scan must not stop at the first
+        // feature's probe admission -- it has to reach the second feature's
+        // RouteAway (tail-drop the target) AND still capture the earlier probe
+        // admission. Dropping that admission would latch the `in_flight` slot
+        // the probe claimed, so the feature could never re-probe.
+        use crate::learned_capability::{ExportedEntry, RoutingDecision};
+
+        let router = Router::new(Arc::new(Config::default()));
+        let stub: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "prov".into(),
+            captured: Arc::new(ParkingMutex::new(Vec::new())),
+        });
+        let model = Arc::new(ResolvedModel::new("nick", "prov", stub, "upstream"));
+        let mut target = into_one_dispatch_target(model);
+        // The learned pass runs only for a target that carries a provider kind.
+        target.provider_kind = Some("openai-compat");
+
+        // Seed the registry directly so each `expires_at` is fixed relative to
+        // a captured base -- the filter's own `Instant::now()` fires strictly
+        // later, so `structured_output` reads expired (probe-due) and
+        // `web_search` still acts, with no fragile clock subtraction.
+        let base = Instant::now();
+        let probe_due_key = normalize_capability_key("structured_output", "openai-compat");
+        let acting_key = normalize_capability_key("web_search", "openai-compat");
+        router.learned_capabilities.import_entries(vec![
+            ExportedEntry {
+                state_key: "nick".into(),
+                feature_key: probe_due_key.clone(),
+                signal: SignalTier::SelfIdentifying,
+                observations: 1,
+                first_seen: base,
+                last_seen: base,
+                expires_at: base,
+                in_flight: false,
+                consecutive_failed_probes: 0,
+            },
+            ExportedEntry {
+                state_key: "nick".into(),
+                feature_key: acting_key,
+                signal: SignalTier::SelfIdentifying,
+                observations: 1,
+                first_seen: base,
+                last_seen: base,
+                expires_at: base + Duration::from_hours(48),
+                in_flight: false,
+                consecutive_failed_probes: 0,
+            },
+        ]);
+
+        // Features in [probe-due, acting] order: the pre-fix code
+        // short-circuited on the probe admission and returned `None` (target
+        // wrongly kept as supported); the fix scans on to the acting negative.
+        let mut admissions = Vec::new();
+        let decision = router.unsupported_feature_for_target(
+            &target,
+            &["structured_output".to_string(), "web_search".to_string()],
+            &mut admissions,
+        );
+        assert_eq!(
+            decision,
+            Some(("web_search".to_string(), FilterSource::Learned)),
+            "RouteAway on the acting feature must decide, not the earlier probe admission",
+        );
+
+        // The earlier probe admission survived the scan -- not swallowed by a
+        // short-circuit -- so the dispatch path can settle its slot.
+        assert_eq!(
+            admissions.len(),
+            1,
+            "the probe-due feature's admission must be captured",
+        );
+        assert_eq!(admissions[0].state_key, "nick");
+        assert_eq!(admissions[0].feature, probe_due_key);
+
+        // The probe claimed the single in_flight slot: while it is held a
+        // repeat query routes away, proving the slot is genuinely occupied.
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "nick",
+                "structured_output",
+                "openai-compat",
+                Instant::now(),
+            ),
+            RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+            "the in_flight slot is held until the admission settles",
+        );
+
+        // Settle exactly as dispatch does: arm the guard from the captured
+        // admission and drop it (the fallback / other-error settle path).
+        {
+            let admission = &admissions[0];
+            let _guard = LearnedProbeGuard::armed(
+                router.learned_capabilities.clone(),
+                admission.state_key.clone(),
+                admission.feature.clone(),
+                admission.provider_kind,
+            );
+        }
+        // The released slot makes the feature re-probable; had the admission
+        // been dropped the slot would have latched forever.
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "nick",
+                "structured_output",
+                "openai-compat",
+                Instant::now(),
+            ),
+            RoutingDecision::ProbeAdmitted,
+            "settling the captured admission releases in_flight; the feature re-probes",
         );
     }
 
@@ -15470,5 +16603,587 @@ creds = { kind = "default-chain" }
         );
         assert_eq!(ev.field("debit"), Some("true"));
         assert_eq!(ev.field("retry_cap"), Some("2"));
+    }
+}
+
+#[cfg(test)]
+mod learn_capture_tests {
+    //! End-to-end coverage for the learn-event capture point
+    //! (`observe_for_learning`): the full eligibility gate, per-request
+    //! dedupe, registry wiring, structured WARN, and the
+    //! `DispatchMeta.learned_capabilities` ride-along -- driven through the
+    //! REAL dispatch error arms (complete + stream), so the classifier,
+    //! matcher, guardrail, and registry all participate.
+
+    use super::*;
+    use routectl_core::ForwardedBearer;
+    use routectl_core::ToolDef;
+    use routectl_core::capability::SignalTier;
+    use routectl_testkit::{CapturedEvent, with_capture};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A provider whose complete/stream always fail with a fixed upstream
+    /// status plus optional type/code, so a test drives a precise
+    /// classifier outcome (a self-identifying token or an inferred body).
+    /// Counts calls so a test can prove a same-provider retry did fire.
+    struct CapabilityRejectingProvider {
+        id: &'static str,
+        status: u16,
+        body: String,
+        upstream_type: Option<String>,
+        upstream_code: Option<String>,
+        calls: AtomicUsize,
+    }
+
+    impl CapabilityRejectingProvider {
+        fn err(&self) -> Error {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Error::upstream_full(
+                self.id,
+                self.status,
+                self.body.clone(),
+                None,
+                self.upstream_type.clone(),
+                self.upstream_code.clone(),
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CapabilityRejectingProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(self.id, "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            Err(self.err())
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            Err(self.err())
+        }
+    }
+
+    /// Self-identifying openai-compat rejection: a 400 whose `error.code`
+    /// is `unsupported_parameter`, which the classifier lifts to
+    /// `FeatureUnsupported` with that capability token.
+    fn self_identifying_provider() -> Arc<CapabilityRejectingProvider> {
+        Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 400,
+            body: "{}".into(),
+            upstream_type: Some("invalid_request_error".into()),
+            upstream_code: Some("unsupported_parameter".into()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn router_with(toml_text: &str, provider: Arc<dyn Provider>) -> Router {
+        let config: Config = toml::from_str(toml_text).expect("valid test toml");
+        let mut router = Router::new(Arc::new(config));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m1".to_string(),
+            Arc::new(ResolvedModel::new("m1", "p1", provider, "wire-model")),
+        );
+        router.install_resolved_models(models);
+        router
+    }
+
+    /// A minimal openai-compat provider config (capability subsystem left
+    /// at its default: enabled).
+    const OPENAI_P1: &str = r#"
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+"#;
+
+    fn req_with_tool(tool_type: &str) -> ChatRequest {
+        ChatRequest {
+            model: "m1".into(),
+            messages: vec![],
+            tools: Some(vec![ToolDef::Other(json!({ "type": tool_type }))]),
+            ..Default::default()
+        }
+    }
+
+    fn learn_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|e| e.message == "learned-capability negative observed")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn eligible_self_identifying_records_warns_and_populates_meta() {
+        // Arrange: a self-identifying 400 whose capability token is also
+        // the request's derived feature -> the guardrail admits it.
+        let router = router_with(OPENAI_P1, self_identifying_provider());
+
+        // Act
+        let (dispatched, events) = with_capture(router.complete_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        // Assert: the request still fails (learning never changes the
+        // per-request outcome), but the meta ride-along carries the event.
+        assert!(dispatched.result.is_err());
+        assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+        let ev = &dispatched.meta.learned_capabilities[0];
+        assert_eq!(ev.state_key, "m1");
+        assert_eq!(ev.feature_key, "unsupported_parameter");
+        assert_eq!(ev.provider_kind, "openai-compat");
+        assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
+        assert_eq!(ev.observations, 1);
+        assert_eq!(ev.upstream_status, 400);
+        assert!(!ev.remapped);
+        assert_eq!(
+            ev.request_features,
+            vec!["unsupported_parameter".to_string()]
+        );
+
+        // The structured WARN carries only the safe fields.
+        let warns = learn_warns(&events);
+        assert_eq!(warns.len(), 1);
+        let warn = warns[0];
+        assert_eq!(warn.field("state_key"), Some("m1"));
+        assert_eq!(warn.field("feature_key"), Some("unsupported_parameter"));
+        assert_eq!(warn.field("signal_tier"), Some("self-identifying"));
+        assert_eq!(warn.field("observations"), Some("1"));
+        assert_eq!(warn.field("acting"), Some("true"));
+        assert_eq!(warn.field("body"), None, "no body/message/prompt fields");
+        assert_eq!(warn.field("message"), None);
+
+        // The registry now holds an acting negative for the target.
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "m1",
+                "unsupported_parameter",
+                "openai-compat",
+                Instant::now(),
+            ),
+            crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        );
+    }
+
+    #[tokio::test]
+    async fn eligible_self_identifying_captures_on_the_stream_arm_too() {
+        // The stream error arm is wired identically to the complete arm.
+        let router = router_with(OPENAI_P1, self_identifying_provider());
+
+        let (dispatched, events) = with_capture(router.stream_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        assert!(dispatched.result.is_err());
+        assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+        assert_eq!(learn_warns(&events).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn same_request_retry_dedupes_to_one_observation() {
+        // Arrange: a non-remapping operator overlay raises the
+        // feature-unsupported same-provider retry cap so the ONE request
+        // hits the error arm more than once against the SAME (state_key,
+        // feature). Per-request dedupe must still count exactly one.
+        let toml = r#"
+[retry]
+max_attempts = 3
+
+[retry.classes.feature-unsupported]
+retry = 2
+
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+"#;
+        let provider = self_identifying_provider();
+        let router = router_with(toml, provider.clone());
+
+        // Act
+        let (dispatched, events) = with_capture(router.complete_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        // Assert: the same provider WAS retried (two dispatches), so the
+        // error arm ran twice -- yet only one observation, one WARN, and
+        // one meta event survived the dedupe.
+        assert!(dispatched.result.is_err());
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            2,
+            "the raised retry cap must drive a same-provider retry",
+        );
+        assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+        assert_eq!(
+            dispatched.meta.learned_capabilities[0].observations, 1,
+            "a same-request retry must not manufacture a second observation",
+        );
+        assert_eq!(learn_warns(&events).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kill_switch_off_skips_the_learn_path() {
+        let toml = r#"
+[capability]
+enabled = false
+
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+"#;
+        let router = router_with(toml, self_identifying_provider());
+
+        let (dispatched, events) = with_capture(router.complete_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+        assert!(learn_warns(&events).is_empty());
+        assert!(router.learned_capabilities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_request_fault_status_is_never_learned() {
+        // A 500 is ServerError, not a 400/422 request fault: the status
+        // gate rejects it before the matcher ever runs.
+        let provider = Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 500,
+            body: "{}".into(),
+            upstream_type: None,
+            upstream_code: None,
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_with(OPENAI_P1, provider);
+
+        let (dispatched, events) = with_capture(router.complete_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+        assert!(learn_warns(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn capability_absent_from_request_is_not_learned() {
+        // Self-identifying 400 for `unsupported_parameter`, but the request
+        // only carries a `web_search` tool -> the local-validation
+        // guardrail rejects a capability the request never asked for.
+        let router = router_with(OPENAI_P1, self_identifying_provider());
+
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
+        .await;
+
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+        assert!(learn_warns(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn forwarded_request_is_not_learned() {
+        // A request carrying a forwarded client bearer never contributes a
+        // learned negative (the forwarded token owns its own retry/backoff).
+        let router = router_with(OPENAI_P1, self_identifying_provider());
+        let mut req = req_with_tool("unsupported_parameter");
+        req.routectl_internal.forwarded_bearer = Some(ForwardedBearer::new("t".into()));
+
+        let (dispatched, events) =
+            with_capture(router.complete_with_options(req, RouterOptions::default())).await;
+
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+        assert!(learn_warns(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn operator_remapped_class_is_not_learned() {
+        // The operator remaps 400 to feature-unsupported: the class is now
+        // config-sourced (remapped == true, capability == the operator-remap
+        // token), so the learn path skips it -- a synthesized class is not
+        // an upstream self-report.
+        let toml = r#"
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+
+[providers.p1.class_overrides]
+400 = "feature-unsupported"
+"#;
+        let router = router_with(toml, self_identifying_provider());
+
+        let (dispatched, events) = with_capture(router.complete_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+        assert!(learn_warns(&events).is_empty());
+    }
+
+    /// A provider whose `complete` always succeeds with a minimal response,
+    /// so a re-probe dispatched to it settles as a success.
+    struct SuccessProvider {
+        id: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SuccessProvider {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(self.id, "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                model: req.model,
+                ..Default::default()
+            })
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            Err(Error::upstream(self.id, 500, "unused"))
+        }
+    }
+
+    /// A generic 400 that names NO capability (openai-compat has no inferred
+    /// matcher), so the matcher yields `None` and a re-probe against it settles
+    /// as an OtherError rather than a same-capability rejection.
+    fn other_error_provider() -> Arc<CapabilityRejectingProvider> {
+        Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 400,
+            body: "{}".into(),
+            upstream_type: None,
+            upstream_code: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Seed an already-expired, still-acting self-identifying negative so the
+    /// next dispatch's filter claims the single re-probe slot. A past
+    /// `expires_at` (rather than a zero decay) keeps the registry's real decay
+    /// intact, so a same-capability settle can be observed backing off.
+    fn seed_expired_negative(router: &Router, state_key: &str, feature: &str) {
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock is well past boot");
+        router.learned_capabilities.import_entries(vec![
+            crate::learned_capability::ExportedEntry {
+                state_key: state_key.into(),
+                feature_key: feature.into(),
+                signal: SignalTier::SelfIdentifying,
+                observations: 1,
+                first_seen: past,
+                last_seen: past,
+                expires_at: past,
+                in_flight: false,
+                consecutive_failed_probes: 0,
+            },
+        ]);
+    }
+
+    #[tokio::test]
+    async fn probe_success_clears_the_learned_negative() {
+        // Arrange: an expired negative for the very feature the request asks
+        // for; the target's provider then succeeds on the admitted re-probe.
+        let router = router_with(OPENAI_P1, Arc::new(SuccessProvider { id: "p1" }));
+        seed_expired_negative(&router, "m1", "unsupported_parameter");
+
+        // Act
+        let dispatched = router
+            .complete_with_options(
+                req_with_tool("unsupported_parameter"),
+                RouterOptions::default(),
+            )
+            .await;
+
+        // Assert: the probe was admitted, the 2xx cleared the entry, and a
+        // subsequent lookup now allows the target.
+        assert!(dispatched.result.is_ok());
+        assert_eq!(router.metrics.probe_attempts_total(), 1);
+        assert!(router.learned_capabilities.is_empty());
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "m1",
+                "unsupported_parameter",
+                "openai-compat",
+                Instant::now(),
+            ),
+            crate::learned_capability::RoutingDecision::Allow,
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_same_capability_rejection_refreshes_with_backoff() {
+        // Arrange: an expired negative; the probe target re-rejects the SAME
+        // capability (self-identifying 400).
+        let router = router_with(OPENAI_P1, self_identifying_provider());
+        seed_expired_negative(&router, "m1", "unsupported_parameter");
+        let before = router.learned_capabilities.snapshot()[0].expires_at;
+
+        // Act
+        let dispatched = router
+            .complete_with_options(
+                req_with_tool("unsupported_parameter"),
+                RouterOptions::default(),
+            )
+            .await;
+
+        // Assert: the request still fails (a probe is a real user request),
+        // the probe failure was counted, and the entry re-acts on a fresh,
+        // later window with a bumped observation -- in_flight released.
+        assert!(dispatched.result.is_err());
+        assert_eq!(router.metrics.probe_attempts_total(), 1);
+        assert_eq!(router.metrics.probe_failures_total(), 1);
+        // A probe re-rejection settles the probe; it is not a fresh learn
+        // event, so nothing rides the meta ledger channel.
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+
+        let snap = router.learned_capabilities.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].observations, 2);
+        assert!(
+            snap[0].expires_at > before,
+            "same-capability rejection must push expiry into the future with backoff",
+        );
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "m1",
+                "unsupported_parameter",
+                "openai-compat",
+                Instant::now(),
+            ),
+            crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+            "the refreshed negative is non-expired and in_flight released -> route away",
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_other_error_releases_slot_and_re_probes_next_request() {
+        // Arrange: an expired negative; the probe target fails with an error
+        // that is NOT the same-capability rejection.
+        let router = router_with(OPENAI_P1, other_error_provider());
+        seed_expired_negative(&router, "m1", "unsupported_parameter");
+
+        // Act
+        let dispatched = router
+            .complete_with_options(
+                req_with_tool("unsupported_parameter"),
+                RouterOptions::default(),
+            )
+            .await;
+
+        // Assert: the probe was admitted but a transient must NOT clear a valid
+        // negative or count as a same-capability failure. The entry survives
+        // unchanged and expired, so the NEXT request re-probes -- the
+        // repeat-re-probe property broken before this wiring.
+        assert!(dispatched.result.is_err());
+        assert_eq!(router.metrics.probe_attempts_total(), 1);
+        assert_eq!(router.metrics.probe_failures_total(), 0);
+        let snap = router.learned_capabilities.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(
+            snap[0].observations, 1,
+            "OtherError leaves observations untouched"
+        );
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "m1",
+                "unsupported_parameter",
+                "openai-compat",
+                Instant::now(),
+            ),
+            crate::learned_capability::RoutingDecision::ProbeAdmitted,
+            "in_flight released + still expired -> the next request admits a NEW probe",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_probe_same_capability_rejection_settles_on_the_stream_arm() {
+        // The stream loop wires the settle guard identically to the complete
+        // loop: a pre-first-chunk same-capability rejection settles the probe.
+        let router = router_with(OPENAI_P1, self_identifying_provider());
+        seed_expired_negative(&router, "m1", "unsupported_parameter");
+        let before = router.learned_capabilities.snapshot()[0].expires_at;
+
+        let dispatched = router
+            .stream_with_options(
+                req_with_tool("unsupported_parameter"),
+                RouterOptions::default(),
+            )
+            .await;
+
+        assert!(dispatched.result.is_err());
+        assert_eq!(router.metrics.probe_attempts_total(), 1);
+        assert_eq!(router.metrics.probe_failures_total(), 1);
+        let snap = router.learned_capabilities.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].observations, 2);
+        assert!(
+            snap[0].expires_at > before,
+            "same-capability rejection must push expiry into the future with backoff",
+        );
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "m1",
+                "unsupported_parameter",
+                "openai-compat",
+                Instant::now(),
+            ),
+            crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_releases_admitted_probe_without_latching() {
+        // A probe admitted while filtering a count_tokens request is released
+        // (OtherError): the token-count path is not a messages-capability test,
+        // so the entry must not latch in_flight.
+        let router = router_with(OPENAI_P1, self_identifying_provider());
+        seed_expired_negative(&router, "m1", "unsupported_parameter");
+
+        // openai-compat cannot count_tokens, so the walk terminates without
+        // touching the provider -- but the filter still admitted the probe.
+        let result = router
+            .count_tokens(req_with_tool("unsupported_parameter"))
+            .await;
+
+        assert!(matches!(result, Err(Error::NotImplemented(..))));
+        assert_eq!(router.metrics.probe_attempts_total(), 1);
+        assert_eq!(router.metrics.probe_failures_total(), 0);
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "m1",
+                "unsupported_parameter",
+                "openai-compat",
+                Instant::now(),
+            ),
+            crate::learned_capability::RoutingDecision::ProbeAdmitted,
+            "in_flight released -> the next request re-probes rather than latching",
+        );
     }
 }

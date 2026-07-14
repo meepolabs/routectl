@@ -849,6 +849,10 @@ pub(crate) async fn build_router_from_config_with_overlay(
     let resolved_models =
         routectl_router::apply_catalog_overlay(resolved_models, &config, catalog_overlay);
     router.install_resolved_models(resolved_models);
+    // Stamp the overlay revision the resolved-model table was merged
+    // against so a later hot-reload can detect an overlay change and
+    // invalidate the learned-capability registry.
+    router.note_overlay_revision(routectl_router::overlay_revision(catalog_overlay));
 
     // Provider build failures are normally non-fatal (an operator
     // may have an unused-but-declared model whose provider creds
@@ -1427,6 +1431,7 @@ async fn rebuild_router_for_seat_change(
     new_router.carry_over_runtime_state_from(&router_swap.load_full());
     new_router.carry_over_sticky_from(&router_swap.load_full());
     new_router.carry_over_k_store_from(&router_swap.load_full());
+    new_router.carry_over_learned_from(&router_swap.load_full());
     router_swap.store(Arc::new(new_router));
     tracing::info!(
         seats_before = before.len(),
@@ -1511,6 +1516,7 @@ async fn handle_config_reload(
     new_router.carry_over_runtime_state_from(&router_swap.load_full());
     new_router.carry_over_sticky_from(&router_swap.load_full());
     new_router.carry_over_k_store_from(&router_swap.load_full());
+    new_router.carry_over_learned_from(&router_swap.load_full());
 
     router_swap.store(Arc::new(new_router));
 
