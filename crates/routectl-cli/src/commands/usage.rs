@@ -105,7 +105,7 @@ const MS_PER_HOUR: i64 = 3_600_000;
 
 /// Compact a count: below 10_000 the plain integer; otherwise a one-decimal
 /// figure with a K/M/B suffix, trimming a trailing `.0`.
-fn human_count(n: i64) -> String {
+pub(crate) fn human_count(n: i64) -> String {
     if n < COMPACT_COUNT_FLOOR {
         return n.to_string();
     }

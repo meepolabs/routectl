@@ -549,6 +549,59 @@ impl Provider for BedrockProvider {
             provider_id,
         ))
     }
+
+    /// Free reachability probe: resolve the AWS credential chain, no
+    /// model invocation. A resolvable chain (Bearer key present, static
+    /// keys, or a Profile / DefaultChain that answers) is `Reachable`;
+    /// a resolution failure maps via [`probe_outcome_for_resolve_error`].
+    /// Never signs or sends a Bedrock request, so it can never bill.
+    ///
+    /// Bounded by the shared `PROBE_TIMEOUT`: Profile / DefaultChain
+    /// resolution can do external work (SSO, instance-metadata), so an
+    /// unbounded await could hang `doctor`.
+    async fn probe(&self) -> routectl_core::ProbeOutcome {
+        probe_bounded_resolve(
+            crate::probe::PROBE_TIMEOUT,
+            auth::resolve(&self.cfg.creds, &self.cfg.region),
+        )
+        .await
+    }
+}
+
+/// Bound a credential-resolution future by `timeout` and map it to a
+/// probe outcome. Generic over the future so the timeout bound is
+/// unit-testable with a deliberately-slow resolver. A timeout collapses
+/// to `Unreachable`; a completed resolution defers to
+/// [`probe_outcome_for_resolve_error`] on error.
+async fn probe_bounded_resolve<F>(
+    timeout: std::time::Duration,
+    resolve: F,
+) -> routectl_core::ProbeOutcome
+where
+    F: std::future::Future<Output = Result<auth::ResolvedCreds>>,
+{
+    match tokio::time::timeout(timeout, resolve).await {
+        Ok(Ok(_)) => routectl_core::ProbeOutcome::Reachable,
+        Ok(Err(e)) => probe_outcome_for_resolve_error(&e),
+        Err(_) => {
+            routectl_core::ProbeOutcome::Unreachable("credential resolution timed out".into())
+        }
+    }
+}
+
+/// Map a `bedrock::auth::resolve` failure to a probe outcome. A
+/// credential-resolution error (`Error::Auth`, the only kind `resolve`
+/// emits today) is an auth problem; any other error is treated as the
+/// chain being unreachable. Reason strings are fixed literals so no
+/// profile name, ARN, or SDK detail leaks into an operator-facing
+/// message.
+fn probe_outcome_for_resolve_error(err: &Error) -> routectl_core::ProbeOutcome {
+    match err {
+        Error::Auth(_) => {
+            routectl_core::ProbeOutcome::AuthFailed("credential resolution failed".into())
+        }
+        _ => routectl_core::ProbeOutcome::Unreachable("credential chain unavailable".into()),
+    }
 }
 
 /// Best-effort parse of a Bedrock error response body into the message
@@ -1003,6 +1056,111 @@ mod tests {
     fn bedrock_creds_default_chain_debug_is_safe() {
         let s = format!("{:?}", BedrockCreds::DefaultChain);
         assert_eq!(s, "BedrockCreds::DefaultChain");
+    }
+
+    fn probe_cfg(creds: BedrockCreds) -> BedrockConfig {
+        BedrockConfig {
+            id: "bedrock:probe".into(),
+            region: "us-west-2".into(),
+            model_id: "anthropic.claude-haiku-4-5".into(),
+            api_shape: BedrockApiShape::Invoke,
+            creds,
+            user_agent: None,
+            header_extras: Vec::new(),
+            anthropic_beta: Vec::new(),
+            allowed_betas: Vec::new(),
+            allowed_body_fields: Vec::new(),
+            additional_model_request_fields: None,
+            adaptive_thinking: None,
+        }
+    }
+
+    /// A Bearer credential resolves without a network call and probes
+    /// as Reachable -- and the probe issues no model invocation (there is
+    /// no HTTP client interaction at all on this path).
+    #[tokio::test]
+    async fn probe_bearer_creds_reachable_without_model_call() {
+        let creds = BedrockCreds::BearerKey {
+            key: "test-bearer-key".into(),
+        };
+        let resolved = auth::resolve(&creds, "us-west-2").await.expect("resolve");
+        let provider = BedrockProvider::new(probe_cfg(creds), resolved);
+        assert_eq!(
+            provider.probe().await,
+            routectl_core::ProbeOutcome::Reachable
+        );
+    }
+
+    /// Static AWS keys resolve to a SigV4 provider with no network hop
+    /// and probe as Reachable.
+    #[tokio::test]
+    async fn probe_static_creds_reachable() {
+        let creds = BedrockCreds::Static {
+            access_key: "testkey-access-xyz".into(),
+            secret_key: "testkey-secret-xyz".into(),
+            session_token: None,
+        };
+        let resolved = auth::resolve(&creds, "us-west-2").await.expect("resolve");
+        let provider = BedrockProvider::new(probe_cfg(creds), resolved);
+        assert_eq!(
+            provider.probe().await,
+            routectl_core::ProbeOutcome::Reachable
+        );
+    }
+
+    /// The resolve-error mapping: an `Error::Auth` (the credential kind
+    /// `resolve` emits) is `AuthFailed`; any other error is `Unreachable`.
+    /// Reason strings carry no profile name, ARN, or SDK detail.
+    #[test]
+    fn probe_outcome_maps_resolve_errors() {
+        let auth_err = Error::Auth("bedrock: failed to load AWS profile `x`: boom".into());
+        match probe_outcome_for_resolve_error(&auth_err) {
+            routectl_core::ProbeOutcome::AuthFailed(reason) => {
+                assert!(!reason.contains("profile"));
+                assert!(!reason.contains('x'));
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+
+        let other_err = Error::Config("some non-auth failure".into());
+        assert!(matches!(
+            probe_outcome_for_resolve_error(&other_err),
+            routectl_core::ProbeOutcome::Unreachable(_)
+        ));
+    }
+
+    /// The credential-resolution probe is bounded: a resolver that would
+    /// take far longer than the timeout returns `Unreachable` within the
+    /// bound, not a hang. Proven WITHOUT a fixed sleep on the happy path
+    /// -- the slow future is cancelled by the timeout, so the test
+    /// completes in ~the timeout, not the 30s delay.
+    #[tokio::test]
+    async fn probe_bounded_resolve_times_out_to_unreachable() {
+        let slow = async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(auth::ResolvedCreds::Bearer {
+                key: "unused".into(),
+            })
+        };
+        let outcome = probe_bounded_resolve(std::time::Duration::from_millis(150), slow).await;
+        assert!(
+            matches!(outcome, routectl_core::ProbeOutcome::Unreachable(_)),
+            "a resolver slower than the bound must map to Unreachable, got {outcome:?}"
+        );
+    }
+
+    /// A resolver that completes within the bound still maps normally: a
+    /// successful resolution is `Reachable` (proves the timeout wrapper
+    /// does not mask the happy path).
+    #[tokio::test]
+    async fn probe_bounded_resolve_fast_success_is_reachable() {
+        let fast = async {
+            Ok(auth::ResolvedCreds::Bearer {
+                key: "unused".into(),
+            })
+        };
+        let outcome = probe_bounded_resolve(std::time::Duration::from_secs(5), fast).await;
+        assert_eq!(outcome, routectl_core::ProbeOutcome::Reachable);
     }
 
     #[test]

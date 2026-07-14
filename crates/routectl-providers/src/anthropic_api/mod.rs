@@ -1405,6 +1405,51 @@ impl Provider for AnthropicApiProvider {
     async fn on_auth_failure(&self) -> Result<()> {
         self.cfg.auth.on_auth_failure().await
     }
+
+    /// Free reachability probe: a single GET against `/v1/models`.
+    ///
+    /// BINDING read-only guard: only the `ApiKey` lane holds a static,
+    /// non-refreshing credential. An `OauthBearer` provider resolves its
+    /// token through the refreshing `token()` path, which a reachability
+    /// probe must never trigger -- so it reports `UnsupportedFreeProbe`
+    /// and the CLI orchestration layer owns oauth reachability. On the
+    /// `ApiKey` lane the resolved key is a `StaticToken`, so reading it
+    /// here does no refresh.
+    async fn probe(&self) -> routectl_core::ProbeOutcome {
+        if self.cfg.auth_kind != AuthKind::ApiKey {
+            return routectl_core::ProbeOutcome::UnsupportedFreeProbe;
+        }
+        let token = match self.cfg.auth.token().await {
+            Ok(t) => t,
+            Err(_) => {
+                return routectl_core::ProbeOutcome::AuthFailed(
+                    "provider credential unavailable".into(),
+                );
+            }
+        };
+        let url = format!("{}/v1/models", self.cfg.base_url.trim_end_matches('/'));
+        let mut headers = reqwest::header::HeaderMap::new();
+        match reqwest::header::HeaderValue::from_str(&token) {
+            Ok(v) => {
+                headers.insert("x-api-key", v);
+            }
+            Err(_) => {
+                return routectl_core::ProbeOutcome::Unreachable(
+                    "credential could not form an auth header".into(),
+                );
+            }
+        }
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&self.cfg.anthropic_version) {
+            headers.insert("anthropic-version", v);
+        }
+        crate::probe::http_get_probe(
+            self.cfg.user_agent.as_deref(),
+            &url,
+            headers,
+            crate::probe::PROBE_TIMEOUT,
+        )
+        .await
+    }
 }
 
 /// Read a 4xx/5xx upstream response body and build a routectl

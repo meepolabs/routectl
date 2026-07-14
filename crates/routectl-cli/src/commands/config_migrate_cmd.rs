@@ -50,6 +50,7 @@ use routectl_router::{
 use toml_edit::DocumentMut;
 
 use super::config::validation_report;
+use super::parse_error_redaction::redact_parse_error;
 
 /// A config with no `version` key predates the schema and is treated as v1,
 /// matching `preflight_config_version`'s legacy default.
@@ -368,115 +369,9 @@ fn gate(candidate_text: &str) -> std::result::Result<Config, Vec<String>> {
     }
 }
 
-/// Redact a `parse_config` error down to provably-safe content. This is
-/// fail-safe by construction: a line is retained ONLY when its shape is
-/// recognized as value-free, and every retained line is stripped of quoted
-/// literals; anything unrecognized is dropped. A blocklist would be wrong here
-/// -- toml/serde echo the offending config VALUE in several places (the
-/// numbered source-line preview, `invalid type:`/`invalid value:` clauses, and
-/// the backtick-quoted token of an `unknown variant` clause), and a mistyped
-/// secret in a non-string field would otherwise reach the terminal. Field and
-/// variant NAMES are safe to keep; field VALUES never are.
-fn redact_parse_error(err: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut field_from_snippet: Option<String> = None;
-    for line in err.lines() {
-        if is_header_line(line) {
-            out.push(line.to_string());
-        } else if is_source_snippet_row(line) {
-            // The snippet echoes the value and is always dropped, but its key
-            // (text left of `=`) is a safe field name we can thread into a
-            // following type/value clause.
-            if let Some(name) = snippet_field_name(line) {
-                field_from_snippet = Some(name);
-            }
-        } else if let Some(safe) = sanitize_clause(line, field_from_snippet.as_deref()) {
-            out.push(safe);
-        }
-    }
-    out.join("\n")
-}
-
-/// Whether `line` is the toml diagnostic header (`TOML parse error at line N,
-/// column M`), which carries only line/column numbers.
-fn is_header_line(line: &str) -> bool {
-    line.trim_start().starts_with("TOML parse error")
-}
-
-/// Extract the safe bare key (text left of the first `=`) from a numbered
-/// snippet source row, e.g. `3 | port = "..."` yields `port`. Returns `None`
-/// for separator/caret rows, table-header rows, or a quoted/non-bare key --
-/// the value (right of `=`) is never inspected.
-fn snippet_field_name(row: &str) -> Option<String> {
-    let after_pipe = row.split_once('|')?.1;
-    let key = after_pipe.split_once('=')?.0.trim();
-    let is_bare = !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-    is_bare.then(|| key.to_string())
-}
-
-/// Render a recognized-safe clause line, or `None` to drop an unrecognized
-/// shape. `invalid type:`/`invalid value:` clauses embed the raw value, so they
-/// collapse to a generic message; an `unknown variant` clause has its
-/// value-bearing token dropped while its schema candidate list is kept; the
-/// name-only clauses are kept with any quoted literal stripped defensively.
-fn sanitize_clause(line: &str, field: Option<&str>) -> Option<String> {
-    let clause = line.trim();
-    if clause.contains("invalid type:") || clause.contains("invalid value:") {
-        return Some(match field {
-            Some(name) => format!("value rejected for field `{name}` (type/value mismatch)"),
-            None => "value rejected (type/value mismatch)".to_string(),
-        });
-    }
-    if let Some(rest) = clause.strip_prefix("unknown variant ") {
-        return Some(match rest.split_once("expected") {
-            Some((_, tail)) => format!("unknown variant rejected, expected{tail}"),
-            None => "unknown variant rejected".to_string(),
-        });
-    }
-    if clause.starts_with("unknown field ")
-        || clause.starts_with("missing field ")
-        || clause.starts_with("duplicate key ")
-        || clause.starts_with("did you mean ")
-    {
-        return Some(strip_double_quoted(clause));
-    }
-    None
-}
-
-/// Remove every double-quoted literal (quotes and their contents) from `s`.
-/// A defensive strip on name-only clauses -- serde uses double quotes for
-/// string values, backticks for names, so this drops any stray value without
-/// touching the field/candidate names.
-fn strip_double_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_quote = false;
-    for c in s.chars() {
-        if c == '"' {
-            in_quote = !in_quote;
-        } else if !in_quote {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Whether `line` is a toml snippet row that echoes source bytes: the `|`
-/// separator/caret rows (`  |`, `  | ^^^`) or a numbered source row
-/// (`<n> | <verbatim source>`).
-fn is_source_snippet_row(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with('|') {
-        return true;
-    }
-    let digits_end = trimmed
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    digits_end > 0 && trimmed[digits_end..].trim_start().starts_with('|')
-}
-
+/// Redact a `parse_config` error down to provably-safe content before it
+/// reaches the terminal. The shared allowlist/fail-safe implementation lives in
+/// [`super::parse_error_redaction`] so `doctor` and this command never diverge.
 fn render_gate_errors(errors: &[String]) {
     eprintln!(
         "migrated config rejected ({} error(s)); nothing was written:",
@@ -950,60 +845,16 @@ default = \"gpt\"
                 "the secret-bearing source line must be redacted, got: {e}"
             );
         }
-        // The diagnostic still names the offending field, so it stays useful.
+        // The offending field name is user-controlled (a TOML key can be a
+        // quoted secret), so it is dropped; the diagnostic still classes the
+        // failure and the header keeps the line/column for locating it.
         assert!(
-            errors.iter().any(|e| e.contains("bogus_secret_key")),
-            "the redacted error must still name the field, got: {errors:?}"
+            errors.iter().any(|e| e.contains("unknown field")),
+            "the redacted error must still class the failure, got: {errors:?}"
         );
-    }
-
-    #[test]
-    fn redact_parse_error_keeps_header_and_name_drops_snippet() {
-        let raw = "TOML parse error at line 6, column 1\n  |\n6 | api_key_ref = \"literal:top-secret\"\n  | ^^^^^^^^^^^\nunknown field `api_key_ref`";
-        let redacted = redact_parse_error(raw);
-        assert!(!redacted.contains("top-secret"), "{redacted}");
-        assert!(redacted.contains("line 6, column 1"), "{redacted}");
-        assert!(redacted.contains("unknown field"), "{redacted}");
-        // The field NAME stays; only the value is gone.
-        assert!(redacted.contains("api_key_ref"), "{redacted}");
-    }
-
-    #[test]
-    fn redact_parse_error_strips_value_from_type_mismatch_clause() {
-        // serde embeds the raw offending value verbatim in a type-mismatch
-        // clause; the numbered snippet row echoes it too. Both must be gone.
-        let raw = "TOML parse error at line 5, column 8\n  |\n5 | port = \"sk-live-LEAKED\"\n  |        ^^^^^^^^^^^^^^^^\ninvalid type: string \"sk-live-LEAKED\", expected u16";
-        let redacted = redact_parse_error(raw);
-        assert!(!redacted.contains("sk-live-LEAKED"), "{redacted}");
-        assert!(!redacted.contains("LEAKED"), "{redacted}");
-        assert!(redacted.contains("line 5, column 8"), "{redacted}");
-        // The field name recovered from the snippet key stays useful.
-        assert!(redacted.contains("port"), "{redacted}");
-    }
-
-    #[test]
-    fn redact_parse_error_strips_value_from_unknown_variant_clause() {
-        // A secret placed as an enum value lands in the backtick-quoted token
-        // of an `unknown variant` clause -- that token must be dropped, the
-        // schema candidate list kept.
-        let raw = "TOML parse error at line 4, column 6\n  |\n4 | mode = \"sk-live-LEAKED\"\n  |        ^^^^^^^^^^^^^^^\nunknown variant `sk-live-LEAKED`, expected `fast` or `slow`";
-        let redacted = redact_parse_error(raw);
-        assert!(!redacted.contains("LEAKED"), "{redacted}");
-        assert!(redacted.contains("fast"), "{redacted}");
-        assert!(redacted.contains("slow"), "{redacted}");
-    }
-
-    #[test]
-    fn redact_parse_error_drops_unrecognized_line_shapes() {
-        // A message shape the allowlist does not recognize is dropped wholesale
-        // rather than echoed, even when it carries config bytes.
-        let raw = "TOML parse error at line 2, column 1\n  |\n2 | secret = \"sk-live-LEAKED\"\n  | ^^^^^^\nsome unforeseen serde diagnostic mentioning sk-live-LEAKED inline";
-        let redacted = redact_parse_error(raw);
-        assert!(!redacted.contains("sk-live-LEAKED"), "{redacted}");
-        assert!(!redacted.contains("unforeseen"), "{redacted}");
-        assert_eq!(
-            redacted, "TOML parse error at line 2, column 1",
-            "{redacted}"
+        assert!(
+            errors.iter().all(|e| !e.contains("bogus_secret_key")),
+            "the user-controlled field name must be dropped, got: {errors:?}"
         );
     }
 
