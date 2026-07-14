@@ -15,18 +15,26 @@ mod common;
 
 mod helpers {
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use routectl_router::Config;
     use tokio::net::TcpListener;
 
     /// Bind to 127.0.0.1:0, spawn the server in a background tokio task,
-    /// return the bound base URL (e.g. "http://127.0.0.1:54321").
+    /// return the bound base URL (e.g. "http://127.0.0.1:54321") once
+    /// `/health` responds.
     ///
     /// The config's usage DB is redirected to a unique per-process path
     /// (via `common::isolate_usage_db`) before serving so the now-live
     /// usage writer never touches the real `~/.config/routectl/usage.db`
     /// (the `UsageConfig` default). See `common::isolate_usage_db` for why
     /// that path is persistent / leaked rather than guarded.
+    ///
+    /// Readiness is decided by a successful `/health` response, not by a
+    /// fixed sleep: the listener is bound before the serve task starts, so
+    /// a bare TCP connect succeeds from the OS backlog before the router
+    /// can answer. Polling the live endpoint against a deadline instead
+    /// keeps a slow boot on a loaded CI box from flaking the suite.
     pub async fn spawn_test_server(config: Arc<Config>) -> String {
         let config = crate::common::isolate_usage_db(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -39,10 +47,25 @@ mod helpers {
                 .expect("server failed");
         });
 
-        // Give the server a tick to accept connections.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
+        await_health(&base_url).await;
         base_url
+    }
+
+    /// Poll `GET {base_url}/health` until it returns success or a 5s
+    /// deadline elapses. The 20ms inter-attempt pause is a poll cadence,
+    /// not a readiness wait -- readiness is the 200 response.
+    async fn await_health(base_url: &str) {
+        let client = reqwest::Client::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(resp) = client.get(format!("{base_url}/health")).send().await
+                && resp.status().is_success()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("test server did not become healthy at {base_url}");
     }
 }
 
@@ -593,8 +616,6 @@ async fn activated_inventory_never_synthesizes_routes() {
     // dispatch path reads -- so it is unreachable from routing by
     // construction. This pins that guarantee end-to-end over the HTTP
     // surface.
-    use tokio::net::TcpListener;
-
     let xdg = tempfile::tempdir().unwrap();
     let _guard = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
 
@@ -627,16 +648,7 @@ async fn activated_inventory_never_synthesizes_routes() {
     }
 
     // Empty config: no providers, models, or aliases at all.
-    let config = crate::common::isolate_usage_db(Arc::new(Config::default()));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base = format!("http://{addr}");
-    tokio::spawn(async move {
-        routectl_cli::server::serve_on_listener(config, listener, None)
-            .await
-            .expect("server failed");
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let base = helpers::spawn_test_server(Arc::new(Config::default())).await;
 
     let client = reqwest::Client::new();
 
@@ -759,7 +771,6 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
     // Route through spawn_test_server so the (booted) usage writer is
     // isolated to a tempdir DB, not the real on-disk path.
     let base = helpers::spawn_test_server(config).await;
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
     // /health returns 200 -> server actually started despite the
     // unreferenced broken provider.
