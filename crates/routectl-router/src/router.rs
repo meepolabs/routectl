@@ -1173,6 +1173,7 @@ impl Router {
         if catalog_changed || overlay_changed {
             self.metrics.incr_invalidations();
             tracing::warn!(
+                event = "invalidation",
                 catalog_changed,
                 overlay_changed,
                 previous_catalog_version = previous.catalog_version,
@@ -1903,6 +1904,7 @@ impl Router {
         if supported.is_empty() {
             self.metrics.incr_d17_tail();
             tracing::warn!(
+                event = "d17_tail",
                 alias = %alias,
                 features = %features.join(", "),
                 tail_len = tail.len(),
@@ -2049,7 +2051,8 @@ impl Router {
                         ) && !self.beta_pinned_for_target(target, feature)
                         {
                             tracing::warn!(
-                                target = %target.state_key,
+                                event = "strip",
+                                state_key = %target.state_key,
                                 capability_key = %normalized,
                                 outcome = "probe_bypassed",
                                 "capability_strip_decision",
@@ -2175,7 +2178,8 @@ impl Router {
         // skips the verdict entirely, so no per-decision context exists to
         // name.
         tracing::warn!(
-            target = %target.state_key,
+            event = "strip",
+            state_key = %target.state_key,
             capability_key = %target.strip_capabilities.join(", "),
             outcome = outcome_token,
             "capability_strip_decision",
@@ -3742,6 +3746,7 @@ impl Router {
             if dedupe.insert((state_key.clone(), feature_key.clone())) {
                 self.metrics.incr_mask_suppressed();
                 tracing::warn!(
+                    event = "suppression",
                     state_key = %state_key,
                     capability_key = %feature_key,
                     "force_supported override contradicted: masked capability still rejected upstream",
@@ -3781,8 +3786,9 @@ impl Router {
             .map_or(0, |entry| entry.observations);
 
         tracing::warn!(
+            event = "learn",
             state_key = %state_key,
-            feature_key = %feature_key,
+            capability_key = %feature_key,
             signal_tier = tier.as_str(),
             observations,
             acting,
@@ -6446,8 +6452,18 @@ mod tests {
             .iter()
             .find(|e| e.level == tracing::Level::WARN)
             .expect("catalog bump must emit a WARN");
+        assert_eq!(warn.field("event"), Some("invalidation"));
         assert_eq!(warn.field("catalog_changed"), Some("true"));
         assert_eq!(warn.field("overlay_changed"), Some("false"));
+        let prev_cat = before.catalog_version.to_string();
+        let cur_cat = after.catalog_version.to_string();
+        assert_eq!(
+            warn.field("previous_catalog_version"),
+            Some(prev_cat.as_str())
+        );
+        assert_eq!(warn.field("catalog_version"), Some(cur_cat.as_str()));
+        assert_eq!(warn.field("previous_overlay_revision"), Some("0"));
+        assert_eq!(warn.field("overlay_revision"), Some("0"));
     }
 
     #[test]
@@ -6483,8 +6499,18 @@ mod tests {
             .iter()
             .find(|e| e.level == tracing::Level::WARN)
             .expect("overlay revision change must emit a WARN");
+        assert_eq!(warn.field("event"), Some("invalidation"));
         assert_eq!(warn.field("overlay_changed"), Some("true"));
         assert_eq!(warn.field("catalog_changed"), Some("false"));
+        let prev_cat = before.catalog_version.to_string();
+        let cur_cat = after.catalog_version.to_string();
+        assert_eq!(
+            warn.field("previous_catalog_version"),
+            Some(prev_cat.as_str())
+        );
+        assert_eq!(warn.field("catalog_version"), Some(cur_cat.as_str()));
+        assert_eq!(warn.field("previous_overlay_revision"), Some("3"));
+        assert_eq!(warn.field("overlay_revision"), Some("4"));
     }
 
     #[test]
@@ -8873,6 +8899,9 @@ mod resolved_models_tests {
             .iter()
             .find(|e| e.level == tracing::Level::WARN)
             .expect("entering the learned tail must WARN");
+        assert_eq!(warn.field("event"), Some("d17_tail"));
+        assert_eq!(warn.field("alias"), Some("alias"));
+        assert_eq!(warn.field("features"), Some("web_search"));
         assert_eq!(warn.field("tail_len"), Some("1"));
     }
 
@@ -11953,7 +11982,8 @@ mod feature_filter_tests {
             bypass_warns[0].field("capability_key"),
             Some(normalize_capability_key("context_management", "openai-compat").as_str()),
         );
-        assert_eq!(bypass_warns[0].field("target"), Some("nick"));
+        assert_eq!(bypass_warns[0].field("event"), Some("strip"));
+        assert_eq!(bypass_warns[0].field("state_key"), Some("nick"));
     }
 
     #[test]
@@ -12109,7 +12139,11 @@ mod feature_filter_tests {
         let target = with_strip_keys(strip_target("nick"), &["advisor"]);
         let mut attempt_req = advisor_request();
 
-        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+        let mut decision = None;
+        let events = routectl_testkit::capture_events(|| {
+            decision = Some(router.apply_strip_interceptor(&target, &mut attempt_req));
+        });
+        let decision = decision.expect("interceptor ran");
 
         assert!(matches!(decision, StripDecision::Proceed));
         assert!(
@@ -12119,6 +12153,15 @@ mod feature_filter_tests {
         assert_eq!(router.metrics.strip_total(), 1);
         assert_eq!(router.metrics.strip_rollback_total(), 0);
         assert_eq!(router.metrics.strip_strict_rejected_total(), 0);
+
+        let warn = events
+            .iter()
+            .find(|e| e.message == "capability_strip_decision")
+            .expect("a strip must emit a capability_strip_decision WARN");
+        assert_eq!(warn.field("event"), Some("strip"));
+        assert_eq!(warn.field("state_key"), Some("nick"));
+        assert_eq!(warn.field("capability_key"), Some("advisor"));
+        assert_eq!(warn.field("outcome"), Some("applied"));
     }
 
     #[test]
@@ -12136,11 +12179,24 @@ mod feature_filter_tests {
         };
         let before = serde_json::to_value(&attempt_req).unwrap();
 
-        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+        let mut decision = None;
+        let events = routectl_testkit::capture_events(|| {
+            decision = Some(router.apply_strip_interceptor(&target, &mut attempt_req));
+        });
+        let decision = decision.expect("interceptor ran");
 
         assert!(matches!(decision, StripDecision::Proceed));
         assert_eq!(serde_json::to_value(&attempt_req).unwrap(), before);
         assert_eq!(router.metrics.strip_total(), 0);
+
+        let warn = events
+            .iter()
+            .find(|e| e.message == "capability_strip_decision")
+            .expect("a no-op strip decision still emits a WARN");
+        assert_eq!(warn.field("event"), Some("strip"));
+        assert_eq!(warn.field("state_key"), Some("nick"));
+        assert_eq!(warn.field("capability_key"), Some("advisor"));
+        assert_eq!(warn.field("outcome"), Some("noop"));
     }
 
     #[test]
@@ -12150,7 +12206,11 @@ mod feature_filter_tests {
         let mut attempt_req = advisor_request();
         let before = serde_json::to_value(&attempt_req).unwrap();
 
-        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+        let mut decision = None;
+        let events = routectl_testkit::capture_events(|| {
+            decision = Some(router.apply_strip_interceptor(&target, &mut attempt_req));
+        });
+        let decision = decision.expect("interceptor ran");
 
         match decision {
             StripDecision::StrictReject(Error::Validation(msg)) => {
@@ -12166,6 +12226,15 @@ mod feature_filter_tests {
         assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
         assert_eq!(router.metrics.strip_total(), 0);
         assert_eq!(router.metrics.strip_rollback_total(), 0);
+
+        let warn = events
+            .iter()
+            .find(|e| e.message == "capability_strip_decision")
+            .expect("a strict rejection still emits a WARN");
+        assert_eq!(warn.field("event"), Some("strip"));
+        assert_eq!(warn.field("state_key"), Some("nick"));
+        assert_eq!(warn.field("capability_key"), Some("advisor"));
+        assert_eq!(warn.field("outcome"), Some("strict_rejected"));
     }
 
     #[test]
@@ -12183,7 +12252,11 @@ mod feature_filter_tests {
         };
         let before = serde_json::to_value(&attempt_req).unwrap();
 
-        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+        let mut decision = None;
+        let events = routectl_testkit::capture_events(|| {
+            decision = Some(router.apply_strip_interceptor(&target, &mut attempt_req));
+        });
+        let decision = decision.expect("interceptor ran");
 
         assert!(matches!(decision, StripDecision::RouteAway(_)));
         assert_eq!(
@@ -12193,6 +12266,15 @@ mod feature_filter_tests {
         );
         assert_eq!(router.metrics.strip_rollback_total(), 1);
         assert_eq!(router.metrics.strip_total(), 0);
+
+        let warn = events
+            .iter()
+            .find(|e| e.message == "capability_strip_decision")
+            .expect("a rolled-back strip still emits a WARN");
+        assert_eq!(warn.field("event"), Some("strip"));
+        assert_eq!(warn.field("state_key"), Some("nick"));
+        assert_eq!(warn.field("capability_key"), Some("advisor"));
+        assert_eq!(warn.field("outcome"), Some("validation_rolled_back"));
     }
 
     #[test]
@@ -17894,8 +17976,9 @@ api_key_ref = "literal:k"
         let warns = learn_warns(&events);
         assert_eq!(warns.len(), 1);
         let warn = warns[0];
+        assert_eq!(warn.field("event"), Some("learn"));
         assert_eq!(warn.field("state_key"), Some("m1"));
-        assert_eq!(warn.field("feature_key"), Some("unsupported_parameter"));
+        assert_eq!(warn.field("capability_key"), Some("unsupported_parameter"));
         assert_eq!(warn.field("signal_tier"), Some("self-identifying"));
         assert_eq!(warn.field("observations"), Some("1"));
         assert_eq!(warn.field("acting"), Some("true"));
@@ -18043,6 +18126,7 @@ api_key_ref = "literal:k"
         // Exactly one suppression WARN, carrying only the safe fields.
         let supp = suppression_warns(&events);
         assert_eq!(supp.len(), 1);
+        assert_eq!(supp[0].field("event"), Some("suppression"));
         assert_eq!(supp[0].field("state_key"), Some("m1"));
         assert_eq!(
             supp[0].field("capability_key"),

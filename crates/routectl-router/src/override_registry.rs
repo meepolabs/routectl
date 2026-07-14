@@ -324,6 +324,7 @@ fn warn_dead_override_keys(config: &Config) {
             let normalized = normalize_capability_key(raw, kind);
             if &normalized != raw {
                 tracing::warn!(
+                    event = "dead_override_key",
                     target_spec = %spec,
                     raw_key = %raw,
                     normalized_key = %normalized,
@@ -605,6 +606,7 @@ mod tests {
             .iter()
             .find(|e| e.level == tracing::Level::WARN)
             .expect("dead-key guard must emit a WARN");
+        assert_eq!(warn.field("event"), Some("dead_override_key"));
         assert_eq!(warn.field("target_spec"), Some("br"));
         assert_eq!(
             warn.field("raw_key"),
