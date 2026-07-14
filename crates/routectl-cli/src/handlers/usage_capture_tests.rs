@@ -446,6 +446,232 @@ async fn observe_meta_forwarded_credential_preserves_existing_extra_keys() {
     );
 }
 
+// -------- observe_meta: learn-event drain to the usage writer -------------
+//
+// `observe_meta` drains `DispatchMeta::learned_capabilities` into the
+// usage writer via `try_send_learn_event` -- one enqueue per captured
+// event, mapping the router-side struct to the plain usage-side row
+// (`SignalTier::as_str` for the tier, the derived feature set carried
+// through for replay verification). These tests build a REAL router meta
+// (`any_dispatch_meta`, the `#[non_exhaustive]` construction pattern above)
+// and push learn events onto its public `learned_capabilities` vec, then
+// assert the writer receives / persists exactly N rows and that the field
+// mapping survives the round trip. The handle is dropped before the writer
+// shutdown so the channel closes (repo learning: shutdown otherwise blocks
+// on a deadline waiting for a channel that never closes).
+
+fn wait_learn_persisted(handle: &UsageHandle, want: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while handle.counters().learn_events_persisted() < want {
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
+fn learn_event(
+    feature_key: &str,
+    tier: routectl_core::SignalTier,
+) -> routectl_router::router::CapabilityLearnEvent {
+    routectl_router::router::CapabilityLearnEvent {
+        state_key: "prov".to_string(),
+        feature_key: feature_key.to_string(),
+        provider_kind: "anthropic-api".to_string(),
+        signal_tier: tier,
+        observations: 2,
+        upstream_status: 400,
+        remapped: false,
+        request_features: vec!["web_search".to_string(), "prefill".to_string()],
+    }
+}
+
+#[tokio::test]
+async fn observe_meta_drains_each_learn_event_to_one_row() {
+    // Arrange: two captured learn events ride the dispatch meta.
+    let mut meta = any_dispatch_meta().await;
+    meta.learned_capabilities = vec![
+        learn_event("web_search", routectl_core::SignalTier::Inferred),
+        learn_event("computer_use", routectl_core::SignalTier::SelfIdentifying),
+    ];
+    let (mut cap, handle, writer, _dir) = capture_with_handle();
+
+    // Act: observe_meta drains both events into the writer.
+    cap.observe_meta(&meta);
+
+    // Assert: N events -> N enqueued and N persisted rows.
+    assert_eq!(handle.counters().learn_events_enqueued(), 2);
+    assert!(
+        wait_learn_persisted(&handle, 2),
+        "learn events not persisted"
+    );
+    drop(cap);
+    drop(handle);
+    writer.shutdown();
+}
+
+#[tokio::test]
+async fn observe_meta_empty_learn_events_enqueues_nothing() {
+    // Arrange: the common path -- no captured capability observations.
+    let meta = any_dispatch_meta().await;
+    assert!(
+        meta.learned_capabilities.is_empty(),
+        "sanity: none captured"
+    );
+    let (mut cap, handle, writer, _dir) = capture_with_handle();
+
+    // Act
+    cap.observe_meta(&meta);
+
+    // Assert: an empty vec enqueues nothing.
+    assert_eq!(handle.counters().learn_events_enqueued(), 0);
+    drop(cap);
+    drop(handle);
+    writer.shutdown();
+}
+
+#[tokio::test]
+async fn observe_meta_maps_learn_event_fields_onto_the_row() {
+    // Arrange: one inferred event with a known feature set.
+    let mut meta = any_dispatch_meta().await;
+    meta.learned_capabilities = vec![learn_event(
+        "web_search",
+        routectl_core::SignalTier::Inferred,
+    )];
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (handle, writer) = routectl_usage::UsageWriter::start(
+        db_path.clone(),
+        routectl_usage::CHANNEL_CAPACITY,
+        0,
+        true,
+    );
+    let draft = build_usage_draft("anthropic", &minimal_request(), "req-learn".to_string());
+    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+
+    // Act
+    cap.observe_meta(&meta);
+    assert!(
+        wait_learn_persisted(&handle, 1),
+        "learn event not persisted"
+    );
+    drop(cap);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: the router struct maps onto the plain usage row -- the tier is
+    // the persisted `as_str` token and the feature set is the JSON array.
+    let conn = rusqlite::Connection::open(&db_path).expect("read db");
+    let (state_key, feature_key, provider_kind, tier, observations, status, remapped, features): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT state_key, feature_key, provider_kind, signal_tier, observations, \
+             upstream_status, remapped, request_features FROM capability_learn_events",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )
+        .expect("one learn event row");
+    assert_eq!(state_key, "prov");
+    assert_eq!(feature_key, "web_search");
+    assert_eq!(provider_kind, "anthropic-api");
+    assert_eq!(tier, "inferred");
+    assert_eq!(observations, 2);
+    assert_eq!(status, 400);
+    assert_eq!(remapped, 0);
+    assert_eq!(features, r#"["web_search","prefill"]"#);
+}
+
+#[tokio::test]
+async fn observe_meta_bounds_untrusted_request_features_on_the_row() {
+    // Arrange: a learn event whose feature set is both too long (more than
+    // the entry cap) and holds an overlong string -- both derive from
+    // arbitrary client tool-type strings, so both must be bounded before
+    // they reach the persisted row.
+    let mut meta = any_dispatch_meta().await;
+    let mut ev = learn_event("web_search", routectl_core::SignalTier::Inferred);
+    let overlong = "a".repeat(500);
+    let mut features: Vec<String> = (0..40).map(|i| format!("feature_{i}")).collect();
+    features.push(overlong);
+    ev.request_features = features;
+    meta.learned_capabilities = vec![ev];
+
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (handle, writer) = routectl_usage::UsageWriter::start(
+        db_path.clone(),
+        routectl_usage::CHANNEL_CAPACITY,
+        0,
+        true,
+    );
+    let draft = build_usage_draft("anthropic", &minimal_request(), "req-bound".to_string());
+    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+
+    // Act
+    cap.observe_meta(&meta);
+    assert!(
+        wait_learn_persisted(&handle, 1),
+        "learn event not persisted"
+    );
+    drop(cap);
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: the persisted JSON array is capped at 16 entries and no entry
+    // exceeds 128 chars.
+    let conn = rusqlite::Connection::open(&db_path).expect("read db");
+    let features_json: String = conn
+        .query_row(
+            "SELECT request_features FROM capability_learn_events",
+            [],
+            |r| r.get(0),
+        )
+        .expect("one learn event row");
+    let persisted: Vec<String> =
+        serde_json::from_str(&features_json).expect("features are a JSON array");
+    assert_eq!(persisted.len(), 16, "entry count is capped");
+    assert!(
+        persisted.iter().all(|f| f.chars().count() <= 128),
+        "each entry is truncated to the char cap"
+    );
+}
+
+fn minimal_request() -> routectl_core::ChatRequest {
+    routectl_core::ChatRequest {
+        model: "m".to_string(),
+        messages: vec![Message {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            refusal: None,
+        }],
+        ..Default::default()
+    }
+}
+
 // -------- build_usage_draft: session_id sourced from inbound_session_key ----
 //
 // `build_usage_draft` no longer takes a separately-derived `session_id`

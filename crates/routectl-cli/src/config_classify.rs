@@ -40,6 +40,7 @@ pub(crate) const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "reduction",
     "trim",
     "cache_pricing",
+    "capability",
 ];
 
 /// Diff the previous config against the new one and return the names of
