@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -169,6 +169,37 @@ CREATE TABLE IF NOT EXISTS requests (
 /// shape for reporting and pruning).
 pub const CREATE_TS_START_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_requests_ts_start ON requests (ts_start)";
+
+/// DDL for the `capability_learn_events` table (v9).
+///
+/// One append-only row per confirmed learned-capability observation. This
+/// is NOT a request row: learn events are their own closed shape and must
+/// never share the `requests` table (whose rows are treated as requests by
+/// every reporting query). Nothing reads this table yet -- it is the
+/// forever-contract landing pad for the warm-rebuild replayer.
+///
+/// Columns mirror the row struct in `learn_event.rs` (the source of truth
+/// for the set). `feature_key` is the NORMALIZED capability key. `signal_tier`
+/// is a closed set whose CHECK tokens mirror the two producer tiers.
+/// `remapped` is always 0 by construction but persisted so a replayer can
+/// filter defensively. `request_features` is a JSON array TEXT (the in-flight
+/// feature set the replayer verifies against). NEVER a body / message / prompt
+/// column (log hygiene).
+pub const CREATE_CAPABILITY_LEARN_EVENTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS capability_learn_events (
+    ts               INTEGER NOT NULL,
+    state_key        TEXT    NOT NULL,
+    feature_key      TEXT    NOT NULL,
+    provider_kind    TEXT    NOT NULL,
+    signal_tier      TEXT    NOT NULL CHECK (signal_tier IN (
+                         'self-identifying',
+                         'inferred'
+                     )),
+    observations     INTEGER NOT NULL,
+    upstream_status  INTEGER NOT NULL,
+    remapped         INTEGER NOT NULL,
+    request_features TEXT    NOT NULL
+)";
 
 /// DDL for the `meta` key/value table. Holds the DB creation timestamp
 /// and a human-readable copy of the schema version. Survives migrations.

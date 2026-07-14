@@ -378,6 +378,7 @@ mod tests {
         assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
         assert!(table_exists(db.conn(), "requests"));
         assert!(table_exists(db.conn(), "meta"));
+        assert!(table_exists(db.conn(), "capability_learn_events"));
         assert!(index_exists(db.conn(), "idx_requests_ts_start"));
         assert_eq!(journal_mode(db.conn()).to_lowercase(), "wal");
     }
@@ -1233,6 +1234,66 @@ mod tests {
             context_fraction.is_none(),
             "migrated v7 row must have NULL would_trim_context_fraction"
         );
+        let meta_version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("meta schema_version");
+        assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+    }
+
+    /// An older v8-shaped DB (no `capability_learn_events` table) migrates
+    /// to v9: the table is created, `user_version` becomes 9, and any
+    /// pre-existing `requests` row survives untouched. Builds a genuine v8
+    /// DB so the create-table migration path -- not the fresh-schema path --
+    /// is exercised.
+    #[test]
+    fn old_v8_db_migrates_to_v9_creating_learn_events_table() {
+        // Arrange: a v8-shaped DB with a request row but no learn-events table.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                ts_start INTEGER NOT NULL,
+                ts_end INTEGER NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                ingress_dialect TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                stream INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                msg_count INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                fallback_count INTEGER NOT NULL
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '8');
+            INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                msg_count, attempt_count, fallback_count) \
+                VALUES (1, 2, 'v8-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0);
+            PRAGMA user_version = 8;",
+        )
+        .expect("build v8 db");
+        assert_eq!(user_version(&conn), 8);
+        assert!(!table_exists(&conn, "capability_learn_events"));
+
+        // Act
+        let version = migrate_to_current(&conn, 0).expect("migrate v8->v9");
+
+        // Assert: landed at v9, the new table exists, the old request row
+        // survived, and meta tracks the new version.
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert!(table_exists(&conn, "capability_learn_events"));
+        let survivor: String = conn
+            .query_row("SELECT request_id FROM requests", [], |r| r.get(0))
+            .expect("request row survives");
+        assert_eq!(survivor, "v8-row");
         let meta_version: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key='schema_version'",
