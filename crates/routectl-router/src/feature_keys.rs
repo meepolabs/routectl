@@ -89,7 +89,7 @@ fn needs_structured_output(tools: &[ToolDef], provider_extras: Option<&Value>) -
 /// Strip a trailing `-YYYYMMDD` or `_YYYYMMDD` suffix if present.
 /// Returns the input unchanged when the trailing 9 chars don't match
 /// the date pattern (separator byte + 8 ASCII digits).
-fn strip_date_suffix(s: &str) -> &str {
+pub fn strip_date_suffix(s: &str) -> &str {
     if s.len() < 9 {
         return s;
     }

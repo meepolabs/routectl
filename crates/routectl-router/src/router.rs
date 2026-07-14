@@ -23,6 +23,7 @@ use routectl_core::{
 use serde_json::Value;
 
 use crate::capability_matcher::match_capability;
+use crate::capability_strip::{Outcome, RequestInterceptor, StripContext, StripInterceptor};
 use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::{
     AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
@@ -227,6 +228,18 @@ struct RouterMetrics {
     /// tail (D17 soft-drop). Bumped by the dispatch path when the tail is
     /// entered (later D17 wiring).
     d17_tail_total: AtomicU64,
+    /// Capabilities stripped in place at a dispatch path (the interceptor
+    /// returned `Stripped`). Bumped once per successful strip run, not per
+    /// capability key.
+    strip_total: AtomicU64,
+    /// Strip runs rolled back because the post-strip check found a
+    /// strip-created hazard; the request was restored and the attempt
+    /// routed away. Bumped by the strip interceptor hook.
+    strip_rollback_total: AtomicU64,
+    /// Would-be strips refused because `strict_translation` is on; the
+    /// attempt returned a 400 without dispatching. Bumped by the strip
+    /// interceptor hook.
+    strip_strict_rejected_total: AtomicU64,
 }
 
 impl RouterMetrics {
@@ -258,6 +271,19 @@ impl RouterMetrics {
 
     fn incr_d17_tail(&self) {
         self.d17_tail_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_strip(&self) {
+        self.strip_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_strip_rollback(&self) {
+        self.strip_rollback_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_strip_strict_rejected(&self) {
+        self.strip_strict_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read the cumulative unknown-upstream-classification count.
@@ -301,6 +327,27 @@ impl RouterMetrics {
     #[cfg(test)]
     fn d17_tail_total(&self) -> u64 {
         self.d17_tail_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative in-place-strip count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn strip_total(&self) -> u64 {
+        self.strip_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative strip-rollback count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn strip_rollback_total(&self) -> u64 {
+        self.strip_rollback_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative strict-rejected-strip count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn strip_strict_rejected_total(&self) -> u64 {
+        self.strip_strict_rejected_total.load(Ordering::Relaxed)
     }
 }
 
@@ -661,6 +708,23 @@ enum CountSeatOutcome {
     Capability,
 }
 
+/// What a dispatch loop must do after the per-attempt strip interceptor
+/// runs. The three dispatch paths map this onto their own control flow
+/// (return / continue / advance-seat).
+#[derive(Debug)]
+enum StripDecision {
+    /// Nothing to reject: proceed to dispatch `attempt_req` (either
+    /// untouched or with the droppable capability stripped in place).
+    Proceed,
+    /// `strict_translation` refused a would-be strip. No mutation
+    /// happened; return this 400 for the attempt without dispatching.
+    StrictReject(Error),
+    /// The post-strip check found a strip-created hazard; the request was
+    /// restored to its pre-strip bytes. Do not dispatch it -- route away
+    /// for this attempt as the f1 route-away verdict would.
+    RouteAway(Error),
+}
+
 /// One hop in the resolved dispatch chain. Built from either a
 /// `Arc<ResolvedModel>` (v0.6.0 path) or a parsed `provider:model`
 /// literal (legacy path). The dispatch loop reads from this struct
@@ -723,6 +787,19 @@ struct DispatchTarget {
     /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
     /// bump rather than a heap allocation.
     model_unsupported_features: std::sync::Arc<[String]>,
+    /// Capability keys the feature filter decided to STRIP in place for
+    /// this target rather than route away from -- the strip-vs-route
+    /// verdict for a learned acting negative whose policy
+    /// ([`capability_strip::action_for`]) is `Strip` and that no operator
+    /// beta floor pins to the wire. Sorted normalized keys
+    /// (`normalize_capability_key`), so the per-session cache prefix an
+    /// interceptor derives from them stays stable across requests. Empty
+    /// (the default in both constructors) means no capability is stripped
+    /// for this target.
+    ///
+    /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
+    /// bump rather than a heap allocation.
+    strip_capabilities: std::sync::Arc<[String]>,
     /// Model nickname for tracing.
     nickname: Option<String>,
     /// The shared resolved model this target dispatches to. Carried as
@@ -1661,9 +1738,24 @@ impl Router {
         // chain order.
         let mut supported: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
         let mut tail: Vec<DispatchTarget> = Vec::new();
-        for target in chain {
-            match self.unsupported_feature_for_target(&target, features, admissions) {
-                None => supported.push(target),
+        for mut target in chain {
+            let mut strip_keys: Vec<String> = Vec::new();
+            match self.unsupported_feature_for_target(
+                &target,
+                features,
+                admissions,
+                &mut strip_keys,
+            ) {
+                None => {
+                    // Strip-in-place verdict: every acting negative on this
+                    // target is a droppable, non-pinned capability, so it
+                    // STAYS in `supported` (no tail demotion) carrying the
+                    // sorted normalized keys the interceptor will strip.
+                    if !strip_keys.is_empty() {
+                        target.strip_capabilities = std::sync::Arc::from(strip_keys);
+                    }
+                    supported.push(target);
+                }
                 Some((feature, FilterSource::Learned)) => {
                     tracing::debug!(
                         provider = %target.provider_name,
@@ -1735,11 +1827,25 @@ impl Router {
     /// and test it), counting the probe attempt as a side effect and
     /// recording the claim in `admissions` so the dispatch path can settle
     /// it. The `in_flight` flip itself happens inside `acting_negative_for`.
+    ///
+    /// Strip-vs-route verdict: when the learned pass finds acting negatives,
+    /// each is classified by [`capability_strip::action_for`]. If EVERY
+    /// acting negative is a droppable `Strip` capability that no operator
+    /// beta floor pins to the wire, the target is NOT unsupported -- it
+    /// returns `None` and the strip keys land in `strip_keys` (sorted,
+    /// normalized) for the caller to attach. If ANY acting negative maps to
+    /// `RouteAway` or is operator-pinned, the whole target routes away
+    /// (`Some((feature, Learned))`, `strip_keys` left empty) -- a target is
+    /// never half-stripped. An admitted re-probe is excluded from
+    /// `strip_keys` (the full request tests the real capability); its
+    /// admission still reaches `admissions`. Static (provider/model) matches
+    /// hard-drop FIRST, ahead of any learned or strip decision.
     fn unsupported_feature_for_target(
         &self,
         target: &DispatchTarget,
         features: &[FeatureKey],
         admissions: &mut Vec<ProbeAdmission>,
+        strip_keys: &mut Vec<String>,
     ) -> Option<(FeatureKey, FilterSource)> {
         let provider_unsupported = self
             .config
@@ -1774,6 +1880,7 @@ impl Router {
         {
             let now = Instant::now();
             let mut route_away: Option<FeatureKey> = None;
+            let mut strip: Vec<String> = Vec::new();
             for feature in features {
                 match self.learned_capabilities.acting_negative_for(
                     &target.state_key,
@@ -1782,26 +1889,166 @@ impl Router {
                     now,
                 ) {
                     crate::learned_capability::RoutingDecision::RouteAway(_) => {
-                        if route_away.is_none() {
+                        // Strip-vs-route: a droppable capability the operator
+                        // has not pinned to the wire is stripped in place;
+                        // everything else (essentials, unknowns, pinned betas)
+                        // routes away. A pinned strip would be re-added
+                        // downstream, so its "success" is false -- route away.
+                        if matches!(
+                            crate::capability_strip::action_for(feature),
+                            crate::capability_strip::CapabilityAction::Strip(_)
+                        ) && !self.beta_pinned_for_target(target, feature)
+                        {
+                            strip.push(normalize_capability_key(feature, provider_kind));
+                        } else if route_away.is_none() {
                             route_away = Some(feature.clone());
                         }
                     }
                     crate::learned_capability::RoutingDecision::ProbeAdmitted => {
                         self.metrics.incr_probe_attempts();
+                        let normalized = normalize_capability_key(feature, provider_kind);
+                        // Probe bypass: the admitted feature tests the REAL
+                        // capability on the full request, so it is never
+                        // stripped -- a stripped success would falsely clear
+                        // the negative the probe is meant to re-verify. When
+                        // the bypassed feature WOULD otherwise have been
+                        // stripped in place (a droppable `Strip` the operator
+                        // has not pinned to the wire -- the exact condition the
+                        // `RouteAway` arm strips on), surface it: the strip WARN
+                        // vocabulary's `probe_bypassed` outcome fires here, with
+                        // the same field shape as the per-decision WARN in
+                        // `apply_strip_interceptor`. Route-away features do not
+                        // fire -- they were never strip-eligible. Capability
+                        // TOKEN and state_key only -- never request bodies.
+                        if matches!(
+                            crate::capability_strip::action_for(feature),
+                            crate::capability_strip::CapabilityAction::Strip(_)
+                        ) && !self.beta_pinned_for_target(target, feature)
+                        {
+                            tracing::warn!(
+                                target = %target.state_key,
+                                capability_key = %normalized,
+                                outcome = "probe_bypassed",
+                                "capability_strip_decision",
+                            );
+                        }
                         admissions.push(ProbeAdmission {
                             state_key: target.state_key.clone(),
-                            feature: normalize_capability_key(feature, provider_kind),
+                            feature: normalized,
                             provider_kind,
                         });
                     }
                     crate::learned_capability::RoutingDecision::Allow => {}
                 }
             }
+            // ANY route-away (or operator-pinned) acting negative demotes the
+            // whole target; the strip set is abandoned so a mixed target is
+            // never half-stripped-half-routed.
             if let Some(feature) = route_away {
                 return Some((feature, FilterSource::Learned));
             }
+            if !strip.is_empty() {
+                strip.sort_unstable();
+                strip.dedup();
+                *strip_keys = strip;
+            }
         }
         None
+    }
+
+    /// Whether stripping `feature` on this target would be silently undone
+    /// on the wire by an operator beta floor. A `Strip(BetaFlag)`
+    /// capability's beta token can be pinned by the provider `anthropic_beta`
+    /// config (Bedrock, re-added post-strip) or a provider/model
+    /// `header_extras` `anthropic-beta` contribution (Anthropic-API,
+    /// re-added via `operator_betas`). Either source makes the strip
+    /// ineffective, so the caller must route away instead. Non-beta strips
+    /// (e.g. a tool-shape strip) carry no beta token and are never pinned.
+    fn beta_pinned_for_target(&self, target: &DispatchTarget, feature: &str) -> bool {
+        let tokens = crate::capability_strip::strip_beta_tokens(feature);
+        if tokens.is_empty() {
+            return false;
+        }
+        let provider_entry = self.config.providers.get(&target.provider_name);
+        let provider_floor =
+            provider_entry.map_or(&[][..], super::config::ProviderEntry::anthropic_beta_floor);
+        let header_floor = operator_betas(
+            provider_entry.map(super::config::ProviderEntry::header_extras),
+            &target.model.header_extras,
+        );
+        tokens.iter().any(|token| {
+            provider_floor.iter().any(|pinned| pinned == token)
+                || header_floor.iter().any(|pinned| pinned == token)
+        })
+    }
+
+    /// Run the single request interceptor over one per-attempt clone and
+    /// map its outcome to a loop-actionable [`StripDecision`], emitting the
+    /// per-decision observability (a structured WARN per capability key
+    /// plus the matching `RouterMetrics` counter).
+    ///
+    /// Called at all three dispatch paths immediately after
+    /// `apply_layered_overlays` and before context reduction / auto-cache,
+    /// so the bytes reduction, cache planning, and dispatch observe are the
+    /// stripped bytes, and the strip runs downstream of the beta floor. The
+    /// caller's original `req` is never passed here -- only `attempt_req`.
+    ///
+    /// `target.strip_capabilities` is consumed as-is: it is empty unless an
+    /// acting learned negative resolved to a non-pinned droppable, so a
+    /// disabled kill switch (or a probe-admitted / operator-pinned feature)
+    /// leaves this inert by construction. The keys arrive already sorted
+    /// and normalized.
+    fn apply_strip_interceptor(
+        &self,
+        target: &DispatchTarget,
+        attempt_req: &mut ChatRequest,
+    ) -> StripDecision {
+        if target.strip_capabilities.is_empty() {
+            return StripDecision::Proceed;
+        }
+        let strict = self.config.server.strict_translation;
+        let ctx = StripContext {
+            keys: target.strip_capabilities.to_vec(),
+            strict,
+        };
+        let outcome = StripInterceptor.apply(attempt_req, &ctx);
+        let outcome_token = match &outcome {
+            Outcome::Stripped => "applied",
+            Outcome::Unchanged => "noop",
+            Outcome::Reject(_) if strict => "strict_rejected",
+            Outcome::Reject(_) => "validation_rolled_back",
+        };
+        // One WARN per strip decision. `capability_key` names the verdict's
+        // keys (already sorted + normalized); the outcome is the run-level
+        // decision, so joining avoids misreporting a per-key outcome the
+        // aggregate `Outcome` cannot distinguish. Capability TOKEN and
+        // state_key only -- never request bodies (log hygiene).
+        // `probe_bypassed` is emitted upstream at the verdict site (an
+        // admitted feature never reaches this verdict -- it arrives empty).
+        // `disabled` has no per-decision emission: a disabled kill switch
+        // skips the verdict entirely, so no per-decision context exists to
+        // name.
+        tracing::warn!(
+            target = %target.state_key,
+            capability_key = %target.strip_capabilities.join(", "),
+            outcome = outcome_token,
+            "capability_strip_decision",
+        );
+        match outcome {
+            Outcome::Stripped => {
+                self.metrics.incr_strip();
+                StripDecision::Proceed
+            }
+            Outcome::Unchanged => StripDecision::Proceed,
+            Outcome::Reject(err) if strict => {
+                self.metrics.incr_strip_strict_rejected();
+                StripDecision::StrictReject(err)
+            }
+            Outcome::Reject(err) => {
+                self.metrics.incr_strip_rollback();
+                StripDecision::RouteAway(err)
+            }
+        }
     }
 
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
@@ -1830,14 +2077,19 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
-        // Re-probes the chain filter admitted, indexed by the target that
-        // must settle each. Consumed per chain-iteration into a
-        // `LearnedProbeGuard` so the probe settles exactly once regardless of
-        // how the target's dispatch concludes.
-        let mut pending_probes: HashMap<String, ProbeAdmission> = probe_admissions
-            .into_iter()
-            .map(|admission| (admission.state_key.clone(), admission))
-            .collect();
+        // Re-probes the chain filter admitted, grouped by the target that must
+        // settle them. A single target can be admitted to re-probe several
+        // distinct `(state_key, feature)` negatives at once, so every admission
+        // for a `state_key` is held together and consumed per chain-iteration
+        // into one `LearnedProbeGuard` that settles each on the dispatch
+        // outcome.
+        let mut pending_probes: HashMap<String, Vec<ProbeAdmission>> = HashMap::new();
+        for admission in probe_admissions {
+            pending_probes
+                .entry(admission.state_key.clone())
+                .or_default()
+                .push(admission);
+        }
         // Whether the CLIENT'S request carried a captured forwarded
         // bearer, computed ONCE before the chain loop (mirroring
         // `is_probe` below). This is a request-global observability
@@ -1878,14 +2130,12 @@ impl Router {
             // Learned re-probe settle guard for THIS target, scoped to the
             // whole chain-iteration (persists across same-provider retries,
             // drops -> OtherError on any exit). Inert unless the filter
-            // admitted a probe for this state_key.
+            // admitted at least one probe for this state_key; holds every
+            // admission the target owns.
             let mut learned_probe_guard = match pending_probes.remove(state_key) {
-                Some(admission) => LearnedProbeGuard::armed(
-                    self.learned_capabilities.clone(),
-                    admission.state_key,
-                    admission.feature,
-                    admission.provider_kind,
-                ),
+                Some(admissions) => {
+                    LearnedProbeGuard::armed(self.learned_capabilities.clone(), admissions)
+                }
                 None => LearnedProbeGuard::inert(),
             };
             let Some(provider) = target.provider.clone() else {
@@ -1924,6 +2174,23 @@ impl Router {
             // provider_name; the model's contribution lives on the
             // dispatch target.
             apply_layered_overlays(&self.config, target, &mut attempt_req);
+            // INTERCEPTOR HOOK: strip runs after layered config compose,
+            // before auto-cache / context reduction. Any future interceptor
+            // over the per-attempt canonical clone goes here, ordered by
+            // data-dependency. A strict-mode refusal returns the 400 for
+            // this attempt; a rolled-back post-strip hazard routes away
+            // (advance the chain as an f1 route-away would).
+            match self.apply_strip_interceptor(target, &mut attempt_req) {
+                StripDecision::Proceed => {}
+                StripDecision::StrictReject(err) => return Err(err),
+                StripDecision::RouteAway(err) => {
+                    last_err = Some(err);
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue;
+                }
+            }
             let provider_cfg = self.config.providers.get(provider_name);
             // Context reduction: runs strictly AFTER overlays and strictly
             // BEFORE auto-cache so any auto-emitted breakpoint covers the
@@ -2524,6 +2791,15 @@ impl Router {
             attempt_req.model = target.upstream.clone();
         }
         apply_layered_overlays(&self.config, &target, &mut attempt_req);
+        // INTERCEPTOR HOOK (see `complete_inner`): strip runs after layered
+        // config compose so the estimated prefix matches the shipped
+        // prefix. Strict refusal is a terminal 400; a rolled-back hazard
+        // advances to the next capable seat (the count_tokens route-away).
+        match self.apply_strip_interceptor(&target, &mut attempt_req) {
+            StripDecision::Proceed => {}
+            StripDecision::StrictReject(err) => return CountSeatOutcome::Terminal(err),
+            StripDecision::RouteAway(_) => return CountSeatOutcome::Capability,
+        }
 
         let mut auth_retry_attempted = false;
         let mut attempts_made: u32 = 0;
@@ -2696,12 +2972,15 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
-        // See `complete_inner`: re-probes the filter admitted, indexed by the
-        // target that must settle each into a `LearnedProbeGuard`.
-        let mut pending_probes: HashMap<String, ProbeAdmission> = probe_admissions
-            .into_iter()
-            .map(|admission| (admission.state_key.clone(), admission))
-            .collect();
+        // See `complete_inner`: re-probes the filter admitted, grouped by the
+        // target that must settle them into one `LearnedProbeGuard`.
+        let mut pending_probes: HashMap<String, Vec<ProbeAdmission>> = HashMap::new();
+        for admission in probe_admissions {
+            pending_probes
+                .entry(admission.state_key.clone())
+                .or_default()
+                .push(admission);
+        }
         // See `complete_inner`: request-global observability dimension
         // ONLY, fed to `emit_class_observability`. The per-target
         // `use_forwarded_credential` flag drives the model-rewrite
@@ -2729,14 +3008,12 @@ impl Router {
             let state_key = target.state_key.as_str();
             let model = target.upstream.as_str();
             // See `complete_inner`: learned re-probe settle guard, scoped to
-            // the whole chain-iteration; drops -> OtherError on any exit.
+            // the whole chain-iteration; holds every admission the target owns
+            // and drops -> OtherError on any exit.
             let mut learned_probe_guard = match pending_probes.remove(state_key) {
-                Some(admission) => LearnedProbeGuard::armed(
-                    self.learned_capabilities.clone(),
-                    admission.state_key,
-                    admission.feature,
-                    admission.provider_kind,
-                ),
+                Some(admissions) => {
+                    LearnedProbeGuard::armed(self.learned_capabilities.clone(), admissions)
+                }
                 None => LearnedProbeGuard::inert(),
             };
             let Some(provider) = target.provider.clone() else {
@@ -2764,6 +3041,21 @@ impl Router {
                 attempt_req.model = model.to_string();
             }
             apply_layered_overlays(&self.config, target, &mut attempt_req);
+            // INTERCEPTOR HOOK (see `complete_inner`): strip runs after
+            // layered config compose, before auto-cache / context
+            // reduction. Strict refusal returns the 400; a rolled-back
+            // hazard routes away for this attempt.
+            match self.apply_strip_interceptor(target, &mut attempt_req) {
+                StripDecision::Proceed => {}
+                StripDecision::StrictReject(err) => return Err(err),
+                StripDecision::RouteAway(err) => {
+                    last_err = Some(err);
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue;
+                }
+            }
             let provider_cfg = self.config.providers.get(provider_name);
             // Context reduction: see `complete_inner`. Runs after overlays
             // and before auto-cache so the auto-emitted breakpoint covers the
@@ -3295,8 +3587,7 @@ impl Router {
         // observation bump and expiry) instead of feeding the observe path.
         // The dedupe key is inserted too, so a same-request retry that hits
         // this arm again does not re-observe the entry the probe refreshed.
-        if probe_guard.matches(&state_key, &feature_key, provider_kind) {
-            probe_guard.settle_same_capability();
+        if probe_guard.settle_same_capability(&state_key, &feature_key, provider_kind) {
             self.metrics.incr_probe_failures();
             dedupe.insert((state_key, feature_key));
             return;
@@ -4351,6 +4642,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
         model_unsupported_features: m.unsupported_features.clone(),
+        strip_capabilities: std::sync::Arc::default(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
@@ -4391,6 +4683,7 @@ fn dispatch_target_for_seat(
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
         model_unsupported_features: m.unsupported_features.clone(),
+        strip_capabilities: std::sync::Arc::default(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
@@ -4584,43 +4877,41 @@ struct ProbeAdmission {
     provider_kind: &'static str,
 }
 
-/// Settles a learned-capability re-probe when the dispatch of its admitted
-/// target concludes -- the [`ProbeSlotGuard`] pattern applied to the learned
-/// registry's `in_flight` slot rather than the breaker's.
+/// Settles the learned-capability re-probes a target's dispatch was admitted
+/// to run -- the [`ProbeSlotGuard`] pattern applied to the learned registry's
+/// `in_flight` slots rather than the breaker's.
 ///
-/// Armed for a target the chain filter admitted as the single re-probe for
-/// `(state_key, feature)`; inert otherwise. Held across the whole
-/// chain-iteration (including same-provider retries, which stay within the
-/// iteration). A definitive verdict settles explicitly and disarms:
-/// [`settle_success`](Self::settle_success) clears the entry,
-/// [`settle_same_capability`](Self::settle_same_capability) refreshes it with
-/// capped backoff. Any other way of leaving the target -- fallback, terminal
-/// error, gate block, cancellation -- drops the guard, which records
-/// `OtherError`: the `in_flight` slot is released and the entry stays expired
-/// so the next request re-probes (a transient must never clear a valid
-/// negative).
+/// A single target can be admitted to re-probe several distinct learned
+/// negatives at once (one admission per `(state_key, feature)`), so the guard
+/// holds EVERY admission that target owns and settles each on the dispatch
+/// outcome. Held across the whole chain-iteration (including same-provider
+/// retries, which stay within the iteration). A 2xx settles all of them:
+/// [`settle_success`](Self::settle_success) clears every held entry (proof the
+/// capability is not rejected). [`settle_same_capability`](Self::settle_same_capability)
+/// refreshes the one matching entry with capped backoff and drops it from the
+/// held set. Any other way of leaving the target -- fallback, terminal error,
+/// gate block, cancellation -- drops the guard, which records `OtherError` for
+/// each still-held admission: the `in_flight` slot is released and the entry
+/// stays expired so the next request re-probes (a transient must never clear a
+/// valid negative).
 struct LearnedProbeGuard {
-    /// `Some` while armed; `None` once an outcome settled the probe or the
-    /// target was never a re-probe admission.
+    /// `Some` while any held admission is unsettled; `None` once every
+    /// admission settled or the target was never a re-probe admission.
     registry: Option<Arc<crate::learned_capability::LearnedCapabilityRegistry>>,
-    state_key: String,
-    feature: String,
-    provider_kind: &'static str,
+    /// The still-unsettled admissions this target owns, each self-describing
+    /// its `(state_key, feature, provider_kind)`.
+    probes: Vec<ProbeAdmission>,
 }
 
 impl LearnedProbeGuard {
-    /// Arm a guard for a target admitted as the single re-probe.
+    /// Arm a guard for a target admitted to re-probe one or more negatives.
     const fn armed(
         registry: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
-        state_key: String,
-        feature: String,
-        provider_kind: &'static str,
+        probes: Vec<ProbeAdmission>,
     ) -> Self {
         Self {
             registry: Some(registry),
-            state_key,
-            feature,
-            provider_kind,
+            probes,
         }
     }
 
@@ -4629,58 +4920,76 @@ impl LearnedProbeGuard {
     const fn inert() -> Self {
         Self {
             registry: None,
-            state_key: String::new(),
-            feature: String::new(),
-            provider_kind: "",
+            probes: Vec::new(),
         }
     }
 
-    /// True when this guard tracks a live probe for exactly this key.
-    fn matches(&self, state_key: &str, feature: &str, provider_kind: &str) -> bool {
-        self.registry.is_some()
-            && self.state_key == state_key
-            && self.feature == feature
-            && self.provider_kind == provider_kind
-    }
-
-    /// The probe succeeded (2xx): clear the entry, then disarm.
+    /// The dispatch succeeded (2xx): clear every held entry, then disarm.
     fn settle_success(&mut self) {
         if let Some(registry) = self.registry.take() {
-            registry.record_probe_outcome(
-                &self.state_key,
-                &self.feature,
-                self.provider_kind,
-                crate::learned_capability::ProbeOutcome::Success,
-                Instant::now(),
-            );
+            let now = Instant::now();
+            for probe in self.probes.drain(..) {
+                registry.record_probe_outcome(
+                    &probe.state_key,
+                    &probe.feature,
+                    probe.provider_kind,
+                    crate::learned_capability::ProbeOutcome::Success,
+                    now,
+                );
+            }
         }
     }
 
-    /// The probe hit the same capability rejection again: refresh with capped
-    /// backoff, then disarm.
-    fn settle_same_capability(&mut self) {
-        if let Some(registry) = self.registry.take() {
+    /// The dispatch hit the same capability rejection for one held probe:
+    /// refresh that entry with capped backoff and drop it from the held set.
+    /// Returns `true` when a held probe matched.
+    fn settle_same_capability(
+        &mut self,
+        state_key: &str,
+        feature: &str,
+        provider_kind: &str,
+    ) -> bool {
+        if self.registry.is_none() {
+            return false;
+        }
+        let Some(pos) = self.probes.iter().position(|probe| {
+            probe.state_key == state_key
+                && probe.feature == feature
+                && probe.provider_kind == provider_kind
+        }) else {
+            return false;
+        };
+        let probe = self.probes.remove(pos);
+        if let Some(registry) = &self.registry {
             registry.record_probe_outcome(
-                &self.state_key,
-                &self.feature,
-                self.provider_kind,
+                &probe.state_key,
+                &probe.feature,
+                probe.provider_kind,
                 crate::learned_capability::ProbeOutcome::SameCapabilityRejection,
                 Instant::now(),
             );
         }
+        // Once the last held admission settles, disarm so drop is a no-op.
+        if self.probes.is_empty() {
+            self.registry = None;
+        }
+        true
     }
 }
 
 impl Drop for LearnedProbeGuard {
     fn drop(&mut self) {
         if let Some(registry) = &self.registry {
-            registry.record_probe_outcome(
-                &self.state_key,
-                &self.feature,
-                self.provider_kind,
-                crate::learned_capability::ProbeOutcome::OtherError,
-                Instant::now(),
-            );
+            let now = Instant::now();
+            for probe in &self.probes {
+                registry.record_probe_outcome(
+                    &probe.state_key,
+                    &probe.feature,
+                    probe.provider_kind,
+                    crate::learned_capability::ProbeOutcome::OtherError,
+                    now,
+                );
+            }
         }
     }
 }
@@ -10917,7 +11226,8 @@ mod feature_filter_tests {
             router.unsupported_feature_for_target(
                 &target,
                 &["web_search".to_string()],
-                &mut Vec::new()
+                &mut Vec::new(),
+                &mut Vec::new(),
             ),
             Some(("web_search".to_string(), FilterSource::ProviderStatic)),
         );
@@ -10926,7 +11236,8 @@ mod feature_filter_tests {
             router.unsupported_feature_for_target(
                 &target,
                 &["structured_output".to_string()],
-                &mut Vec::new()
+                &mut Vec::new(),
+                &mut Vec::new(),
             ),
             Some(("structured_output".to_string(), FilterSource::ModelStatic)),
         );
@@ -10935,7 +11246,8 @@ mod feature_filter_tests {
             router.unsupported_feature_for_target(
                 &target,
                 &["computer_use".to_string()],
-                &mut Vec::new()
+                &mut Vec::new(),
+                &mut Vec::new(),
             ),
             None,
         );
@@ -10946,6 +11258,7 @@ mod feature_filter_tests {
             router.unsupported_feature_for_target(
                 &target,
                 &["web_search".to_string(), "structured_output".to_string()],
+                &mut Vec::new(),
                 &mut Vec::new(),
             ),
             Some(("web_search".to_string(), FilterSource::ProviderStatic)),
@@ -11013,6 +11326,7 @@ mod feature_filter_tests {
             &target,
             &["structured_output".to_string(), "web_search".to_string()],
             &mut admissions,
+            &mut Vec::new(),
         );
         assert_eq!(
             decision,
@@ -11044,15 +11358,9 @@ mod feature_filter_tests {
         );
 
         // Settle exactly as dispatch does: arm the guard from the captured
-        // admission and drop it (the fallback / other-error settle path).
+        // admissions and drop it (the fallback / other-error settle path).
         {
-            let admission = &admissions[0];
-            let _guard = LearnedProbeGuard::armed(
-                router.learned_capabilities.clone(),
-                admission.state_key.clone(),
-                admission.feature.clone(),
-                admission.provider_kind,
-            );
+            let _guard = LearnedProbeGuard::armed(router.learned_capabilities.clone(), admissions);
         }
         // The released slot makes the feature re-probable; had the admission
         // been dropped the slot would have latched forever.
@@ -11072,6 +11380,477 @@ mod feature_filter_tests {
     fn filter_source_as_str_tokens() {
         assert_eq!(FilterSource::ProviderStatic.as_str(), "provider");
         assert_eq!(FilterSource::ModelStatic.as_str(), "model");
+    }
+
+    // --- strip-vs-route verdict (capability-strip wiring) ---
+
+    /// An acting (non-expired) learned negative for `(state_key, feature)`,
+    /// normalized under the `openai-compat` kind these strip tests use
+    /// (identity normalization for a clean key).
+    fn acting_negative(
+        state_key: &str,
+        feature: &str,
+        base: Instant,
+    ) -> crate::learned_capability::ExportedEntry {
+        crate::learned_capability::ExportedEntry {
+            state_key: state_key.into(),
+            feature_key: normalize_capability_key(feature, "openai-compat"),
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: base,
+            last_seen: base,
+            expires_at: base + Duration::from_hours(48),
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }
+    }
+
+    /// A probe-due (expired) learned negative: `expires_at == base`, which
+    /// the filter's strictly-later `Instant::now()` reads as expired, so
+    /// the single re-probe slot is admitted.
+    fn probe_due_negative(
+        state_key: &str,
+        feature: &str,
+        base: Instant,
+    ) -> crate::learned_capability::ExportedEntry {
+        crate::learned_capability::ExportedEntry {
+            expires_at: base,
+            ..acting_negative(state_key, feature, base)
+        }
+    }
+
+    fn strip_target(nickname: &str) -> DispatchTarget {
+        let stub: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: nickname.into(),
+            captured: Arc::new(ParkingMutex::new(Vec::new())),
+        });
+        let model = Arc::new(ResolvedModel::new(nickname, "prov", stub, "upstream"));
+        let mut target = into_one_dispatch_target(model);
+        // The learned pass runs only for a target carrying a provider kind.
+        target.provider_kind = Some("openai-compat");
+        target
+    }
+
+    #[test]
+    fn all_strip_negatives_keep_target_supported_with_sorted_keys() {
+        // Two acting negatives, both droppable: advisor (tool-shape strip)
+        // and context_management (beta strip). No route-away, no pin -> the
+        // target stays supported carrying both keys in sorted normalized
+        // order so a per-session cache prefix stays stable.
+        let router = Router::new(Arc::new(Config::default()));
+        let target = strip_target("nick");
+        let base = Instant::now();
+        router.learned_capabilities.import_entries(vec![
+            acting_negative("nick", "context_management", base),
+            acting_negative("nick", "advisor", base),
+        ]);
+
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let decision = router.unsupported_feature_for_target(
+            &target,
+            &["context_management".to_string(), "advisor".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        assert_eq!(
+            decision, None,
+            "all-strip negatives keep the target supported"
+        );
+        assert_eq!(
+            strip_keys,
+            vec!["advisor".to_string(), "context_management".to_string()],
+            "strip keys are sorted normalized",
+        );
+        assert!(admissions.is_empty());
+    }
+
+    #[test]
+    fn any_route_away_negative_demotes_target_and_leaves_strip_empty() {
+        // A droppable negative (context_management) coexists with an
+        // essential route-away one (web_search). ANY route-away demotes the
+        // whole target to the tail; the strip set is abandoned so the target
+        // is never half-stripped.
+        let router = Router::new(Arc::new(Config::default()));
+        let target = strip_target("nick");
+        let base = Instant::now();
+        router.learned_capabilities.import_entries(vec![
+            acting_negative("nick", "context_management", base),
+            acting_negative("nick", "web_search", base),
+        ]);
+
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let decision = router.unsupported_feature_for_target(
+            &target,
+            &["context_management".to_string(), "web_search".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        assert_eq!(
+            decision,
+            Some(("web_search".to_string(), FilterSource::Learned))
+        );
+        assert!(
+            strip_keys.is_empty(),
+            "a route-away target never carries strip keys"
+        );
+    }
+
+    #[test]
+    fn admitted_probe_feature_excluded_from_strip_but_admission_recorded() {
+        // context_management is probe-due (a would-be strip) and advisor is
+        // an acting strip. The admitted re-probe tests the REAL capability on
+        // the full request, so context_management is excluded from the strip
+        // set -- yet its admission still reaches `admissions` to settle the
+        // in_flight slot. advisor still strips.
+        let router = Router::new(Arc::new(Config::default()));
+        let target = strip_target("nick");
+        let base = Instant::now();
+        router.learned_capabilities.import_entries(vec![
+            probe_due_negative("nick", "context_management", base),
+            acting_negative("nick", "advisor", base),
+        ]);
+
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let decision = router.unsupported_feature_for_target(
+            &target,
+            &["context_management".to_string(), "advisor".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        assert_eq!(decision, None);
+        assert_eq!(
+            strip_keys,
+            vec!["advisor".to_string()],
+            "the admitted-probe feature is never stripped",
+        );
+        assert_eq!(
+            admissions.len(),
+            1,
+            "the probe admission still settles its slot"
+        );
+        assert_eq!(
+            admissions[0].feature,
+            normalize_capability_key("context_management", "openai-compat"),
+        );
+    }
+
+    #[test]
+    fn probe_bypass_of_strip_eligible_feature_emits_probe_bypassed_warn() {
+        // context_management is a probe-due droppable Strip (strip-eligible),
+        // web_search is a probe-due essential (route-away). Both are admitted
+        // for re-probe, so neither is stripped -- but only the strip-eligible
+        // bypass surfaces a `probe_bypassed` WARN at the verdict site; the
+        // route-away feature was never strip-eligible and stays silent.
+        let router = Router::new(Arc::new(Config::default()));
+        let target = strip_target("nick");
+        let base = Instant::now();
+        router.learned_capabilities.import_entries(vec![
+            probe_due_negative("nick", "context_management", base),
+            probe_due_negative("nick", "web_search", base),
+        ]);
+
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let mut decision = None;
+        let events = routectl_testkit::capture_events(|| {
+            decision = router.unsupported_feature_for_target(
+                &target,
+                &["context_management".to_string(), "web_search".to_string()],
+                &mut admissions,
+                &mut strip_keys,
+            );
+        });
+
+        // Both features are admitted probes: the target stays supported, no
+        // key is stripped, and both admissions settle their slots.
+        assert_eq!(decision, None);
+        assert!(strip_keys.is_empty());
+        assert_eq!(admissions.len(), 2);
+
+        // Exactly one `probe_bypassed` WARN fires, for the strip-eligible
+        // feature, carrying the capability token and the target's state key.
+        let bypass_warns: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message == "capability_strip_decision"
+                    && e.field("outcome") == Some("probe_bypassed")
+            })
+            .collect();
+        assert_eq!(
+            bypass_warns.len(),
+            1,
+            "one probe_bypassed WARN for the strip-eligible bypassed feature",
+        );
+        assert_eq!(
+            bypass_warns[0].field("capability_key"),
+            Some(normalize_capability_key("context_management", "openai-compat").as_str()),
+        );
+        assert_eq!(bypass_warns[0].field("target"), Some("nick"));
+    }
+
+    #[test]
+    fn operator_pinned_beta_capability_routes_away_never_strips() {
+        // context_management is a droppable beta strip, but the operator pins
+        // its beta token via the model's header_extras anthropic-beta floor.
+        // Bedrock/Anthropic egresses re-add the token AFTER the canonical
+        // strip, so a strip would be a false success -> route away instead.
+        let router = Router::new(Arc::new(Config::default()));
+        let stub: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "nick".into(),
+            captured: Arc::new(ParkingMutex::new(Vec::new())),
+        });
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "anthropic-beta".to_string(),
+            "context-management-2025-06-27".to_string(),
+        );
+        let model = Arc::new(
+            ResolvedModel::new("nick", "prov", stub, "upstream").with_header_extras(headers),
+        );
+        let mut target = into_one_dispatch_target(model);
+        target.provider_kind = Some("openai-compat");
+
+        let base = Instant::now();
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_negative("nick", "context_management", base)]);
+
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let decision = router.unsupported_feature_for_target(
+            &target,
+            &["context_management".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        assert_eq!(
+            decision,
+            Some(("context_management".to_string(), FilterSource::Learned)),
+            "an operator-pinned beta strip routes away",
+        );
+        assert!(strip_keys.is_empty());
+    }
+
+    #[test]
+    fn beta_pinned_reads_provider_and_model_floors_and_ignores_non_beta_strips() {
+        // Provider header_extras pins the beta; a tool-shape strip (advisor)
+        // carries no beta token and is never pinned.
+        let mut config = Config::default();
+        let mut provider_headers = BTreeMap::new();
+        provider_headers.insert(
+            "anthropic-beta".to_string(),
+            "context-management-2025-06-27".to_string(),
+        );
+        config.providers.insert(
+            "prov".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: provider_headers,
+                payload_extras: None,
+                user_agent: None,
+                cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
+                runtime: crate::config::ProviderRuntimePolicy::default(),
+            },
+        );
+        let router = Router::new(Arc::new(config));
+        let target = strip_target("prov");
+
+        assert!(
+            router.beta_pinned_for_target(&target, "context_management"),
+            "provider header_extras floor pins the beta",
+        );
+        assert!(
+            !router.beta_pinned_for_target(&target, "advisor"),
+            "a tool-shape strip carries no beta token",
+        );
+    }
+
+    #[test]
+    fn filter_chain_keeps_stripped_target_and_tails_route_away() {
+        // Two targets: one carrying a droppable-only negative
+        // (context_management) STAYS supported with the strip key attached;
+        // one carrying an essential negative (web_search) is tail-demoted.
+        let router = Router::new(Arc::new(Config::default()));
+        let strip_t = strip_target("strip-nick");
+        let route_t = strip_target("route-nick");
+        let base = Instant::now();
+        router.learned_capabilities.import_entries(vec![
+            acting_negative("strip-nick", "context_management", base),
+            acting_negative("route-nick", "web_search", base),
+        ]);
+
+        let mut admissions = Vec::new();
+        let out = router
+            .filter_chain_by_features(
+                vec![strip_t, route_t],
+                &["context_management".to_string(), "web_search".to_string()],
+                "alias",
+                &mut admissions,
+            )
+            .unwrap();
+
+        assert_eq!(out.len(), 2);
+        // The strip target stays first (supported); the route-away target is
+        // demoted to the tail.
+        assert_eq!(out[0].state_key, "strip-nick");
+        assert_eq!(
+            &*out[0].strip_capabilities,
+            &["context_management".to_string()],
+        );
+        assert_eq!(out[1].state_key, "route-nick");
+        assert!(
+            out[1].strip_capabilities.is_empty(),
+            "a tail-demoted target carries no strip keys",
+        );
+    }
+
+    // --- apply_strip_interceptor: outcome mapping, mutation, metrics ---
+
+    fn advisor_tool() -> ToolDef {
+        ToolDef::Other(json!({"type": "advisor", "name": "advisor"}))
+    }
+
+    fn advisor_request() -> ChatRequest {
+        ChatRequest {
+            model: "nick".into(),
+            messages: vec![],
+            tools: Some(vec![advisor_tool()]),
+            ..Default::default()
+        }
+    }
+
+    fn with_strip_keys(mut target: DispatchTarget, keys: &[&str]) -> DispatchTarget {
+        target.strip_capabilities =
+            std::sync::Arc::from(keys.iter().map(|k| (*k).to_string()).collect::<Vec<_>>());
+        target
+    }
+
+    fn strict_router() -> Router {
+        let mut config = Config::default();
+        config.server.strict_translation = true;
+        Router::new(Arc::new(config))
+    }
+
+    #[test]
+    fn strip_helper_applies_and_bumps_strip_total() {
+        let router = Router::new(Arc::new(Config::default()));
+        let target = with_strip_keys(strip_target("nick"), &["advisor"]);
+        let mut attempt_req = advisor_request();
+
+        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+
+        assert!(matches!(decision, StripDecision::Proceed));
+        assert!(
+            attempt_req.tools.as_ref().unwrap().is_empty(),
+            "the advisor tool is stripped from the attempt request",
+        );
+        assert_eq!(router.metrics.strip_total(), 1);
+        assert_eq!(router.metrics.strip_rollback_total(), 0);
+        assert_eq!(router.metrics.strip_strict_rejected_total(), 0);
+    }
+
+    #[test]
+    fn strip_helper_is_noop_when_surface_absent() {
+        // The verdict names advisor, but the request carries no advisor
+        // surface: a plain no-op, not a strip -- strip_total stays at zero.
+        let router = Router::new(Arc::new(Config::default()));
+        let target = with_strip_keys(strip_target("nick"), &["advisor"]);
+        let mut attempt_req = ChatRequest {
+            model: "nick".into(),
+            tools: Some(vec![ToolDef::Other(
+                json!({"type": "web_search_20250305", "name": "search"}),
+            )]),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&attempt_req).unwrap();
+
+        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+
+        assert!(matches!(decision, StripDecision::Proceed));
+        assert_eq!(serde_json::to_value(&attempt_req).unwrap(), before);
+        assert_eq!(router.metrics.strip_total(), 0);
+    }
+
+    #[test]
+    fn strip_helper_strict_rejects_without_mutation() {
+        let router = strict_router();
+        let target = with_strip_keys(strip_target("nick"), &["advisor"]);
+        let mut attempt_req = advisor_request();
+        let before = serde_json::to_value(&attempt_req).unwrap();
+
+        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+
+        match decision {
+            StripDecision::StrictReject(Error::Validation(msg)) => {
+                assert!(msg.contains("advisor"), "{msg}");
+            }
+            other => panic!("expected StrictReject(Validation), got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_value(&attempt_req).unwrap(),
+            before,
+            "strict mode blocks before any mutation",
+        );
+        assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
+        assert_eq!(router.metrics.strip_total(), 0);
+        assert_eq!(router.metrics.strip_rollback_total(), 0);
+    }
+
+    #[test]
+    fn strip_helper_rolls_back_and_routes_away() {
+        // tool_choice forces the advisor tool the strip removes: a
+        // strip-created hazard the post-strip check rolls back. The
+        // request is restored and the attempt routes away.
+        let router = Router::new(Arc::new(Config::default()));
+        let target = with_strip_keys(strip_target("nick"), &["advisor"]);
+        let mut attempt_req = ChatRequest {
+            model: "nick".into(),
+            tools: Some(vec![advisor_tool()]),
+            tool_choice: Some(json!({"type": "tool", "name": "advisor"})),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&attempt_req).unwrap();
+
+        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+
+        assert!(matches!(decision, StripDecision::RouteAway(_)));
+        assert_eq!(
+            serde_json::to_value(&attempt_req).unwrap(),
+            before,
+            "the rolled-back request is byte-identical to the pre-strip bytes",
+        );
+        assert_eq!(router.metrics.strip_rollback_total(), 1);
+        assert_eq!(router.metrics.strip_total(), 0);
+    }
+
+    #[test]
+    fn strip_helper_is_inert_with_empty_verdict_even_under_strict() {
+        // Kill-switch by construction: an empty strip verdict (disabled
+        // learning, probe-admitted, or operator-pinned features) leaves the
+        // helper inert -- no mutation, no counter, even under strict.
+        let router = strict_router();
+        let target = strip_target("nick");
+        let mut attempt_req = advisor_request();
+        let before = serde_json::to_value(&attempt_req).unwrap();
+
+        let decision = router.apply_strip_interceptor(&target, &mut attempt_req);
+
+        assert!(matches!(decision, StripDecision::Proceed));
+        assert_eq!(serde_json::to_value(&attempt_req).unwrap(), before);
+        assert_eq!(router.metrics.strip_total(), 0);
+        assert_eq!(router.metrics.strip_strict_rejected_total(), 0);
+        assert_eq!(router.metrics.strip_rollback_total(), 0);
     }
 }
 
@@ -17185,5 +17964,390 @@ api_key_ref = "literal:k"
             crate::learned_capability::RoutingDecision::ProbeAdmitted,
             "in_flight released -> the next request re-probes rather than latching",
         );
+    }
+}
+
+#[cfg(test)]
+mod strip_interceptor_dispatch_tests {
+    //! End-to-end wiring of the strip interceptor at the three dispatch
+    //! paths (`complete`, `stream`, `count_tokens`). Each test drives a
+    //! real acting learned negative so the feature filter populates
+    //! `strip_capabilities`, then asserts the bytes that reach the
+    //! provider are the stripped bytes -- identically across all three
+    //! paths.
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use parking_lot::Mutex as ParkingMutex;
+    use routectl_core::{
+        ChatChunk, ChatRequest, ChatResponse, Choice, Message, Provider, TokenCount, ToolDef,
+    };
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    /// Records every request that reaches the upstream at any of the three
+    /// dispatch entry points, and is `anthropic-api`-kind so it also serves
+    /// the `count_tokens` walk.
+    struct ProbeProvider {
+        captured: Arc<ParkingMutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ProbeProvider {
+        fn id(&self) -> &'static str {
+            "probe"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("probe", "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            let model = req.model.clone();
+            self.captured.lock().push(req);
+            Ok(ChatResponse {
+                id: "ok".into(),
+                model,
+                created: 0,
+                choices: vec![Choice {
+                    logprobs: None,
+                    index: 0,
+                    message: Message {
+                        refusal: None,
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+                upstream_meta: None,
+            })
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.captured.lock().push(req);
+            let s = futures::stream::once(async move {
+                Ok(ChatChunk {
+                    id: "c0".into(),
+                    model: "m".into(),
+                    choices: vec![],
+                    usage: None,
+                    opaque_events: Vec::new(),
+                    upstream_meta: None,
+                })
+            });
+            Ok(s.boxed())
+        }
+        async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+            self.captured.lock().push(req);
+            Ok(TokenCount {
+                input_tokens: 7,
+                extras: serde_json::Map::new(),
+            })
+        }
+    }
+
+    fn advisor_request() -> ChatRequest {
+        ChatRequest {
+            model: "haiku".into(),
+            messages: vec![],
+            tools: Some(vec![ToolDef::Other(
+                json!({"type": "advisor", "name": "advisor"}),
+            )]),
+            ..Default::default()
+        }
+    }
+
+    fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::ExportedEntry {
+        let base = Instant::now();
+        crate::learned_capability::ExportedEntry {
+            state_key: state_key.into(),
+            feature_key: "advisor".into(),
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: base,
+            last_seen: base,
+            expires_at: base + Duration::from_hours(48),
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }
+    }
+
+    /// Router with a single `anthropic-api` provider `prov` and a model
+    /// `haiku` whose upstream is served by `provider`. When `learning` is
+    /// off the kill switch disables the learned pass entirely.
+    fn build_router(provider: Arc<dyn Provider>, learning: bool) -> Router {
+        build_router_strict(provider, learning, false)
+    }
+
+    fn build_router_strict(provider: Arc<dyn Provider>, learning: bool, strict: bool) -> Router {
+        let toml = format!(
+            "version = 3\n[server]\nstrict_translation = {strict}\n\
+             [capability]\nenabled = {learning}\n\
+             [providers.prov]\nkind = \"anthropic-api\"\n"
+        );
+        let config: Config = toml::from_str(&toml).expect("config parses");
+        let mut router = Router::new(Arc::new(config));
+        let model = ResolvedModel::new("haiku", "prov", provider, "claude-haiku");
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert("haiku".into(), Arc::new(model));
+        router.install_resolved_models(models);
+        router
+    }
+
+    /// Advisor request whose `tool_choice` forces the advisor tool the
+    /// strip removes -- a strip-created hazard the post-strip check rolls
+    /// back, driving the route-away branch.
+    fn advisor_request_forcing_advisor() -> ChatRequest {
+        ChatRequest {
+            tool_choice: Some(json!({"type": "tool", "name": "advisor"})),
+            ..advisor_request()
+        }
+    }
+
+    fn captured() -> Arc<ParkingMutex<Vec<ChatRequest>>> {
+        Arc::new(ParkingMutex::new(Vec::new()))
+    }
+
+    fn dispatched_tool_types(req: &ChatRequest) -> Vec<String> {
+        req.tools
+            .as_ref()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| match t {
+                        ToolDef::Other(v) => {
+                            v.get("type").and_then(|x| x.as_str()).map(str::to_string)
+                        }
+                        ToolDef::Custom(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn complete_strips_advisor_before_dispatch() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        router.complete(advisor_request()).await.expect("ok");
+
+        let cap = cap.lock();
+        let upstream = cap.first().expect("one upstream call");
+        assert!(
+            dispatched_tool_types(upstream).is_empty(),
+            "advisor tool is stripped before dispatch",
+        );
+        assert_eq!(router.metrics.strip_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_strips_advisor_identically() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let _ = router
+            .stream(advisor_request())
+            .await
+            .expect("ok")
+            .collect::<Vec<_>>()
+            .await;
+
+        let cap = cap.lock();
+        let upstream = cap.first().expect("one upstream call");
+        assert!(
+            dispatched_tool_types(upstream).is_empty(),
+            "the streaming path strips identically to the completion path",
+        );
+        assert_eq!(router.metrics.strip_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_strips_so_estimated_prefix_matches_shipped() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let count = router.count_tokens(advisor_request()).await.expect("ok");
+        assert_eq!(count.input_tokens, 7);
+
+        let cap = cap.lock();
+        let upstream = cap.first().expect("one count_tokens call");
+        assert!(
+            dispatched_tool_types(upstream).is_empty(),
+            "count_tokens counts the stripped prefix, matching the shipped prefix",
+        );
+        assert_eq!(router.metrics.strip_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn kill_switch_off_leaves_advisor_intact() {
+        // With `[capability] enabled = false` the learned pass never runs,
+        // so `strip_capabilities` stays empty and the advisor tool reaches
+        // the upstream unstripped -- the helper is inert by construction.
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, false);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        router.complete(advisor_request()).await.expect("ok");
+
+        let cap = cap.lock();
+        let upstream = cap.first().expect("one upstream call");
+        assert_eq!(
+            dispatched_tool_types(upstream),
+            vec!["advisor".to_string()],
+            "a disabled kill switch leaves the request untouched",
+        );
+        assert_eq!(router.metrics.strip_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn complete_strict_rejects_without_dispatching() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router_strict(provider, true, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let err = router
+            .complete(advisor_request())
+            .await
+            .expect_err("strict translation rejects the strip");
+
+        assert!(matches!(err, Error::Validation(_)), "{err:?}");
+        assert!(
+            cap.lock().is_empty(),
+            "a strict-rejected attempt never reaches the upstream",
+        );
+        assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
+        assert_eq!(router.metrics.strip_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn complete_rollback_routes_away_without_dispatching_mutated_request() {
+        // The only chain entry rolls back (dangling forced tool_choice), so
+        // the mutated request is never dispatched and the single-entry chain
+        // exhausts to an error -- with zero upstream calls.
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let result = router.complete(advisor_request_forcing_advisor()).await;
+
+        assert!(result.is_err(), "the rolled-back attempt does not dispatch");
+        assert!(
+            cap.lock().is_empty(),
+            "a rolled-back attempt never dispatches the mutated request",
+        );
+        assert_eq!(router.metrics.strip_rollback_total(), 1);
+        assert_eq!(router.metrics.strip_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn stream_strict_rejects_without_dispatching() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router_strict(provider, true, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let err = router
+            .stream(advisor_request())
+            .await
+            .err()
+            .expect("strict translation rejects the strip before the stream opens");
+
+        assert!(matches!(err, Error::Validation(_)), "{err:?}");
+        assert!(cap.lock().is_empty(), "no upstream call on strict reject");
+        assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_strict_rejects_without_dispatching() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router_strict(provider, true, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let err = router
+            .count_tokens(advisor_request())
+            .await
+            .expect_err("strict translation rejects the strip");
+
+        assert!(matches!(err, Error::Validation(_)), "{err:?}");
+        assert!(
+            cap.lock().is_empty(),
+            "count_tokens never reaches the upstream on strict reject",
+        );
+        assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_rollback_advances_seat_without_dispatching() {
+        // The only capable seat rolls back, so count_tokens advances past it
+        // and the walk exhausts -- with no provider count_tokens call.
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let result = router.count_tokens(advisor_request_forcing_advisor()).await;
+
+        assert!(result.is_err(), "the only seat rolled back and was skipped");
+        assert!(
+            cap.lock().is_empty(),
+            "a rolled-back seat never calls the upstream count_tokens",
+        );
+        assert_eq!(router.metrics.strip_rollback_total(), 1);
     }
 }
