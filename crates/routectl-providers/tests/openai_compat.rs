@@ -791,3 +791,71 @@ async fn complete_vllm_lifts_reasoning_content() {
     assert_eq!(details[0].format.as_deref(), Some("vllm-reasoning-v1"));
     assert_eq!(details[0].payload["text"], "vllm trace");
 }
+
+// ---------------------------------------------------------------------------
+// probe(): free reachability against /models
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn probe_200_models_list_is_reachable() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .expect(1) // AT MOST ONE upstream request: no retry.
+        .mount(&server)
+        .await;
+
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+    assert_eq!(
+        provider.probe().await,
+        routectl_core::ProbeOutcome::Reachable
+    );
+}
+
+#[tokio::test]
+async fn probe_401_is_auth_failed_without_leaking_credential() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .mount(&server)
+        .await;
+
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+    match provider.probe().await {
+        routectl_core::ProbeOutcome::AuthFailed(reason) => {
+            assert!(!reason.contains("test-key"), "reason leaked the api key");
+            assert!(!reason.contains(&server.uri()), "reason leaked the url");
+        }
+        other => panic!("expected AuthFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn probe_403_is_auth_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+        .mount(&server)
+        .await;
+
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+    assert!(matches!(
+        provider.probe().await,
+        routectl_core::ProbeOutcome::AuthFailed(_)
+    ));
+}
+
+#[tokio::test]
+async fn probe_connection_refused_is_unreachable() {
+    // A closed loopback port (nothing binds 127.0.0.1:1) deterministically
+    // refuses the connect. Stands in for DNS / connect / TLS transport
+    // failures, which all fold into Unreachable.
+    let provider = make_provider("http://127.0.0.1:1", ReasoningDialect::OpenAi);
+    assert!(matches!(
+        provider.probe().await,
+        routectl_core::ProbeOutcome::Unreachable(_)
+    ));
+}

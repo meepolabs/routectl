@@ -4,10 +4,30 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::schema::{ChatChunk, ChatRequest, ChatResponse, TokenCount};
+
+/// Result of a `routectl doctor` reachability probe against a provider.
+/// Every variant is a display-safe discriminant or an operator-facing
+/// message; a payload never carries a token, path, or env value.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub enum ProbeOutcome {
+    /// The provider answered a minimal probe request successfully.
+    Reachable,
+    /// The upstream rejected the probe's credentials (typically a 401).
+    AuthFailed(String),
+    /// The upstream could not be reached (DNS, connect, or timeout).
+    Unreachable(String),
+    /// The provider has no free reachability probe. This is the default
+    /// for any provider that does not override `Provider::probe`.
+    UnsupportedFreeProbe,
+    /// The probe was deliberately not run (e.g. no credentials configured).
+    Skipped(String),
+}
 
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -63,5 +83,14 @@ pub trait Provider: Send + Sync {
     /// fallback chain would mask that).
     async fn on_auth_failure(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Cheap reachability check for `routectl doctor`. Returns a display-safe
+    /// [`ProbeOutcome`]; the default reports `UnsupportedFreeProbe` so a
+    /// provider without a free probe path needs no override. Overriders take
+    /// only `&self`: credential presence is the CLI orchestration layer's
+    /// concern, not the probe's.
+    async fn probe(&self) -> ProbeOutcome {
+        ProbeOutcome::UnsupportedFreeProbe
     }
 }

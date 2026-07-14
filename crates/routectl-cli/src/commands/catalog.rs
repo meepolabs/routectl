@@ -51,13 +51,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use routectl_router::save_catalog_overlay;
 use routectl_router::{
     CachePricingOverride, CachePricingSelector, CatalogOverlay, CatalogRow, Config, EffectiveRow,
     OverlayCell, OverlayError, OverlaySource, Source, baked_table_rows, catalog_state_selector_key,
-    is_stale_today, merge, overlay_default_path, overlay_revision, with_overlay_write_lock,
+    is_stale_today, load_catalog_overlay, merge, overlay_default_path, overlay_revision,
+    with_overlay_write_lock,
 };
-#[cfg(test)]
-use routectl_router::{load_catalog_overlay, save_catalog_overlay};
 
 // ---------------------------------------------------------------------------
 // Legacy sidecar (read-only, migration-only)
@@ -349,6 +350,45 @@ pub fn list(overlay: &CatalogOverlay) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
     Ok(())
+}
+
+/// `routectl catalog export` -- serialize the on-disk overlay to pretty
+/// JSON, printed to stdout or written to `--out <path>`. Resolves the
+/// default overlay path; see [`export_at`] for the testable core.
+///
+/// The exported JSON is exactly `catalog_overlay.json` -- catalog cells
+/// only. It does NOT back up credentials: provider keys, OAuth tokens, and
+/// every other secret live in separate files this command never reads, so
+/// a leaked export can never disclose one. There is no separate
+/// overlay-import format to pair with this: restoring an export is placing
+/// the JSON back at the overlay path (`catalog_overlay.json`), where the
+/// next load picks it up. `catalog import` consumes VENDOR economics
+/// snapshots, not this dump.
+pub fn export(out: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let json = export_at(&overlay_default_path())?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, format!("{json}\n"))
+                .map_err(|e| format!("cannot write `{}`: {e}", path.display()))?;
+            println!("catalog overlay exported to {}", path.display());
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
+/// Core of [`export`], taking the overlay path explicitly so tests can
+/// point it at a temp directory instead of the real `catalog_overlay.json`.
+///
+/// READ-ONLY: loads the overlay and serializes it, never opening the file
+/// for writing -- the on-disk overlay is byte-identical afterward. A
+/// missing overlay file loads as the empty default (first run), so export
+/// still succeeds and emits an empty-cells overlay rather than erroring.
+/// The output round-trips: `serde_json::from_str` of it yields an equal
+/// [`CatalogOverlay`].
+pub(crate) fn export_at(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let overlay = load_catalog_overlay(path)?;
+    Ok(serde_json::to_string_pretty(&overlay)?)
 }
 
 /// Today's date (UTC), the stamp every catalog writer (`verify`, `set`,
@@ -1732,6 +1772,143 @@ mod tests {
             matches!(err, CatalogWriteError::InvalidField { .. }),
             "{err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // export_at: read-only overlay dump -- round-trips, never writes, and
+    // carries no credential material.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn export_at_round_trips_back_into_an_equal_overlay() {
+        // Arrange: an overlay with one import cell, one user cell, and one
+        // disabled cell, persisted through the real writer.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-01".to_string(),
+                wm: Some(0.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        cells.insert(
+            "anthropic-api:claude-opus-4-8*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::User,
+                verified_at: "2026-07-05".to_string(),
+                wm: None,
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: Some(1024),
+                max_context_tokens: Some(200_000),
+                capabilities: None,
+            }),
+        );
+        cells.insert("openai-compat:disabled-model".to_string(), None);
+        let saved = save_catalog_overlay(&path, 0, cells).expect("seed");
+
+        // Act
+        let json = export_at(&path).expect("export");
+
+        // Assert: the JSON deserializes back into an overlay equal to the
+        // one on disk -- every cell (present, user, disabled) preserved.
+        let restored: CatalogOverlay =
+            serde_json::from_str(&json).expect("export output must deserialize");
+        assert_eq!(restored, saved);
+    }
+
+    #[test]
+    fn export_at_is_read_only_and_leaves_the_overlay_byte_identical() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                min_prefix_tokens: Some(512),
+                ..blank_user_cell()
+            }),
+        );
+        save_catalog_overlay(&path, 0, cells).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        // Act
+        export_at(&path).expect("export");
+
+        // Assert: the exporter never opened the overlay for writing.
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "export must not mutate the overlay file");
+    }
+
+    #[test]
+    fn export_at_output_carries_no_credential_material() {
+        // Arrange: a fully-populated cell -- the export shape is catalog
+        // cells only, so none of the secret-shaped keys a credentials store
+        // would carry can ever appear in it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "anthropic-api:claude-opus-4-8*".to_string(),
+            Some(user_cell_with_capability()),
+        );
+        save_catalog_overlay(&path, 0, cells).expect("seed");
+
+        // Act
+        let json = export_at(&path).expect("export");
+
+        // Assert: no credential-shaped JSON key appears (quoted-key form so
+        // the legitimate `*_tokens` cell fields are not false positives).
+        for secret_key in [
+            "\"api_key\"",
+            "\"secret\"",
+            "\"password\"",
+            "\"credential\"",
+            "\"access_token\"",
+            "\"refresh_token\"",
+        ] {
+            assert!(
+                !json.to_ascii_lowercase().contains(secret_key),
+                "export must not carry {secret_key}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_at_on_a_missing_overlay_emits_the_empty_default() {
+        // Arrange: no overlay file exists yet (first run).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        // Act
+        let json = export_at(&path).expect("export must succeed on first run");
+
+        // Assert: an empty, current-schema overlay -- and still no write.
+        let restored: CatalogOverlay = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, CatalogOverlay::default());
+        assert!(!path.exists(), "export must not create the overlay file");
+    }
+
+    fn user_cell_with_capability() -> OverlayCell {
+        OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-07-05".to_string(),
+            wm: None,
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: Some(1024),
+            max_context_tokens: Some(200_000),
+            capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
+        }
     }
 
     fn minimal_config() -> Config {

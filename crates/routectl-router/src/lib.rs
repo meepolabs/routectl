@@ -24,6 +24,7 @@ pub mod config_path;
 pub mod config_write;
 pub mod context_trim;
 pub mod cost_gate;
+pub mod doctor;
 pub mod factory;
 pub(crate) mod feature_keys;
 pub mod glob;
@@ -93,6 +94,9 @@ pub use context_trim::{
     trimmed_prefix_fingerprint,
 };
 pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
+pub use doctor::{
+    DoctorPanels, DoctorReport, Finding, ProbeOutcome, Status, WouldTrimPanel, overall_exit,
+};
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 pub use factory::{

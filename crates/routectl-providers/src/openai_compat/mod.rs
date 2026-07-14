@@ -477,6 +477,28 @@ impl Provider for OpenAiCompatProvider {
             self.cfg.id.clone(),
         ))
     }
+
+    async fn probe(&self) -> routectl_core::ProbeOutcome {
+        let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
+        let mut headers = HeaderMap::new();
+        match HeaderValue::from_str(&format!("Bearer {}", self.cfg.api_key)) {
+            Ok(v) => {
+                headers.insert(AUTHORIZATION, v);
+            }
+            Err(_) => {
+                return routectl_core::ProbeOutcome::Unreachable(
+                    "credential could not form an auth header".into(),
+                );
+            }
+        }
+        crate::probe::http_get_probe(
+            self.cfg.user_agent.as_deref(),
+            &url,
+            headers,
+            crate::probe::PROBE_TIMEOUT,
+        )
+        .await
+    }
 }
 
 /// Build a content-only `ChatChunk` from the ThinkTagAccumulator's

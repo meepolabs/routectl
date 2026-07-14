@@ -50,7 +50,7 @@ pub use log_safe::{
     trace_outgoing_body, trace_outgoing_headers, trace_stream_summary, trace_structural_summary,
     trace_upstream_response_headers, trace_upstream_success_body, wrap_stream_with_summary,
 };
-pub use provider::Provider;
+pub use provider::{ProbeOutcome, Provider};
 pub use reasoning_dialect::{
     HistoryReasoning as CoreHistoryReasoning, ReasoningDialect as CoreReasoningDialect,
 };

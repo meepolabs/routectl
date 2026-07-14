@@ -55,6 +55,26 @@ pub fn build(user_agent: Option<&str>) -> Client {
         .expect("reqwest::Client::build failed (TLS init?); fatal at startup")
 }
 
+/// Build a `reqwest::Client` for one-shot reachability probes: same TLS
+/// floor and connect timeout as [`build`], but with redirect-following
+/// DISABLED. A probe must be EXACTLY one request -- following a
+/// `Location` header would turn a single GET into multiple hops and let
+/// a hostile endpoint steer the probe to an unintended host (SSRF).
+///
+/// Returns `Result` rather than panicking (unlike [`build`]) so a probe
+/// on a machine with a broken TLS store degrades to a typed `Unreachable`
+/// outcome instead of aborting `doctor`.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses"
+))]
+pub fn build_no_redirect(user_agent: Option<&str>) -> reqwest::Result<Client> {
+    common_builder(user_agent)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 /// Build a `reqwest::Client` with an attached cookie provider. Used by
 /// the openai-responses provider to pin Cloudflare cookies across
 /// requests against `chatgpt.com/backend-api/codex` (mirrors codex

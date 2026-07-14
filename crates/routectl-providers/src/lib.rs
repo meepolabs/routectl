@@ -15,6 +15,17 @@ pub(crate) mod model_profile;
 
 pub(crate) mod http_client;
 
+// Shared single-shot reachability probe for the HTTP-based egresses
+// (`Provider::probe`). Gated on the three OpenAI/Anthropic-shape
+// providers that share the GET-a-free-models-list mechanic; bedrock
+// probes its credential chain directly and needs nothing here.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses"
+))]
+pub(crate) mod probe;
+
 // Shared effort-clamping helper for OpenAI-shape egresses. Unconditional
 // (no feature gate) because both openai-compat and openai-responses egresses
 // use it and both pull in reqwest anyway. `pub` so `routectl-router` can

@@ -50,6 +50,22 @@ fn gemini_provider_at(base_url: &str) -> GeminiProvider {
 }
 
 // =====================================================================
+// Reachability probe: gemini keeps the trait default (no free probe).
+// =====================================================================
+
+/// Gemini has no free reachability endpoint wired, so it inherits the
+/// `Provider::probe` default -- `UnsupportedFreeProbe`. Pins that an
+/// un-overridden kind reports the default rather than attempting a call.
+#[tokio::test]
+async fn gemini_probe_reports_unsupported_free_probe_default() {
+    let provider = gemini_provider();
+    assert_eq!(
+        provider.probe().await,
+        routectl_core::ProbeOutcome::UnsupportedFreeProbe
+    );
+}
+
+// =====================================================================
 // Request side: canonical ChatRequest -> Gemini wire body
 // =====================================================================
 

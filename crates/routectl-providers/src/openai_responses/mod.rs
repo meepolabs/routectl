@@ -741,6 +741,47 @@ impl Provider for OpenAiResponsesProvider {
     async fn on_auth_failure(&self) -> Result<()> {
         self.cfg.auth.on_auth_failure().await
     }
+
+    /// Free reachability probe: a single GET against `/models`.
+    ///
+    /// BINDING read-only guard: only the `ApiKey` lane holds a static,
+    /// non-refreshing credential. `ChatgptOauth` (and `BedrockMantle`)
+    /// resolve their token through paths a reachability probe must not
+    /// trigger, so they report `UnsupportedFreeProbe` and the CLI
+    /// orchestration layer owns their reachability. On the `ApiKey` lane
+    /// the resolved key is a `StaticToken`, so reading it does no refresh.
+    async fn probe(&self) -> routectl_core::ProbeOutcome {
+        if self.cfg.auth_kind != AuthKind::ApiKey {
+            return routectl_core::ProbeOutcome::UnsupportedFreeProbe;
+        }
+        let token = match self.cfg.auth.token().await {
+            Ok(t) => t,
+            Err(_) => {
+                return routectl_core::ProbeOutcome::AuthFailed(
+                    "provider credential unavailable".into(),
+                );
+            }
+        };
+        let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
+        let mut headers = reqwest::header::HeaderMap::new();
+        match reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) {
+            Ok(v) => {
+                headers.insert(reqwest::header::AUTHORIZATION, v);
+            }
+            Err(_) => {
+                return routectl_core::ProbeOutcome::Unreachable(
+                    "credential could not form an auth header".into(),
+                );
+            }
+        }
+        crate::probe::http_get_probe(
+            self.cfg.user_agent.as_deref(),
+            &url,
+            headers,
+            crate::probe::PROBE_TIMEOUT,
+        )
+        .await
+    }
 }
 
 fn build_error_excerpt(body_text: &str) -> String {
@@ -819,7 +860,7 @@ fn map_responses_upstream_error(
 mod e2e_tests {
     use super::*;
     use futures::StreamExt;
-    use routectl_core::{ChatRequest, MessageContent};
+    use routectl_core::{ChatRequest, MessageContent, ProbeOutcome};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1316,6 +1357,134 @@ mod e2e_tests {
         assert_eq!(chunks[1].choices[0].delta.content.as_deref(), Some("hi"));
         let final_c = chunks.last().unwrap();
         assert_eq!(final_c.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    // -----------------------------------------------------------------------
+    // probe(): free reachability against /models (ApiKey lane only)
+    // -----------------------------------------------------------------------
+
+    /// A `TokenSource` that counts `token()` calls so the oauth-guard test
+    /// can prove the probe never resolves (never refreshes) a credential.
+    #[derive(Default)]
+    struct CountingTokenSource {
+        token_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::fmt::Debug for CountingTokenSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("CountingTokenSource").finish()
+        }
+    }
+
+    #[async_trait]
+    impl TokenSource for CountingTokenSource {
+        async fn token(&self) -> Result<String> {
+            self.token_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("api-key".into())
+        }
+    }
+
+    fn api_key_provider(base_url: &str) -> OpenAiResponsesProvider {
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:probe".into(),
+            auth: Arc::new(StaticToken::new("test-key")) as Arc<dyn TokenSource>,
+            account_id: None,
+            base_url: base_url.to_string(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: Vec::new(),
+            user_agent: None,
+            session_id: None,
+        };
+        OpenAiResponsesProvider::new(cfg)
+    }
+
+    #[tokio::test]
+    async fn probe_api_key_200_models_list_is_reachable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1) // AT MOST ONE upstream request: no retry.
+            .mount(&server)
+            .await;
+
+        let provider = api_key_provider(&server.uri());
+        assert_eq!(provider.probe().await, ProbeOutcome::Reachable);
+    }
+
+    #[tokio::test]
+    async fn probe_api_key_401_is_auth_failed_without_leaking_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let provider = api_key_provider(&server.uri());
+        match provider.probe().await {
+            ProbeOutcome::AuthFailed(reason) => {
+                assert!(!reason.contains("test-key"), "reason leaked the api key");
+                assert!(!reason.contains(&server.uri()), "reason leaked the url");
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_api_key_403_is_auth_failed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let provider = api_key_provider(&server.uri());
+        assert!(matches!(
+            provider.probe().await,
+            ProbeOutcome::AuthFailed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn probe_api_key_connection_refused_is_unreachable() {
+        // A closed loopback port (nothing binds 127.0.0.1:1)
+        // deterministically refuses the connect.
+        let provider = api_key_provider("http://127.0.0.1:1");
+        assert!(matches!(
+            provider.probe().await,
+            ProbeOutcome::Unreachable(_)
+        ));
+    }
+
+    /// BINDING read-only guard: a ChatgptOauth provider reports
+    /// `UnsupportedFreeProbe` and makes ZERO token-source calls -- the
+    /// token path is never touched, and no upstream request is issued.
+    #[tokio::test]
+    async fn probe_chatgpt_oauth_is_unsupported_with_zero_token_calls() {
+        let source = Arc::new(CountingTokenSource::default());
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:oauth-probe".into(),
+            auth: source.clone(),
+            account_id: Some("acct-uuid".into()),
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            auth_kind: AuthKind::ChatgptOauth,
+            header_extras: Vec::new(),
+            user_agent: None,
+            session_id: None,
+        };
+        let provider = OpenAiResponsesProvider::new(cfg);
+
+        assert_eq!(provider.probe().await, ProbeOutcome::UnsupportedFreeProbe);
+        assert_eq!(
+            source.token_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the oauth probe guard must never resolve a token",
+        );
     }
 }
 

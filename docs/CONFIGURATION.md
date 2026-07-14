@@ -1352,17 +1352,20 @@ A misconfigured alias surfaces the same clean config-validation error
 
 ### Cache-break economics projection (advisory)
 
-When you pass `--hypothetical-d`, the report gains a fourth section: an
-ADVISORY projection of whether breaking a warm prompt-cache to apply a
-proposed prefix cut would be net-positive. It is offline-only and never
-mutates a request, resolves a secret, or touches the network -- it is
-advice, computed from the baked per-`(provider_kind, model, tier)` cache
-pricing table.
+When you pass `--hypothetical-d` (or `--steady-state`), the report gains
+a fourth section: an ADVISORY projection of whether breaking a warm
+prompt-cache to apply a proposed prefix cut would be net-positive. It is
+offline-only and never mutates a request, resolves a secret, or touches
+the network -- it is advice, computed from the baked
+per-`(provider_kind, model, tier)` cache pricing table.
 
 ```sh
 # Just the break-even threshold K* for a 50k-token cut, 5m tier:
 routectl prompt-size --alias heavy --request ./fixture.json \
   --hypothetical-d 50000
+
+# Price the REAL steady-state trim candidate instead of a hypothetical cut:
+routectl prompt-size --alias heavy --request ./fixture.json --steady-state
 
 # Plus a keep/break verdict at an assumed reuse count, 1h tier:
 routectl prompt-size --alias heavy --request ./fixture.json \
@@ -1372,6 +1375,12 @@ routectl prompt-size --alias heavy --request ./fixture.json \
 - `--hypothetical-d <TOKENS>` -- the size of the proposed cache-prefix
   cut. Supplying this flag is what turns ON the projection; omit it and
   the report is byte-for-byte the three-section output above.
+- `--steady-state` -- price the REAL deterministic steady-state trim
+  candidate routectl's advisory trimmer would propose for this request
+  (front-anchored old-tool-content elision), instead of a hypothetical
+  cut. Turns ON the projection section and leads with the trimmer's
+  would-trim yes/no decision before the priced candidate. Mutually
+  exclusive with `--hypothetical-d`.
 - `--hypothetical-k <COUNT>` -- an assumed future-reuse count. When
   given, the report also prints a KEEP / BREAK verdict (with the stable
   ledger strategy token). When omitted, only the break-even K* threshold
@@ -1570,6 +1579,28 @@ multiplier can make a cache break look falsely profitable. `rm` must be
 routectl catalog set openai-compat:my-cheap-host-* wm=1.0 --acknowledge-cost-risk
 routectl catalog disable openai-compat:retired-model-*
 ```
+
+### `routectl catalog export`
+
+Serialize the on-disk overlay (`catalog_overlay.json`) to pretty JSON,
+printed to stdout or written to a file with `--out <path>`. It is
+read-only: the overlay file is left byte-identical.
+
+```sh
+routectl catalog export
+routectl catalog export --out ./catalog_overlay.backup.json
+```
+
+The export is CATALOG CELLS ONLY. It does NOT back up credentials --
+provider keys, OAuth tokens, and every other secret live in separate
+files (`config.toml`, the OAuth credentials store) that this command
+never reads, so a leaked export can never disclose one.
+
+There is no separate overlay-import format to pair with it: to restore an
+export, place the JSON back at the overlay path (`catalog_overlay.json`
+next to `config.toml`), where the next load picks it up. `catalog import`
+consumes the VENDOR economics snapshots (litellm + models.dev), not an
+overlay dump.
 
 **`pricing` alias.** `routectl pricing ...` is a hidden alias for
 `routectl catalog ...`, kept for muscle memory; it is dropped at 1.0.
@@ -1941,6 +1972,178 @@ command prints `no usage data yet (...)` and exits 0 -- it is not an
 error. A database written by a newer routectl than the running binary is
 refused with a clear error rather than misread. `--db` overrides the
 `[usage] db_path` for one invocation.
+
+### Steady-state would-trim opportunity
+
+Under `--detail`, and in the `routectl doctor` would-trim panel, the
+report surfaces the advisory steady-state would-trim opportunity recorded
+in the usage ledger -- how much cacheable context routectl's trimmer
+flagged as a would-cut candidate WITHOUT applying it. The recording is
+non-mutating (nothing is trimmed from a live request); it measures the
+opportunity so an operator can decide whether to enable trimming. The
+`doctor` panel reads the same figures read-only over all recorded
+history, and its remediation hint points at `prompt-size --steady-state`
+for a per-request inspection.
+
+- **`candidate_requests`** -- count of requests in the window that
+  carried a would-cut candidate.
+- **`would_trim_tokens`** -- summed candidate freed-token count over
+  those `candidate_requests`.
+- **`verdict`** -- how the candidate rows partition by the K-estimator's
+  confidence call:
+  - `met` -- priced and calibrated, and the reuse floor cleared the
+    break-even threshold: a real cut would have been authorized.
+  - `unmet` -- priced and calibrated, but the floor fell short of
+    break-even: not enough predicted reuse to justify the cut.
+  - `cold` -- priced but not yet calibrated (no floor stamped): too few
+    samples for a confidence call.
+  - `unpriced` -- no verified pricing row, so the break-even threshold
+    could not be computed.
+
+## Diagnostics (`routectl doctor` and `routectl provider probe`)
+
+`routectl doctor` and `routectl provider probe` are the two read-only
+health surfaces. Both mutate NOTHING -- config, credentials, the catalog
+overlay, and the usage DB are byte-identical after a run -- and both share
+one exit-code contract and one probe-classification seam, so the two
+never disagree about a provider.
+
+### Exit-code contract (STABLE)
+
+Both commands map their findings to a process exit code the same way, and
+this mapping is the one part of the surface pinned pre-1.0:
+
+- **PASS or WARN -> exit 0.** A warning is advisory (something to look at,
+  not a failure). A run whose findings are all PASS and WARN exits 0.
+- **FAIL -> nonzero exit.** A single FAIL finding makes the whole run exit
+  nonzero. The code is order-independent: it depends only on whether any
+  finding failed, never on provider ordering.
+
+Script against the exit code, not against the rendered text or the
+`--json` shape (below). `provider probe <name>` with an unconfigured name
+is a separate usage error that also exits nonzero.
+
+### `--json` is UNSTABLE pre-1.0
+
+Both commands take `--json` for a machine-readable report, and both
+payloads carry a top-level `schema_version` (currently `1`). The JSON
+shape is UNSTABLE before 1.0: fields may be added, renamed, or
+restructured, and `schema_version` bumps when they do. Only the exit-code
+contract above is pinned -- do not build a durable integration on the
+exact JSON shape.
+
+`provider probe --json`:
+
+```json
+{
+  "schema_version": 1,
+  "providers": [
+    { "name": "anthropic", "outcome": "Reachable" },
+    { "name": "compat", "outcome": { "AuthFailed": "not logged in" } }
+  ]
+}
+```
+
+`doctor --json` carries the flat findings list plus the structured panels:
+
+```json
+{
+  "schema_version": 1,
+  "findings": [
+    {
+      "section": "auth",
+      "name": "anthropic",
+      "status": "Warn",
+      "detail": "no oauth providers are logged in",
+      "remediation": "run `routectl login <provider>` to authenticate"
+    }
+  ],
+  "panels": { "would_trim": null }
+}
+```
+
+`status` is one of `"Pass"`, `"Warn"`, `"Fail"`; `remediation` is `null`
+on a clean finding and a fix string on every WARN/FAIL. The `would_trim`
+panel is `null` when there is no usage data to summarize; its fields are
+documented under
+[Steady-state would-trim opportunity](#steady-state-would-trim-opportunity).
+
+### `provider probe [<name>]` -- reachability, free-only
+
+`routectl provider probe` reports one reachability outcome per configured
+provider (or just `<name>` when given). It is FREE-ONLY by construction:
+it never makes a billed upstream call and never mutates a credential.
+
+- **No free endpoint -> WARN, never a silent charge.** A provider kind
+  with no cheap reachability check reports WARN with a "cannot verify
+  without a billed call" reason -- routectl will not spend money to turn a
+  WARN into a PASS. This is a warning (exit 0), not a failure.
+- **Forwarded providers are SKIPPED.** A `credential_source = "forwarded"`
+  provider (see
+  [credential_source](#credential_source-anthropic-api-provider-flag----forwarded-credential))
+  short-circuits before any build or upstream call and renders an
+  informational PASS line -- there is no routectl-managed credential to
+  probe.
+- **OAuth is probed read-only.** An `oauth://` provider is checked against
+  the in-memory credential cache only: a present seat reports reachable, a
+  missing or expired one reports a FAIL with a `routectl login`
+  remediation. The probe never refreshes a near-expiry token, so the
+  credentials store is byte-identical afterward.
+- **Static-credential and bedrock providers** (`env://` / `file://` /
+  `literal:`, bedrock) build the provider and call its free reachability
+  check.
+- **Unreachable -> FAIL.** A provider that cannot be reached (network
+  failure, a credential store that will not open, or a probe that overruns
+  the shared deadline) reports FAIL with a remediation.
+
+The probe is a one-shot process: it reports static reachability, not live
+runtime state. The per-seat circuit-breaker readout an operator watches
+during traffic is NOT part of `provider probe` -- that state belongs to a
+running `serve` instance, not a one-shot command.
+
+Outcome-to-status summary:
+
+| Outcome | Status | Exit |
+|---|---|---|
+| reachable | PASS | 0 |
+| skipped (forwarded) | PASS | 0 |
+| no free endpoint / cannot verify | WARN | 0 |
+| auth failed (not logged in / expired) | FAIL | nonzero |
+| unreachable (network / store / deadline) | FAIL | nonzero |
+
+### `routectl doctor` -- the health battery
+
+`routectl doctor` runs a fixed ordered battery of read-only sections and
+prints a finding list plus a summary line (`summary: PASS n  WARN n  FAIL
+n`). It loads config through the never-migrating loader and reads the raw
+bytes for a schema-version preflight that never stamps the file.
+
+`doctor` NEVER auto-fixes anything. Every WARN or FAIL finding carries a
+remediation that NAMES the fix (`run \`routectl login anthropic\``, `run
+\`routectl config migrate\``, ...) for the operator to run -- the command
+diagnoses, it does not mutate.
+
+The battery sections, in render order:
+
+| Section | Checks |
+|---|---|
+| Provider activation (`inventory`) | Whether each known provider's credential is present and usable; a configured route that depends on an unusable provider is a WARN. |
+| Config schema version (`version`) | The config's schema version against the binary; a too-old config FAILs with a `config migrate` remediation, a too-new one FAILs with an upgrade remediation, a present-but-broken config FAILs rather than reporting all-PASS. |
+| Config validation (`config`) | The static validator suite (the same one `config check` runs) plus a read-only secret-presence scan. Every message names the ref SCHEME, never the secret value, path, or env var name. |
+| OAuth credentials (`auth`) | Stored OAuth seats and their expiry; no seats logged in is a WARN, an expired seat is a WARN, a credential store that will not open is a FAIL. |
+| Managed secrets (`secrets`) | Managed secret files not referenced by any provider surface as a WARN. The scan is a read-only directory diff; a stored secret is NEVER auto-deleted. |
+| Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
+| Capability | A reserved seam that renders `not yet available` and contributes no findings; a later release plugs a real producer in here. |
+
+`doctor` also attaches the steady-state would-trim opportunity panel
+(read-only, over all recorded history) under `panels.would_trim`; its
+fields are documented under
+[Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)
+and its remediation hint points at `prompt-size --steady-state`.
+
+Neither command reads a secret it does not need: like
+[`catalog export`](#routectl-catalog-export), a probe or doctor run reads
+only what it classifies and never discloses a credential value.
 
 ## Validating config
 

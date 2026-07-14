@@ -113,6 +113,15 @@ enum Cmd {
     /// store. Exits 0 when at least one provider is logged in,
     /// non-zero otherwise.
     Whoami,
+    /// Read-only health report: provider activation, config schema
+    /// version, and OAuth credential state. Mutates nothing. Exits 0 when
+    /// no check fails, non-zero on any failure.
+    Doctor {
+        /// Emit the report as JSON (`{schema_version, findings, panels}`)
+        /// instead of the human battery. The schema is UNSTABLE.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot completion against an alias key or model nickname.
     Test {
         /// Alias key (`[aliases]` entry) or model nickname (`[models.X]` table key).
@@ -372,6 +381,17 @@ enum ProviderCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Probe configured providers for reachability without billing a model
+    /// call. Read-only: never refreshes a token or mutates config/creds.
+    /// With `<name>` probes one provider; omitted probes every configured
+    /// provider. Exits nonzero if any probe fails.
+    Probe {
+        /// Probe only this provider; omit to probe every configured one.
+        name: Option<String>,
+        /// Emit the report as JSON (schema UNSTABLE) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -447,6 +467,18 @@ enum CatalogCmd {
     /// regardless of what it previously carried. Rejects a selector
     /// unknown to the catalog. Re-enabling is a fresh `set`.
     Disable { selector: String },
+    /// Serialize the on-disk overlay (`catalog_overlay.json`) to pretty
+    /// JSON, printed to stdout or written to `--out <path>`. The export is
+    /// catalog cells ONLY -- it does NOT back up credentials (provider
+    /// keys, OAuth tokens, and every other secret live in separate files
+    /// this command never reads). To restore, place the exported JSON back
+    /// at the overlay path; there is no separate overlay-import format
+    /// (`import` consumes vendor economics snapshots, not this dump).
+    Export {
+        /// Write the export to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -533,6 +565,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         },
+        Cmd::Doctor { json } => {
+            let path = resolve_config_path(cli.config.as_deref());
+            std::process::exit(commands::doctor::run(&path, json).await);
+        }
         Cmd::Test { target, prompt } => {
             let config = load_config(cli.config.as_deref())?;
             if let Err(e) = commands::test::run(config, &target, &prompt).await {
@@ -658,6 +694,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            ProviderCmd::Probe { name, json } => {
+                let config_path = resolve_config_path(cli.config.as_deref());
+                std::process::exit(commands::probe::run(&config_path, name, json).await);
+            }
         },
         Cmd::PromptSize {
             alias,
@@ -772,6 +812,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            CatalogCmd::Export { out } => {
+                if let Err(e) = commands::catalog::export(out.as_deref()) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
         },
         Cmd::Rc { action } => {
             let config = load_config(cli.config.as_deref())?;
@@ -799,6 +845,7 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(true)
         .with_span_events(FmtSpan::CLOSE)
+        .with_writer(std::io::stderr)
         .init();
 }
 
