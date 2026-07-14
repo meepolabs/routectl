@@ -22,6 +22,11 @@ pub enum ProbeOutcome {
     AuthFailed(String),
     /// The upstream could not be reached (DNS, connect, or timeout).
     Unreachable(String),
+    /// The endpoint completed a round trip but answered with a status the
+    /// probe cannot read as a clean pass or a credential rejection (3xx,
+    /// 404, 429, 5xx). The network path and TLS work, yet the endpoint's
+    /// health is unproven -- a warning, not a pass and not a hard failure.
+    IndeterminateHttp { status: u16 },
     /// The provider has no free reachability probe. This is the default
     /// for any provider that does not override `Provider::probe`.
     UnsupportedFreeProbe,

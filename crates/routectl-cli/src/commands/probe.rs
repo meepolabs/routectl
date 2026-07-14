@@ -225,12 +225,13 @@ pub(crate) fn probe_finding(name: &str, outcome: &ProbeOutcome) -> Finding {
 }
 
 /// Exit-code mapping: `AuthFailed` / `Unreachable` are failures; `Reachable`
-/// and `Skipped` are clean; `UnsupportedFreeProbe` (and any future variant)
-/// is a non-failing warning.
+/// and `Skipped` are clean; `IndeterminateHttp`, `UnsupportedFreeProbe`
+/// (and any future variant) are non-failing warnings.
 pub(crate) const fn outcome_status(outcome: &ProbeOutcome) -> Status {
     match outcome {
         ProbeOutcome::Reachable | ProbeOutcome::Skipped(_) => Status::Pass,
         ProbeOutcome::AuthFailed(_) | ProbeOutcome::Unreachable(_) => Status::Fail,
+        ProbeOutcome::IndeterminateHttp { .. } | ProbeOutcome::UnsupportedFreeProbe => Status::Warn,
         _ => Status::Warn,
     }
 }
@@ -253,6 +254,10 @@ fn describe(name: &str, outcome: &ProbeOutcome) -> (String, Option<String>) {
             reason.clone(),
             Some("verify the provider's base URL and network reachability".to_string()),
         ),
+        ProbeOutcome::IndeterminateHttp { status } => (
+            format!("endpoint answered HTTP {status}; reachability not confirmed"),
+            Some(indeterminate_remediation(*status)),
+        ),
         ProbeOutcome::UnsupportedFreeProbe => (
             "no free reachability probe available".to_string(),
             Some(
@@ -262,6 +267,30 @@ fn describe(name: &str, outcome: &ProbeOutcome) -> (String, Option<String>) {
         _ => (
             "unrecognized probe outcome".to_string(),
             Some("upgrade routectl to a build that understands this outcome".to_string()),
+        ),
+    }
+}
+
+/// Status-family remediation for an `IndeterminateHttp` outcome. The probe
+/// reached the endpoint but the status does not confirm a healthy provider;
+/// the hint points at the most likely cause for that status family.
+fn indeterminate_remediation(status: u16) -> String {
+    match status {
+        404 | 405 | 410 => format!(
+            "the probe endpoint returned HTTP {status}; verify the base URL and probe endpoint path"
+        ),
+        300..=399 => format!(
+            "the endpoint redirected (HTTP {status}) and routectl does not follow redirects; \
+             verify the base URL points at the API root"
+        ),
+        429 => "the provider rate-limited the probe (HTTP 429); retry shortly".to_string(),
+        500..=599 => format!(
+            "the upstream returned HTTP {status} and may be unhealthy; retry, or verify with \
+             a real request"
+        ),
+        _ => format!(
+            "the endpoint answered HTTP {status}; verify the base URL and confirm with a \
+             real request"
         ),
     }
 }
@@ -487,6 +516,7 @@ mod tests {
         for outcome in [
             ProbeOutcome::AuthFailed("x".into()),
             ProbeOutcome::Unreachable("x".into()),
+            ProbeOutcome::IndeterminateHttp { status: 500 },
             ProbeOutcome::UnsupportedFreeProbe,
         ] {
             let finding = probe_finding("p", &outcome);
@@ -497,6 +527,60 @@ mod tests {
             assert!(
                 finding.remediation.is_some(),
                 "{outcome:?} must carry a remediation"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // IndeterminateHttp: WARN, never a pass and never a hard fail, with
+    // status-family remediation. One case per family the classifier emits.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn indeterminate_http_is_warn_not_fail_or_pass() {
+        for status in [302u16, 404, 429, 500, 503] {
+            let outcome = ProbeOutcome::IndeterminateHttp { status };
+            assert_eq!(
+                outcome_status(&outcome),
+                Status::Warn,
+                "HTTP {status} must be a warning, not a pass or a hard fail"
+            );
+        }
+    }
+
+    #[test]
+    fn indeterminate_http_does_not_fail_the_exit_code() {
+        let results = vec![
+            (
+                "a".to_string(),
+                ProbeOutcome::IndeterminateHttp { status: 404 },
+            ),
+            (
+                "b".to_string(),
+                ProbeOutcome::IndeterminateHttp { status: 503 },
+            ),
+        ];
+        assert_eq!(
+            overall_exit(&to_findings(&results)),
+            0,
+            "an IndeterminateHttp WARN must not fail the exit code"
+        );
+    }
+
+    #[test]
+    fn indeterminate_http_remediation_matches_status_family() {
+        let cases = [
+            (404u16, "base URL and probe endpoint path"),
+            (302, "does not follow redirects"),
+            (429, "rate-limited"),
+            (503, "may be unhealthy"),
+        ];
+        for (status, needle) in cases {
+            let finding = probe_finding("p", &ProbeOutcome::IndeterminateHttp { status });
+            let rem = finding.remediation.expect("remediation present");
+            assert!(
+                rem.contains(needle),
+                "HTTP {status} remediation {rem:?} should mention {needle:?}"
             );
         }
     }
