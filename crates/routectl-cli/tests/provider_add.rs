@@ -447,6 +447,54 @@ api_key_ref = \"literal:test-key\"
 }
 
 // ---------------------------------------------------------------------
+// Audit parity: an oauth-backed add resolves `--kind anthropic` to an
+// `anthropic-api` block, so the audit event must report the resolved kind
+// that lands on disk, not the CLI-supplied one.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+#[serial_test::serial]
+async fn oauth_add_audits_the_resolved_kind() {
+    let _xdg = scope_xdg();
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), V3_BASE);
+
+    let (_r, events) = routectl_testkit::with_capture(async {
+        provider_add::run_with_io(
+            &path,
+            base_args("anthropic", "claude-sub"),
+            &StubIo::default(),
+        )
+        .await
+        .expect("oauth add");
+    })
+    .await;
+
+    let audit: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("surface") == Some("cli") && e.field("verb") == Some("provider-add"))
+        .collect();
+    assert_eq!(
+        audit.len(),
+        1,
+        "exactly one provider-add audit event expected"
+    );
+    assert_eq!(
+        audit[0].field("kind"),
+        Some("anthropic-api"),
+        "the audit kind must match the on-disk `anthropic-api` block, not the CLI `anthropic`"
+    );
+
+    // The block actually written carries the same resolved kind, confirming
+    // the audit event and the config agree.
+    let config = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        config.providers.get("claude-sub").unwrap().kind_str(),
+        "anthropic-api"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Secret never leaks: across the env / stdin / prompt capture paths the
 // secret value never reaches a tracing event's message or fields.
 // ---------------------------------------------------------------------

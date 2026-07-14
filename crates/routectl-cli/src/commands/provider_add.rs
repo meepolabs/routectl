@@ -160,8 +160,15 @@ enum PendingSecret {
     /// A ref already final at build time (env / secret-ref / forwarded):
     /// nothing to execute post-confirm.
     None,
-    /// A captured value to `put` into the managed store under `name`.
-    File { name: String, value: String },
+    /// A captured value to `put` into the already-opened managed store
+    /// under `name`. The store is opened (and its base canonicalized) once
+    /// during capture and carried here so the pre-confirm ref-string
+    /// computation and the post-confirm `put` share ONE canonical base.
+    File {
+        store: ManagedSecretStore,
+        name: String,
+        value: String,
+    },
     /// An oauth provider to log in against post-confirm.
     OAuth { provider: String },
 }
@@ -227,7 +234,10 @@ pub async fn run_with_io(
 
     let (entry, cred_class, pending) = build_entry(&args, io)?;
     let name = args.name.as_str();
-    let kind = args.kind.as_str();
+    // The RESOLVED kind, not the CLI-supplied `--kind`: an oauth kind
+    // (`anthropic`) constructs an `anthropic-api` block, so the audit event
+    // and the human line must report what actually lands on disk.
+    let kind = entry.kind_str();
 
     let block = provider_table(&entry)?;
     let new_block_norm = block.to_string();
@@ -317,8 +327,7 @@ pub async fn run_with_io(
 async fn execute_pending(pending: PendingSecret, io: &dyn AddIo) -> Result<()> {
     match pending {
         PendingSecret::None => Ok(()),
-        PendingSecret::File { name, value } => {
-            let store = open_secret_store()?;
+        PendingSecret::File { store, name, value } => {
             store.put(&name, &value)?;
             Ok(())
         }
@@ -326,9 +335,12 @@ async fn execute_pending(pending: PendingSecret, io: &dyn AddIo) -> Result<()> {
     }
 }
 
-/// Open the managed secret store at the default directory. Shared by the
-/// pre-confirm ref-string computation and the post-confirm `put` so both
-/// resolve the SAME deterministic path.
+/// Open the managed secret store at the default directory, canonicalizing
+/// its base ONCE. The opened store is carried through
+/// [`PendingSecret::File`] so the pre-confirm ref-string computation and
+/// the post-confirm `put` share the SAME canonical base -- a symlinked
+/// ancestor swapped between the two phases cannot redirect where a managed
+/// secret lands.
 fn open_secret_store() -> Result<ManagedSecretStore> {
     let dir = default_secret_dir()?;
     Ok(ManagedSecretStore::open(dir)?)
@@ -563,8 +575,10 @@ fn resolve_interactive(
 
 /// Turn a validated captured `value` into a managed `file://` ref string
 /// plus the deferred `put`. The ref path is computed deterministically
-/// (no bytes written yet); the store is opened here so an unwritable /
-/// wrong-perms store fails EARLY, before the confirm.
+/// (no bytes written yet); the store is opened ONCE here so an unwritable /
+/// wrong-perms store fails EARLY, before the confirm, and the opened store
+/// is carried into the pending so the post-confirm `put` reuses the same
+/// canonical base.
 fn capture_value(
     args: &ProviderAddArgs,
     value: String,
@@ -580,6 +594,7 @@ fn capture_value(
         ref_str,
         "file",
         PendingSecret::File {
+            store,
             name: args.name.clone(),
             value,
         },
@@ -1808,6 +1823,75 @@ default = \"no-such-model\"
             .collect();
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].field("credential_source"), Some("file"));
+        unset_env("XDG_CONFIG_HOME");
+    }
+
+    // -----------------------------------------------------------------
+    // Canonicalize-once: the store is opened during the capture phase and
+    // carried through PendingSecret::File, so a symlinked ancestor swapped
+    // between capture and execute cannot redirect the put -- it lands under
+    // the ORIGINAL canonical base the precomputed ref already points at.
+    // -----------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn symlinked_ancestor_swap_between_phases_lands_at_original_base() {
+        // Arrange: XDG_CONFIG_HOME points through a symlink at `real_a`, so
+        // the store's default dir resolves under `real_a`.
+        let root = tempfile::tempdir().unwrap();
+        let real_a = root.path().join("real-a");
+        let real_b = root.path().join("real-b");
+        std::fs::create_dir_all(&real_a).unwrap();
+        std::fs::create_dir_all(&real_b).unwrap();
+        let link = root.path().join("xdg-link");
+        std::os::unix::fs::symlink(&real_a, &link).unwrap();
+        set_env("XDG_CONFIG_HOME", link.to_str().unwrap());
+
+        let a = args("openai-compat", "grok");
+
+        // Act (capture phase): opens the store, canonicalizes through the
+        // symlink, and computes the ref off the resolved base.
+        let (ref_str, class, pending) =
+            capture_value(&a, "value-not-real".to_string()).expect("capture");
+        assert_eq!(class, "file");
+        let expected = std::fs::canonicalize(&real_a)
+            .unwrap()
+            .join("routectl")
+            .join("secrets")
+            .join("grok");
+        assert_eq!(
+            ref_str,
+            SecretRef::File(expected.clone()).to_string(),
+            "the precomputed ref points at the original canonical base"
+        );
+
+        // Swap the symlinked ancestor to `real_b` BETWEEN the two phases.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&real_b, &link).unwrap();
+
+        // Act (execute phase): the put reuses the store canonicalized at
+        // capture time, not the freshly-swapped symlink target.
+        execute_pending(pending, &FakeIo::default())
+            .await
+            .expect("put");
+
+        // Assert: the secret landed under the ORIGINAL canonical base,
+        // matching the precomputed ref -- never under the swapped target.
+        assert_eq!(
+            std::fs::read_to_string(&expected).unwrap(),
+            "value-not-real",
+            "put must land at the precomputed ref path"
+        );
+        let swapped = std::fs::canonicalize(&real_b)
+            .unwrap()
+            .join("routectl")
+            .join("secrets")
+            .join("grok");
+        assert!(
+            !swapped.exists(),
+            "the swapped symlink target must never receive the secret"
+        );
         unset_env("XDG_CONFIG_HOME");
     }
 
