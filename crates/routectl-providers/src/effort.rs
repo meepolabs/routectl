@@ -11,6 +11,12 @@
 //! Anthropic-shape egresses (anthropic_api, bedrock) accept "xhigh"
 //! and "max" verbatim and MUST NOT call this helper.
 
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
 use std::borrow::Cow;
 
 /// The six canonical effort tokens, in rank order from lowest to
@@ -24,6 +30,12 @@ pub const VALID_EFFORT_TOKENS: [&str; 6] = ["minimal", "low", "medium", "high", 
 /// can continue to work with a `&[&str]` reference and carry its
 /// rank-ordering semantics explicitly. Both must stay in sync; the
 /// unit test `effort_tokens_and_rank_order_in_sync` enforces that.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
 const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
 
 /// Clamp `requested` to the nearest supported level on the standard
@@ -44,6 +56,12 @@ const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
 ///   - Emits `tracing::warn!` when `supported` is non-empty AND `requested`
 ///     is not in the standard rank order (unknown string). In that case the
 ///     function still picks the lowest supported level as a safe default.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
 pub(crate) fn clamp_effort_to_supported<'a>(
     requested: &'a str,
     supported: &[String],
@@ -105,6 +123,7 @@ pub(crate) fn clamp_effort_to_supported<'a>(
 /// The table is independent of `VALID_EFFORT_TOKENS` / `RANK_ORDER`:
 /// it carries a "none" level (budget 0) and exact per-level budgets
 /// that the clamp path deliberately does not model.
+#[cfg(any(feature = "gemini", feature = "anthropic-api"))]
 pub(crate) fn budget_from_level(level: &str) -> Option<u32> {
     match level {
         "none" => Some(0),
@@ -147,6 +166,12 @@ pub(crate) const fn level_from_budget(budget: u32) -> &'static str {
 /// Precondition: `supported` is non-empty. Callers must ensure this
 /// before invoking (every call site checks `supported.is_empty()`
 /// earlier and returns early).
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
 fn lowest_supported(supported: &[String]) -> &str {
     debug_assert!(
         !supported.is_empty(),
@@ -187,12 +212,33 @@ pub(crate) fn drop_orphaned_output_config_effort(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
+    use super::VALID_EFFORT_TOKENS;
+    #[cfg(any(feature = "gemini", feature = "anthropic-api"))]
+    use super::budget_from_level;
     #[cfg(feature = "openai-responses")]
     use super::level_from_budget;
-    use super::{RANK_ORDER, VALID_EFFORT_TOKENS, budget_from_level, clamp_effort_to_supported};
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
+    use super::{RANK_ORDER, clamp_effort_to_supported};
 
     // VALID_EFFORT_TOKENS and RANK_ORDER must stay in sync: same elements,
     // same order. If either is updated, the other must follow.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn effort_tokens_and_rank_order_in_sync() {
         assert_eq!(
@@ -203,11 +249,23 @@ mod tests {
     }
 
     // Helper to build a Vec<String> from a slice of &str.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     fn levels(ls: &[&str]) -> Vec<String> {
         ls.iter().map(|s| (*s).to_string()).collect()
     }
 
     // Empty supported -> requested returned verbatim (passthrough).
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn empty_supported_returns_requested() {
         assert_eq!(clamp_effort_to_supported("max", &[]), "max");
@@ -216,6 +274,12 @@ mod tests {
     }
 
     // Requested level is in supported -> verbatim, no allocation.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn requested_in_supported_returns_verbatim() {
         let sup = levels(&["low", "medium", "high"]);
@@ -224,6 +288,12 @@ mod tests {
     }
 
     // requested="max", supported=["low","medium","high"] -> "high".
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn max_clamps_to_high() {
         let sup = levels(&["low", "medium", "high"]);
@@ -231,6 +301,12 @@ mod tests {
     }
 
     // requested="xhigh", supported=["low","medium","high"] -> "high".
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn xhigh_clamps_to_high() {
         let sup = levels(&["low", "medium", "high"]);
@@ -239,6 +315,12 @@ mod tests {
 
     // requested="minimal", supported=["medium","high"] -> "medium"
     // (nothing <= minimal in supported, so pick lowest = "medium").
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn minimal_below_all_supported_picks_lowest() {
         let sup = levels(&["medium", "high"]);
@@ -247,6 +329,12 @@ mod tests {
 
     // requested="low", supported=["medium","high"] -> "medium"
     // (nothing <= low in supported, so pick lowest = "medium").
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn low_below_all_supported_picks_lowest() {
         let sup = levels(&["medium", "high"]);
@@ -257,6 +345,12 @@ mod tests {
     // We cannot easily test the warn emission in unit tests without
     // tracing-test, but we can verify the returned value is the lowest
     // supported level.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn unknown_effort_returns_lowest_supported() {
         let sup = levels(&["low", "medium"]);
@@ -265,6 +359,12 @@ mod tests {
     }
 
     // Clamp from a mid-level works correctly.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn high_clamps_to_medium_when_only_low_medium_supported() {
         let sup = levels(&["low", "medium"]);
@@ -272,6 +372,12 @@ mod tests {
     }
 
     // Single-element supported list: everything maps to it.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn single_element_supported_always_returns_it() {
         let sup = levels(&["medium"]);
@@ -281,6 +387,12 @@ mod tests {
     }
 
     // minimal < low: low clamps down to minimal when minimal is sole option.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
     #[test]
     fn low_clamps_down_when_only_minimal_supported() {
         let sup = levels(&["minimal"]);
@@ -289,6 +401,7 @@ mod tests {
     }
 
     // Forward table: every defined level maps to its exact budget.
+    #[cfg(any(feature = "gemini", feature = "anthropic-api"))]
     #[test]
     fn budget_from_level_returns_exact_table_value_for_each_level() {
         assert_eq!(budget_from_level("none"), Some(0));
@@ -301,6 +414,7 @@ mod tests {
     }
 
     // Forward table: an unknown level yields None so callers can fall back.
+    #[cfg(any(feature = "gemini", feature = "anthropic-api"))]
     #[test]
     fn budget_from_level_returns_none_for_unknown_level() {
         assert_eq!(budget_from_level("ludicrous"), None);
