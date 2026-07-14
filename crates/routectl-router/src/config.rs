@@ -124,6 +124,15 @@ pub struct Config {
     #[serde(default)]
     pub reduction: ReductionConfig,
 
+    /// Operator-facing `[capability]` block. Kill switch plus tempo knobs
+    /// for the learned-capability subsystem. A missing block keeps all
+    /// defaults: enabled, a 48h decay window, a 1h inferred-signal window.
+    /// The table is deliberately top-level (not nested under `[server]`)
+    /// so a later override layer can nest per-target overrides under the
+    /// same parent.
+    #[serde(default)]
+    pub capability: CapabilityConfig,
+
     /// Operator-facing `[trim]` block. Tunes the deterministic steady-state
     /// advisory trimmer's four knobs. A missing block resolves (via
     /// `TrimConfig::to_params()`) to `SteadyStateTrimParams::default()` --
@@ -521,6 +530,127 @@ pub struct ReductionConfig {
     /// and the derived `Default` keeps reduction disabled.
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// Operator-facing `[capability]` config block. Kill switch plus tempo
+/// knobs for the learned-capability subsystem. A missing `[capability]`
+/// table deserializes to `CapabilityConfig::default()` (enabled, 48h
+/// decay, 1h inferred window), and each per-field `#[serde(default)]`
+/// keeps an omitted key at its default too.
+///
+/// `enabled` is the master switch: off leaves any learned entries
+/// resident but inert (both the learn path and the act path are skipped).
+/// `decay_hours` sets how long a learned negative acts before it lapses
+/// into a single re-probe; `inferred_window_hours` bounds how long a
+/// pending single-observation inferred signal waits for a confirming
+/// second observation before it resets.
+///
+/// `#[non_exhaustive]` leaves room for later knobs without breaking
+/// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
+/// config-load time (matching the sibling feature blocks) instead of
+/// silently ignoring it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CapabilityConfig {
+    /// Master switch for the learned-capability subsystem. Default on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Hours a learned negative acts before it lapses into a single
+    /// re-probe. Default 48.
+    #[serde(default = "default_decay_hours")]
+    pub decay_hours: u64,
+    /// Hours a pending single-observation inferred signal waits for a
+    /// confirming second observation before it resets. Default 1.
+    #[serde(default = "default_inferred_window_hours")]
+    pub inferred_window_hours: u64,
+}
+
+impl Default for CapabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            decay_hours: default_decay_hours(),
+            inferred_window_hours: default_inferred_window_hours(),
+        }
+    }
+}
+
+const fn default_decay_hours() -> u64 {
+    48
+}
+
+const fn default_inferred_window_hours() -> u64 {
+    1
+}
+
+#[cfg(test)]
+mod capability_config_tests {
+    use super::{CapabilityConfig, Config};
+
+    #[test]
+    fn absent_block_uses_defaults() {
+        // Arrange / Act: a full config that omits [capability] entirely.
+        let config: Config =
+            toml::from_str("version = 3\n[server]\nhost = \"127.0.0.1\"\n").expect("parse");
+
+        // Assert: the omitted block resolves to the documented defaults.
+        assert_eq!(config.capability, CapabilityConfig::default());
+        assert!(config.capability.enabled);
+        assert_eq!(config.capability.decay_hours, 48);
+        assert_eq!(config.capability.inferred_window_hours, 1);
+    }
+
+    #[test]
+    fn explicit_values_are_honored() {
+        // Arrange / Act
+        let config: Config = toml::from_str(
+            "version = 3\n[capability]\nenabled = false\ndecay_hours = 12\n\
+             inferred_window_hours = 3\n",
+        )
+        .expect("parse");
+
+        // Assert
+        assert!(!config.capability.enabled);
+        assert_eq!(config.capability.decay_hours, 12);
+        assert_eq!(config.capability.inferred_window_hours, 3);
+    }
+
+    #[test]
+    fn partial_block_defaults_the_omitted_keys() {
+        // Only the kill switch set; the two tempo knobs keep their defaults.
+        let config: Config =
+            toml::from_str("version = 3\n[capability]\nenabled = false\n").expect("parse");
+
+        assert!(!config.capability.enabled);
+        assert_eq!(config.capability.decay_hours, 48);
+        assert_eq!(config.capability.inferred_window_hours, 1);
+    }
+
+    #[test]
+    fn unknown_key_is_rejected() {
+        // deny_unknown_fields: a typo'd key surfaces at load, never silent.
+        let err = toml::from_str::<Config>("version = 3\n[capability]\ndecay_hrs = 5\n")
+            .expect_err("unknown [capability] key must be rejected");
+        assert!(err.to_string().contains("decay_hrs"), "err: {err}");
+    }
+
+    /// `config example` prints `examples/config.toml` verbatim; that shipped
+    /// text must render a `[capability]` block, and it must parse with the
+    /// documented defaults.
+    #[test]
+    fn shipped_example_renders_capability_block() {
+        let example = include_str!("../../../examples/config.toml");
+        assert!(
+            example.contains("[capability]"),
+            "shipped example must render a [capability] block"
+        );
+
+        let config: Config = toml::from_str(example).expect("example parses as Config");
+        assert!(config.capability.enabled);
+        assert_eq!(config.capability.decay_hours, 48);
+        assert_eq!(config.capability.inferred_window_hours, 1);
+    }
 }
 
 /// Operator-facing `[trim]` config block. Wraps the deterministic

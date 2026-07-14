@@ -219,6 +219,17 @@ stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 # retry_on_429 = 1
 # retry_on_network = 2
 
+# ---- Learned-capability subsystem (server-wide) ----
+# routectl learns, per target, which capabilities an upstream rejects
+# and routes around them. This block is the kill switch plus tempo
+# knobs; every field carries the shown default, so the whole block is
+# optional. Set enabled = false to leave any learned entries inert.
+
+[capability]
+enabled               = true    # master switch for the subsystem
+decay_hours           = 48      # how long a learned negative acts before a re-probe
+inferred_window_hours = 1       # window for a second observation to confirm an inferred signal
+
 # ---- Bedrock global filters (operator-owned allowlists) ----
 # Empty list (or section omitted) = pass-through. See
 # examples/bedrock.toml for the empirical baseline (16 betas + 16
