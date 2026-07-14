@@ -34,7 +34,10 @@ pub use cache_control::{
     Breakpoint, BreakpointPosition, CacheBreakpointSource, CacheControl, FrozenFloor,
     OwnedBreakpoint, compute_frozen_floor, mutable_suffix_start, validate_source,
 };
-pub use capability::{COMPUTER_USE, STRUCTURED_OUTPUT, WEB_SEARCH, WELL_KNOWN_CAPABILITY_KEYS};
+pub use capability::{
+    COMPUTER_USE, STRUCTURED_OUTPUT, SignalTier, WEB_SEARCH, WELL_KNOWN_CAPABILITY_KEYS,
+    normalize_capability_key,
+};
 pub use cloud_project::{CloudProjectCache, InMemoryProjectCache};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use context_reduction::{
