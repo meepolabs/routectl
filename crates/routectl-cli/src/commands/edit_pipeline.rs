@@ -17,6 +17,7 @@ use routectl_router::{
 };
 
 use super::config::validation_report;
+use super::parse_error_redaction::redact_parse_error;
 
 /// The `edit_fn` closure's error shared by the config-mutating commands: the
 /// candidate re-validated under the write lock against the SAME bytes the
@@ -46,9 +47,12 @@ pub(crate) fn preflight(raw_text: &str) -> Result<()> {
 
 /// The shared validation gate: `parse_config` (free did-you-mean) then the
 /// centralized validator suite the reload path also runs. Returns the
-/// validated `Config` or the rendered error lines.
+/// validated `Config` or the rendered error lines. The `parse_config` error is
+/// stripped of its verbatim source-line preview and value-bearing clauses first
+/// -- toml/serde echo the offending config line into the diagnostic, and that
+/// line could carry a `literal:` credential.
 pub(crate) fn gate(candidate_text: &str) -> std::result::Result<Config, Vec<String>> {
-    let config = parse_config(candidate_text).map_err(|e| vec![e])?;
+    let config = parse_config(candidate_text).map_err(|e| vec![redact_parse_error(&e)])?;
     let report = validation_report(&config, Some(candidate_text));
     if report.errors.is_empty() {
         Ok(config)
