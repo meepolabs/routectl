@@ -8,10 +8,13 @@
 //!
 //! Reliability contract (BINDING): every transport failure (DNS, connect,
 //! TLS, timeout) collapses to `Unreachable`; a 401/403 collapses to
-//! `AuthFailed`; any other response is treated as `Reachable` because the
-//! network path and TLS handshake succeeded. The probe never panics and
-//! never hangs -- the per-request timeout caps the whole exchange -- and
-//! never follows a redirect, so one probe is exactly one request.
+//! `AuthFailed`; a 2xx is `Reachable`. Any other status the endpoint
+//! answered (3xx, 404, 429, 5xx) completed a round trip but does not prove
+//! the endpoint is a healthy provider, so it maps to `IndeterminateHttp`
+//! carrying the status -- a warning, never a silent pass. The probe never
+//! panics and never hangs -- the per-request timeout caps the whole
+//! exchange -- and never follows a redirect, so one probe is exactly one
+//! request.
 //!
 //! Reason strings are fixed literals: a probe outcome must never carry a
 //! token, an api-key, or a credential-bearing URL into an operator-facing
@@ -62,16 +65,19 @@ pub async fn http_get_probe(
 ///
 /// - 2xx -> `Reachable` (the endpoint answered the free probe).
 /// - 401 / 403 -> `AuthFailed` (reached the host, credential rejected).
-/// - anything else -> `Reachable`: the request completed a round trip,
-///   so the network path and TLS work even if the endpoint returned a
-///   non-2xx status the probe does not treat as an auth failure.
+/// - anything else (3xx, 404, 429, 5xx) -> `IndeterminateHttp`: the
+///   request completed a round trip, so the network path and TLS work,
+///   but the status does not prove a healthy provider -- a mistyped base
+///   URL (404), a redirect the probe does not follow (3xx), rate limiting
+///   (429), or an unhealthy upstream (5xx) all land here as a warning
+///   rather than a false pass.
 pub fn classify_probe_status(status: u16) -> ProbeOutcome {
     if (200..300).contains(&status) {
         ProbeOutcome::Reachable
     } else if status == 401 || status == 403 {
         ProbeOutcome::AuthFailed("provider rejected the probe credential".into())
     } else {
-        ProbeOutcome::Reachable
+        ProbeOutcome::IndeterminateHttp { status }
     }
 }
 
@@ -100,11 +106,17 @@ mod tests {
     }
 
     #[test]
-    fn classify_maps_other_status_to_reachable() {
-        // A round trip completed, so the host is reachable even on a
-        // non-auth non-2xx status.
-        assert_eq!(classify_probe_status(404), ProbeOutcome::Reachable);
-        assert_eq!(classify_probe_status(500), ProbeOutcome::Reachable);
+    fn classify_maps_indeterminate_statuses_to_indeterminate_http() {
+        // A round trip completed, but none of these statuses prove a
+        // healthy provider, so each maps to IndeterminateHttp carrying the
+        // status rather than a false Reachable.
+        for status in [302u16, 404, 429, 500, 503] {
+            assert_eq!(
+                classify_probe_status(status),
+                ProbeOutcome::IndeterminateHttp { status },
+                "status {status} must map to IndeterminateHttp"
+            );
+        }
     }
 
     /// A non-responsive endpoint (delay far exceeding the timeout) must
@@ -159,8 +171,8 @@ mod tests {
     /// request. The `/models` mock returns a 302 whose `Location` points
     /// at `/redirected`; the redirect target is mounted with `.expect(0)`
     /// so wiremock fails on drop if the probe ever hops to it. The 302 is
-    /// classified in isolation (non-2xx, non-auth -> `Reachable`) rather
-    /// than being resolved to the target's status.
+    /// classified in isolation (non-2xx, non-auth -> `IndeterminateHttp`)
+    /// rather than being resolved to the target's status.
     #[tokio::test]
     async fn probe_does_not_follow_redirects() {
         let server = MockServer::start().await;
@@ -188,7 +200,7 @@ mod tests {
 
         assert_eq!(
             outcome,
-            ProbeOutcome::Reachable,
+            ProbeOutcome::IndeterminateHttp { status: 302 },
             "a 302 must be classified in isolation, not followed"
         );
     }
