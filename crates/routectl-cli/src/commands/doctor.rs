@@ -20,19 +20,32 @@ use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, Config, ConfigVersionError,
-    DoctorPanels, DoctorReport, Finding, Status, UnresolvedReason, WouldTrimPanel,
-    compute_activation, overall_exit, preflight_config_version,
+    ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, CatalogOverlay, Config,
+    ConfigVersionError, DoctorPanels, DoctorReport, EffectiveRow, Finding, OverrideProvenance,
+    OverrideRegistry, OverrideRow, OverrideVerdict, Source, Status, UnresolvedReason,
+    WouldTrimPanel, compute_activation, derive_effective_view, is_stale_today, overall_exit,
+    preflight_config_version,
 };
 
+use crate::commands::capability_legacy::{
+    LEGACY_ALLOWED_BETAS, LEGACY_ALLOWED_BODY_FIELDS, LEGACY_UNSUPPORTED_FEATURES,
+    present_legacy_capability_keys,
+};
 use crate::commands::doctor_panels::{compute_would_trim_panel, render_would_trim_panel};
 use crate::commands::parse_error_redaction::redact_parse_error;
 use crate::commands::probe::{PROBE_DEADLINE, probe_all, probe_finding};
 use crate::server::CompositeStore;
 
-/// UNSTABLE report schema version. Bumped only when the JSON shape changes
-/// in a way a consumer would care about.
-const SCHEMA_VERSION: u32 = 1;
+/// UNSTABLE report schema version. Bumped on ANY structural or semantic
+/// change a consumer would care about -- including an ADDITIVE one, since the
+/// report JSON is explicitly human-facing and non-contractual. Bump when a
+/// section's finding shape, a panel field, or the meaning of an existing
+/// field changes.
+///
+/// v1 -> v2: the reserved `capability` section became a real producer
+/// (override rows, catalog priors, the runtime-only learned line, and the
+/// legacy-key migrate nudge).
+const SCHEMA_VERSION: u32 = 2;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -91,6 +104,60 @@ struct DoctorContext {
     would_trim: Option<WouldTrimPanel>,
     now_unix: u64,
     binary_version: &'static str,
+    /// The capability section's read-only inputs, resolved per-layer so the
+    /// section producer stays a pure mapping. The config layer and the
+    /// catalog overlay degrade independently (see [`CapabilityInputs`]).
+    capability: CapabilityInputs,
+}
+
+/// Per-layer inputs the capability section maps to findings. The config
+/// layer (override rows + legacy keys + prior cells) and the catalog overlay
+/// (the prior cells' source) are gathered independently, so an unreadable
+/// overlay degrades the priors alone while the config-derived override rows
+/// still render.
+struct CapabilityInputs {
+    /// `Some` when the config parsed: the config-derived capability view.
+    /// `None` when the config could not be parsed -- the section then renders
+    /// a single redacted "panel unavailable" line (keyed on this flag) rather
+    /// than a misleading empty-from-default-config view.
+    config: Option<CapabilityConfig>,
+    /// The already-redacted config load error, set only when `config` is
+    /// `None`. Redacted at gather time through the shared parse-error
+    /// redactor (see [`redact_config_load_error`]).
+    panel_unavailable: Option<String>,
+}
+
+/// The config-derived capability view: everything the section renders when
+/// the config parsed.
+struct CapabilityConfig {
+    /// Flattened operator override cells, in the registry's snapshot order.
+    override_rows: Vec<OverrideRow>,
+    /// Present legacy capability-list key NAMES (never values) driving the
+    /// migrate nudge.
+    legacy_keys: Vec<&'static str>,
+    /// The catalog/overlay capability prior cells, or unavailable when the
+    /// overlay could not be read.
+    priors: PriorLayer,
+}
+
+/// The catalog capability prior layer, degraded independently of the config.
+enum PriorLayer {
+    /// The overlay loaded: the capability prior cells (empty when no cell
+    /// carries capability data -- baked cells are empty today).
+    Present(Vec<PriorCell>),
+    /// The overlay could not be read: priors are unavailable. Override rows
+    /// still render.
+    Unavailable,
+}
+
+/// One catalog/overlay capability prior cell: a `[models.X]` entry whose
+/// resolved catalog row carries capability data, tagged with the winning
+/// layer.
+struct PriorCell {
+    nickname: String,
+    selector: String,
+    source: Source,
+    capabilities: Vec<(String, bool)>,
 }
 
 /// Run the doctor aggregator against `config_path` and render the report.
@@ -119,15 +186,27 @@ pub async fn run(config_path: &Path, json: bool) -> i32 {
 
 async fn gather_context(config_path: &Path) -> DoctorContext {
     let raw_config = std::fs::read_to_string(config_path).ok();
-    // Read-only load: never the migrate/edit path. Keep the load error
-    // rather than degrade it away -- a present-but-broken config must not
-    // report all-Pass. On failure the other sections still run against
-    // defaults; the version section speaks to the real error.
-    let (config, config_load_error) =
-        match crate::server::load_effective_config_unvalidated(config_path) {
-            Ok(loaded) => (loaded.config, None),
-            Err(e) => (Config::default(), Some(redact_config_load_error(&e))),
-        };
+    // Read-only, per-layer load: the config and the catalog overlay load
+    // independently so the capability panel can degrade one without the
+    // other. The version section keeps its coupled "config could not be
+    // loaded" semantics -- a config parse error wins, else an overlay error
+    // -- so a present-but-broken config still never reports all-Pass. On a
+    // config failure the other sections run against defaults.
+    let config_layer = crate::server::parse_config_only(config_path);
+    let overlay_layer = crate::server::load_overlay_default();
+
+    let (config, config_parse_error) = match config_layer {
+        Ok(config) => (config, None),
+        Err(e) => (Config::default(), Some(redact_config_load_error(&e))),
+    };
+    let config_load_error = config_parse_error.clone().or_else(|| {
+        overlay_layer
+            .as_ref()
+            .err()
+            .map(|e| redact_config_load_error(e))
+    });
+
+    let capability = build_capability_inputs(&config, config_parse_error, overlay_layer.ok());
 
     let (probes, seats, auth_store_error) = gather_auth().await;
     let secret_checks = gather_secret_checks(&config, &probes);
@@ -148,7 +227,77 @@ async fn gather_context(config_path: &Path) -> DoctorContext {
         would_trim,
         now_unix: unix_now(),
         binary_version: env!("CARGO_PKG_VERSION"),
+        capability,
     }
+}
+
+/// Build the capability section's per-layer inputs. A config parse error
+/// (already redacted) yields the "panel unavailable" state -- NOT an
+/// empty-from-default-config view. Otherwise the override rows and legacy
+/// keys come from the parsed config, and the prior cells from the overlay
+/// (or unavailable when the overlay could not be read).
+fn build_capability_inputs(
+    config: &Config,
+    config_parse_error: Option<String>,
+    overlay: Option<CatalogOverlay>,
+) -> CapabilityInputs {
+    if let Some(err) = config_parse_error {
+        return CapabilityInputs {
+            config: None,
+            panel_unavailable: Some(err),
+        };
+    }
+
+    let override_rows = OverrideRegistry::build(config).snapshot();
+    let legacy_keys = present_legacy_capability_keys(config);
+    let priors = match overlay {
+        Some(overlay) => PriorLayer::Present(derive_prior_cells(config, &overlay)),
+        None => PriorLayer::Unavailable,
+    };
+
+    CapabilityInputs {
+        config: Some(CapabilityConfig {
+            override_rows,
+            legacy_keys,
+            priors,
+        }),
+        panel_unavailable: None,
+    }
+}
+
+/// Derive the catalog/overlay capability prior cells: one per `[models.X]`
+/// entry whose resolved catalog row is `Present`, is NOT stale, AND carries
+/// capability data. A `Missing` / `Disabled` cell (absent or explicitly
+/// disabled), a stale cell (its `verified_at` older than the catalog
+/// staleness horizon, or unparseable), or a row with no capability keys all
+/// yield NO prior -- the conservative "unknown" baseline, never a fabricated
+/// or falsely-unsupported row. Staleness uses the live clock, matching this
+/// one-shot tool's fresh-process reads.
+fn derive_prior_cells(config: &Config, overlay: &CatalogOverlay) -> Vec<PriorCell> {
+    derive_effective_view(config, overlay)
+        .models
+        .into_iter()
+        .filter_map(|cell| {
+            let EffectiveRow::Present {
+                row,
+                source,
+                verified_at,
+            } = cell.row
+            else {
+                return None;
+            };
+            if is_stale_today(&verified_at) || row.capabilities.is_empty() {
+                return None;
+            }
+            let capabilities = row.capabilities.into_iter().collect();
+            Some(PriorCell {
+                nickname: cell.nickname,
+                selector: format!("{}/{}", cell.provider_kind, cell.upstream),
+                source,
+                capabilities,
+            })
+        })
+        .collect()
 }
 
 /// Redact the read-only loader's error before it is stored on the context and
@@ -738,12 +887,203 @@ fn seat_provider(seat_key: &str) -> &str {
     seat_key.split_once('#').map_or(seat_key, |(p, _)| p)
 }
 
-/// The M-F seam: a reserved, currently-empty section. It renders as a
-/// named placeholder ("not yet available") and contributes no findings
-/// until a later milestone plugs a real producer body in here.
-#[allow(clippy::missing_const_for_fn)]
-fn section_capability(_ctx: &DoctorContext) -> Vec<Finding> {
-    Vec::new()
+/// Capability section: a pure mapping of the gathered [`CapabilityInputs`]
+/// to findings. NON-CONTRACTUAL, human-facing content -- no typed panel
+/// struct. Every finding here is `Pass` or `Warn`; the section NEVER emits a
+/// `Fail`, so it can never flip the doctor exit code. Per-layer degradation
+/// (config unavailable, overlay unavailable, absent catalog cell) is
+/// rendered honestly, never a whole-doctor fallback and never raw loader
+/// text.
+fn section_capability(ctx: &DoctorContext) -> Vec<Finding> {
+    let Some(config) = &ctx.capability.config else {
+        return vec![capability_unavailable(
+            ctx.capability.panel_unavailable.as_deref(),
+        )];
+    };
+
+    let mut findings = Vec::new();
+    findings.extend(config.override_rows.iter().map(override_finding));
+    findings.push(prior_finding(&config.priors));
+    findings.push(learned_line());
+    if let Some(nudge) = legacy_nudge(&config.legacy_keys) {
+        findings.push(nudge);
+    }
+    findings
+}
+
+/// The panel-unavailable finding: the config layer could not be parsed. The
+/// detail carries ONLY the already-redacted load error (routed through the
+/// shared parse-error redactor at gather time) -- never raw loader text.
+/// `Warn`, so it degrades honestly without flipping the exit code (the
+/// version section owns the config-load `Fail`).
+fn capability_unavailable(redacted: Option<&str>) -> Finding {
+    let detail = match redacted {
+        Some(err) if !err.trim().is_empty() => {
+            format!("capability panel unavailable: {err}")
+        }
+        _ => "capability panel unavailable: the config could not be loaded".to_string(),
+    };
+    Finding {
+        section: "capability",
+        name: "panel".to_string(),
+        status: Status::Warn,
+        detail,
+        remediation: Some(
+            "resolve the config error reported above, then re-run `routectl doctor`".to_string(),
+        ),
+    }
+}
+
+/// One informational `Pass` finding per operator override cell: the target
+/// spec, the capability key, the verdict, and the source label from
+/// provenance. Never flips the exit code.
+fn override_finding(row: &OverrideRow) -> Finding {
+    Finding {
+        section: "capability",
+        name: row.target_spec.clone(),
+        status: Status::Pass,
+        detail: format!(
+            "{} {} (source: {})",
+            row.capability_key,
+            verdict_label(row.verdict),
+            provenance_label(row.provenance),
+        ),
+        remediation: None,
+    }
+}
+
+const fn verdict_label(verdict: OverrideVerdict) -> &'static str {
+    match verdict {
+        OverrideVerdict::RouteAway => "route-away",
+        OverrideVerdict::ForceSupported => "force-supported",
+    }
+}
+
+const fn provenance_label(provenance: OverrideProvenance) -> &'static str {
+    match provenance {
+        OverrideProvenance::Override => "override",
+        OverrideProvenance::ProviderStatic => "provider-static",
+        OverrideProvenance::ModelStatic => "model-static",
+    }
+}
+
+const fn source_label(source: Source) -> &'static str {
+    match source {
+        Source::Baked => "baked",
+        Source::Import => "import",
+        Source::User => "user",
+    }
+}
+
+/// The catalog/overlay prior layer as findings. Present-with-cells renders
+/// one `Pass` per cell; present-but-empty an honest "no priors" note;
+/// unavailable a `Warn` that leaves the override rows intact.
+fn prior_finding(priors: &PriorLayer) -> Finding {
+    match priors {
+        PriorLayer::Unavailable => Finding {
+            section: "capability",
+            name: "catalog priors".to_string(),
+            status: Status::Warn,
+            detail: "catalog capability priors unavailable: the catalog overlay could not be read"
+                .to_string(),
+            remediation: Some(
+                "resolve the catalog overlay error, then re-run `routectl doctor`".to_string(),
+            ),
+        },
+        PriorLayer::Present(cells) if cells.is_empty() => Finding {
+            section: "capability",
+            name: "catalog priors".to_string(),
+            status: Status::Pass,
+            detail: "no catalog capability priors present".to_string(),
+            remediation: None,
+        },
+        PriorLayer::Present(cells) => {
+            let detail = cells
+                .iter()
+                .map(prior_cell_detail)
+                .collect::<Vec<_>>()
+                .join("; ");
+            Finding {
+                section: "capability",
+                name: "catalog priors".to_string(),
+                status: Status::Pass,
+                detail,
+                remediation: None,
+            }
+        }
+    }
+}
+
+/// One prior cell rendered as `nickname (selector) [source]: cap=bool, ...`.
+fn prior_cell_detail(cell: &PriorCell) -> String {
+    let caps = cell
+        .capabilities
+        .iter()
+        .map(|(key, supported)| format!("{key}={supported}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} ({}) [{}]: {caps}",
+        cell.nickname,
+        cell.selector,
+        source_label(cell.source),
+    )
+}
+
+/// The single fixed learned-layer line. Capability learning is runtime-only
+/// (in the live serve registry); a one-shot doctor cannot read it. No
+/// fabricated counts -- just the fixed statement of where learning lives.
+fn learned_line() -> Finding {
+    Finding {
+        section: "capability",
+        name: "learned".to_string(),
+        status: Status::Pass,
+        detail: "capability learning is runtime-only, visible in serve logs; \
+                 a future status surface will expose the live registry"
+            .to_string(),
+        remediation: None,
+    }
+}
+
+/// The legacy-key migrate nudge: ONE `Warn` finding when a legacy
+/// capability-list key is present, naming the present keys and the `config
+/// migrate` pointer with the guarded phrasing. Absent (returns `None`) when
+/// no legacy list is set. `Warn`, so it never flips the exit code. The
+/// phrasing is EXACT and MUST NOT imply the lists are safe to delete.
+fn legacy_nudge(legacy_keys: &[&'static str]) -> Option<Finding> {
+    if legacy_keys.is_empty() {
+        return None;
+    }
+
+    let mut clauses = Vec::new();
+    if legacy_keys.contains(&LEGACY_UNSUPPORTED_FEATURES) {
+        clauses.push("the override layer replaces these via config migrate");
+    }
+    if legacy_keys
+        .iter()
+        .any(|k| *k == LEGACY_ALLOWED_BETAS || *k == LEGACY_ALLOWED_BODY_FIELDS)
+    {
+        clauses.push(
+            "the learner discovers use-time rejections automatically; these lists remain \
+             operator-owned until the next schema version",
+        );
+    }
+
+    let detail = format!(
+        "deprecated capability-list keys are set ({}); {}",
+        legacy_keys.join(", "),
+        clauses.join("; "),
+    );
+    Some(Finding {
+        section: "capability",
+        name: "legacy keys".to_string(),
+        status: Status::Warn,
+        detail,
+        remediation: Some(
+            "run `routectl config migrate` to move deprecated keys under [capability.overrides]"
+                .to_string(),
+        ),
+    })
 }
 
 fn render_human(report: &DoctorReport) -> Vec<String> {
@@ -770,11 +1110,6 @@ fn render_human(report: &DoctorReport) -> Vec<String> {
 fn render_section(key: &str, findings: &[&Finding], out: &mut Vec<String>) {
     out.push(format!("[{}]", section_title(key)));
     if findings.is_empty() {
-        // The reserved capability section is the M-F seam: shown as a
-        // named placeholder even though it carries no findings yet.
-        if key == "capability" {
-            out.push("  not yet available".to_string());
-        }
         return;
     }
     for f in findings {
@@ -886,6 +1221,7 @@ mod tests {
         probes: Vec<(&'static str, LocalProbe)>,
         seats: Vec<(String, TokenRecord)>,
     ) -> DoctorContext {
+        let capability = build_capability_inputs(&config, None, Some(CatalogOverlay::default()));
         DoctorContext {
             config,
             raw_config: raw_config.map(str::to_string),
@@ -899,6 +1235,7 @@ mod tests {
             would_trim: None,
             now_unix: 1_000,
             binary_version: "test",
+            capability,
         }
     }
 
@@ -1121,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_seam_is_named_empty_in_human_render() {
+    fn capability_section_renders_content_not_placeholder() {
         let context = ctx(
             Config::default(),
             Some("version = 3\n"),
@@ -1130,8 +1467,8 @@ mod tests {
         );
         let report = build_report(&context);
         assert!(
-            report.findings.iter().all(|f| f.section != "capability"),
-            "capability section must contribute no findings"
+            report.findings.iter().any(|f| f.section == "capability"),
+            "capability section must now contribute findings"
         );
         let text = render_human(&report).join("\n");
         assert!(
@@ -1139,9 +1476,318 @@ mod tests {
             "capability header missing: {text}"
         );
         assert!(
-            text.contains("not yet available"),
-            "capability placeholder missing: {text}"
+            !text.contains("not yet available"),
+            "placeholder must be gone: {text}"
         );
+        // The runtime-only learned line and the honest empty-priors note are
+        // both present on a default config.
+        assert!(
+            text.contains("runtime-only"),
+            "learned line missing: {text}"
+        );
+        assert!(
+            text.contains("no catalog capability priors present"),
+            "honest empty-priors note missing: {text}"
+        );
+    }
+
+    /// A config with a legacy provider list plus a new override, so the
+    /// registry snapshot carries both a provider-static and an override row.
+    fn config_with_overrides() -> Config {
+        toml::from_str(
+            "version = 3\n\
+             [providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             unsupported_features = [\"web_search\"]\n\
+             [capability.overrides.p]\n\
+             force_supported = [\"structured_output\"]\n",
+        )
+        .expect("override config parses")
+    }
+
+    #[test]
+    fn override_rows_render_with_source_labels_and_never_fail() {
+        let context = ctx(
+            config_with_overrides(),
+            Some("version = 3\n"),
+            Vec::new(),
+            Vec::new(),
+        );
+        let findings = section_capability(&context);
+        let overrides: Vec<&Finding> = findings.iter().filter(|f| f.name == "p").collect();
+        assert_eq!(overrides.len(), 2, "one finding per override cell");
+        assert!(overrides.iter().all(|f| f.status == Status::Pass));
+
+        let route_away = overrides
+            .iter()
+            .find(|f| f.detail.contains("web_search"))
+            .expect("provider-static route-away row");
+        assert!(route_away.detail.contains("route-away"), "{route_away:?}");
+        assert!(
+            route_away.detail.contains("source: provider-static"),
+            "{route_away:?}"
+        );
+
+        let forced = overrides
+            .iter()
+            .find(|f| f.detail.contains("structured_output"))
+            .expect("override force-supported row");
+        assert!(forced.detail.contains("force-supported"), "{forced:?}");
+        assert!(forced.detail.contains("source: override"), "{forced:?}");
+
+        // Capability findings never flip the exit code.
+        assert_eq!(overall_exit(&findings), 0);
+    }
+
+    #[test]
+    fn prior_cells_render_when_overlay_provides_them() {
+        let config: Config = toml::from_str(
+            "version = 3\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"env://ANTHROPIC_API_KEY\"\n\
+             [models.opus]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude-opus-4-8\"\n",
+        )
+        .expect("config parses");
+        // An overlay cell that supplies capability data for the model's
+        // (provider_kind, upstream) selector. `verified_at` is stamped TODAY
+        // (via the live clock) so the cell is never stale-suppressed
+        // regardless of when the suite runs.
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let overlay: CatalogOverlay = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "revision": 1,
+            "cells": {
+                "anthropic-api:claude-opus-4-8": {
+                    "source": "user",
+                    "verified_at": today,
+                    "capabilities": { "web_search": true }
+                }
+            }
+        }))
+        .expect("valid overlay");
+
+        let inputs = build_capability_inputs(&config, None, Some(overlay));
+        let priors = &inputs.config.expect("config present").priors;
+        let PriorLayer::Present(cells) = priors else {
+            panic!("expected present priors");
+        };
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].nickname, "opus");
+        assert!(cells[0].selector.contains("claude-opus-4-8"));
+        // The overlay cell wins the merge -> source is User.
+        assert_eq!(cells[0].source, Source::User);
+        // The overlay-supplied capability is present and true (baked keys the
+        // overlay does not mention merge through unchanged).
+        assert!(
+            cells[0]
+                .capabilities
+                .contains(&("web_search".to_string(), true)),
+            "web_search prior missing: {:?}",
+            cells[0].capabilities
+        );
+    }
+
+    #[test]
+    fn stale_catalog_cell_yields_no_prior() {
+        // A Present overlay cell whose verified_at is far in the past is
+        // stale -> suppressed as unknown, never rendered as an authoritative
+        // prior (spec 6c). An unparseable stamp is treated as stale too.
+        let config: Config = toml::from_str(
+            "version = 3\n\
+             [providers.anthropic]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"env://ANTHROPIC_API_KEY\"\n\
+             [models.opus]\n\
+             provider = \"anthropic\"\n\
+             upstream = \"claude-opus-4-8\"\n",
+        )
+        .expect("config parses");
+        let overlay: CatalogOverlay = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "revision": 1,
+            "cells": {
+                "anthropic-api:claude-opus-4-8": {
+                    "source": "user",
+                    "verified_at": "2000-01-01",
+                    "capabilities": { "web_search": true }
+                }
+            }
+        }))
+        .expect("valid overlay");
+        let cells = derive_prior_cells(&config, &overlay);
+        assert!(cells.is_empty(), "stale cell must yield no prior");
+    }
+
+    #[test]
+    fn absent_catalog_cell_yields_no_prior_and_no_crash() {
+        // A model whose provider is unknown resolves to an empty
+        // provider_kind that matches no baked cell -> Missing -> no prior.
+        let config: Config = toml::from_str(
+            "version = 3\n\
+             [models.ghost]\n\
+             provider = \"nope\"\n\
+             upstream = \"whatever\"\n",
+        )
+        .expect("config parses");
+        let cells = derive_prior_cells(&config, &CatalogOverlay::default());
+        assert!(cells.is_empty(), "absent cell must yield no prior");
+    }
+
+    #[test]
+    fn learned_line_is_runtime_only_with_no_counts() {
+        let f = learned_line();
+        assert_eq!(f.status, Status::Pass);
+        assert!(f.detail.contains("runtime-only"));
+        assert!(f.detail.contains("serve logs"));
+        // No fabricated counts.
+        assert!(
+            !f.detail.chars().any(|c| c.is_ascii_digit()),
+            "learned line must carry no counts: {}",
+            f.detail
+        );
+    }
+
+    #[test]
+    fn config_load_error_routes_through_redactor_to_unavailable() {
+        // A TOML parse error whose diagnostic inlines a `literal:` secret in
+        // the source-line preview. build_capability_inputs receives the
+        // ALREADY-redacted string (redact_config_load_error), mirroring the
+        // gather path; assert the secret never reaches the finding.
+        let raw = "config parse error in `/home/x/config.toml`: TOML parse error at line 2, column 1\n  |\n2 | api_key_ref = \"literal:sk-super-secret\"\n  | ^\ninvalid type: string, expected integer\n";
+        let redacted = redact_config_load_error(raw);
+        let inputs = build_capability_inputs(&Config::default(), Some(redacted), None);
+        let context = DoctorContext {
+            capability: inputs,
+            ..ctx(Config::default(), Some("x"), Vec::new(), Vec::new())
+        };
+        let findings = section_capability(&context);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].name, "panel");
+        assert_eq!(findings[0].status, Status::Warn);
+        assert!(findings[0].detail.contains("unavailable"));
+        assert!(
+            !findings[0].detail.contains("sk-super-secret"),
+            "secret leaked into unavailable finding: {}",
+            findings[0].detail
+        );
+        // Never flips the exit code.
+        assert_eq!(overall_exit(&findings), 0);
+    }
+
+    #[test]
+    fn overlay_unavailable_keeps_override_rows_marks_priors_unavailable() {
+        // overlay = None simulates an unreadable overlay: override rows still
+        // render, priors are marked unavailable.
+        let inputs = build_capability_inputs(&config_with_overrides(), None, None);
+        let context = DoctorContext {
+            capability: inputs,
+            ..ctx(Config::default(), Some("x"), Vec::new(), Vec::new())
+        };
+        let findings = section_capability(&context);
+        assert!(
+            findings.iter().any(|f| f.name == "p"),
+            "override rows must still render on overlay failure"
+        );
+        let priors = findings
+            .iter()
+            .find(|f| f.name == "catalog priors")
+            .expect("priors finding");
+        assert_eq!(priors.status, Status::Warn);
+        assert!(priors.detail.contains("unavailable"));
+        assert_eq!(overall_exit(&findings), 0);
+    }
+
+    #[test]
+    fn legacy_nudge_warns_once_with_guarded_phrasing() {
+        let config: Config = toml::from_str(
+            "version = 3\n\
+             [providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             unsupported_features = [\"web_search\"]\n\
+             [bedrock]\n\
+             allowed_betas = [\"some-beta\"]\n",
+        )
+        .expect("config parses");
+        let keys = present_legacy_capability_keys(&config);
+        let nudge = legacy_nudge(&keys).expect("nudge present");
+        assert_eq!(nudge.status, Status::Warn);
+        assert!(nudge.detail.contains("unsupported_features"), "{nudge:?}");
+        assert!(nudge.detail.contains("allowed_betas"), "{nudge:?}");
+        // Exact guarded phrasing.
+        assert!(
+            nudge
+                .detail
+                .contains("the override layer replaces these via config migrate"),
+            "{nudge:?}"
+        );
+        assert!(
+            nudge.detail.contains(
+                "the learner discovers use-time rejections automatically; these lists remain \
+                 operator-owned until the next schema version"
+            ),
+            "{nudge:?}"
+        );
+        // Must not imply the lists are safe to delete.
+        assert!(!nudge.detail.contains("delete"), "{nudge:?}");
+        assert!(!nudge.detail.contains("remove"), "{nudge:?}");
+        assert!(
+            nudge
+                .remediation
+                .as_deref()
+                .unwrap()
+                .contains("config migrate")
+        );
+    }
+
+    #[test]
+    fn legacy_nudge_absent_without_legacy_lists() {
+        assert!(legacy_nudge(&[]).is_none());
+        // A config with a new override but no legacy list emits no nudge.
+        let config: Config = toml::from_str(
+            "version = 3\n\
+             [providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [capability.overrides.p]\n\
+             unsupported = [\"web_search\"]\n",
+        )
+        .expect("config parses");
+        let context = ctx(config, Some("version = 3\n"), Vec::new(), Vec::new());
+        let findings = section_capability(&context);
+        assert!(
+            findings.iter().all(|f| f.name != "legacy keys"),
+            "no nudge without a legacy list"
+        );
+    }
+
+    #[test]
+    fn schema_version_is_two() {
+        assert_eq!(SCHEMA_VERSION, 2);
+        let context = ctx(
+            config_with_overrides(),
+            Some("version = 3\n"),
+            Vec::new(),
+            Vec::new(),
+        );
+        let report = build_report(&context);
+        assert_eq!(report.schema_version, 2);
+        // JSON mode carries the same capability content as the human render.
+        let value = serde_json::to_value(&report).expect("serialize");
+        let blob = value.to_string();
+        assert!(blob.contains("route-away"), "json missing override verdict");
+        assert!(
+            blob.contains("provider-static"),
+            "json missing source label"
+        );
+        assert!(blob.contains("runtime-only"), "json missing learned line");
     }
 
     #[test]
@@ -1922,6 +2568,11 @@ mod tests {
             would_trim: None,
             now_unix: 1_000,
             binary_version: "test",
+            capability: build_capability_inputs(
+                &Config::default(),
+                Some(redact_config_load_error(&raw_load_error)),
+                None,
+            ),
         };
         let report = build_report(&context);
 

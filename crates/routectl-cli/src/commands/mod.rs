@@ -4,6 +4,7 @@
 //! `serve` is in `crate::server`. Each module here exposes one entry function
 //! called from `main.rs`'s clap match arms.
 
+pub mod capability_legacy;
 pub mod catalog;
 pub mod catalog_import;
 pub mod config;

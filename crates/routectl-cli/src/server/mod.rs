@@ -1579,41 +1579,6 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     Ok(loaded)
 }
 
-/// The legacy capability-list keys superseded by `[capability.overrides]`.
-/// Names only ever leave this module -- never the operator's values, which
-/// can sit next to secrets in the config file.
-const LEGACY_UNSUPPORTED_FEATURES: &str = "unsupported_features";
-const LEGACY_ALLOWED_BETAS: &str = "allowed_betas";
-const LEGACY_ALLOWED_BODY_FIELDS: &str = "allowed_body_fields";
-
-/// The legacy capability-list key NAMES a parsed config still carries, in a
-/// stable order. A key counts as present when its list is non-empty -- an
-/// empty list is the pass-through default and needs no migration. Returns
-/// names only; the operator's list VALUES never leave this function.
-fn present_legacy_capability_keys(config: &Config) -> Vec<&'static str> {
-    let mut keys = Vec::new();
-
-    let unsupported_present = config
-        .providers
-        .values()
-        .any(|p| !p.runtime().unsupported_features.is_empty())
-        || config
-            .models
-            .values()
-            .any(|m| !m.unsupported_features.is_empty());
-    if unsupported_present {
-        keys.push(LEGACY_UNSUPPORTED_FEATURES);
-    }
-    if !config.bedrock.allowed_betas.is_empty() {
-        keys.push(LEGACY_ALLOWED_BETAS);
-    }
-    if !config.bedrock.allowed_body_fields.is_empty() {
-        keys.push(LEGACY_ALLOWED_BODY_FIELDS);
-    }
-
-    keys
-}
-
 /// Emit ONE structured deprecation WARN when a serve-loaded config carries
 /// any legacy capability-list key, naming which keys are present, the
 /// `[capability.overrides]` successor, and the `config migrate` command that
@@ -1623,12 +1588,13 @@ fn present_legacy_capability_keys(config: &Config) -> Vec<&'static str> {
 /// check surface stays silent per the settled constraint. The WARN carries
 /// key NAMES only -- no config values (secrets can live near these tables).
 fn warn_deprecated_capability_lists(config: &Config) {
-    let present = present_legacy_capability_keys(config);
+    let present = crate::commands::capability_legacy::present_legacy_capability_keys(config);
     if present.is_empty() {
         return;
     }
 
     tracing::warn!(
+        event = "legacy_deprecation",
         legacy_keys = ?present,
         successor = "[capability.overrides]",
         migrate_command = "config migrate",
@@ -1658,6 +1624,22 @@ fn warn_deprecated_capability_lists(config: &Config) {
 /// through [`load_effective_config`], which wraps this and keeps the
 /// fail-fast validation posture unchanged.
 pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, String> {
+    let config = parse_config_only(path)?;
+    let catalog_overlay = load_overlay_default()?;
+    Ok(LoadedConfig {
+        config,
+        catalog_overlay,
+    })
+}
+
+/// Parse `config.toml` ONLY -- version preflight, the legacy-mitm preflight,
+/// and the typed `deny_unknown_fields` deserialize -- WITHOUT loading the
+/// catalog overlay. Doctor's capability panel uses this so an unreadable
+/// overlay degrades the catalog priors alone while the config-derived
+/// override rows still render. Produces the SAME wrapped error strings as
+/// the coupled [`load_effective_config_unvalidated`] so callers redact them
+/// through one shared path.
+pub(crate) fn parse_config_only(path: &Path) -> Result<Config, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
 
@@ -1678,18 +1660,18 @@ pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, St
     // that names the exact provider-block replacement.
     routectl_router::preflight_legacy_mitm_credential_source(&text).map_err(|e| e.to_string())?;
 
-    let config: Config = routectl_router::parse_config(&text)
-        .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
+    routectl_router::parse_config(&text)
+        .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))
+}
 
+/// Load the default catalog overlay independently of any config parse
+/// (fail-closed per `routectl_router::load_catalog_overlay`'s matrix).
+/// Doctor loads this layer separately so an unreadable overlay degrades the
+/// capability priors without tainting the config-derived override rows.
+pub(crate) fn load_overlay_default() -> Result<CatalogOverlay, String> {
     let overlay_path = routectl_router::overlay_default_path();
-
-    let catalog_overlay = routectl_router::load_catalog_overlay(&overlay_path)
-        .map_err(|e| format!("catalog overlay load error: {e}"))?;
-
-    Ok(LoadedConfig {
-        config,
-        catalog_overlay,
-    })
+    routectl_router::load_catalog_overlay(&overlay_path)
+        .map_err(|e| format!("catalog overlay load error: {e}"))
 }
 
 /// Return of [`load_effective_config`]: the parsed `Config` alongside the
@@ -3254,6 +3236,7 @@ default = "claude"
         );
         let warn = warns[0];
         assert_eq!(warn.level, tracing::Level::WARN);
+        assert_eq!(warn.field("event"), Some("legacy_deprecation"));
 
         // Names all three present legacy keys, the successor, the command.
         let keys = warn.field("legacy_keys").expect("legacy_keys field");

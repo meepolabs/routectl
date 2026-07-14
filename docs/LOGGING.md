@@ -543,6 +543,260 @@ gap between this mark and the request's existing first-content mark
 `routectl usage`) is the first-activity-to-first-content delta -- the
 upstream prefill time M4 makes measurable.
 
+## Capability intelligence events
+
+routectl's learned-capability subsystem (see CONFIGURATION.md,
+"Capability intelligence") emits a fixed vocabulary of structured events
+as it learns, re-probes, clears, and strips per-target capability
+negatives, plus two config-layer events for operator override hygiene.
+Every event carries a stable `event` discriminator so alerts pin on that
+field, never on the human message string. All fields are display-safe
+discriminants -- capability TOKENS, session/target keys, and counts only.
+Never a request body, prompt content, or secret.
+
+**Revision:** field vocabulary last changed in 0.9.0. Renaming or
+removing any field below, or changing an `outcome` / `signal_tier` /
+`event` token, is a breaking change to this contract and updates this
+note. Adding a new field to an existing event is allowed without
+ceremony.
+
+**Not the stable API.** `routectl doctor --json` surfaces the capability
+panel (catalog priors and operator overrides read by a fresh process;
+the learned registry is runtime-only and NOT visible to doctor) for
+human triage, but its shape is NOT a stability
+guarantee and may change between releases. The stable programmatic path
+is the future serve-embedded status endpoint, which adopts THIS event
+vocabulary (these `event` tokens and field names) verbatim. Build
+tooling against the event contract documented here, not against
+`doctor --json`.
+
+Summary (grep the `event` field to isolate a kind):
+
+| `event` | Level | Module target | Message |
+|---|---|---|---|
+| `learn` | WARN | `routectl_router::router` | `learned-capability negative observed` |
+| `clear` | INFO | `routectl_router::learned_capability` | `learned-capability negative cleared by successful re-probe` |
+| `expire_probe` | INFO | `routectl_router::learned_capability` | `lapsed learned negative admitted for its single re-probe` |
+| `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
+| `d17_tail` | WARN | `routectl_router::router` | `alias chain survives only via the de-prioritized learned tail; ...` |
+| `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; clearing learned-capability registry` |
+| `strip` | WARN | `routectl_router::router` | `capability_strip_decision` |
+| `suppression` | WARN | `routectl_router::router` | `force_supported override contradicted: masked capability still rejected upstream` |
+| `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key is rewritten by normalization; ...` |
+| `legacy_deprecation` | WARN | `routectl_cli::server` | `deprecated capability-list keys are set; ...` |
+
+### `learn` (WARN)
+
+Emitted once per request per `(state_key, capability_key)` when an
+upstream rejection teaches routectl a new (or reconfirming) capability
+negative.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `learn`. |
+| `state_key` | string | The dispatch target's session/target key. |
+| `capability_key` | string | The normalized capability token learned unsupported. |
+| `signal_tier` | string | `self-identifying` or `inferred` -- how the negative was classified. |
+| `observations` | integer | How many times this negative has been observed (>= 1). |
+| `acting` | bool | `true` once the entry is acting (routes away / strips); `false` while still pending. |
+
+```
+WARN routectl_router::router event=learn state_key=m1
+  capability_key=unsupported_parameter signal_tier=self-identifying
+  observations=1 acting=true "learned-capability negative observed"
+```
+
+### `clear` (INFO)
+
+Emitted when a successful re-probe clears a resident learned negative.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `clear`. |
+| `state_key` | string | The target's session/target key. |
+| `capability_key` | string | The normalized capability token cleared. |
+| `signal_tier` | string | `self-identifying` or `inferred` (from the cleared entry). |
+
+```
+INFO routectl_router::learned_capability event=clear state_key=nick
+  capability_key=web_search signal_tier=self-identifying
+  "learned-capability negative cleared by successful re-probe"
+```
+
+### `expire_probe` (INFO)
+
+Emitted when a lapsed learned negative is admitted for its single
+re-probe.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `expire_probe`. |
+| `state_key` | string | The target's session/target key. |
+| `capability_key` | string | The normalized capability token being re-probed. |
+| `signal_tier` | string | `self-identifying` or `inferred`. |
+
+```
+INFO routectl_router::learned_capability event=expire_probe state_key=nick
+  capability_key=web_search signal_tier=self-identifying
+  "lapsed learned negative admitted for its single re-probe"
+```
+
+### `evict` (WARN)
+
+Emitted when the registry is at capacity and evicts the oldest entry. A
+safety valve, not a routine cache policy.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `evict`. |
+| `state_key` | string | The evicted entry's session/target key. |
+| `capability_key` | string | The evicted entry's capability token. |
+| `max_entries` | integer | The registry capacity that triggered eviction. |
+
+```
+WARN routectl_router::learned_capability event=evict state_key=n
+  capability_key=cap_a max_entries=2
+  "learned-capability registry at capacity; evicted oldest entry"
+```
+
+### `d17_tail` (WARN)
+
+Emitted when an alias chain survives only via the de-prioritized learned
+tail and routectl attempts that tail as a route-away floor rather than
+returning `NotImplemented`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `d17_tail`. |
+| `alias` | string | The alias whose chain collapsed to the learned tail. |
+| `features` | string | The requested feature keys, comma-joined. |
+| `tail_len` | integer | How many de-prioritized targets remain in the tail. |
+
+```
+WARN routectl_router::router event=d17_tail alias=alias features=web_search
+  tail_len=1 "alias chain survives only via the de-prioritized learned
+  tail; attempting learned-negative targets as a route-away floor"
+```
+
+### `invalidation` (WARN)
+
+Emitted when a catalog or overlay change across a hot reload clears the
+entire learned-capability registry (fresher config truth wins over
+learned negatives).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `invalidation`. |
+| `catalog_changed` | bool | Whether the baked catalog version changed. |
+| `overlay_changed` | bool | Whether the operator overlay revision changed. |
+| `previous_catalog_version` | integer | The outgoing Router's catalog version. |
+| `catalog_version` | integer | The incoming Router's catalog version. |
+| `previous_overlay_revision` | integer | The outgoing Router's overlay revision. |
+| `overlay_revision` | integer | The incoming Router's overlay revision. |
+
+```
+WARN routectl_router::router event=invalidation catalog_changed=true
+  overlay_changed=false previous_catalog_version=7 catalog_version=8
+  previous_overlay_revision=0 overlay_revision=0
+  "catalog/overlay changed across reload; clearing learned-capability registry"
+```
+
+### `strip` (WARN)
+
+Emitted once per capability-strip decision. `capability_key` names the
+verdict's keys (already sorted + normalized; comma-joined at the
+per-decision site, a single token at the probe-bypass site). `outcome`
+is the stable decision token.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `strip`. |
+| `state_key` | string | The target's session/target key. |
+| `capability_key` | string | The normalized strip verdict key(s), comma-joined. |
+| `outcome` | string | The stable decision token (vocabulary below). |
+
+The `outcome` token is a stable contract -- pin alerts on it, not on the
+message:
+
+| Token | Meaning |
+|---|---|
+| `applied` | The strip ran and removed the capability surface from the attempt request. |
+| `noop` | The verdict named a capability the request did not carry; nothing to strip. |
+| `strict_rejected` | `strict_translation` is on; the strip would mutate, so the request is rejected before any change. |
+| `validation_rolled_back` | The strip created a post-strip hazard; the request was restored byte-for-byte and the attempt routes away. |
+| `probe_bypassed` | A strip-eligible feature was admitted for re-probe, so it was intentionally NOT stripped (emitted at the verdict site). |
+
+A `disabled` kill switch (empty strip verdict) emits NO `strip` event --
+the verdict is skipped entirely, so there is no per-decision context to
+name.
+
+```
+WARN routectl_router::router event=strip state_key=nick
+  capability_key=advisor outcome=applied "capability_strip_decision"
+```
+
+### `suppression` (WARN)
+
+Emitted once per request (deduped) when an operator `force_supported`
+override is contradicted: the masked capability was still rejected
+upstream.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `suppression`. |
+| `state_key` | string | The target's session/target key. |
+| `capability_key` | string | The normalized capability token the operator forced on. |
+
+```
+WARN routectl_router::router event=suppression state_key=m1
+  capability_key=unsupported_parameter
+  "force_supported override contradicted: masked capability still rejected upstream"
+```
+
+### `dead_override_key` (WARN)
+
+A config-layer event, emitted once per operator override key that
+normalization rewrites: such a key can never match a normalized registry
+key, so the override is dead.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `dead_override_key`. |
+| `target_spec` | string | The override target (`provider` or `provider:nickname`). |
+| `raw_key` | string | The operator's key as written in config. |
+| `normalized_key` | string | What normalization rewrites it to (use this form instead). |
+
+```
+WARN routectl_router::override_registry event=dead_override_key
+  target_spec=br raw_key=additionalModelRequestFields.anthropic_beta
+  normalized_key=anthropic_beta
+  "capability override key is rewritten by normalization; it can never
+  match and is dead -- use the normalized form"
+```
+
+### `legacy_deprecation` (WARN)
+
+A config-layer event, emitted exactly once on a serve cold-start or hot
+reload when the loaded config carries any legacy capability-list key. It
+names key NAMES only -- never config values (secrets can live near these
+tables). `config check` never emits it.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `legacy_deprecation`. |
+| `legacy_keys` | string | Debug-rendered list of the present legacy key names. |
+| `successor` | string | Always `[capability.overrides]`. |
+| `migrate_command` | string | Always `config migrate`. |
+
+```
+WARN routectl_cli::server event=legacy_deprecation
+  legacy_keys=["unsupported_features", "allowed_betas"]
+  successor=[capability.overrides] migrate_command="config migrate"
+  "deprecated capability-list keys are set; they are tolerated for one
+  release cycle and rejected at the next config schema version. Move them
+  under [capability.overrides] with `config migrate`."
+```
+
 ## What's never logged
 
 - Resolved secret values (env contents, file contents, OAuth tokens,

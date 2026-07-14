@@ -63,7 +63,7 @@ struct RegistryKey {
 }
 
 /// A single learned negative. Private storage representation; callers see
-/// [`RegistryEntry`] (snapshot) or [`ExportedEntry`] (carry-over).
+/// [`LearnedRegistryEntry`] (snapshot) or [`ExportedEntry`] (carry-over).
 #[derive(Debug, Clone)]
 struct LearnedEntry {
     signal: SignalTier,
@@ -131,7 +131,7 @@ pub enum ProbeOutcome {
 /// Snapshot row -- the shape consumed by later features (status / doctor)
 /// without a retrofit, so the field set is fixed by contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegistryEntry {
+pub struct LearnedRegistryEntry {
     pub state_key: String,
     pub feature_key: String,
     pub signal_tier: SignalTier,
@@ -247,6 +247,13 @@ impl LearnedCapabilityRegistry {
                     RoutingDecision::RouteAway(entry.signal)
                 } else {
                     entry.in_flight = true;
+                    tracing::info!(
+                        event = "expire_probe",
+                        state_key = %key.state_key,
+                        capability_key = %key.feature_key,
+                        signal_tier = entry.signal.as_str(),
+                        "lapsed learned negative admitted for its single re-probe",
+                    );
                     RoutingDecision::ProbeAdmitted
                 }
             }
@@ -266,7 +273,15 @@ impl LearnedCapabilityRegistry {
         let mut entries = self.entries.write();
         match outcome {
             ProbeOutcome::Success => {
-                entries.remove(&key);
+                if let Some(entry) = entries.remove(&key) {
+                    tracing::info!(
+                        event = "clear",
+                        state_key = %key.state_key,
+                        capability_key = %key.feature_key,
+                        signal_tier = entry.signal.as_str(),
+                        "learned-capability negative cleared by successful re-probe",
+                    );
+                }
             }
             ProbeOutcome::SameCapabilityRejection => {
                 if let Some(entry) = entries.get_mut(&key) {
@@ -288,11 +303,11 @@ impl LearnedCapabilityRegistry {
     }
 
     /// Snapshot every resident entry in the fixed contract shape.
-    pub fn snapshot(&self) -> Vec<RegistryEntry> {
+    pub fn snapshot(&self) -> Vec<LearnedRegistryEntry> {
         self.entries
             .read()
             .iter()
-            .map(|(key, entry)| RegistryEntry {
+            .map(|(key, entry)| LearnedRegistryEntry {
                 state_key: key.state_key.clone(),
                 feature_key: key.feature_key.clone(),
                 signal_tier: entry.signal,
@@ -496,8 +511,9 @@ impl LearnedCapabilityRegistry {
             .map(|(key, _)| key.clone());
         if let Some(key) = victim {
             tracing::warn!(
-                evicted_state_key = %key.state_key,
-                evicted_feature_key = %key.feature_key,
+                event = "evict",
+                state_key = %key.state_key,
+                capability_key = %key.feature_key,
                 max_entries = self.max_entries,
                 "learned-capability registry at capacity; evicted oldest entry",
             );
@@ -907,7 +923,10 @@ mod tests {
             .iter()
             .find(|e| e.level == tracing::Level::WARN)
             .expect("eviction must emit a WARN");
-        assert_eq!(warn.field("evicted_feature_key"), Some("cap_a"));
+        assert_eq!(warn.field("event"), Some("evict"));
+        assert_eq!(warn.field("capability_key"), Some("cap_a"));
+        assert_eq!(warn.field("state_key"), Some("n"));
+        assert_eq!(warn.field("max_entries"), Some("2"));
     }
 
     #[test]
@@ -1079,5 +1098,74 @@ mod tests {
 
         // Act / Assert -- nothing to expire for an unknown key.
         assert!(!reg.expire_keyed("nick", "web_search", "openai-compat", Instant::now()));
+    }
+
+    #[test]
+    fn probe_admission_emits_expire_probe_event() {
+        // Arrange -- an acting self-identifying negative past its decay window.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            t0,
+        );
+        let expired = t0 + DECAY + Duration::from_secs(1);
+
+        // Act -- the admission of the single re-probe emits the event.
+        let events = routectl_testkit::capture_events(|| {
+            assert_eq!(
+                reg.acting_negative_for("nick", "web_search", "openai-compat", expired),
+                RoutingDecision::ProbeAdmitted
+            );
+        });
+
+        // Assert
+        let ev = events
+            .iter()
+            .find(|e| e.field("event") == Some("expire_probe"))
+            .expect("probe admission must emit an expire_probe event");
+        assert_eq!(ev.field("state_key"), Some("nick"));
+        assert_eq!(ev.field("capability_key"), Some("web_search"));
+        assert_eq!(ev.field("signal_tier"), Some("self-identifying"));
+    }
+
+    #[test]
+    fn successful_reprobe_emits_clear_event() {
+        // Arrange -- an acting negative admitted for its single re-probe.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            t0,
+        );
+        let expired = t0 + DECAY + Duration::from_secs(1);
+        reg.acting_negative_for("nick", "web_search", "openai-compat", expired);
+
+        // Act -- the probe succeeds; the entry is cleared with an event.
+        let events = routectl_testkit::capture_events(|| {
+            reg.record_probe_outcome(
+                "nick",
+                "web_search",
+                "openai-compat",
+                ProbeOutcome::Success,
+                expired,
+            );
+        });
+
+        // Assert -- fields captured from the removed entry.
+        assert!(reg.is_empty());
+        let ev = events
+            .iter()
+            .find(|e| e.field("event") == Some("clear"))
+            .expect("successful re-probe must emit a clear event");
+        assert_eq!(ev.field("state_key"), Some("nick"));
+        assert_eq!(ev.field("capability_key"), Some("web_search"));
+        assert_eq!(ev.field("signal_tier"), Some("self-identifying"));
     }
 }
