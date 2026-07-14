@@ -6,6 +6,7 @@
 
 pub mod activation;
 pub mod capability_matcher;
+pub mod capability_strip;
 pub mod catalog;
 pub(crate) mod catalog_baked;
 #[doc(hidden)]

@@ -37,6 +37,10 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 /// "capability was in flight" check passes.
 const CAP_TOKEN: &str = "unsupported_parameter";
 
+/// A second self-identifying token, distinct from [`CAP_TOKEN`], so one
+/// target can carry two independent learned negatives.
+const CAP_TOKEN_2: &str = "unsupported_value";
+
 /// A wiremock responder that walks a fixed sequence of `(status, body)`
 /// steps across successive calls, repeating the last step once the
 /// sequence is exhausted. Deterministic and order-independent (a single
@@ -187,13 +191,44 @@ fn req_with_feature(alias: &str, feature: &str) -> ChatRequest {
     }
 }
 
+/// A request against `alias` carrying built-in tools whose `type` is each
+/// entry of `features`, so `derive_feature_keys` yields `features`.
+fn req_with_features(alias: &str, features: &[&str]) -> ChatRequest {
+    ChatRequest {
+        model: alias.to_string(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        tools: Some(
+            features
+                .iter()
+                .map(|f| ToolDef::Other(json!({"type": *f, "name": "t"})))
+                .collect(),
+        ),
+        ..Default::default()
+    }
+}
+
 /// An openai-compat 400 whose `error.code` names an unsupported parameter:
 /// the classifier lifts this to `FeatureUnsupported { capability }`.
 fn unsupported_body() -> Value {
+    unsupported_body_for(CAP_TOKEN)
+}
+
+/// An openai-compat 400 whose `error.code` is `code`; the classifier lifts
+/// it to `FeatureUnsupported { capability: code }`.
+fn unsupported_body_for(code: &str) -> Value {
     json!({
         "error": {
             "type": "invalid_request_error",
-            "code": CAP_TOKEN,
+            "code": code,
             "message": "The requested parameter is not supported by this model."
         }
     })
@@ -223,6 +258,18 @@ fn ok_body() -> Value {
 async fn complete(router: &Router, alias: &str) -> routectl_router::Dispatched {
     router
         .complete_with_options(req_with_feature(alias, CAP_TOKEN), RouterOptions::default())
+        .await
+}
+
+/// Dispatch a request against `alias` carrying `features` as derived tool
+/// types.
+async fn complete_with(
+    router: &Router,
+    alias: &str,
+    features: &[&str],
+) -> routectl_router::Dispatched {
+    router
+        .complete_with_options(req_with_features(alias, features), RouterOptions::default())
         .await
 }
 
@@ -529,4 +576,181 @@ async fn statically_unsupported_chain_returns_not_implemented() {
         0,
         "a statically unsupported target is hard-dropped, never dialed",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Leg 5: two distinct learned negatives on ONE target both re-probe and
+// both settle -- neither admission leaks its in_flight slot.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn two_expired_negatives_on_one_target_both_reprobe_and_clear() {
+    // One solo target learns TWO distinct capability negatives (F1, F2).
+    // `decay_hours = 0` lapses both immediately, so a request carrying both
+    // features admits TWO re-probes on the same target in one dispatch. A
+    // 2xx must settle BOTH: each entry clears and neither in_flight slot
+    // latches. The fresh relearns in requests 4/5 prove both cleared -- a
+    // leaked slot would leave its feature routed-away (reconfirmed at
+    // observations >= 2) instead of relearning from scratch.
+    let a = upstream_server(vec![
+        (400, unsupported_body_for(CAP_TOKEN)),   // req 1: learn F1
+        (400, unsupported_body_for(CAP_TOKEN_2)), // req 2: learn F2
+        (200, ok_body()),                         // req 3: the double re-probe clears both
+        (400, unsupported_body_for(CAP_TOKEN)),   // req 4: fresh learn F1 (proves clear)
+        (400, unsupported_body_for(CAP_TOKEN_2)), // req 5: fresh learn F2 (proves clear)
+    ])
+    .await;
+    let router = build_router(
+        vec![Upstream::openai("m_a", "prov_a", &a.uri())],
+        "solo",
+        &["m_a"],
+        0,
+    )
+    .await;
+
+    // Request 1: A rejects F1; solo chain, so the 400 surfaces. F1 learned.
+    let d1 = complete_with(&router, "solo", &[CAP_TOKEN]).await;
+    assert!(matches!(
+        d1.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
+    assert_eq!(d1.meta.learned_capabilities.len(), 1);
+    assert_eq!(d1.meta.learned_capabilities[0].feature_key, CAP_TOKEN);
+    assert_eq!(d1.meta.learned_capabilities[0].observations, 1);
+
+    // Request 2: A rejects F2. F2 learned as a second, independent negative.
+    let d2 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
+    assert!(matches!(
+        d2.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
+    assert_eq!(d2.meta.learned_capabilities.len(), 1);
+    assert_eq!(d2.meta.learned_capabilities[0].feature_key, CAP_TOKEN_2);
+    assert_eq!(d2.meta.learned_capabilities[0].observations, 1);
+    assert_eq!(hits(&a).await, 2);
+
+    // Request 3: both negatives have lapsed (decay 0) and the request carries
+    // both features, so A is admitted to re-probe BOTH in one dispatch. Its
+    // 2xx must clear both entries. A clearing re-probe emits no learn event.
+    let d3 = complete_with(&router, "solo", &[CAP_TOKEN, CAP_TOKEN_2]).await;
+    assert!(
+        d3.result.is_ok(),
+        "the double re-probe must reach A and succeed: {:?}",
+        d3.result.err()
+    );
+    assert_eq!(d3.meta.served_provider.as_deref(), Some("prov_a"));
+    assert!(
+        d3.meta.learned_capabilities.is_empty(),
+        "a clearing re-probe emits no learn event",
+    );
+    assert_eq!(
+        hits(&a).await,
+        3,
+        "exactly one dispatch carried both probes"
+    );
+
+    // Request 4: F1's entry was cleared, so this rejection is a brand-new
+    // negative at observations = 1. A leaked in_flight slot would have kept
+    // F1 routed-away and reconfirmed it at observations >= 2 instead.
+    let d4 = complete_with(&router, "solo", &[CAP_TOKEN]).await;
+    assert!(matches!(
+        d4.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
+    assert_eq!(d4.meta.learned_capabilities.len(), 1);
+    assert_eq!(d4.meta.learned_capabilities[0].feature_key, CAP_TOKEN);
+    assert_eq!(
+        d4.meta.learned_capabilities[0].observations, 1,
+        "F1 must relearn from scratch -- its probe slot did not leak",
+    );
+
+    // Request 5: same proof for F2's cleared entry.
+    let d5 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
+    assert!(matches!(
+        d5.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
+    assert_eq!(d5.meta.learned_capabilities.len(), 1);
+    assert_eq!(d5.meta.learned_capabilities[0].feature_key, CAP_TOKEN_2);
+    assert_eq!(
+        d5.meta.learned_capabilities[0].observations, 1,
+        "F2 must relearn from scratch -- its probe slot did not leak",
+    );
+    assert_eq!(hits(&a).await, 5);
+}
+
+#[tokio::test]
+async fn mixed_outcome_settles_matched_probe_and_drops_the_rest() {
+    // One solo target holds two expired negatives (F1, F2) and is admitted to
+    // re-probe BOTH on a single request. The dispatch rejects the SAME
+    // capability for F1 only: that admission must settle as a same-capability
+    // refresh (no fresh observe event, its own backoff owns the bump) while
+    // the still-held F2 admission drops as OtherError -- releasing F2's
+    // in_flight slot without clearing the entry, so F2 stays re-probable.
+    let a = upstream_server(vec![
+        (400, unsupported_body_for(CAP_TOKEN)),   // req 1: learn F1
+        (400, unsupported_body_for(CAP_TOKEN_2)), // req 2: learn F2
+        (400, unsupported_body_for(CAP_TOKEN)),   // req 3: double re-probe, F1 rejects again
+        (200, ok_body()),                         // req 4: F2's fresh re-probe clears it
+        (400, unsupported_body_for(CAP_TOKEN_2)), // req 5: fresh learn F2 (proves clear)
+    ])
+    .await;
+    let router = build_router(
+        vec![Upstream::openai("m_a", "prov_a", &a.uri())],
+        "solo",
+        &["m_a"],
+        0,
+    )
+    .await;
+
+    let d1 = complete_with(&router, "solo", &[CAP_TOKEN]).await;
+    assert_eq!(d1.meta.learned_capabilities.len(), 1);
+    assert_eq!(d1.meta.learned_capabilities[0].observations, 1);
+    let d2 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
+    assert_eq!(d2.meta.learned_capabilities.len(), 1);
+    assert_eq!(d2.meta.learned_capabilities[0].observations, 1);
+
+    // Request 3: both negatives lapsed and both features present, so A is
+    // admitted to re-probe both. A re-rejects F1 (same capability). That
+    // admission settles via the capped-backoff path -- so NO learn event is
+    // emitted (a same-capability probe settle owns the observation bump
+    // itself). The unmatched F2 admission is dropped as OtherError.
+    let d3 = complete_with(&router, "solo", &[CAP_TOKEN, CAP_TOKEN_2]).await;
+    assert!(matches!(
+        d3.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
+    assert!(
+        d3.meta.learned_capabilities.is_empty(),
+        "F1's rejection must settle its own held probe, not emit a fresh observe event",
+    );
+    assert_eq!(hits(&a).await, 3);
+
+    // Request 4: F2's admission was released (OtherError, not cleared), so F2
+    // is still an expired negative -- this request re-probes it, and the 2xx
+    // clears it. A leaked in_flight slot would have kept F2 routed-away.
+    let d4 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
+    assert!(
+        d4.result.is_ok(),
+        "F2's slot was released, so it re-probes: {:?}",
+        d4.result.err()
+    );
+    assert_eq!(d4.meta.served_provider.as_deref(), Some("prov_a"));
+    assert!(d4.meta.learned_capabilities.is_empty());
+    assert_eq!(hits(&a).await, 4);
+
+    // Request 5: F2 was cleared by its re-probe, so this rejection relearns
+    // from scratch at observations = 1.
+    let d5 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
+    assert!(matches!(
+        d5.result,
+        Err(Error::Upstream { status: 400, .. })
+    ));
+    assert_eq!(d5.meta.learned_capabilities.len(), 1);
+    assert_eq!(d5.meta.learned_capabilities[0].feature_key, CAP_TOKEN_2);
+    assert_eq!(
+        d5.meta.learned_capabilities[0].observations, 1,
+        "F2 must relearn from scratch -- its dropped probe released the slot",
+    );
+    assert_eq!(hits(&a).await, 5);
 }

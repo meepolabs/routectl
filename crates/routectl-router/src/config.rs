@@ -2205,6 +2205,23 @@ impl ProviderEntry {
         }
     }
 
+    /// Operator-configured `anthropic_beta` floor for this entry: the
+    /// betas the egress always sends, bypassing the client-beta
+    /// allowlist. Only the Bedrock variant carries one today (the
+    /// invoke/converse adapters re-add it on the wire after the
+    /// canonical request build); every other variant has no such floor
+    /// and returns an empty slice. Read by the dispatch-layer
+    /// operator-floor-pin guard so a capability whose beta token the
+    /// operator pins is never stripped (a stripped-then-re-added token
+    /// is a false success).
+    pub fn anthropic_beta_floor(&self) -> &[String] {
+        match self {
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { anthropic_beta, .. } => anthropic_beta,
+            _ => &[],
+        }
+    }
+
     /// Per-provider `payload_extras`. Returns a reference (None when
     /// the operator did not configure any) so the dispatch-layer deep
     /// merge can borrow without cloning on the no-op path.
