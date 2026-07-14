@@ -2380,6 +2380,9 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = crate::catalog::validate_overrides(&config.cache_pricing) {
         errors.push(e);
     }
+    if let Err(e) = crate::override_registry::validate_capability_overrides(config) {
+        errors.push(e);
+    }
 
     let warnings = class_policy_warnings(config);
 
@@ -4900,6 +4903,23 @@ mod collect_config_validation_tests {
         );
     }
 
+    /// A capability override cell carrying contradictory verdicts (a
+    /// provider legacy list routes a capability away while a
+    /// `force_supported` entry marks it supported) -- trips
+    /// `validate_capability_overrides`.
+    fn contradictory_capability_override_config() -> Config {
+        toml::from_str(
+            "[providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             unsupported_features = [\"web_search\"]\n\
+             [capability.overrides.p]\n\
+             force_supported = [\"web_search\"]\n",
+        )
+        .expect("must parse")
+    }
+
     #[test]
     fn collects_the_reserved_class_override_error() {
         let validation = collect_config_validation(&reserved_class_override_config());
@@ -4913,6 +4933,23 @@ mod collect_config_validation_tests {
             validation.errors[0].contains("feature-unsupported")
                 && validation.errors[0].contains("reserved"),
             "error should flag the reserved class: {}",
+            validation.errors[0]
+        );
+    }
+
+    #[test]
+    fn collects_the_capability_override_conflict_error() {
+        let validation = collect_config_validation(&contradictory_capability_override_config());
+        assert_eq!(
+            validation.errors.len(),
+            1,
+            "exactly one validator should fire: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation.errors[0].contains("web_search")
+                && validation.errors[0].contains("force-supported"),
+            "error should name the conflicting cell: {}",
             validation.errors[0]
         );
     }

@@ -549,6 +549,11 @@ pub struct ReductionConfig {
 /// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
 /// config-load time (matching the sibling feature blocks) instead of
 /// silently ignoring it.
+///
+/// `overrides` is the operator capability-override map. It nests under
+/// this existing `[capability]` parent as `[capability.overrides]` -- no
+/// new top-level Config section is introduced, so the config-classify
+/// coverage in routectl-cli stays exhaustive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -564,6 +569,14 @@ pub struct CapabilityConfig {
     /// confirming second observation before it resets. Default 1.
     #[serde(default = "default_inferred_window_hours")]
     pub inferred_window_hours: u64,
+    /// Operator capability overrides, keyed by two-tier target spec:
+    /// `"provider_name"` applies to every model on that provider, and
+    /// `"provider_name:nickname"` targets a single model. An omitted
+    /// `[capability.overrides]` table yields an empty map. The
+    /// capability-value namespace is open -- values are not validated
+    /// against any known-capability list here.
+    #[serde(default)]
+    pub overrides: BTreeMap<String, OverrideEntry>,
 }
 
 impl Default for CapabilityConfig {
@@ -572,8 +585,28 @@ impl Default for CapabilityConfig {
             enabled: true,
             decay_hours: default_decay_hours(),
             inferred_window_hours: default_inferred_window_hours(),
+            overrides: BTreeMap::new(),
         }
     }
+}
+
+/// A single operator capability override, the value type of
+/// `[capability.overrides]`. `unsupported` force-marks capabilities as
+/// unavailable for the target; `force_supported` overrides a learned or
+/// catalog negative back to available. Both default to empty.
+///
+/// `#[serde(deny_unknown_fields)]` rejects a typo'd key inside an entry at
+/// config-load time rather than silently ignoring it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OverrideEntry {
+    /// Capabilities force-marked unavailable for the target.
+    #[serde(default)]
+    pub unsupported: Vec<String>,
+    /// Capabilities force-marked available for the target, overriding a
+    /// learned or catalog negative.
+    #[serde(default)]
+    pub force_supported: Vec<String>,
 }
 
 const fn default_decay_hours() -> u64 {
@@ -586,7 +619,7 @@ const fn default_inferred_window_hours() -> u64 {
 
 #[cfg(test)]
 mod capability_config_tests {
-    use super::{CapabilityConfig, Config};
+    use super::{CapabilityConfig, Config, OverrideEntry};
 
     #[test]
     fn absent_block_uses_defaults() {
@@ -650,6 +683,87 @@ mod capability_config_tests {
         assert!(config.capability.enabled);
         assert_eq!(config.capability.decay_hours, 48);
         assert_eq!(config.capability.inferred_window_hours, 1);
+    }
+
+    #[test]
+    fn absent_overrides_table_yields_empty_map() {
+        // Omitting [capability.overrides] leaves the map empty and keeps
+        // Default equality intact for a config that sets only tempo knobs.
+        let config: Config =
+            toml::from_str("version = 3\n[capability]\nenabled = true\n").expect("parse");
+
+        assert!(config.capability.overrides.is_empty());
+        assert_eq!(config.capability, CapabilityConfig::default());
+    }
+
+    #[test]
+    fn two_tier_overrides_deserialize_to_expected_map() {
+        // Arrange / Act: provider-wide and provider:nickname targets.
+        let config: Config = toml::from_str(
+            "version = 3\n\
+             [capability.overrides.anthropic]\n\
+             unsupported = [\"computer_use\"]\n\
+             force_supported = [\"structured_output\"]\n\
+             [capability.overrides.\"anthropic:sonnet\"]\n\
+             unsupported = [\"prefill\"]\n",
+        )
+        .expect("parse");
+
+        // Assert: both keys present with the documented values.
+        assert_eq!(config.capability.overrides.len(), 2);
+        assert_eq!(
+            config.capability.overrides.get("anthropic"),
+            Some(&OverrideEntry {
+                unsupported: vec!["computer_use".to_string()],
+                force_supported: vec!["structured_output".to_string()],
+            })
+        );
+        assert_eq!(
+            config.capability.overrides.get("anthropic:sonnet"),
+            Some(&OverrideEntry {
+                unsupported: vec!["prefill".to_string()],
+                force_supported: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn override_entry_omitted_lists_default_empty() {
+        // An entry naming neither list is valid; both lists default empty.
+        let config: Config =
+            toml::from_str("version = 3\n[capability.overrides.openai]\n").expect("parse");
+
+        assert_eq!(
+            config.capability.overrides.get("openai"),
+            Some(&OverrideEntry::default())
+        );
+    }
+
+    #[test]
+    fn unknown_override_entry_key_is_rejected() {
+        // deny_unknown_fields on OverrideEntry: a typo'd inner key surfaces
+        // at load rather than being silently dropped.
+        let err = toml::from_str::<Config>(
+            "version = 3\n[capability.overrides.anthropic]\nunsuported = [\"x\"]\n",
+        )
+        .expect_err("unknown OverrideEntry key must be rejected");
+        assert!(err.to_string().contains("unsuported"), "err: {err}");
+    }
+
+    #[test]
+    fn old_and_new_shape_configs_both_parse() {
+        // Old shape: no [capability.overrides] at all.
+        let old_shape: Config =
+            toml::from_str("version = 3\n[capability]\nenabled = true\ndecay_hours = 48\n")
+                .expect("legacy-shape config parses");
+        assert!(old_shape.capability.overrides.is_empty());
+
+        // New shape: the overrides table present.
+        let new_shape: Config = toml::from_str(
+            "version = 3\n[capability.overrides.anthropic]\nunsupported = [\"computer_use\"]\n",
+        )
+        .expect("new-shape config parses");
+        assert_eq!(new_shape.capability.overrides.len(), 1);
     }
 }
 

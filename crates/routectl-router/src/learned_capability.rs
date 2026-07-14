@@ -345,7 +345,9 @@ impl LearnedCapabilityRegistry {
                     first_seen: exported.first_seen,
                     last_seen: exported.last_seen,
                     expires_at: exported.expires_at,
-                    in_flight: exported.in_flight,
+                    // A probe settling on the pre-swap router cannot clear a
+                    // slot copied onto the new one, so carry across as free.
+                    in_flight: false,
                     consecutive_failed_probes: exported.consecutive_failed_probes,
                 },
             );
@@ -355,6 +357,37 @@ impl LearnedCapabilityRegistry {
     /// Drop every entry (invalidation on catalog / overlay change).
     pub fn clear_all(&self) {
         self.entries.write().clear();
+    }
+
+    /// Lapse the entry keyed by `(state_key, feature_key)` into a single
+    /// re-probe: set its `expires_at` to `now` so the next dispatch admits
+    /// a probe, WITHOUT touching observation count, signal tier, or backoff
+    /// history. Also releases any in-flight slot so the lapse takes effect
+    /// immediately. A no-op when no such entry is resident. Returns whether
+    /// an entry was expired.
+    ///
+    /// The targeted counterpart to [`clear_all`](Self::clear_all): used on a
+    /// hot-reload when the operator override cell governing this key changed,
+    /// so the resident verdict is re-verified against live upstream behavior
+    /// rather than either trusted blindly or dropped along with every
+    /// unrelated negative.
+    pub fn expire_keyed(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> bool {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        let mut entries = self.entries.write();
+        match entries.get_mut(&key) {
+            Some(entry) => {
+                entry.expires_at = now;
+                entry.in_flight = false;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Number of resident entries.
@@ -1004,5 +1037,47 @@ mod tests {
             reg.acting_negative_for("absent", "web_search", "openai-compat", t0),
             RoutingDecision::Allow
         );
+    }
+
+    #[test]
+    fn expire_keyed_lapses_entry_into_reprobe_without_touching_history() {
+        // Arrange -- an acting self-identifying negative well inside decay.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            t0,
+        );
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
+            RoutingDecision::RouteAway(SignalTier::SelfIdentifying)
+        );
+
+        // Act -- keyed-expire at t0.
+        let expired = reg.expire_keyed("nick", "web_search", "openai-compat", t0);
+
+        // Assert -- the entry lapsed into a single re-probe, its observation
+        // history left intact (only the decay clock reset).
+        assert!(expired);
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
+            RoutingDecision::ProbeAdmitted
+        );
+        let snap = reg.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].observations, 1);
+        assert_eq!(snap[0].first_seen, t0);
+    }
+
+    #[test]
+    fn expire_keyed_absent_key_is_a_noop() {
+        // Arrange
+        let reg = registry();
+
+        // Act / Assert -- nothing to expire for an unknown key.
+        assert!(!reg.expire_keyed("nick", "web_search", "openai-compat", Instant::now()));
     }
 }

@@ -1575,7 +1575,67 @@ async fn handle_config_reload(
 pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     let loaded = load_effective_config_unvalidated(path)?;
     validate_effective_config(&loaded.config)?;
+    warn_deprecated_capability_lists(&loaded.config);
     Ok(loaded)
+}
+
+/// The legacy capability-list keys superseded by `[capability.overrides]`.
+/// Names only ever leave this module -- never the operator's values, which
+/// can sit next to secrets in the config file.
+const LEGACY_UNSUPPORTED_FEATURES: &str = "unsupported_features";
+const LEGACY_ALLOWED_BETAS: &str = "allowed_betas";
+const LEGACY_ALLOWED_BODY_FIELDS: &str = "allowed_body_fields";
+
+/// The legacy capability-list key NAMES a parsed config still carries, in a
+/// stable order. A key counts as present when its list is non-empty -- an
+/// empty list is the pass-through default and needs no migration. Returns
+/// names only; the operator's list VALUES never leave this function.
+fn present_legacy_capability_keys(config: &Config) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+
+    let unsupported_present = config
+        .providers
+        .values()
+        .any(|p| !p.runtime().unsupported_features.is_empty())
+        || config
+            .models
+            .values()
+            .any(|m| !m.unsupported_features.is_empty());
+    if unsupported_present {
+        keys.push(LEGACY_UNSUPPORTED_FEATURES);
+    }
+    if !config.bedrock.allowed_betas.is_empty() {
+        keys.push(LEGACY_ALLOWED_BETAS);
+    }
+    if !config.bedrock.allowed_body_fields.is_empty() {
+        keys.push(LEGACY_ALLOWED_BODY_FIELDS);
+    }
+
+    keys
+}
+
+/// Emit ONE structured deprecation WARN when a serve-loaded config carries
+/// any legacy capability-list key, naming which keys are present, the
+/// `[capability.overrides]` successor, and the `config migrate` command that
+/// rewrites them. Runs on the serve cold-start AND hot-reload load paths
+/// (both flow through [`load_effective_config`]); `config check` loads via
+/// [`load_effective_config_unvalidated`], which never calls this, so the
+/// check surface stays silent per the settled constraint. The WARN carries
+/// key NAMES only -- no config values (secrets can live near these tables).
+fn warn_deprecated_capability_lists(config: &Config) {
+    let present = present_legacy_capability_keys(config);
+    if present.is_empty() {
+        return;
+    }
+
+    tracing::warn!(
+        legacy_keys = ?present,
+        successor = "[capability.overrides]",
+        migrate_command = "config migrate",
+        "deprecated capability-list keys are set; they are tolerated for one release cycle and \
+         rejected at the next config schema version. Move them under [capability.overrides] with \
+         `config migrate`.",
+    );
 }
 
 /// The parse + overlay body of [`load_effective_config`], WITHOUT the
@@ -3137,6 +3197,168 @@ default = "claude"
                 "serve pre-parse gate must reject `{name}`"
             );
         }
+    }
+
+    /// A serve-loadable config that sets all three legacy capability-list
+    /// keys AND passes the shared validator suite: an `openai-compat`
+    /// provider carrying `unsupported_features`, plus the two `[bedrock]`
+    /// allowlists (non-empty). No Bedrock provider is configured, so the
+    /// Bedrock allowlist validator short-circuits and the config loads
+    /// cleanly -- letting the same file exercise both the serve WARN and
+    /// the silent `config check` path.
+    const LEGACY_LIST_CONFIG: &str = "version = 3\n\
+         [providers.p]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://api.example.com\"\n\
+         api_key_ref = \"env://SOME_KEY\"\n\
+         unsupported_features = [\"web_search\"]\n\
+         [bedrock]\n\
+         allowed_betas = [\"some-beta\"]\n\
+         allowed_body_fields = [\"messages\", \"anthropic_version\", \"max_tokens\"]\n";
+
+    fn deprecation_warns(
+        events: &[routectl_testkit::CapturedEvent],
+    ) -> Vec<&routectl_testkit::CapturedEvent> {
+        events
+            .iter()
+            .filter(|e| e.field("legacy_keys").is_some())
+            .collect()
+    }
+
+    /// Serve COLD START (`load_effective_config`, the loader both the
+    /// cold-start `load_config_with_overlay` and the hot-reload
+    /// `read_parse_validate_config` flow through) emits exactly ONE
+    /// deprecation WARN on a legacy-list config, naming which keys are
+    /// present plus the successor + migrate pointer -- and no config VALUES.
+    #[test]
+    #[serial_test::serial]
+    fn serve_load_warns_once_on_legacy_capability_lists() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            load_effective_config(&cfg_path).expect("legacy-list config must still load");
+        });
+
+        // Assert: exactly one deprecation WARN.
+        let warns = deprecation_warns(&events);
+        assert_eq!(
+            warns.len(),
+            1,
+            "serve cold-start load must emit exactly one deprecation WARN; got {}",
+            warns.len()
+        );
+        let warn = warns[0];
+        assert_eq!(warn.level, tracing::Level::WARN);
+
+        // Names all three present legacy keys, the successor, the command.
+        let keys = warn.field("legacy_keys").expect("legacy_keys field");
+        assert!(keys.contains("unsupported_features"), "keys: {keys}");
+        assert!(keys.contains("allowed_betas"), "keys: {keys}");
+        assert!(keys.contains("allowed_body_fields"), "keys: {keys}");
+        assert_eq!(warn.field("successor"), Some("[capability.overrides]"));
+        assert_eq!(warn.field("migrate_command"), Some("config migrate"));
+
+        // Log hygiene: the WARN carries key NAMES, never the operator's
+        // list VALUES (which can sit next to secrets).
+        let blob = format!("{} {:?}", warn.message, warn.fields);
+        assert!(!blob.contains("web_search"), "leaked value: {blob}");
+        assert!(!blob.contains("some-beta"), "leaked value: {blob}");
+    }
+
+    /// HOT RELOAD (`read_parse_validate_config`, the synchronous loader the
+    /// reload path runs off-runtime) emits exactly ONE deprecation WARN on a
+    /// legacy-list config -- the same site as cold start, fired once.
+    #[test]
+    #[serial_test::serial]
+    fn hot_reload_load_warns_once_on_legacy_capability_lists() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            read_parse_validate_config(&cfg_path).expect("legacy-list config must reload");
+        });
+
+        // Assert
+        assert_eq!(
+            deprecation_warns(&events).len(),
+            1,
+            "hot reload must emit exactly one deprecation WARN"
+        );
+    }
+
+    /// `config check` loads via `load_effective_config_unvalidated` (never
+    /// `load_effective_config`), so the SAME legacy-list config produces NO
+    /// deprecation WARN there -- and still PASSES the shared validator suite,
+    /// so existing configs keep passing `check`. Asserts both sides.
+    #[test]
+    #[serial_test::serial]
+    fn config_check_stays_silent_and_passing_on_legacy_capability_lists() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
+
+        // Act: the loader `config check` uses, under capture.
+        let mut loaded = None;
+        let events = routectl_testkit::capture_events(|| {
+            loaded = Some(
+                load_effective_config_unvalidated(&cfg_path)
+                    .expect("legacy-list config must parse for check"),
+            );
+        });
+
+        // Assert (silent): no deprecation WARN on the check load path.
+        assert!(
+            deprecation_warns(&events).is_empty(),
+            "config check load path must emit no deprecation WARN"
+        );
+
+        // Assert (passing): the shared validator suite `config check` runs
+        // finds no errors, so the legacy-list config still passes.
+        let config = loaded.expect("config loaded").config;
+        let validation = routectl_router::collect_config_validation(&config);
+        assert!(
+            validation.errors.is_empty(),
+            "legacy-list config must still pass config check; errors: {:?}",
+            validation.errors
+        );
+    }
+
+    /// A config with no legacy list set (empty lists are the pass-through
+    /// default) emits no deprecation WARN on the serve load path.
+    #[test]
+    #[serial_test::serial]
+    fn serve_load_is_silent_without_legacy_capability_lists() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .expect("write config.toml");
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            load_effective_config(&cfg_path).expect("clean config must load");
+        });
+
+        // Assert
+        assert!(
+            deprecation_warns(&events).is_empty(),
+            "a config with no legacy lists must emit no deprecation WARN"
+        );
     }
 
     /// Hot-reload posture: a config edited to a too-new `version`

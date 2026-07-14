@@ -166,6 +166,12 @@ pub struct Router {
     /// unchanged -- either bump invalidates every learned negative because
     /// the fresher pricing / capability truth must win.
     learned_capabilities: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
+    /// Operator capability-override read-model, flattened from config at
+    /// construction. Pure projection of `config.capability.overrides` plus
+    /// the legacy provider / model `unsupported_features` lists -- no
+    /// carry-over on reload, since a reload builds a fresh Router from the
+    /// new config and this rebuilds deterministically from it.
+    override_registry: crate::override_registry::OverrideRegistry,
     /// Baked catalog table version this Router was built against
     /// (`catalog_baked::CATALOG_VERSION`). Compared old-vs-new in
     /// `carry_over_learned_from`: a bump invalidates the learned registry.
@@ -240,6 +246,11 @@ struct RouterMetrics {
     /// attempt returned a 400 without dispatching. Bumped by the strip
     /// interceptor hook.
     strip_strict_rejected_total: AtomicU64,
+    /// Masked (`force_supported`) capability rejections observed on a
+    /// dispatch error arm: the operator forced a capability on for a target,
+    /// but upstream still rejected it. Bumped once per request per
+    /// `(state_key, feature)` by the learn path when it suppresses the learn.
+    mask_suppressed_total: AtomicU64,
 }
 
 impl RouterMetrics {
@@ -284,6 +295,10 @@ impl RouterMetrics {
     fn incr_strip_strict_rejected(&self) {
         self.strip_strict_rejected_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_mask_suppressed(&self) {
+        self.mask_suppressed_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read the cumulative unknown-upstream-classification count.
@@ -348,6 +363,13 @@ impl RouterMetrics {
     #[cfg(test)]
     fn strip_strict_rejected_total(&self) -> u64 {
         self.strip_strict_rejected_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative masked-rejection-suppression count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn mask_suppressed_total(&self) -> u64 {
+        self.mask_suppressed_total.load(Ordering::Relaxed)
     }
 }
 
@@ -670,10 +692,15 @@ type FeatureKey = String;
 /// loop can tell a hard static drop from a soft learned de-prioritization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterSource {
-    /// Matched the per-provider `unsupported_features` list.
+    /// Matched a route-away override whose provenance is the legacy
+    /// per-provider `unsupported_features` list.
     ProviderStatic,
-    /// Matched the per-model `unsupported_features` list.
+    /// Matched a route-away override whose provenance is the legacy
+    /// per-model `unsupported_features` list.
     ModelStatic,
+    /// Matched a route-away override whose provenance is a new
+    /// `[capability.overrides.<spec>].unsupported` entry.
+    Override,
     /// Matched a non-expired acting negative in the learned-capability
     /// registry. A soft signal: the target is de-prioritized to the tail,
     /// never hard-dropped.
@@ -682,13 +709,26 @@ enum FilterSource {
 
 impl FilterSource {
     /// Stable lowercase token for the skip-log `source` field. The
-    /// `"learned"` token is a CONTRACT consumed by downstream features
-    /// (action dispatch, doctor labels, the future status endpoint).
+    /// `"learned"` and `"override"` tokens are a CONTRACT consumed by
+    /// downstream features (action dispatch, doctor labels, the future
+    /// status endpoint).
     const fn as_str(self) -> &'static str {
         match self {
             Self::ProviderStatic => "provider",
             Self::ModelStatic => "model",
+            Self::Override => "override",
             Self::Learned => "learned",
+        }
+    }
+}
+
+impl From<crate::override_registry::OverrideProvenance> for FilterSource {
+    fn from(provenance: crate::override_registry::OverrideProvenance) -> Self {
+        use crate::override_registry::OverrideProvenance;
+        match provenance {
+            OverrideProvenance::ProviderStatic => Self::ProviderStatic,
+            OverrideProvenance::ModelStatic => Self::ModelStatic,
+            OverrideProvenance::Override => Self::Override,
         }
     }
 }
@@ -778,15 +818,6 @@ struct DispatchTarget {
     /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
     /// bump rather than a heap allocation.
     effort_levels: std::sync::Arc<[String]>,
-    /// Operator-declared per-MODEL `unsupported_features` list. Threaded
-    /// from `ResolvedModel.unsupported_features` so the feature filter
-    /// can union it with the per-PROVIDER list, keyed on this target's
-    /// nickname (not provider) -- two nicknames on one provider filter
-    /// independently. Empty means no model-scoped restriction.
-    ///
-    /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
-    /// bump rather than a heap allocation.
-    model_unsupported_features: std::sync::Arc<[String]>,
     /// Capability keys the feature filter decided to STRIP in place for
     /// this target rather than route away from -- the strip-vs-route
     /// verdict for a learned acting negative whose policy
@@ -942,6 +973,7 @@ impl Router {
             .providers
             .values()
             .any(|entry| entry.forwarded_base_url().is_some());
+        let override_registry = crate::override_registry::OverrideRegistry::build(&config);
         Self {
             config,
             providers: Default::default(),
@@ -954,6 +986,7 @@ impl Router {
             k_estimator,
             shadow_store,
             learned_capabilities,
+            override_registry,
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
             overlay_revision: 0,
             metrics: RouterMetrics::default(),
@@ -967,6 +1000,14 @@ impl Router {
     /// re-scan `config.providers` per request.
     pub const fn has_forwarded_provider(&self) -> bool {
         self.has_forwarded_provider
+    }
+
+    /// The operator capability-override read-model built from this
+    /// Router's config. Provenance-preserving projection of the config
+    /// overrides plus the legacy provider / model `unsupported_features`
+    /// lists.
+    pub const fn override_registry(&self) -> &crate::override_registry::OverrideRegistry {
+        &self.override_registry
     }
 
     /// Install the v0.6.0 pre-resolved model table. Called after
@@ -1117,8 +1158,11 @@ impl Router {
     /// overridden."
     ///
     /// When both are unchanged, every entry rides across at full fidelity
-    /// (decay windows, in-flight probe slots, backoff counters intact) so a
-    /// config-only reload does not un-learn a valid negative.
+    /// (decay windows, backoff counters intact) so a config-only reload does
+    /// not un-learn a valid negative. The one exception is the in-flight
+    /// probe slot: a probe outstanding against the pre-swap Router can never
+    /// clear a slot copied onto the new one, so it is carried across as free
+    /// and the next matching request re-admits a probe normally.
     ///
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in,
@@ -1141,6 +1185,68 @@ impl Router {
         }
         self.learned_capabilities
             .import_entries(previous.learned_capabilities.export_entries());
+        self.expire_learned_on_override_change(previous);
+    }
+
+    /// After a config-only carry-over, lapse into a single re-probe every
+    /// learned negative whose EFFECTIVE operator override verdict changed
+    /// across the reload -- a `force_supported` mask (or any override cell)
+    /// added, removed, or flipped for that `(target, capability)`. The
+    /// operator's intent for the cell moved, so the resident learned verdict
+    /// is re-verified against live upstream behavior rather than trusted; the
+    /// entry is expired (decay clock reset), NOT dropped, so its observation
+    /// history and backoff survive. Entries whose override resolution is
+    /// unchanged ride across intact -- this never clears the whole registry
+    /// (that stays keyed to catalog / overlay changes).
+    fn expire_learned_on_override_change(&self, previous: &Self) {
+        let now = Instant::now();
+        for entry in self.learned_capabilities.snapshot() {
+            let (provider_name, nickname) = self.override_identity_for(&entry.state_key);
+            let provider_kind = self
+                .config
+                .providers
+                .get(&provider_name)
+                .map_or("", |p| p.kind_str());
+            let before = previous
+                .override_registry
+                .resolve(&provider_name, &nickname, &entry.feature_key, provider_kind)
+                .map(|(verdict, _)| verdict);
+            let after = self
+                .override_registry
+                .resolve(&provider_name, &nickname, &entry.feature_key, provider_kind)
+                .map(|(verdict, _)| verdict);
+            if before != after {
+                self.learned_capabilities.expire_keyed(
+                    &entry.state_key,
+                    &entry.feature_key,
+                    provider_kind,
+                    now,
+                );
+                tracing::debug!(
+                    state_key = %entry.state_key,
+                    capability_key = %entry.feature_key,
+                    "override cell changed across reload; lapsed learned negative into a re-probe",
+                );
+            }
+        }
+    }
+
+    /// Map a learned-registry `state_key` to the `(provider_name, nickname)`
+    /// pair the override registry resolves against. A per-model target keys
+    /// by nickname; a pooled seat keys by `nickname#label` (recover the base
+    /// model); a legacy / direct-construction target keys by the provider
+    /// name itself (no model scope). Enables comparing a learned entry's
+    /// effective override verdict across a reload.
+    fn override_identity_for(&self, state_key: &str) -> (String, String) {
+        if let Some(model) = self.resolved_models.get(state_key) {
+            return (model.provider_name.clone(), state_key.to_string());
+        }
+        if let Some((base, _label)) = state_key.split_once('#')
+            && let Some(model) = self.resolved_models.get(base)
+        {
+            return (model.provider_name.clone(), base.to_string());
+        }
+        (state_key.to_string(), String::new())
     }
 
     /// Record one live cache-reuse observation into the per-session K
@@ -1813,14 +1919,21 @@ impl Router {
     /// FIRST matched `(feature, source)` or `None` if the target
     /// supports every requested feature.
     ///
-    /// The union is over two static lists plus the learned registry: the
-    /// per-PROVIDER list (keyed on `target.provider_name`, via the provider
-    /// table), the per-MODEL list (carried on the target, keyed on its
-    /// nickname), and -- when the kill switch is on -- a non-expired acting
-    /// learned negative for this `(state_key, feature)`. Static lists are
-    /// consulted FIRST so a feature listed statically reports its static
-    /// source (and hard-drops) ahead of any learned signal; provider is
-    /// consulted before model.
+    /// The union is over the operator-override registry plus the learned
+    /// registry. The override consult flattens the legacy per-PROVIDER and
+    /// per-MODEL `unsupported_features` lists and the
+    /// `[capability.overrides]` table into one provenance-preserving
+    /// read-model; a `RouteAway` verdict of ANY provenance is consulted
+    /// FIRST so it hard-drops (and reports its preserved source label --
+    /// `provider`, `model`, or `override`) ahead of any learned signal.
+    /// When the kill switch is on, a non-expired acting learned negative
+    /// for this `(state_key, feature)` is consulted after.
+    ///
+    /// A `ForceSupported` override masks a feature: it short-circuits that
+    /// feature to Allow BEFORE the learned consult, suppressing an acting
+    /// learned negative and -- because the mask precedes probe-admission
+    /// logic (the `in_flight` flip happens inside `acting_negative_for`) --
+    /// ensuring a masked cell never claims a re-probe slot.
     ///
     /// The learned consult is admission-bearing: an expired negative whose
     /// re-probe slot this caller claims returns `None` (route to the target
@@ -1838,7 +1951,7 @@ impl Router {
     /// (`Some((feature, Learned))`, `strip_keys` left empty) -- a target is
     /// never half-stripped. An admitted re-probe is excluded from
     /// `strip_keys` (the full request tests the real capability); its
-    /// admission still reaches `admissions`. Static (provider/model) matches
+    /// admission still reaches `admissions`. Override `RouteAway` matches
     /// hard-drop FIRST, ahead of any learned or strip decision.
     fn unsupported_feature_for_target(
         &self,
@@ -1847,23 +1960,23 @@ impl Router {
         admissions: &mut Vec<ProbeAdmission>,
         strip_keys: &mut Vec<String>,
     ) -> Option<(FeatureKey, FilterSource)> {
-        let provider_unsupported = self
-            .config
-            .providers
-            .get(&target.provider_name)
-            .map(|e| &e.runtime().unsupported_features);
+        // Override consult replaces the two raw static-list scans: the
+        // registry (built from the legacy provider / model
+        // `unsupported_features` lists plus `[capability.overrides]`)
+        // hard-drops on a `RouteAway` of ANY provenance, reporting the
+        // preserved source label so an existing config's behavior and
+        // labels stay byte-identical.
+        let nickname = target.nickname.as_deref().unwrap_or("");
         for feature in features {
-            if let Some(list) = provider_unsupported
-                && list.iter().any(|u| u == feature)
+            if let Some((crate::override_registry::OverrideVerdict::RouteAway, provenance)) =
+                self.override_registry.resolve(
+                    &target.provider_name,
+                    nickname,
+                    feature,
+                    target.provider_kind.unwrap_or(""),
+                )
             {
-                return Some((feature.clone(), FilterSource::ProviderStatic));
-            }
-            if target
-                .model_unsupported_features
-                .iter()
-                .any(|u| u == feature)
-            {
-                return Some((feature.clone(), FilterSource::ModelStatic));
+                return Some((feature.clone(), provenance.into()));
             }
         }
         // Learned pass: consult the adaptive registry only when the kill
@@ -1882,6 +1995,16 @@ impl Router {
             let mut route_away: Option<FeatureKey> = None;
             let mut strip: Vec<String> = Vec::new();
             for feature in features {
+                // ForceSupported mask: an operator `force_supported`
+                // override short-circuits this feature to Allow BEFORE
+                // `acting_negative_for` runs, so a masked cell never
+                // suppresses only the verdict while still claiming a
+                // re-probe slot (the `in_flight` flip happens inside
+                // `acting_negative_for`). A `RouteAway` override can never
+                // reach here -- it hard-dropped in the consult above.
+                if self.override_forces_supported(target, feature, provider_kind) {
+                    continue;
+                }
                 match self.learned_capabilities.acting_negative_for(
                     &target.state_key,
                     feature,
@@ -1980,6 +2103,29 @@ impl Router {
             provider_floor.iter().any(|pinned| pinned == token)
                 || header_floor.iter().any(|pinned| pinned == token)
         })
+    }
+
+    /// Whether an operator `force_supported` override masks `feature` for
+    /// this target -- the single consult shared by the act side (which
+    /// short-circuits a masked feature to Allow before probe admission) and
+    /// the learn side (which suppresses the observe for a masked cell). The
+    /// same `(provider, nickname)` two-tier resolve both paths key on, so a
+    /// mask is never honored on one side and missed on the other.
+    fn override_forces_supported(
+        &self,
+        target: &DispatchTarget,
+        feature: &str,
+        provider_kind: &str,
+    ) -> bool {
+        matches!(
+            self.override_registry.resolve(
+                &target.provider_name,
+                target.nickname.as_deref().unwrap_or(""),
+                feature,
+                provider_kind,
+            ),
+            Some((crate::override_registry::OverrideVerdict::ForceSupported, _))
+        )
     }
 
     /// Run the single request interceptor over one per-attempt clone and
@@ -3582,6 +3728,27 @@ impl Router {
             return;
         }
         let state_key = target.state_key.clone();
+        // MASK: an operator `force_supported` override for this (target,
+        // feature) masks the learned negative. The act side already
+        // short-circuited both the routing verdict AND the probe admission
+        // for a masked cell, so it never claims a re-probe slot; here the
+        // learn is suppressed too -- a masked-cell rejection never refreshes
+        // or increments the resident entry (its `expires_at` is untouched, so
+        // wall-clock decay continues). Upstream still rejected the capability
+        // the operator forced on, so surface the contradiction exactly once
+        // per request (deduped) with a dedicated counter. Capability TOKEN and
+        // state_key only -- never a request body.
+        if self.override_forces_supported(target, &feature_key, provider_kind) {
+            if dedupe.insert((state_key.clone(), feature_key.clone())) {
+                self.metrics.incr_mask_suppressed();
+                tracing::warn!(
+                    state_key = %state_key,
+                    capability_key = %feature_key,
+                    "force_supported override contradicted: masked capability still rejected upstream",
+                );
+            }
+            return;
+        }
         // If this target was admitted as the single re-probe for this same
         // capability, the rejection SETTLES the probe (capped backoff owns the
         // observation bump and expiry) instead of feeding the observe path.
@@ -4641,7 +4808,6 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         provider: Some(m.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
-        model_unsupported_features: m.unsupported_features.clone(),
         strip_capabilities: std::sync::Arc::default(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
@@ -4682,7 +4848,6 @@ fn dispatch_target_for_seat(
         provider: Some(seat.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
-        model_unsupported_features: m.unsupported_features.clone(),
         strip_capabilities: std::sync::Arc::default(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
@@ -6058,6 +6223,46 @@ mod tests {
     }
 
     #[test]
+    fn router_new_builds_override_registry_with_static_provenance_from_legacy_config() {
+        // Arrange: a legacy-only config (provider + model
+        // `unsupported_features`, no `[capability.overrides]`). The
+        // override read-model must be built from it at construction and
+        // carry the legacy static provenance so labels stay unchanged.
+        let toml_text = "\
+            [providers.p]\n\
+            kind = \"openai-compat\"\n\
+            base_url = \"https://x\"\n\
+            api_key_ref = \"literal:k\"\n\
+            unsupported_features = [\"web_search\"]\n\
+            [models.nick]\n\
+            provider = \"p\"\n\
+            upstream = \"gpt-x\"\n\
+            unsupported_features = [\"computer_use\"]\n";
+        let config: Config = toml::from_str(toml_text).expect("config parses");
+
+        // Act
+        let router = Router::new(Arc::new(config));
+
+        // Assert: the accessor exposes a registry whose legacy entries
+        // carry ProviderStatic / ModelStatic provenance.
+        let registry = router.override_registry();
+        assert_eq!(
+            registry.resolve("p", "nick", "web_search", "openai-compat"),
+            Some((
+                crate::override_registry::OverrideVerdict::RouteAway,
+                crate::override_registry::OverrideProvenance::ProviderStatic
+            )),
+        );
+        assert_eq!(
+            registry.resolve("p", "nick", "computer_use", "openai-compat"),
+            Some((
+                crate::override_registry::OverrideVerdict::RouteAway,
+                crate::override_registry::OverrideProvenance::ModelStatic
+            )),
+        );
+    }
+
+    #[test]
     fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
         use routectl_core::capability::SignalTier;
         use std::time::Instant;
@@ -6084,6 +6289,129 @@ mod tests {
         // Assert: the negative rode across untouched; no invalidation.
         assert_eq!(after.learned_capabilities.snapshot().len(), 1);
         assert_eq!(after.metrics.invalidations_total(), 0);
+    }
+
+    #[test]
+    fn carry_over_learned_from_clears_in_flight_slot() {
+        use crate::learned_capability::RoutingDecision;
+        use routectl_core::capability::SignalTier;
+        use std::time::{Duration, Instant};
+
+        // Arrange: a 1h decay so the probe slot can be claimed on a lapsed
+        // entry. Learn a self-identifying negative, then admit a re-probe on
+        // the outgoing Router so its entry carries `in_flight = true`.
+        let mut config = Config::default();
+        config.capability.decay_hours = 1;
+        config.capability.inferred_window_hours = 1;
+        let config = Arc::new(config);
+        let before = Router::new(config.clone());
+        let t0 = Instant::now();
+        before.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            t0,
+        );
+        let t_probe = t0 + Duration::from_hours(1) + Duration::from_secs(1);
+        assert_eq!(
+            before.learned_capabilities.acting_negative_for(
+                "nick",
+                "web_search",
+                "openai-compat",
+                t_probe,
+            ),
+            RoutingDecision::ProbeAdmitted,
+            "outgoing entry must hold an in-flight probe slot to carry across",
+        );
+
+        // Act: config-only reload -- same catalog version and overlay
+        // revision, so the entry rides across.
+        let mut after = Router::new(config);
+        assert_eq!(after.catalog_version, before.catalog_version);
+        assert_eq!(after.overlay_revision, before.overlay_revision);
+        after.carry_over_learned_from(&before);
+
+        // Assert: the entry rode across with its non-in-flight fields intact.
+        let carried = after.learned_capabilities.snapshot();
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].signal_tier, SignalTier::SelfIdentifying);
+
+        // The carried entry is still acting AND its in-flight slot was
+        // cleared, so the next matching request re-admits a probe rather than
+        // latching on a slot no outcome on the new Router can ever release.
+        let t_query = t_probe + Duration::from_secs(1);
+        assert_eq!(
+            after.learned_capabilities.acting_negative_for(
+                "nick",
+                "web_search",
+                "openai-compat",
+                t_query,
+            ),
+            RoutingDecision::ProbeAdmitted,
+            "carried-over slot must not stay latched after the reload",
+        );
+    }
+
+    #[test]
+    fn carry_over_expires_learned_entries_whose_override_cell_changed() {
+        use crate::learned_capability::RoutingDecision;
+        use routectl_core::capability::SignalTier;
+        use std::time::Instant;
+
+        // Arrange: the outgoing Router masked `web_search` on provider `p`
+        // with a force_supported override; the incoming Router drops that
+        // override. Both share catalog version + overlay revision (the
+        // config-only reload case), so entries ride across.
+        let before_cfg: Config = toml::from_str(
+            "version = 3\n\
+             [capability.overrides.p]\n\
+             force_supported = [\"web_search\"]\n",
+        )
+        .expect("config parses");
+        let before = Router::new(Arc::new(before_cfg));
+        let t0 = Instant::now();
+        // A masked entry (the cell that changes) plus an unrelated healthy
+        // entry (no override in either config).
+        before
+            .learned_capabilities
+            .observe("p", "web_search", "", SignalTier::SelfIdentifying, t0);
+        before.learned_capabilities.observe(
+            "p",
+            "computer_use",
+            "",
+            SignalTier::SelfIdentifying,
+            t0,
+        );
+
+        let mut after = Router::new(Arc::new(Config::default()));
+        assert_eq!(after.catalog_version, before.catalog_version);
+        assert_eq!(after.overlay_revision, before.overlay_revision);
+
+        // Act
+        after.carry_over_learned_from(&before);
+
+        // Assert: both entries carried across, no full invalidation.
+        assert_eq!(after.learned_capabilities.snapshot().len(), 2);
+        assert_eq!(after.metrics.invalidations_total(), 0);
+
+        let now = Instant::now();
+        // The changed cell's entry lapsed into a single re-probe...
+        assert_eq!(
+            after
+                .learned_capabilities
+                .acting_negative_for("p", "web_search", "", now),
+            RoutingDecision::ProbeAdmitted,
+            "an override cell that changed across reload must lapse its entry",
+        );
+        // ...while the unrelated healthy entry survived the reload intact.
+        assert_eq!(
+            after
+                .learned_capabilities
+                .acting_negative_for("p", "computer_use", "", now),
+            RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+            "an entry with no override change must ride across untouched",
+        );
     }
 
     #[test]
@@ -8493,7 +8821,20 @@ mod resolved_models_tests {
 
     #[test]
     fn static_unsupported_emptying_chain_returns_not_implemented() {
-        let router = Router::new(learned_provider_config());
+        // The model-static list lives in config.models: the override
+        // registry is built from config (mirroring build_resolved_models,
+        // which copies the same list onto each ResolvedModel).
+        let mut config = Config::default();
+        config.providers.insert(
+            "test-prov".into(),
+            ProviderEntry::anthropic_api("literal:k"),
+        );
+        config.models.insert(
+            "only".into(),
+            crate::config::ModelEntry::new("test-prov", "claude-x")
+                .with_unsupported_features(vec!["web_search".to_string()]),
+        );
+        let router = Router::new(Arc::new(config));
         let only = learned_target(&router, "only", &["web_search"]);
         let features = vec!["web_search".to_string()];
 
@@ -11062,6 +11403,19 @@ mod feature_filter_tests {
             "alias".into(),
             AliasValue::Chain(vec!["mA".into(), "mB".into()]),
         );
+        // Model-static lists live in config.models: the override registry
+        // is built from config, mirroring the factory's
+        // build_resolved_models (which copies these onto each ResolvedModel).
+        config.models.insert(
+            "mA".into(),
+            crate::config::ModelEntry::new("shared-prov", "upstream-a")
+                .with_unsupported_features(unsupported_model_a.clone()),
+        );
+        config.models.insert(
+            "mB".into(),
+            crate::config::ModelEntry::new("shared-prov", "upstream-b")
+                .with_unsupported_features(unsupported_model_b.clone()),
+        );
 
         let mut router = Router::new(Arc::new(config));
         let captured_a: CapturedRequests = Arc::new(ParkingMutex::new(Vec::new()));
@@ -11190,8 +11544,8 @@ mod feature_filter_tests {
         // (e) Unit-test the decision seam directly: provider-scoped vs
         // model-scoped matches return distinct FilterSource variants;
         // a supported feature returns None. Also pins the precedence:
-        // a feature listed at BOTH scopes reports ProviderStatic (the
-        // provider list is consulted first).
+        // with features listed at different scopes, the FIRST requested
+        // feature that matches wins (iteration order).
         let mut config = Config::default();
         config.providers.insert(
             "prov-blocks-ws".into(),
@@ -11209,6 +11563,13 @@ mod feature_filter_tests {
                     ..Default::default()
                 },
             },
+        );
+        // The per-model list lives in config.models: the override registry
+        // is built from config (mirroring build_resolved_models).
+        config.models.insert(
+            "m".into(),
+            crate::config::ModelEntry::new("prov-blocks-ws", "u")
+                .with_unsupported_features(vec!["structured_output".into()]),
         );
         let router = Router::new(Arc::new(config));
         let stub: Arc<dyn Provider> = Arc::new(CapturingProvider {
@@ -17638,6 +17999,108 @@ api_key_ref = "literal:k"
         assert!(router.learned_capabilities.is_empty());
     }
 
+    /// The suppression WARN a masked-cell rejection emits.
+    const MASK_SUPPRESSION_MSG: &str =
+        "force_supported override contradicted: masked capability still rejected upstream";
+
+    fn suppression_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|e| e.message == MASK_SUPPRESSION_MSG)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn masked_reject_emits_suppression_warn_and_counter_and_skips_learn() {
+        // A force_supported override masks `unsupported_parameter` on m1: the
+        // mask lets the target dispatch (act side short-circuits to Allow),
+        // upstream still rejects it, and the learn side suppresses the observe
+        // -- one suppression WARN + one counter, no learned negative, no learn
+        // event.
+        let toml = format!(
+            "{OPENAI_P1}\n\
+             [capability.overrides.\"p1:m1\"]\n\
+             force_supported = [\"unsupported_parameter\"]\n"
+        );
+        let router = router_with(&toml, self_identifying_provider());
+
+        let (dispatched, events) = with_capture(router.complete_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        // The request still fails; nothing was learned and the ordinary learn
+        // WARN / meta event never fired.
+        assert!(dispatched.result.is_err());
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+        assert!(learn_warns(&events).is_empty());
+        assert!(
+            router.learned_capabilities.is_empty(),
+            "a masked cell must never create a learned negative",
+        );
+
+        // Exactly one suppression WARN, carrying only the safe fields.
+        let supp = suppression_warns(&events);
+        assert_eq!(supp.len(), 1);
+        assert_eq!(supp[0].field("state_key"), Some("m1"));
+        assert_eq!(
+            supp[0].field("capability_key"),
+            Some("unsupported_parameter")
+        );
+        assert_eq!(supp[0].field("body"), None, "no body/message/prompt fields");
+        assert_eq!(supp[0].field("message"), None);
+
+        // ...and exactly one dedicated counter increment.
+        assert_eq!(router.metrics.mask_suppressed_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn masked_cell_rejection_does_not_refresh_resident_entry() {
+        // With an ALREADY-resident learned negative, a masked-cell rejection
+        // must neither refresh (expires_at) nor increment (observations) the
+        // entry -- its wall-clock decay continues on the original clock.
+        let toml = format!(
+            "{OPENAI_P1}\n\
+             [capability.overrides.\"p1:m1\"]\n\
+             force_supported = [\"unsupported_parameter\"]\n"
+        );
+        let router = router_with(&toml, self_identifying_provider());
+
+        // Plant a resident acting negative at a fixed instant.
+        let t0 = Instant::now();
+        router.learned_capabilities.observe(
+            "m1",
+            "unsupported_parameter",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            t0,
+        );
+        let before = router.learned_capabilities.snapshot();
+        assert_eq!(before.len(), 1);
+
+        let (dispatched, _events) = with_capture(router.complete_with_options(
+            req_with_tool("unsupported_parameter"),
+            RouterOptions::default(),
+        ))
+        .await;
+
+        // No learn event, and the resident entry is untouched: neither
+        // incremented nor refreshed by the masked rejection.
+        assert!(dispatched.meta.learned_capabilities.is_empty());
+        let after = router.learned_capabilities.snapshot();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].observations, before[0].observations,
+            "masked rejection must not increment observations",
+        );
+        assert_eq!(
+            after[0].expires_at, before[0].expires_at,
+            "masked rejection must not refresh the decay clock",
+        );
+        assert_eq!(router.metrics.mask_suppressed_total(), 1);
+    }
+
     #[tokio::test]
     async fn non_request_fault_status_is_never_learned() {
         // A 500 is ServerError, not a 400/422 request fault: the status
@@ -18349,5 +18812,437 @@ mod strip_interceptor_dispatch_tests {
             "a rolled-back seat never calls the upstream count_tokens",
         );
         assert_eq!(router.metrics.strip_rollback_total(), 1);
+    }
+}
+
+#[cfg(test)]
+mod capability_override_filter_tests {
+    //! Filter-seam tests for the operator override consult: legacy static
+    //! lists keep their provenance labels, new override entries hard-drop
+    //! or mask, and a `force_supported` mask precedes probe admission.
+    use super::*;
+
+    /// Minimal provider stub so the fixtures can build a real
+    /// `Arc<ResolvedModel>`; none of its methods are exercised here.
+    struct StubProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for StubProvider {
+        fn id(&self) -> &'static str {
+            "stub"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("stub", "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            unreachable!("override filter tests never dispatch")
+        }
+        async fn stream(
+            &self,
+            _: ChatRequest,
+        ) -> Result<futures::stream::BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!("override filter tests never dispatch")
+        }
+    }
+
+    fn override_router_from_toml(body: &str) -> Router {
+        let config: Config =
+            toml::from_str(&format!("version = 3\n{body}")).expect("config parses");
+        Router::new(Arc::new(config))
+    }
+
+    /// A minimal openai-compat dispatch target keyed by `provider:nickname`.
+    /// `into_one_dispatch_target` leaves `provider_kind` unset (the legacy
+    /// path), so the kind is pinned here for the override / learned consult.
+    fn override_test_target(provider_name: &str, nickname: &str) -> DispatchTarget {
+        let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+        let model = Arc::new(ResolvedModel::new(
+            nickname,
+            provider_name,
+            provider,
+            "upstream",
+        ));
+        let mut target = into_one_dispatch_target(model);
+        target.provider_kind = Some("openai-compat");
+        target
+    }
+
+    const OVERRIDE_PROVIDER_P: &str = "[providers.p]\n\
+        kind = \"openai-compat\"\n\
+        base_url = \"https://x\"\n\
+        api_key_ref = \"literal:k\"\n";
+
+    #[test]
+    fn override_consult_legacy_provider_list_hard_drops_with_provider_label() {
+        // Arrange -- a legacy per-provider list. The registry preserves its
+        // ProviderStatic provenance so the consult reports the same
+        // `provider` source label the raw scan always did.
+        let router = override_router_from_toml(&format!(
+            "{OVERRIDE_PROVIDER_P}unsupported_features = [\"web_search\"]\n"
+        ));
+        let target = override_test_target("p", "nick");
+
+        // Act
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let verdict = router.unsupported_feature_for_target(
+            &target,
+            &["web_search".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        // Assert
+        assert_eq!(
+            verdict,
+            Some(("web_search".to_string(), FilterSource::ProviderStatic)),
+        );
+        assert_eq!(FilterSource::ProviderStatic.as_str(), "provider");
+        assert!(admissions.is_empty());
+        assert!(strip_keys.is_empty());
+    }
+
+    #[test]
+    fn override_consult_legacy_model_list_hard_drops_with_model_label() {
+        // Arrange -- a legacy per-model list keyed by `provider:nickname`.
+        let router = override_router_from_toml(&format!(
+            "{OVERRIDE_PROVIDER_P}\
+             [models.nick]\n\
+             provider = \"p\"\n\
+             upstream = \"gpt-x\"\n\
+             unsupported_features = [\"computer_use\"]\n"
+        ));
+        let target = override_test_target("p", "nick");
+
+        // Act
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let verdict = router.unsupported_feature_for_target(
+            &target,
+            &["computer_use".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        // Assert
+        assert_eq!(
+            verdict,
+            Some(("computer_use".to_string(), FilterSource::ModelStatic)),
+        );
+        assert_eq!(FilterSource::ModelStatic.as_str(), "model");
+    }
+
+    #[test]
+    fn override_unsupported_hard_drops_and_empties_chain_like_legacy_list() {
+        // Arrange -- a NEW `[capability.overrides]` unsupported entry.
+        let router = override_router_from_toml(&format!(
+            "{OVERRIDE_PROVIDER_P}\
+             [capability.overrides.p]\n\
+             unsupported = [\"web_search\"]\n"
+        ));
+        let target = override_test_target("p", "nick");
+
+        // Act / Assert -- the consult reports the `override` label and
+        // hard-drops just as a static list does.
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        assert_eq!(
+            router.unsupported_feature_for_target(
+                &target,
+                &["web_search".to_string()],
+                &mut admissions,
+                &mut strip_keys,
+            ),
+            Some(("web_search".to_string(), FilterSource::Override)),
+        );
+        assert_eq!(FilterSource::Override.as_str(), "override");
+
+        // The sole target hard-drops, so the chain filters to empty and
+        // surfaces D17's NotImplemented (501) -- byte-identical to a legacy
+        // static list emptying the chain.
+        let mut chain_admissions = Vec::new();
+        match router.filter_chain_by_features(
+            vec![target],
+            &["web_search".to_string()],
+            "alias-x",
+            &mut chain_admissions,
+        ) {
+            Err(Error::NotImplemented(_, _)) => {}
+            Err(other) => panic!("expected NotImplemented, got {other:?}"),
+            Ok(_) => panic!("an override-unsupported sole target must empty the chain"),
+        }
+    }
+
+    #[test]
+    fn force_supported_flips_acting_learned_route_away_to_allow() {
+        use routectl_core::capability::SignalTier;
+        use std::time::Instant;
+
+        // Arrange -- capability enabled with a self-identifying (acting-now)
+        // negative on the target's state_key, plus a force_supported mask
+        // for the same capability.
+        let masked = override_router_from_toml(&format!(
+            "{OVERRIDE_PROVIDER_P}\
+             [capability]\n\
+             enabled = true\n\
+             [capability.overrides.p]\n\
+             force_supported = [\"web_search\"]\n"
+        ));
+        let target = override_test_target("p", "nick");
+        masked.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+
+        // Act
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let verdict = masked.unsupported_feature_for_target(
+            &target,
+            &["web_search".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        // Assert -- the mask suppresses the acting negative: the feature is
+        // Allowed (None), not routed away.
+        assert_eq!(
+            verdict, None,
+            "force_supported must flip the negative to Allow"
+        );
+
+        // Contrast: the SAME acting negative without the mask routes away
+        // with the learned source, proving the mask is what flipped it.
+        let unmasked = override_router_from_toml(&format!(
+            "{OVERRIDE_PROVIDER_P}[capability]\nenabled = true\n"
+        ));
+        unmasked.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+        let mut ctrl_admissions = Vec::new();
+        let mut ctrl_strip = Vec::new();
+        assert_eq!(
+            unmasked.unsupported_feature_for_target(
+                &override_test_target("p", "nick"),
+                &["web_search".to_string()],
+                &mut ctrl_admissions,
+                &mut ctrl_strip,
+            ),
+            Some(("web_search".to_string(), FilterSource::Learned)),
+        );
+    }
+
+    #[test]
+    fn force_supported_mask_admits_no_probe_where_unmasked_would() {
+        use routectl_core::capability::SignalTier;
+        use std::time::Instant;
+
+        // A zero-hour decay lapses an observed negative immediately, so the
+        // next consult would claim a re-probe slot.
+        let base = "[providers.p]\n\
+            kind = \"openai-compat\"\n\
+            base_url = \"https://x\"\n\
+            api_key_ref = \"literal:k\"\n\
+            [capability]\n\
+            enabled = true\n\
+            decay_hours = 0\n\
+            inferred_window_hours = 0\n";
+
+        // Control -- unmasked: the lapsed negative admits exactly one probe.
+        let control = override_router_from_toml(base);
+        control.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+        let mut ctrl_admissions = Vec::new();
+        let mut ctrl_strip = Vec::new();
+        let _ = control.unsupported_feature_for_target(
+            &override_test_target("p", "nick"),
+            &["web_search".to_string()],
+            &mut ctrl_admissions,
+            &mut ctrl_strip,
+        );
+        assert_eq!(
+            ctrl_admissions.len(),
+            1,
+            "control: a lapsed negative must admit a re-probe",
+        );
+
+        // Masked: the force_supported short-circuit precedes
+        // acting_negative_for, so a masked cell never claims a probe slot.
+        let masked = override_router_from_toml(&format!(
+            "{base}[capability.overrides.p]\n\
+                 force_supported = [\"web_search\"]\n"
+        ));
+        masked.learned_capabilities.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let verdict = masked.unsupported_feature_for_target(
+            &override_test_target("p", "nick"),
+            &["web_search".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+        assert_eq!(verdict, None, "masked feature must Allow");
+        assert!(
+            admissions.is_empty(),
+            "a masked cell must not claim a re-probe slot",
+        );
+    }
+
+    #[test]
+    fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
+        use routectl_core::capability::SignalTier;
+        use std::time::Instant;
+
+        // A per-provider override routes `web_search` away; a droppable
+        // learned negative on `advisor` would otherwise strip in place.
+        // Override RouteAway is consulted first, so it hard-drops (returns
+        // the override label) ahead of the learned strip decision -- and the
+        // non-overridden `advisor` cell keeps its f2 strip behavior when
+        // web_search is absent.
+        let router = override_router_from_toml(&format!(
+            "{OVERRIDE_PROVIDER_P}\
+             [capability]\n\
+             enabled = true\n\
+             [capability.overrides.p]\n\
+             unsupported = [\"web_search\"]\n"
+        ));
+        let target = override_test_target("p", "nick");
+        router.learned_capabilities.observe(
+            "nick",
+            "advisor",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+
+        // With web_search present, the override hard-drops first.
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        assert_eq!(
+            router.unsupported_feature_for_target(
+                &target,
+                &["advisor".to_string(), "web_search".to_string()],
+                &mut admissions,
+                &mut strip_keys,
+            ),
+            Some(("web_search".to_string(), FilterSource::Override)),
+        );
+        assert!(strip_keys.is_empty(), "a hard-drop leaves strip_keys empty");
+
+        // Without web_search, the non-overridden advisor cell still strips
+        // in place (f2 behavior unchanged): None with the advisor key.
+        let mut advisor_admissions = Vec::new();
+        let mut advisor_strip = Vec::new();
+        assert_eq!(
+            router.unsupported_feature_for_target(
+                &target,
+                &["advisor".to_string()],
+                &mut advisor_admissions,
+                &mut advisor_strip,
+            ),
+            None,
+        );
+        assert_eq!(advisor_strip, vec!["advisor".to_string()]);
+    }
+
+    /// Feature acceptance -- legacy-config filter-decision equivalence.
+    ///
+    /// One config carrying ALL three legacy capability lists (a per-provider
+    /// `unsupported_features`, a per-model `unsupported_features`, and the
+    /// `[bedrock]` egress allowlists `allowed_betas` / `allowed_body_fields`
+    /// -- inert for routing but present so the whole legacy surface coexists)
+    /// must route away with the SAME `FilterSource` labels the pre-f3 raw
+    /// static-list scan produced: a provider-scoped drop reports
+    /// `ProviderStatic` (`"provider"`) and a model-scoped drop reports
+    /// `ModelStatic` (`"model"`). Absolute expected labels, not a diff
+    /// against a rebuilt old binary. The egress-byte half of this acceptance
+    /// bar lives in `routectl-providers`
+    /// (`tests/legacy_capability_config_equivalence.rs`).
+    #[test]
+    fn legacy_config_lists_route_away_with_pre_f3_source_labels() {
+        // Arrange -- every legacy list in one config.
+        let router = override_router_from_toml(
+            "[providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             unsupported_features = [\"web_search\"]\n\
+             [models.nick]\n\
+             provider = \"p\"\n\
+             upstream = \"gpt-x\"\n\
+             unsupported_features = [\"computer_use\"]\n\
+             [bedrock]\n\
+             allowed_betas = [\"some-beta\"]\n\
+             allowed_body_fields = [\"messages\", \"anthropic_version\", \"max_tokens\"]\n",
+        );
+        let target = override_test_target("p", "nick");
+
+        // Act / Assert -- the provider-scoped list keeps the `provider` label.
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let provider_verdict = router.unsupported_feature_for_target(
+            &target,
+            &["web_search".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+        assert_eq!(
+            provider_verdict,
+            Some(("web_search".to_string(), FilterSource::ProviderStatic)),
+        );
+        assert_eq!(FilterSource::ProviderStatic.as_str(), "provider");
+
+        // The model-scoped list keeps the `model` label.
+        let mut model_admissions = Vec::new();
+        let mut model_strip = Vec::new();
+        let model_verdict = router.unsupported_feature_for_target(
+            &target,
+            &["computer_use".to_string()],
+            &mut model_admissions,
+            &mut model_strip,
+        );
+        assert_eq!(
+            model_verdict,
+            Some(("computer_use".to_string(), FilterSource::ModelStatic)),
+        );
+        assert_eq!(FilterSource::ModelStatic.as_str(), "model");
+
+        // A request touching no listed feature passes through: no route-away,
+        // no probe admission, no strip -- byte-identical to the pre-f3
+        // no-match path.
+        let mut clean_admissions = Vec::new();
+        let mut clean_strip = Vec::new();
+        assert_eq!(
+            router.unsupported_feature_for_target(
+                &target,
+                &["structured_output".to_string()],
+                &mut clean_admissions,
+                &mut clean_strip,
+            ),
+            None,
+        );
+        assert!(clean_admissions.is_empty());
+        assert!(clean_strip.is_empty());
     }
 }

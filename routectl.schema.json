@@ -265,7 +265,7 @@
     },
     "CapabilityConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window), and each per-field `#[serde(default)]`\nkeeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets.\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.",
+      "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window), and each per-field `#[serde(default)]`\nkeeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets.\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.\n\n`overrides` is the operator capability-override map. It nests under\nthis existing `[capability]` parent as `[capability.overrides]` -- no\nnew top-level Config section is introduced, so the config-classify\ncoverage in routectl-cli stays exhaustive.",
       "properties": {
         "decay_hours": {
           "default": 48,
@@ -285,6 +285,14 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "overrides": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OverrideEntry"
+          },
+          "default": {},
+          "description": "Operator capability overrides, keyed by two-tier target spec:\n`\"provider_name\"` applies to every model on that provider, and\n`\"provider_name:nickname\"` targets a single model. An omitted\n`[capability.overrides]` table yields an empty map. The\ncapability-value namespace is open -- values are not validated\nagainst any known-capability list here.",
+          "type": "object"
         }
       },
       "type": "object"
@@ -655,6 +663,29 @@
         "provider",
         "upstream"
       ],
+      "type": "object"
+    },
+    "OverrideEntry": {
+      "additionalProperties": false,
+      "description": "A single operator capability override, the value type of\n`[capability.overrides]`. `unsupported` force-marks capabilities as\nunavailable for the target; `force_supported` overrides a learned or\ncatalog negative back to available. Both default to empty.\n\n`#[serde(deny_unknown_fields)]` rejects a typo'd key inside an entry at\nconfig-load time rather than silently ignoring it.",
+      "properties": {
+        "force_supported": {
+          "default": [],
+          "description": "Capabilities force-marked available for the target, overriding a\nlearned or catalog negative.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unsupported": {
+          "default": [],
+          "description": "Capabilities force-marked unavailable for the target.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     },
     "PricingConfig": {
@@ -1798,7 +1829,8 @@
       "default": {
         "decay_hours": 48,
         "enabled": true,
-        "inferred_window_hours": 1
+        "inferred_window_hours": 1,
+        "overrides": {}
       },
       "description": "Operator-facing `[capability]` block. Kill switch plus tempo knobs\nfor the learned-capability subsystem. A missing block keeps all\ndefaults: enabled, a 48h decay window, a 1h inferred-signal window.\nThe table is deliberately top-level (not nested under `[server]`)\nso a later override layer can nest per-target overrides under the\nsame parent."
     },
