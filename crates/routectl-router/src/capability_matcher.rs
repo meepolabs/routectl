@@ -235,6 +235,14 @@ fn upstream_error_field(err: &Error, field: &str) -> Option<String> {
     value.get("error")?.get(field)?.as_str().map(str::to_string)
 }
 
+/// The upstream `error.param` string, for observability enrichment on the
+/// learn event. Shares the same over-cap / non-JSON / missing-field guard as
+/// the resolver's read; carries the capability the upstream named, never a
+/// request body / message / prompt.
+pub(crate) fn upstream_param(err: &Error) -> Option<String> {
+    upstream_error_field(err, "param")
+}
+
 #[cfg(test)]
 mod tests {
     use super::resolve_requested_capability;
