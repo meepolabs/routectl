@@ -408,7 +408,7 @@ impl RouterOptions {
 /// router does not depend on the ledger writer, so learn events travel
 /// on the dispatch meta rather than being written here.
 ///
-/// `feature_key` is already normalized (via `normalize_capability_key`),
+/// `capability_key` is already normalized (via `normalize_capability_key`),
 /// so the writer and any future warm-rebuild replayer key off identical
 /// strings. `remapped` is always `false` by construction (the capture
 /// gate rejects a config-remapped class); it is carried so a replay can
@@ -419,7 +419,7 @@ pub struct CapabilityLearnEvent {
     /// Breaker state key (nickname-or-provider) of the rejecting target.
     pub state_key: String,
     /// Normalized capability key the rejection named.
-    pub feature_key: String,
+    pub capability_key: String,
     /// Stable provider-kind token of the rejecting target.
     pub provider_kind: String,
     /// Whether the evidence was self-identifying or inferred.
@@ -3816,25 +3816,45 @@ impl Router {
             .map_or(0, |entry| entry.observations);
 
         let upstream_param = crate::capability_matcher::upstream_param(err);
-        tracing::warn!(
-            event = "learn",
-            state_key = %state_key,
-            capability_key = %feature_key,
-            provider_kind,
-            upstream_status,
-            upstream_code = upstream_code.as_deref().unwrap_or(""),
-            upstream_param = upstream_param.as_deref().unwrap_or(""),
-            signal_tier = tier.as_str(),
-            observations,
-            acting,
-            "learned-capability negative observed",
-        );
+        // Emit `upstream_param` ONLY when the sanitizer deemed it safe to log
+        // verbatim (bounded, single-token, no whitespace/control bytes). An
+        // adversarial or buggy upstream can put arbitrary text in `error.param`;
+        // dropping the field entirely -- rather than logging a blank or the raw
+        // string -- keeps injected content out of the operator log while the
+        // closed-set `capability_key` and `upstream_code` still record.
+        match upstream_param.as_deref() {
+            Some(param) => tracing::warn!(
+                event = "learn",
+                state_key = %state_key,
+                capability_key = %feature_key,
+                provider_kind,
+                upstream_status,
+                upstream_code = upstream_code.as_deref().unwrap_or(""),
+                upstream_param = %param,
+                signal_tier = tier.as_str(),
+                observations,
+                acting,
+                "learned-capability negative observed",
+            ),
+            None => tracing::warn!(
+                event = "learn",
+                state_key = %state_key,
+                capability_key = %feature_key,
+                provider_kind,
+                upstream_status,
+                upstream_code = upstream_code.as_deref().unwrap_or(""),
+                signal_tier = tier.as_str(),
+                observations,
+                acting,
+                "learned-capability negative observed",
+            ),
+        }
 
         if acting {
             self.metrics.incr_learned_negatives();
             meta.learned_capabilities.push(CapabilityLearnEvent {
                 state_key,
-                feature_key,
+                capability_key: feature_key,
                 provider_kind: provider_kind.to_string(),
                 signal_tier: tier,
                 observations,
@@ -18024,6 +18044,33 @@ mod learn_capture_tests {
         })
     }
 
+    /// A self-identifying openai-compat 400 whose `/error/param` resolves to
+    /// `web_search` once the resolver trims it, but whose RAW field is an
+    /// oversized, control-char-laden blob (`web_search` followed by 80
+    /// newlines). Models a buggy or adversarial upstream: the closed-set
+    /// resolver still attributes the capability, yet the raw param must never
+    /// reach the operator log verbatim.
+    fn oversized_param_provider() -> Arc<CapabilityRejectingProvider> {
+        let param = format!("web_search{}", "\n".repeat(80));
+        let body = json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "unsupported_parameter",
+                "param": param,
+                "message": "Unsupported parameter."
+            }
+        })
+        .to_string();
+        Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 400,
+            body,
+            upstream_type: Some("invalid_request_error".into()),
+            upstream_code: Some("unsupported_parameter".into()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
     /// A self-identifying openai-compat 400 whose `error.code` lifts to
     /// `FeatureUnsupported` but whose body carries NO `/error/param`: the
     /// resolver can attribute no capability, so nothing is learned.
@@ -18129,7 +18176,7 @@ kind = "anthropic-api"
         assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
         let ev = &dispatched.meta.learned_capabilities[0];
         assert_eq!(ev.state_key, "m1");
-        assert_eq!(ev.feature_key, "web_search");
+        assert_eq!(ev.capability_key, "web_search");
         assert_eq!(ev.provider_kind, "openai-compat");
         assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
         assert_eq!(ev.observations, 1);
@@ -18164,6 +18211,36 @@ kind = "anthropic-api"
             ),
             crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_upstream_param_is_dropped_from_the_learn_warn() {
+        // Arrange: a self-identifying 400 whose raw `/error/param` is oversized
+        // and control-char-laden but trims to the canonical `web_search` key.
+        let router = router_with(OPENAI_P1, oversized_param_provider());
+
+        // Act
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
+        .await;
+
+        // Assert: the capability is still learned (the resolver trims the raw
+        // field to a closed-set key), so the safe fields log unchanged.
+        assert!(dispatched.result.is_err());
+        assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+        assert_eq!(
+            dispatched.meta.learned_capabilities[0].capability_key,
+            "web_search"
+        );
+        let warns = learn_warns(&events);
+        assert_eq!(warns.len(), 1);
+        let warn = warns[0];
+        assert_eq!(warn.field("capability_key"), Some("web_search"));
+        assert_eq!(warn.field("upstream_code"), Some("unsupported_parameter"));
+        // The unbounded, control-char-laden raw param is dropped entirely --
+        // the field is absent, not blank, so no injected text reaches the log.
+        assert_eq!(warn.field("upstream_param"), None);
     }
 
     #[tokio::test]

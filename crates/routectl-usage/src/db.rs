@@ -1310,10 +1310,10 @@ mod tests {
     /// stale pre-change keys, and that the step is forward-only + idempotent.
     #[test]
     fn v9_to_v10_truncates_stale_pre_change_learn_rows() {
-        use crate::schema::CREATE_CAPABILITY_LEARN_EVENTS_TABLE;
-
         // Arrange: a genuine v9 DB with a stale token-keyed learn row (the
-        // pre-change openai keyspace keyed on the `error.code` token).
+        // pre-change openai keyspace keyed on the `error.code` token). The
+        // table is created from its HISTORICAL v9 shape (column `feature_key`,
+        // renamed to `capability_key` only at v10 -> v11), not the current DDL.
         let (_dir, path) = temp_db_path();
         let conn = Connection::open(&path).expect("raw open");
         conn.execute_batch(
@@ -1321,8 +1321,20 @@ mod tests {
              INSERT INTO meta (key, value) VALUES ('schema_version', '9');",
         )
         .expect("seed meta");
-        conn.execute_batch(CREATE_CAPABILITY_LEARN_EVENTS_TABLE)
-            .expect("create learn table");
+        conn.execute_batch(
+            "CREATE TABLE capability_learn_events (
+                 ts               INTEGER NOT NULL,
+                 state_key        TEXT    NOT NULL,
+                 feature_key      TEXT    NOT NULL,
+                 provider_kind    TEXT    NOT NULL,
+                 signal_tier      TEXT    NOT NULL,
+                 observations     INTEGER NOT NULL,
+                 upstream_status  INTEGER NOT NULL,
+                 remapped         INTEGER NOT NULL,
+                 request_features TEXT    NOT NULL
+             )",
+        )
+        .expect("create v9 learn table");
         conn.execute(
             "INSERT INTO capability_learn_events (ts, state_key, feature_key, \
              provider_kind, signal_tier, observations, upstream_status, remapped, \
@@ -1350,6 +1362,62 @@ mod tests {
         assert_eq!(
             remaining, 0,
             "pre-change token-keyed row must not resurface"
+        );
+
+        // Idempotent: re-running the ladder is a no-op.
+        let again = migrate_to_current(&conn, 0).expect("re-run migrate");
+        assert_eq!(again, SCHEMA_VERSION);
+    }
+
+    /// The v10 -> v11 column rename: a v10 DB whose `capability_learn_events`
+    /// table still carries the legacy `feature_key` column is migrated to
+    /// `capability_key`, closing the persisted-vocabulary split. Proves the
+    /// column is renamed (not dropped/re-added), the table survives, and the
+    /// step is idempotent.
+    #[test]
+    fn v10_to_v11_renames_feature_key_to_capability_key() {
+        // Arrange: a genuine v10 DB with the pre-rename column name.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('schema_version', '10');",
+        )
+        .expect("seed meta");
+        conn.execute_batch(
+            "CREATE TABLE capability_learn_events (
+                 ts               INTEGER NOT NULL,
+                 state_key        TEXT    NOT NULL,
+                 feature_key      TEXT    NOT NULL,
+                 provider_kind    TEXT    NOT NULL,
+                 signal_tier      TEXT    NOT NULL,
+                 observations     INTEGER NOT NULL,
+                 upstream_status  INTEGER NOT NULL,
+                 remapped         INTEGER NOT NULL,
+                 request_features TEXT    NOT NULL
+             )",
+        )
+        .expect("create v10 learn table");
+        conn.execute_batch("PRAGMA user_version = 10")
+            .expect("stamp v10");
+        assert_eq!(user_version(&conn), 10);
+
+        // Act
+        let version = migrate_to_current(&conn, 0).expect("migrate v10->v11");
+
+        // Assert: landed at the current version with the column renamed.
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(table_exists(&conn, "capability_learn_events"));
+        let has_column = |name: &str| -> bool {
+            conn.prepare("SELECT 1 FROM pragma_table_info('capability_learn_events') WHERE name=?1")
+                .expect("prepare")
+                .exists([name])
+                .expect("exists")
+        };
+        assert!(has_column("capability_key"), "column must be renamed");
+        assert!(
+            !has_column("feature_key"),
+            "legacy column name must be gone"
         );
 
         // Idempotent: re-running the ladder is a no-op.

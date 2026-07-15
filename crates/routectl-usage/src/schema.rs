@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -179,7 +179,7 @@ pub const CREATE_TS_START_INDEX: &str =
 /// forever-contract landing pad for the warm-rebuild replayer.
 ///
 /// Columns mirror the row struct in `learn_event.rs` (the source of truth
-/// for the set). `feature_key` is the NORMALIZED capability key. `signal_tier`
+/// for the set). `capability_key` is the NORMALIZED capability key. `signal_tier`
 /// is a closed set whose CHECK tokens mirror the two producer tiers.
 /// `remapped` is always 0 by construction but persisted so a replayer can
 /// filter defensively. `request_features` is a JSON array TEXT (the in-flight
@@ -189,7 +189,7 @@ pub const CREATE_CAPABILITY_LEARN_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS capability_learn_events (
     ts               INTEGER NOT NULL,
     state_key        TEXT    NOT NULL,
-    feature_key      TEXT    NOT NULL,
+    capability_key   TEXT    NOT NULL,
     provider_kind    TEXT    NOT NULL,
     signal_tier      TEXT    NOT NULL CHECK (signal_tier IN (
                          'self-identifying',

@@ -381,7 +381,7 @@ async fn real_envelope_response_format_400_learns_structured_output_and_routes_a
     );
     let ev = &d1.meta.learned_capabilities[0];
     assert_eq!(
-        ev.feature_key, STRUCTURED_OUTPUT,
+        ev.capability_key, STRUCTURED_OUTPUT,
         "the learned key is the canonical capability, not the raw wire param",
     );
     assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
@@ -458,7 +458,7 @@ async fn learn_then_deprioritizes_matching_target() {
     assert_eq!(d1.meta.served_provider.as_deref(), Some("prov_b"));
     assert_eq!(d1.meta.learned_capabilities.len(), 1);
     let ev = &d1.meta.learned_capabilities[0];
-    assert_eq!(ev.feature_key, WEB_SEARCH);
+    assert_eq!(ev.capability_key, WEB_SEARCH);
     assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
     assert!(ev.request_features.iter().any(|f| f == WEB_SEARCH));
     assert_eq!(hits(&a).await, 1);
@@ -835,7 +835,7 @@ async fn two_expired_negatives_on_one_target_both_reprobe_and_clear() {
         Err(Error::Upstream { status: 400, .. })
     ));
     assert_eq!(d1.meta.learned_capabilities.len(), 1);
-    assert_eq!(d1.meta.learned_capabilities[0].feature_key, WEB_SEARCH);
+    assert_eq!(d1.meta.learned_capabilities[0].capability_key, WEB_SEARCH);
     assert_eq!(d1.meta.learned_capabilities[0].observations, 1);
 
     let d2 = complete_with(&router, "solo", &[COMPUTER_USE]).await;
@@ -844,7 +844,7 @@ async fn two_expired_negatives_on_one_target_both_reprobe_and_clear() {
         Err(Error::Upstream { status: 400, .. })
     ));
     assert_eq!(d2.meta.learned_capabilities.len(), 1);
-    assert_eq!(d2.meta.learned_capabilities[0].feature_key, COMPUTER_USE);
+    assert_eq!(d2.meta.learned_capabilities[0].capability_key, COMPUTER_USE);
     assert_eq!(hits(&a).await, 2);
 
     let d3 = complete_with(&router, "solo", &[WEB_SEARCH, COMPUTER_USE]).await;

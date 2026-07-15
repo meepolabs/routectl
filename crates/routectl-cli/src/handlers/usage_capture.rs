@@ -404,7 +404,7 @@ impl UsageCapture {
             self.usage.try_send_learn_event(CapabilityLearnEvent {
                 ts: epoch_ms_now(),
                 state_key: ev.state_key.clone(),
-                feature_key: ev.feature_key.clone(),
+                capability_key: ev.capability_key.clone(),
                 provider_kind: ev.provider_kind.clone(),
                 signal_tier: ev.signal_tier.as_str().to_string(),
                 observations: ev.observations,
