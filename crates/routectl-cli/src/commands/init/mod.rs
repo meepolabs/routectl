@@ -237,10 +237,10 @@ impl InitIo for RealInitIo {
             "upstream model id for `{provider_name}` ({kind}), e.g. {example_hint} \
              (blank to skip): "
         );
-        match prompt(&label) {
-            Some(value) if !value.is_empty() => Some(value),
-            _ => None,
-        }
+        capture_model_id(
+            || prompt(&label),
+            |reason| eprintln!("  that model id is not usable: {reason}. try again."),
+        )
     }
 
     fn choose_default_route(&self, candidates: &[String]) -> Option<String> {
@@ -467,7 +467,7 @@ fn missing_credential_next_steps() -> String {
 /// through [`build_plan`], also before any side effect.
 fn collect_answers(args: &InitArgs, offers: &[Offer], io: &dyn InitIo) -> Result<WizardAnswers> {
     let selected = select_offers(args, offers, io);
-    let model_ids = collect_model_ids(args, &selected, io);
+    let model_ids = collect_model_ids(args, &selected, io)?;
     let default_route = choose_default_route(args, &selected, io)?;
     Ok(WizardAnswers {
         selected,
@@ -508,11 +508,20 @@ fn select_offers(args: &InitArgs, offers: &[Offer], io: &dyn InitIo) -> Vec<Offe
 /// every provider non-interactively; otherwise the per-provider prompt asks
 /// (with a per-kind example hint). A provider left without an id is absent from
 /// the map, and [`build_plan`] turns that into an actionable `MissingModelId`.
+///
+/// Every captured id is validated at this boundary ([`validate_model_id`]): an
+/// unusable id from `--default-model` (including an explicit empty value) fails
+/// here with an actionable message before any write, and the interactive prompt
+/// has already re-prompted past unusable entries, so a doctor-clean config can
+/// no longer carry a model id the first real request would reject. A blank
+/// interactive entry stays the documented "blank to skip" decline (it leaves
+/// the provider absent, which `build_plan` reports before any write); only an
+/// explicit `--default-model ""` is treated as an empty value to reject.
 fn collect_model_ids(
     args: &InitArgs,
     selected: &[Offer],
     io: &dyn InitIo,
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>> {
     let mut ids = BTreeMap::new();
     for offer in selected {
         let id = if let Some(model) = &args.default_model {
@@ -526,11 +535,21 @@ fn collect_model_ids(
                 example_hint_for_kind(&offer.kind),
             )
         };
-        if let Some(id) = id.filter(|s| !s.is_empty()) {
-            ids.insert(offer.provider_name.clone(), id);
+        let Some(id) = id else { continue };
+        if id.is_empty() && args.default_model.is_none() {
+            continue;
         }
+        validate_model_id(&id).map_err(|reason| {
+            Error::Config(format!(
+                "model id `{id}` for provider `{}` is not usable: {reason}. \
+                 supply a plain upstream model id, e.g. {}",
+                offer.provider_name,
+                example_hint_for_kind(&offer.kind),
+            ))
+        })?;
+        ids.insert(offer.provider_name.clone(), id);
     }
-    ids
+    Ok(ids)
 }
 
 /// The provider whose model becomes `aliases.default`. Interactively the
@@ -724,6 +743,51 @@ fn example_hint_for_kind(kind: &str) -> &'static str {
         "openai-responses" => "gpt-5",
         "gemini" => "gemini-2.5-pro",
         _ => "the provider's upstream model id",
+    }
+}
+
+/// Conservatively reject a model id that a config write or the first real
+/// request would choke on. This is a shape check at the capture boundary, NOT
+/// a catalog or network lookup: any id the provider actually serves passes.
+/// Rejects the empty / all-whitespace id, any embedded whitespace, control
+/// characters, and the quote / backslash characters that break a TOML string
+/// value. On rejection the `Err` carries a short, operator-facing reason.
+fn validate_model_id(id: &str) -> std::result::Result<(), &'static str> {
+    if id.trim().is_empty() {
+        return Err("it is empty");
+    }
+    for ch in id.chars() {
+        if ch.is_whitespace() {
+            return Err("it contains whitespace");
+        }
+        if ch.is_control() {
+            return Err("it contains a control character");
+        }
+        if matches!(ch, '"' | '\'' | '\\') {
+            return Err("it contains a quote or backslash");
+        }
+    }
+    Ok(())
+}
+
+/// The interactive model-id capture loop shared by [`RealInitIo::prompt_model_id`].
+/// `read` yields the next entry (already trimmed); `None` (EOF / read error)
+/// or a blank line skips (returns `None`). An entry [`validate_model_id`]
+/// rejects is surfaced through `warn` and the loop reads again, so an unusable
+/// id never leaves this boundary -- every returned `Some` is a validated id.
+fn capture_model_id(
+    mut read: impl FnMut() -> Option<String>,
+    mut warn: impl FnMut(&str),
+) -> Option<String> {
+    loop {
+        let entry = read()?;
+        if entry.is_empty() {
+            return None;
+        }
+        match validate_model_id(&entry) {
+            Ok(()) => return Some(entry),
+            Err(reason) => warn(reason),
+        }
     }
 }
 
@@ -1593,5 +1657,160 @@ mod tests {
             !msg.to_ascii_lowercase().contains("default route"),
             "never surfaces the raw routing error: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Model-id validation at the capture boundary: a doctor-clean config
+    // can no longer carry an id the first real request would reject.
+    // `validate_model_id` is a pure shape check; `collect_model_ids` is
+    // the non-interactive fail seam; `capture_model_id` is the interactive
+    // re-prompt loop.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn validate_model_id_accepts_a_plain_id_and_rejects_unusable_ones() {
+        assert!(validate_model_id("claude-sonnet-4-5").is_ok());
+        assert!(validate_model_id("gpt-4o").is_ok());
+        assert!(validate_model_id("provider/model:v1.2").is_ok());
+
+        assert!(validate_model_id("").is_err(), "empty is rejected");
+        assert!(
+            validate_model_id("   ").is_err(),
+            "whitespace-only is rejected"
+        );
+        assert!(
+            validate_model_id("gpt 4o").is_err(),
+            "embedded whitespace is rejected"
+        );
+        assert!(
+            validate_model_id("gpt\t4o").is_err(),
+            "an embedded tab is rejected"
+        );
+        assert!(
+            validate_model_id("gpt\n4o").is_err(),
+            "an embedded newline is rejected"
+        );
+        assert!(
+            validate_model_id("gpt\u{7}4o").is_err(),
+            "an embedded control char is rejected"
+        );
+        assert!(
+            validate_model_id("gpt\"4o").is_err(),
+            "an embedded quote is rejected"
+        );
+        assert!(
+            validate_model_id("gpt\\4o").is_err(),
+            "an embedded backslash is rejected"
+        );
+    }
+
+    #[test]
+    fn collect_model_ids_rejects_an_unparseable_default_model_before_any_write() {
+        let offers = vec![forwarded_test_offer()];
+        let err = collect_model_ids(
+            &init_args(false, true, Some("claude sonnet"), true),
+            &offers,
+            &FakeInitIo::default(),
+        )
+        .expect_err("an unparseable --default-model must fail at capture");
+
+        let msg = err.to_string();
+        assert!(msg.contains("not usable"), "actionable message: {msg}");
+        assert!(msg.contains("whitespace"), "names the reason: {msg}");
+    }
+
+    #[test]
+    fn collect_model_ids_rejects_an_empty_default_model() {
+        let offers = vec![forwarded_test_offer()];
+        let err = collect_model_ids(
+            &init_args(false, true, Some("   "), true),
+            &offers,
+            &FakeInitIo::default(),
+        )
+        .expect_err("a whitespace-only --default-model must fail at capture");
+        assert!(err.to_string().contains("not usable"), "err: {err}");
+    }
+
+    #[test]
+    fn collect_model_ids_rejects_an_exact_empty_default_model() {
+        // An explicit `--default-model ""` is an empty VALUE (not the
+        // interactive blank-to-skip decline), so it is rejected at capture
+        // rather than falling through to the later missing-model error.
+        let offers = vec![forwarded_test_offer()];
+        let err = collect_model_ids(
+            &init_args(false, true, Some(""), true),
+            &offers,
+            &FakeInitIo::default(),
+        )
+        .expect_err("an explicit empty --default-model must fail at capture");
+        assert!(err.to_string().contains("not usable"), "err: {err}");
+        assert!(err.to_string().contains("empty"), "names the reason: {err}");
+    }
+
+    #[test]
+    fn collect_model_ids_accepts_a_valid_id_unchanged() {
+        let offers = vec![forwarded_test_offer()];
+        let ids = collect_model_ids(
+            &init_args(false, true, Some("claude-sonnet-4-5"), true),
+            &offers,
+            &FakeInitIo::default(),
+        )
+        .expect("a valid model id passes capture");
+
+        assert_eq!(
+            ids.get("anthropic-forwarded").map(String::as_str),
+            Some("claude-sonnet-4-5"),
+            "the valid id is stored verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn unparseable_default_model_errors_before_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let err = orchestrate(
+            &path,
+            &init_args(false, true, Some("bad id"), true),
+            &Config::default(),
+            false,
+            vec![forwarded_test_offer()],
+            &FakeInitIo::default(),
+        )
+        .await
+        .expect_err("an unusable model id must abort the run");
+
+        assert!(err.to_string().contains("not usable"), "err: {err}");
+        assert!(!path.exists(), "no write before the capture-time error");
+    }
+
+    #[test]
+    fn interactive_capture_reprompts_past_an_unusable_id() {
+        // The reader pops from the end, so the unusable entry is read first.
+        let mut inputs = vec!["claude-sonnet-4-5".to_string(), "gpt 4o".to_string()];
+        let mut warnings = 0;
+        let got = capture_model_id(|| inputs.pop(), |_reason| warnings += 1);
+
+        assert_eq!(
+            got.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "the loop returns the first valid id"
+        );
+        assert_eq!(
+            warnings, 1,
+            "the unusable id triggered exactly one re-prompt"
+        );
+    }
+
+    #[test]
+    fn interactive_capture_treats_a_blank_entry_as_skip() {
+        let got = capture_model_id(|| Some(String::new()), |_| panic!("blank must not warn"));
+        assert_eq!(got, None, "a blank entry skips the provider");
+    }
+
+    #[test]
+    fn interactive_capture_treats_eof_as_skip() {
+        let got = capture_model_id(|| None, |_| panic!("EOF must not warn"));
+        assert_eq!(got, None, "a read error / EOF skips rather than loops");
     }
 }
