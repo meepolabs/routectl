@@ -1060,17 +1060,17 @@ mod tests {
     }
 
     /// Build a representative learn event.
-    fn learn_event(feature_key: &str) -> CapabilityLearnEvent {
+    fn learn_event(capability_key: &str) -> CapabilityLearnEvent {
         CapabilityLearnEvent {
             ts: 123,
             state_key: "gpt-nick".to_string(),
-            feature_key: feature_key.to_string(),
+            capability_key: capability_key.to_string(),
             provider_kind: "anthropic-api".to_string(),
             signal_tier: "inferred".to_string(),
             observations: 2,
             upstream_status: 400,
             remapped: false,
-            request_features: vec!["thinking".to_string(), feature_key.to_string()],
+            request_features: vec!["thinking".to_string(), capability_key.to_string()],
         }
     }
 
@@ -1117,7 +1117,7 @@ mod tests {
         assert_eq!(learn_event_row_count(&path), 1);
         assert_eq!(row_count(&path), 0);
         let conn = Connection::open(&path).expect("read");
-        let (state_key, feature_key, tier, observations, status, remapped, features): (
+        let (state_key, capability_key, tier, observations, status, remapped, features): (
             String,
             String,
             String,
@@ -1127,7 +1127,7 @@ mod tests {
             String,
         ) = conn
             .query_row(
-                "SELECT state_key, feature_key, signal_tier, observations, upstream_status, \
+                "SELECT state_key, capability_key, signal_tier, observations, upstream_status, \
                  remapped, request_features FROM capability_learn_events",
                 [],
                 |r| {
@@ -1144,7 +1144,7 @@ mod tests {
             )
             .expect("row");
         assert_eq!(state_key, "gpt-nick");
-        assert_eq!(feature_key, "web_search");
+        assert_eq!(capability_key, "web_search");
         assert_eq!(tier, "inferred");
         assert_eq!(observations, 2);
         assert_eq!(status, 400);

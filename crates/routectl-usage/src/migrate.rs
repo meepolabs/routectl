@@ -307,6 +307,36 @@ fn migrate_v9_to_v10(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v10 -> v11 step atomically: rename the `capability_learn_events`
+/// column `feature_key` to `capability_key`, bump `PRAGMA user_version` to 11,
+/// and update `meta.schema_version`. All in one transaction so a crash
+/// mid-step rolls back.
+///
+/// This closes a persisted-vocabulary split: the event tracing, the router
+/// carrier, and the writer struct all name this field `capability_key`, but
+/// the column lagged at `feature_key`. The v9 -> v10 truncate already emptied
+/// the table (the warm-rebuild landing pad nothing reads yet), so the rename
+/// moves no data. Guarded so it is idempotent AND fresh-DB-safe: a fresh DB
+/// created the table from the current DDL (already `capability_key`), so the
+/// rename is skipped and only the version bumps.
+fn migrate_v10_to_v11(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if column_exists(&tx, "capability_learn_events", "feature_key")?
+        && !column_exists(&tx, "capability_learn_events", "capability_key")?
+    {
+        tx.execute_batch(
+            "ALTER TABLE capability_learn_events RENAME COLUMN feature_key TO capability_key",
+        )?;
+    }
+    tx.execute_batch("PRAGMA user_version = 11")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "11"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -361,6 +391,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             7 => migrate_v7_to_v8(conn)?,
             8 => migrate_v8_to_v9(conn)?,
             9 => migrate_v9_to_v10(conn)?,
+            10 => migrate_v10_to_v11(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

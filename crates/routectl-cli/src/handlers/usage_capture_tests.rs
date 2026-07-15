@@ -472,12 +472,12 @@ fn wait_learn_persisted(handle: &UsageHandle, want: u64) -> bool {
 }
 
 fn learn_event(
-    feature_key: &str,
+    capability_key: &str,
     tier: routectl_core::SignalTier,
 ) -> routectl_router::router::CapabilityLearnEvent {
     routectl_router::router::CapabilityLearnEvent {
         state_key: "prov".to_string(),
-        feature_key: feature_key.to_string(),
+        capability_key: capability_key.to_string(),
         provider_kind: "anthropic-api".to_string(),
         signal_tier: tier,
         observations: 2,
@@ -563,7 +563,7 @@ async fn observe_meta_maps_learn_event_fields_onto_the_row() {
     // Assert: the router struct maps onto the plain usage row -- the tier is
     // the persisted `as_str` token and the feature set is the JSON array.
     let conn = rusqlite::Connection::open(&db_path).expect("read db");
-    let (state_key, feature_key, provider_kind, tier, observations, status, remapped, features): (
+    let (state_key, capability_key, provider_kind, tier, observations, status, remapped, features): (
         String,
         String,
         String,
@@ -574,7 +574,7 @@ async fn observe_meta_maps_learn_event_fields_onto_the_row() {
         String,
     ) = conn
         .query_row(
-            "SELECT state_key, feature_key, provider_kind, signal_tier, observations, \
+            "SELECT state_key, capability_key, provider_kind, signal_tier, observations, \
              upstream_status, remapped, request_features FROM capability_learn_events",
             [],
             |r| {
@@ -592,7 +592,7 @@ async fn observe_meta_maps_learn_event_fields_onto_the_row() {
         )
         .expect("one learn event row");
     assert_eq!(state_key, "prov");
-    assert_eq!(feature_key, "web_search");
+    assert_eq!(capability_key, "web_search");
     assert_eq!(provider_kind, "anthropic-api");
     assert_eq!(tier, "inferred");
     assert_eq!(observations, 2);
