@@ -125,9 +125,13 @@ impl OverrideRegistry {
     /// [`validate_capability_overrides`] rejects at config-load time)
     /// resolves conservatively to `RouteAway` here so a direct
     /// construction that bypassed validation still yields a usable,
-    /// safe-by-default registry. Emits the dead-key WARN for any operator
-    /// override key that normalization rewrites (such a key could never
-    /// match a normalized registry key).
+    /// safe-by-default registry. Emits the dead-key WARN only for an
+    /// operator override key whose NORMALIZED form is not itself
+    /// normalization-stable -- a genuinely unreachable cell, since every
+    /// capability lookup is normalized before it is matched. A key that
+    /// normalization merely reduces to a stable form (e.g. a Bedrock
+    /// request-bag path collapsing to its capability leaf) stays reachable
+    /// and is not flagged.
     pub fn build(config: &Config) -> Self {
         warn_dead_override_keys(config);
 
@@ -310,9 +314,15 @@ fn provider_kind_for<'a>(config: &'a Config, provider_name: &str) -> &'a str {
 }
 
 /// Emit one structured WARN per operator override key that normalization
-/// rewrites: such a key can never match a normalized registry key, so
-/// the override is dead. Only the capability token reaches the log line,
-/// never a request body.
+/// rewrites into an unreachable cell: a key whose normalized form is not
+/// itself a normalization fixed point. Every capability lookup value passes
+/// through normalization before it is matched against a stored cell, so the
+/// reachable keys are exactly normalization's fixed points; a stored key that
+/// normalization would rewrite again lies outside that image and can never
+/// match. A key that normalization only reduces to a stable form (e.g. a
+/// Bedrock request-bag path collapsing to its capability leaf) stays
+/// reachable and is NOT flagged. Only the capability token reaches the log
+/// line, never a request body.
 fn warn_dead_override_keys(config: &Config) {
     for (spec, override_entry) in &config.capability.overrides {
         let kind = provider_kind_for(config, provider_of_spec(spec));
@@ -321,19 +331,33 @@ fn warn_dead_override_keys(config: &Config) {
             .iter()
             .chain(&override_entry.force_supported)
         {
-            let normalized = normalize_capability_key(raw, kind);
-            if &normalized != raw {
-                tracing::warn!(
-                    event = "dead_override_key",
-                    target_spec = %spec,
-                    raw_key = %raw,
-                    normalized_key = %normalized,
-                    "capability override key is rewritten by normalization; it can never \
-                     match and is dead -- use the normalized form",
-                );
+            let stored_key = normalize_capability_key(raw, kind);
+            if override_key_reachable(&stored_key, kind) {
+                continue;
             }
+            let lookup_key = normalize_capability_key(&stored_key, kind);
+            tracing::warn!(
+                event = "dead_override_key",
+                target_spec = %spec,
+                raw_key = %raw,
+                stored_key = %stored_key,
+                lookup_key = %lookup_key,
+                "capability override key normalizes to a form that is not \
+                 normalization-stable; the cell is stored under a key no \
+                 normalized capability lookup can produce, so the override is \
+                 unreachable",
+            );
         }
     }
+}
+
+/// Whether a stored (already-normalized) override key can ever be matched by
+/// a capability lookup. Every lookup value passes through
+/// [`normalize_capability_key`] before comparison, so the reachable keys are
+/// exactly normalization's fixed points: a key that normalization would
+/// rewrite again can never equal any lookup key.
+fn override_key_reachable(stored_key: &str, provider_kind: &str) -> bool {
+    normalize_capability_key(stored_key, provider_kind) == stored_key
 }
 
 /// Reject a config whose override sources place contradictory verdicts on
@@ -580,12 +604,17 @@ mod tests {
         assert!(err.contains("computer_use"), "got: {err}");
     }
 
-    /// A dotted request-bag override key on a `bedrock`-kind target that
-    /// normalization rewrites to `anthropic_beta`. Bedrock is the only
-    /// kind that rewrites keys, so this test needs the feature.
+    /// A dotted Bedrock request-bag override key normalizes to its
+    /// capability leaf (`additionalModelRequestFields.anthropic_beta` ->
+    /// `anthropic_beta`), a normalization-stable key a normalized lookup
+    /// reproduces. The override is reachable and must NOT trip the dead-key
+    /// guard -- the guard previously mislabeled this working key as
+    /// unreachable purely because normalization rewrote its raw form.
+    /// Bedrock is the only kind that rewrites keys, so this test needs the
+    /// feature.
     #[cfg(feature = "bedrock")]
     #[test]
-    fn dead_key_guard_warns_on_non_idempotent_override_key() {
+    fn reachable_bedrock_bag_prefixed_override_emits_no_dead_key_warn() {
         // Arrange
         let config = config(
             "[providers.br]\n\
@@ -601,18 +630,36 @@ mod tests {
             let _ = OverrideRegistry::build(&config);
         });
 
-        // Assert
-        let warn = events
-            .iter()
-            .find(|e| e.level == tracing::Level::WARN)
-            .expect("dead-key guard must emit a WARN");
-        assert_eq!(warn.field("event"), Some("dead_override_key"));
-        assert_eq!(warn.field("target_spec"), Some("br"));
-        assert_eq!(
-            warn.field("raw_key"),
-            Some("additionalModelRequestFields.anthropic_beta")
+        // Assert -- no dead-key WARN, and the normalized key resolves to a
+        // live cell (reachable via a normalized capability lookup).
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "a bag-prefixed key that normalizes to a reachable leaf must not \
+             trip the dead-key guard"
         );
-        assert_eq!(warn.field("normalized_key"), Some("anthropic_beta"));
+        let registry = OverrideRegistry::build(&config);
+        assert_eq!(
+            registry.resolve("br", "any", "anthropic_beta", "bedrock"),
+            Some((OverrideVerdict::RouteAway, OverrideProvenance::Override))
+        );
+    }
+
+    /// The dead-key guard's reachability core. A key already in normalized
+    /// (fixed-point) form is reachable, while a key normalization would
+    /// rewrite again is not: stored under that form it could never equal a
+    /// normalized capability lookup, so the guard flags it as the genuinely
+    /// unreachable cell -- distinct from a merely-rewritten-but-stable key.
+    #[test]
+    fn override_key_reachability_distinguishes_stable_from_rewritten_keys() {
+        // Normalization-stable keys are reachable.
+        assert!(override_key_reachable("anthropic_beta", "bedrock"));
+        assert!(override_key_reachable("web_search", "openai-compat"));
+        // A dotted Bedrock request-bag key is not a normalization fixed
+        // point: no normalized lookup key can ever equal it.
+        assert!(!override_key_reachable(
+            "additionalModelRequestFields.anthropic_beta",
+            "bedrock"
+        ));
     }
 
     #[test]
