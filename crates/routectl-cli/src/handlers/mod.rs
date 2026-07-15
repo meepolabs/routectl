@@ -7,4 +7,5 @@ pub mod models;
 pub mod pure_proxy_admission;
 pub mod pure_proxy_metrics;
 pub mod responses;
+pub mod status;
 pub mod usage_capture;

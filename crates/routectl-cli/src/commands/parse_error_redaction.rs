@@ -38,6 +38,31 @@ pub(crate) fn redact_parse_error(err: &str) -> String {
     out.join("\n")
 }
 
+/// Redact the read-only loader's error before it is surfaced to the terminal.
+/// `load_effective_config_unvalidated` formats several failures with FULL
+/// filesystem paths: a `parse_config` failure as `config parse error in
+/// <path>: <toml diagnostic>` (whose diagnostic can also inline the offending
+/// config VALUE), an unreadable config as `cannot read config <path>: <io
+/// error>`, and a catalog-overlay failure as `catalog overlay load error:
+/// <path-bearing detail>`. The parse shape is cut at the `TOML parse error`
+/// header (dropping the wrapping path) and run through the shared fail-safe
+/// [`redact_parse_error`]; the two path-bearing IO shapes collapse to a
+/// path-free class message. Any other loader error (version/legacy-key
+/// rejection) carries no path or value and is kept verbatim so it stays
+/// actionable.
+pub(crate) fn redact_config_load_error(err: &str) -> String {
+    if let Some(idx) = err.find("TOML parse error") {
+        return redact_parse_error(&err[idx..]);
+    }
+    if err.starts_with("cannot read config") {
+        return "the config file could not be read".to_string();
+    }
+    if err.starts_with("catalog overlay load error") {
+        return "the catalog overlay could not be loaded".to_string();
+    }
+    err.to_string()
+}
+
 /// Whether `line` is the toml diagnostic header (`TOML parse error at line N,
 /// column M`), which carries only line/column numbers.
 fn is_header_line(line: &str) -> bool {

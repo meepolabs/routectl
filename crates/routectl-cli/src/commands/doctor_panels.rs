@@ -18,6 +18,24 @@ use super::usage::{WindowFlag, human_count, window_bounds};
 /// recorded traffic never blanks the panel.
 const DEFAULT_WINDOW: WindowFlag = WindowFlag::All;
 
+/// Path-free class token for an unexpected usage-DB open failure. Several
+/// `OpenError` variants embed the DB PATH in their Display, so the logging
+/// site on the unauthenticated status surface must never emit the Display --
+/// it logs this fixed variant class instead. A new variant is a compile error
+/// here, forcing a deliberate log-hygiene decision for any new failure mode.
+const fn open_error_class(err: &OpenError) -> &'static str {
+    match err {
+        OpenError::CreateDir { .. } => "create_dir",
+        OpenError::Open { .. } => "open",
+        OpenError::Pragma(_) => "pragma",
+        OpenError::Permissions { .. } => "permissions",
+        OpenError::Migrate(_) => "migrate",
+        OpenError::VersionTooNew { .. } => "version_too_new",
+        OpenError::NotWal { .. } => "not_wal",
+        OpenError::NoData { .. } | OpenError::VersionTooOld { .. } => "expected",
+    }
+}
+
 /// Compute the would-trim panel from the usage DB, read-only.
 ///
 /// Opens the usage DB via `open_readonly` and summarizes the would-trim
@@ -37,7 +55,13 @@ pub(crate) fn compute_would_trim_panel(
         Ok(db) => db,
         Err(OpenError::NoData { .. } | OpenError::VersionTooOld { .. }) => return None,
         Err(e) => {
-            tracing::debug!(error = %e, "would-trim panel: usage db unavailable, omitting");
+            // `OpenError` Display embeds the DB PATH; this poll fires on the
+            // unauthenticated status surface whose logs ship off-host, so only
+            // a fixed path-free variant class is logged, never the Display.
+            tracing::debug!(
+                reason = open_error_class(&e),
+                "would-trim panel: usage db unavailable, omitting"
+            );
             return None;
         }
     };
@@ -276,6 +300,76 @@ mod tests {
         assert!(docs.contains("`would_trim_tokens`"), "field not documented");
         for verdict in ["`met`", "`unmet`", "`cold`", "`unpriced`"] {
             assert!(docs.contains(verdict), "verdict {verdict} not documented");
+        }
+    }
+
+    #[test]
+    fn open_error_class_is_path_free_for_every_variant() {
+        // Every class token is a fixed discriminant, never a path. The
+        // path-bearing variants (Display embeds the DB path) must still map to
+        // a clean token.
+        let cases = [
+            open_error_class(&OpenError::Open {
+                path: "/secret/usage.db".into(),
+                source: rusqlite::Error::QueryReturnedNoRows,
+            }),
+            open_error_class(&OpenError::CreateDir {
+                path: "/secret/dir".into(),
+                source: std::io::Error::other("x"),
+            }),
+        ];
+        for token in cases {
+            assert!(
+                !token.contains('/') && !token.contains("secret"),
+                "class token must be path-free: {token}"
+            );
+        }
+        assert_eq!(
+            open_error_class(&OpenError::Open {
+                path: "/secret/usage.db".into(),
+                source: rusqlite::Error::QueryReturnedNoRows,
+            }),
+            "open"
+        );
+    }
+
+    #[test]
+    fn compute_log_on_open_failure_carries_no_path() {
+        use routectl_testkit::capture_events;
+
+        // Arrange: point the usage path at a DIRECTORY so `open_readonly`
+        // fails with `OpenError::Open` -- whose Display embeds the path -- via
+        // the catch-all `Err(e)` branch (not NoData / VersionTooOld).
+        let dir = TempDir::new().expect("tempdir");
+        let db_dir = dir.path().join("usage-as-a-dir");
+        std::fs::create_dir(&db_dir).expect("create dir at db path");
+        let secret_fragment = db_dir.to_string_lossy().into_owned();
+        let config = config_for(&db_dir);
+
+        // Act: capture the omission log emitted while computing the panel.
+        let events = capture_events(|| {
+            assert!(compute_would_trim_panel(&config, fixed_now()).is_none());
+        });
+
+        // Assert: the panel is omitted, exactly the path-free class is logged,
+        // and no captured event (message OR any field) carries the DB path.
+        let event = events
+            .iter()
+            .find(|e| e.message.contains("would-trim panel: usage db unavailable"))
+            .expect("omission log emitted");
+        assert_eq!(event.field("reason"), Some("open"));
+        for e in &events {
+            assert!(
+                !e.message.contains(&*secret_fragment),
+                "log message leaked the db path: {}",
+                e.message
+            );
+            for (name, value) in &e.fields {
+                assert!(
+                    !value.contains(&*secret_fragment),
+                    "log field `{name}` leaked the db path: {value}"
+                );
+            }
         }
     }
 }

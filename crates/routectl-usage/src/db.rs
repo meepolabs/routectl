@@ -96,6 +96,13 @@ pub enum OpenError {
          start the service once to migrate it"
     )]
     VersionTooOld { found: i64, supported: i64 },
+
+    /// A fast-fail read-only open found a journal mode other than WAL. A
+    /// viewer must not flip journal modes on a live writer's DB, and a
+    /// non-WAL journal means readers and the writer would contend, so the
+    /// viewer fails closed rather than risk it.
+    #[error("usage db journal mode is '{found}', expected 'wal'")]
+    NotWal { found: String },
 }
 
 /// Current wall-clock time as epoch milliseconds. Saturates to 0 if the
@@ -233,6 +240,38 @@ pub fn open(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
 /// `VersionTooNew` or `VersionTooOld` rather than being misread or crashing
 /// on a missing column.
 pub fn open_readonly(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
+    open_readonly_with_timeout(path, BUSY_TIMEOUT_MS, false)
+}
+
+/// Open the usage DB at `path` for reading only with a small busy timeout,
+/// for the status surface that polls under load. Like `open_readonly` it
+/// does NOT create, chmod, migrate, or switch journal modes -- the daemon
+/// is the sole writer and may be live -- and it classifies a missing file /
+/// missing `requests` table / schema mismatch identically (`NoData`,
+/// `VersionTooNew`, `VersionTooOld`). It differs in two ways: the busy
+/// timeout is `FASTFAIL_BUSY_TIMEOUT_MS` (well under the CLI viewer's 5s) so
+/// a poll loop sheds to a busy error instead of holding a request open for
+/// seconds; and it confirms WAL by READING the journal-mode pragma without
+/// mutating it, failing closed with `NotWal` on any other mode rather than
+/// risk reader/writer contention on a live writer's DB.
+pub fn open_readonly_fastfail(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
+    open_readonly_with_timeout(path, FASTFAIL_BUSY_TIMEOUT_MS, true)
+}
+
+/// Shared read-only open sequence behind [`open_readonly`] and
+/// [`open_readonly_fastfail`]: reject a missing file as `NoData`, open the
+/// file `SQLITE_OPEN_READ_ONLY` (never `CREATE`, so a missing file is still
+/// rejected and nothing is created or migrated). It then applies
+/// `busy_timeout_ms`, verifies the schema version matches this binary, and
+/// treats a missing `requests` table as `NoData`. When `check_wal` is set it
+/// additionally confirms WAL by READING the journal-mode pragma (never writing
+/// it), failing closed with `NotWal`. Neither path creates, chmods, migrates,
+/// or switches journal modes -- the daemon is the sole writer and may be live.
+fn open_readonly_with_timeout(
+    path: impl AsRef<Path>,
+    busy_timeout_ms: u64,
+    check_wal: bool,
+) -> Result<UsageDb, OpenError> {
     let path = path.as_ref().to_path_buf();
     if !path.exists() {
         return Err(OpenError::NoData {
@@ -248,11 +287,14 @@ pub fn open_readonly(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
             }
         })?;
 
-    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))
+    conn.busy_timeout(std::time::Duration::from_millis(busy_timeout_ms))
         .map_err(OpenError::Pragma)?;
 
     verify_readable_version(&conn)?;
     ensure_requests_table(&conn, &path)?;
+    if check_wal {
+        verify_wal_readonly(&conn)?;
+    }
 
     Ok(UsageDb { conn, path })
 }
@@ -302,9 +344,33 @@ fn ensure_requests_table(conn: &Connection, path: &Path) -> Result<(), OpenError
     }
 }
 
+/// Confirm the connection's journal mode is WAL by READING the pragma,
+/// never writing it. Unlike `enable_wal`, which uses a writing pragma, a
+/// read-only viewer must not flip journal modes on a live writer's DB; a
+/// non-WAL journal risks reader/writer contention, so this fails closed
+/// with `NotWal` rather than proceeding.
+fn verify_wal_readonly(conn: &Connection) -> Result<(), OpenError> {
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(OpenError::Pragma)?;
+    if mode.eq_ignore_ascii_case("wal") {
+        Ok(())
+    } else {
+        Err(OpenError::NotWal { found: mode })
+    }
+}
+
 /// SQLite busy timeout for this open path, in milliseconds. The
 /// one-writer/N-reader contract must not rely on a crate default.
 const BUSY_TIMEOUT_MS: u64 = 5000;
+
+/// SQLite busy timeout for the fast-fail read-only open path, in
+/// milliseconds. The status surface polls under load and must shed to a
+/// busy error quickly rather than hold a request open for seconds, so this
+/// is far smaller than `BUSY_TIMEOUT_MS`.
+const FASTFAIL_BUSY_TIMEOUT_MS: u64 = 50;
+
+const _: () = assert!(FASTFAIL_BUSY_TIMEOUT_MS < BUSY_TIMEOUT_MS);
 
 /// Switch the connection to WAL and confirm the mode actually took. On
 /// some filesystems the pragma is silently ignored and the journal stays
@@ -1782,5 +1848,200 @@ mod tests {
 
         // Assert
         assert_eq!(timeout, BUSY_TIMEOUT_MS as i64);
+    }
+
+    #[test]
+    fn open_readonly_fastfail_on_nonexistent_path_returns_no_data() {
+        // Arrange: a path that does not exist.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("absent.db");
+
+        // Act
+        let result = open_readonly_fastfail(&path);
+
+        // Assert: NoData, and the file was NOT created.
+        assert!(matches!(result, Err(OpenError::NoData { .. })));
+        assert!(
+            !path.exists(),
+            "open_readonly_fastfail must not create the file"
+        );
+    }
+
+    #[test]
+    fn open_readonly_fastfail_missing_requests_table_returns_no_data() {
+        // Arrange: a file at the current schema version but with no
+        // `requests` table, so the version check passes and the table
+        // probe is what classifies it as NoData.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("create empty sqlite file");
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+            .expect("stamp current version");
+        drop(conn);
+
+        // Act
+        let result = open_readonly_fastfail(&path);
+
+        // Assert
+        assert!(matches!(result, Err(OpenError::NoData { .. })));
+    }
+
+    #[test]
+    fn open_readonly_fastfail_on_fresh_unwritten_db_returns_version_too_old() {
+        // Arrange: a file exists but has no `requests` table and
+        // user_version = 0 (never migrated). VersionTooOld is returned
+        // before the table check, mirroring open_readonly.
+        let (_dir, path) = temp_db_path();
+        let _conn = Connection::open(&path).expect("create empty sqlite file");
+
+        // Act
+        let result = open_readonly_fastfail(&path);
+
+        // Assert
+        assert!(matches!(result, Err(OpenError::VersionTooOld { .. })));
+    }
+
+    #[test]
+    fn open_readonly_fastfail_rejects_newer_version() {
+        // Arrange: seed a normal DB, then bump user_version above support.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("seed db");
+        db.conn()
+            .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
+            .expect("bump version");
+        drop(db);
+
+        // Act
+        let result = open_readonly_fastfail(&path);
+
+        // Assert
+        assert!(matches!(result, Err(OpenError::VersionTooNew { .. })));
+    }
+
+    #[test]
+    fn open_readonly_fastfail_rejects_older_version() {
+        // Arrange: seed a fully-migrated DB, then roll user_version back to
+        // simulate a DB that predates this binary.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("seed db");
+        db.conn()
+            .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION - 1))
+            .expect("roll version back");
+        drop(db);
+
+        // Act
+        let result = open_readonly_fastfail(&path);
+
+        // Assert
+        assert!(matches!(result, Err(OpenError::VersionTooOld { .. })));
+    }
+
+    #[test]
+    fn open_readonly_fastfail_reads_a_healthy_wal_db() {
+        // Arrange: seed via the read-write open path, which sets WAL. WAL is
+        // a persistent property of the file, so it survives the reopen.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("seed db");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count) \
+                 VALUES (10, 20, 'r-ff', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0)",
+                [],
+            )
+            .expect("seed row");
+        drop(db);
+
+        // Act
+        let ro = open_readonly_fastfail(&path).expect("open readonly fastfail");
+
+        // Assert: a trivial read query answers.
+        let count: i64 = ro
+            .conn()
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn open_readonly_fastfail_reads_wal_db_with_live_writer() {
+        // Arrange: open the read-write writer and KEEP it live (do not drop),
+        // inserting a row so the WAL sidecars materialize. This mirrors the
+        // production scenario: the daemon's usage writer holds the WAL DB open
+        // while a status poll opens the same file read-only.
+        let (_dir, path) = temp_db_path();
+        let writer = open(&path).expect("seed db (live writer)");
+        writer
+            .conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count) \
+                 VALUES (10, 20, 'r-live', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0)",
+                [],
+            )
+            .expect("seed row");
+
+        // Act: open read-only WITHOUT dropping the live writer.
+        let ro = open_readonly_fastfail(&path).expect("open readonly fastfail under live writer");
+
+        // Assert: a real read query answers against the live-writer WAL DB.
+        let count: i64 = ro
+            .conn()
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .expect("count under live writer");
+        assert_eq!(count, 1);
+
+        // Keep the writer alive until the read completes.
+        drop(writer);
+    }
+
+    #[test]
+    fn open_readonly_fastfail_rejects_non_wal_db() {
+        // Arrange: a fully-migrated DB that was never switched to WAL. A raw
+        // connection defaults to the rollback-journal ("delete") mode, so
+        // this exercises the fail-closed path without mutating anything.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        migrate_to_current(&conn, 0).expect("migrate to current schema");
+        assert_ne!(
+            journal_mode(&conn).to_lowercase(),
+            "wal",
+            "fixture must genuinely not be in WAL mode"
+        );
+        drop(conn);
+
+        // Act
+        let result = open_readonly_fastfail(&path);
+
+        // Assert: fails closed rather than flipping the journal mode.
+        assert!(matches!(result, Err(OpenError::NotWal { .. })));
+
+        // And the journal mode was NOT mutated by the failed open.
+        let check = Connection::open(&path).expect("reopen");
+        assert_ne!(
+            journal_mode(&check).to_lowercase(),
+            "wal",
+            "open_readonly_fastfail must not flip the journal mode"
+        );
+    }
+
+    #[test]
+    fn open_readonly_fastfail_sets_small_busy_timeout() {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        drop(open(&path).expect("seed db"));
+
+        // Act
+        let ro = open_readonly_fastfail(&path).expect("open readonly fastfail");
+        let timeout: i64 = ro
+            .conn()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .expect("read busy_timeout");
+
+        // Assert: the fast-fail timeout is distinct and well under the 5s
+        // CLI-viewer timeout (the const relationship is guarded at compile
+        // time; here we prove the runtime PRAGMA took the small value).
+        assert_eq!(timeout, FASTFAIL_BUSY_TIMEOUT_MS as i64);
     }
 }

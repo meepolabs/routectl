@@ -253,6 +253,39 @@ impl ProviderState {
             circuit,
         }
     }
+
+    /// Read the gate's health for a status view WITHOUT mutating it. Takes
+    /// `&self`, so the borrow checker forbids touching the token bucket or
+    /// the half-open probe slot; it must never call `try_dispatch` or
+    /// `refill_tokens`. Mirrors `capacity_snapshot` (same projected bucket
+    /// level, same circuit-phase classification) and additionally surfaces
+    /// the half-open-probe-in-flight bool explicitly, rather than folding it
+    /// into `CircuitPhase::Open` the way the phase classification does.
+    pub fn gate_status(&self, now: Instant) -> ProviderGateStatus {
+        let snapshot = self.capacity_snapshot(now);
+        ProviderGateStatus {
+            rpm_available: snapshot.rpm_available,
+            circuit: snapshot.circuit,
+            half_open_probe_in_flight: self.half_open_in_flight,
+        }
+    }
+}
+
+/// Non-mutating health view of a `ProviderState` for the status surface.
+/// Carries the same projected RPM level and circuit phase as
+/// [`CapacitySnapshot`], plus the half-open-probe-in-flight bool surfaced
+/// explicitly (the phase classification folds an in-flight probe into
+/// `CircuitPhase::Open`; this field exposes it on its own).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProviderGateStatus {
+    /// Projected available RPM tokens right now. `None` when the policy is
+    /// unlimited; otherwise the lazily-refilled bucket level computed
+    /// without storing it back.
+    pub rpm_available: Option<f64>,
+    /// Read-only circuit-breaker phase.
+    pub circuit: CircuitPhase,
+    /// Whether a half-open probe is currently claimed by a live dispatch.
+    pub half_open_probe_in_flight: bool,
 }
 
 /// Read-only classification of the circuit breaker, mirroring the decision

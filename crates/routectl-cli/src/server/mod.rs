@@ -20,6 +20,7 @@ pub mod file_watch;
 pub mod k_rebuild;
 pub mod request_id;
 pub mod secrets;
+pub mod status_gate;
 
 use auth::TokenSet;
 use file_watch::{ReloadRequest, WatchTarget};
@@ -108,7 +109,7 @@ pub fn check_bind_safety(host: &str, unsafe_public: bool) -> Result<()> {
     Ok(())
 }
 
-fn is_loopback(host: &str) -> bool {
+pub(crate) fn is_loopback(host: &str) -> bool {
     use std::net::IpAddr;
     use std::str::FromStr;
     match IpAddr::from_str(host) {
@@ -441,7 +442,7 @@ pub async fn serve_on_listener_with_overlay(
         reload_handles.push(handle);
     }
 
-    let app = build_axum_router(state, token_set, max_body_bytes);
+    let app = build_axum_router(state, token_set, max_body_bytes, config_path.clone(), bound);
 
     let serve_result = serve_with_bounded_drain(listener, app).await;
 
@@ -919,6 +920,8 @@ fn build_axum_router(
     state: Arc<AppState>,
     token_set: Arc<TokenSet>,
     max_body_bytes: usize,
+    config_path: Option<PathBuf>,
+    bound: std::net::SocketAddr,
 ) -> AxumRouter {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
@@ -956,10 +959,32 @@ fn build_axum_router(
         ));
     }
 
-    public
-        .merge(authed)
+    // The `/v1/*` + `/health` surface, with its own `AppState` erased away.
+    let versioned = public.merge(authed).with_state(state.clone());
+
+    // The read-only `/status*` subtree. It is AUTH-EXEMPT (merged alongside
+    // the public/authed surface, never inside the auth group), so a status
+    // poll needs no token even when `[server.auth]` is set. It carries its
+    // OWN state and two subtree-only layers that `/v1/*` never inherits:
+    //   1. a `Host` allowlist (anti-DNS-rebinding), applied OUTERMOST so a
+    //      rejected host is turned away before it can consume a shed permit;
+    //   2. a bounded-concurrency load-shed (see `status_gate`), so a poller
+    //      burst sheds as a 503 instead of contending with the proxy.
+    // `with_state` erases `Router<Arc<StatusState>>` to `Router<()>` so it
+    // merges into the state-erased `versioned` router below.
+    let status_state = crate::handlers::status::StatusState::from_app(&state, config_path);
+    let status_allowlist = status_gate::StatusHostAllowlist::new(bound);
+    let status = status_gate::apply_overload_layers(
+        crate::handlers::status::status_router().with_state(Arc::new(status_state)),
+    )
+    .layer(axum::middleware::from_fn_with_state(
+        status_allowlist,
+        status_gate::host_guard,
+    ));
+
+    versioned
+        .merge(status)
         .layer(axum::middleware::from_fn(request_id::middleware))
-        .with_state(state)
 }
 
 /// Spawn the file-watch task, the SIGHUP listener (cfg(unix)), and

@@ -32,7 +32,7 @@ use crate::commands::capability_legacy::{
     present_legacy_capability_keys,
 };
 use crate::commands::doctor_panels::{compute_would_trim_panel, render_would_trim_panel};
-use crate::commands::parse_error_redaction::redact_parse_error;
+use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::probe::{PROBE_DEADLINE, login_id_for, probe_all, probe_finding};
 use crate::server::CompositeStore;
 
@@ -66,9 +66,27 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("capability", section_capability),
 ];
 
+/// The no-network subset of [`SECTIONS`]: [`SECTIONS`] MINUS the `probe`
+/// entry. Every producer here is pure over [`DoctorContext`] and dials
+/// nothing -- inventory, version, config, auth (`probe_local`, no refresh),
+/// secrets, and capability. A report built from these needs no
+/// [`gather_probe_results`] pass, so a status surface can produce a full
+/// doctor report offline and derive reachability from an already-observed
+/// circuit phase rather than an upstream dial.
+// Consumed by the offline status surface, not the CLI `doctor` command; the
+// CLI path stays on the full `SECTIONS` list.
+const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
+    ("inventory", section_inventory),
+    ("version", section_version),
+    ("config", section_config),
+    ("auth", section_auth),
+    ("secrets", section_secret_orphans),
+    ("capability", section_capability),
+];
+
 /// The read-only inputs every section producer draws from, gathered once
 /// per run so producers stay pure and the run is a single filesystem pass.
-struct DoctorContext {
+pub(crate) struct DoctorContext {
     config: Config,
     raw_config: Option<String>,
     /// Set when the read-only typed load failed for a reason the raw-bytes
@@ -184,7 +202,27 @@ pub async fn run(config_path: &Path, json: bool) -> i32 {
     overall_exit(&report.findings)
 }
 
+/// The network doctor gather: the no-network context PLUS one upstream
+/// reachability pass. Building the whole context in exactly ONE place
+/// ([`gather_context_no_network`]) is what keeps the two entry points from
+/// drifting -- a new context field is added once and both paths carry it; the
+/// only difference between the paths is this `probe_results` assignment.
 async fn gather_context(config_path: &Path) -> DoctorContext {
+    let ctx = gather_context_no_network(config_path).await;
+    let probe_results = gather_probe_results(&ctx.config).await;
+    DoctorContext {
+        probe_results,
+        ..ctx
+    }
+}
+
+/// Gather every read-only input the no-network sections draw from, WITHOUT
+/// any upstream dial: `probe_results` is left empty and
+/// [`gather_probe_results`] (the only caller of `CompositeStore`/`probe_all`)
+/// is never reached. Everything else -- per-layer config/overlay load, auth
+/// via `probe_local` (no network, no refresh), secret presence checks, the
+/// orphan scan, and the would-trim panel -- is retained.
+pub(crate) async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
     let raw_config = std::fs::read_to_string(config_path).ok();
     // Read-only, per-layer load: the config and the catalog overlay load
     // independently so the capability panel can degrade one without the
@@ -211,7 +249,6 @@ async fn gather_context(config_path: &Path) -> DoctorContext {
     let (probes, seats, auth_store_error) = gather_auth().await;
     let secret_checks = gather_secret_checks(&config, &probes);
     let orphan_secrets = gather_orphan_secrets(&config);
-    let probe_results = gather_probe_results(&config).await;
     let would_trim = compute_would_trim_panel(&config, Local::now());
 
     DoctorContext {
@@ -223,7 +260,7 @@ async fn gather_context(config_path: &Path) -> DoctorContext {
         auth_store_error,
         secret_checks,
         orphan_secrets,
-        probe_results,
+        probe_results: Vec::new(),
         would_trim,
         now_unix: unix_now(),
         binary_version: env!("CARGO_PKG_VERSION"),
@@ -298,31 +335,6 @@ fn derive_prior_cells(config: &Config, overlay: &CatalogOverlay) -> Vec<PriorCel
             })
         })
         .collect()
-}
-
-/// Redact the read-only loader's error before it is stored on the context and
-/// rendered by the version section. `load_effective_config_unvalidated` formats
-/// several failures with FULL filesystem paths: a `parse_config` failure as
-/// `config parse error in <path>: <toml diagnostic>` (whose diagnostic can also
-/// inline the offending config VALUE), an unreadable config as `cannot read
-/// config <path>: <io error>`, and a catalog-overlay failure as `catalog
-/// overlay load error: <path-bearing detail>`. The parse shape is cut at the
-/// `TOML parse error` header (dropping the wrapping path) and run through the
-/// shared fail-safe [`redact_parse_error`]; the two path-bearing IO shapes
-/// collapse to a path-free class message. Any other loader error
-/// (version/legacy-key rejection) carries no path or value and is kept verbatim
-/// so it stays actionable.
-fn redact_config_load_error(err: &str) -> String {
-    if let Some(idx) = err.find("TOML parse error") {
-        return redact_parse_error(&err[idx..]);
-    }
-    if err.starts_with("cannot read config") {
-        return "the config file could not be read".to_string();
-    }
-    if err.starts_with("catalog overlay load error") {
-        return "the catalog overlay could not be loaded".to_string();
-    }
-    err.to_string()
 }
 
 /// Probe every configured provider read-only through the shared `probe_all`
@@ -410,8 +422,25 @@ fn sanitize_store_open_error(err: &OAuthError) -> String {
 }
 
 fn build_report(ctx: &DoctorContext) -> DoctorReport {
+    build_report_over(ctx, SECTIONS)
+}
+
+/// The no-network report: identical to [`build_report`] but iterates
+/// [`NO_NETWORK_SECTIONS`], so it never renders the `probe` section and never
+/// depends on a `gather_probe_results` pass. Same schema version and sort as
+/// the network report.
+// Consumed by the offline status surface, not the CLI `doctor` command.
+pub(crate) fn build_report_no_network(ctx: &DoctorContext) -> DoctorReport {
+    build_report_over(ctx, NO_NETWORK_SECTIONS)
+}
+
+/// Shared report builder: run each section producer over `ctx`, flatten and
+/// deterministically sort the findings, and attach the panels. The section
+/// slice is the only thing that varies between the network and no-network
+/// reports, so the sort and assembly cannot drift between them.
+fn build_report_over(ctx: &DoctorContext, sections: &[(&str, SectionFn)]) -> DoctorReport {
     let mut findings = Vec::new();
-    for (_, producer) in SECTIONS {
+    for (_, producer) in sections {
         findings.extend(producer(ctx));
     }
     findings.sort_by(|a, b| {
@@ -2674,5 +2703,128 @@ mod tests {
                 "a directory leaked: {surface}"
             );
         }
+    }
+
+    /// The no-network section list is exactly [`SECTIONS`] minus the `probe`
+    /// entry, order preserved: `probe` is present in the full list and absent
+    /// from the no-network one.
+    #[test]
+    fn no_network_sections_are_sections_minus_probe() {
+        let full: Vec<&str> = SECTIONS.iter().map(|(k, _)| *k).collect();
+        let no_net: Vec<&str> = NO_NETWORK_SECTIONS.iter().map(|(k, _)| *k).collect();
+        assert!(full.contains(&"probe"), "SECTIONS must contain probe");
+        assert!(
+            !no_net.contains(&"probe"),
+            "no-network sections must omit probe"
+        );
+        let expected: Vec<&str> = full.iter().copied().filter(|k| *k != "probe").collect();
+        assert_eq!(
+            no_net, expected,
+            "no-network sections must equal SECTIONS minus probe, order preserved"
+        );
+    }
+
+    /// The no-network gather leaves `probe_results` empty (no
+    /// `gather_probe_results` -> no `CompositeStore`/`probe_all` dial), and a
+    /// report built from it carries no `probe` section rows.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gather_context_no_network_yields_no_probe_results() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let cfg_dir = tmp.path().join("routectl");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config_path = cfg_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            b"version = 3\n[providers.anthropic]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n",
+        )
+        .unwrap();
+        let creds_path = cfg_dir.join("credentials.json");
+        std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let context = gather_context_no_network(&config_path).await;
+        assert!(
+            context.probe_results.is_empty(),
+            "the no-network gather must not populate probe results"
+        );
+
+        let report = build_report_no_network(&context);
+        assert!(
+            report.findings.iter().all(|f| f.section != "probe"),
+            "a no-network report must carry no probe findings"
+        );
+    }
+
+    /// `build_report_no_network` keeps the schema version, emits no `probe`
+    /// rows, and its findings are exactly the network report's non-probe
+    /// findings for the same context.
+    #[test]
+    fn build_report_no_network_matches_network_minus_probe() {
+        let mut context = ctx(
+            config_referencing_anthropic(),
+            Some("version = 3\n"),
+            vec![("anthropic", LocalProbe::Present)],
+            Vec::new(),
+        );
+        context.probe_results = vec![("anthropic".to_string(), ProbeOutcome::Reachable)];
+
+        let network = build_report(&context);
+        let no_net = build_report_no_network(&context);
+
+        assert_eq!(no_net.schema_version, 2);
+        assert!(
+            no_net.findings.iter().all(|f| f.section != "probe"),
+            "no-network report must have no probe rows"
+        );
+        assert!(
+            network.findings.iter().any(|f| f.section == "probe"),
+            "the network report must have probe rows for the same context"
+        );
+
+        let network_non_probe: Vec<&Finding> = network
+            .findings
+            .iter()
+            .filter(|f| f.section != "probe")
+            .collect();
+        let no_net_all: Vec<&Finding> = no_net.findings.iter().collect();
+        assert_eq!(
+            no_net_all, network_non_probe,
+            "non-probe sections must be byte-identical across the two builders"
+        );
+    }
+
+    /// The shared gather body cannot drift: the network and no-network entry
+    /// points, run against the same fixture, produce identical non-probe
+    /// findings. A field added in one path but not the other would break this.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn network_and_no_network_gather_agree_outside_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let cfg_dir = tmp.path().join("routectl");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config_path = cfg_dir.join("config.toml");
+        std::fs::write(&config_path, b"version = 3\n").unwrap();
+        let creds_path = cfg_dir.join("credentials.json");
+        std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let network = gather_context(&config_path).await;
+        let no_network = gather_context_no_network(&config_path).await;
+
+        // Both contexts fed through the no-network builder must agree: the
+        // shared gather body produced the same non-probe inputs on both paths.
+        let from_network = build_report_no_network(&network);
+        let from_no_network = build_report_no_network(&no_network);
+        assert_eq!(
+            from_network.findings, from_no_network.findings,
+            "the shared gather body must yield identical non-probe findings on both entry points"
+        );
     }
 }

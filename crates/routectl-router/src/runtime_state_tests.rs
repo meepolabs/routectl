@@ -446,6 +446,59 @@ fn snapshot_half_open_ready_does_not_claim_probe_slot() {
 }
 
 #[test]
+fn gate_status_mirrors_capacity_snapshot_and_adds_probe_flag() {
+    // gate_status must report the SAME rpm_available and circuit phase as
+    // capacity_snapshot for identical state, plus the probe-in-flight bool.
+    let policy = ProviderRuntimePolicy {
+        rpm_limit: Some(4),
+        circuit_cooldown_ms: Some(500),
+        ..Default::default()
+    };
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+
+    // Closed, full bucket.
+    let snap = s.capacity_snapshot(t0);
+    let status = s.gate_status(t0);
+    assert_eq!(status.rpm_available, snap.rpm_available);
+    assert_eq!(status.circuit, snap.circuit);
+    assert!(!status.half_open_probe_in_flight);
+
+    // Park the breaker, then claim the half-open probe with a real
+    // dispatch: the phase folds to Open AND the explicit bool is true.
+    s.force_open(t0, Duration::from_millis(500));
+    let t_ready = t0 + Duration::from_millis(501);
+    assert_eq!(s.try_dispatch(t_ready), GateDecision::Allow);
+    let snap = s.capacity_snapshot(t_ready);
+    let status = s.gate_status(t_ready);
+    assert_eq!(status.circuit, snap.circuit);
+    assert_eq!(status.circuit, CircuitPhase::Open);
+    assert!(status.half_open_probe_in_flight);
+}
+
+#[test]
+fn gate_status_half_open_ready_does_not_claim_probe_slot() {
+    // Parallels snapshot_half_open_ready_does_not_claim_probe_slot: a
+    // non-mutating gate_status read of a recovered breaker must NOT claim
+    // the half-open probe slot the way a try_dispatch-based "read" would.
+    let policy = ProviderRuntimePolicy {
+        circuit_cooldown_ms: Some(500),
+        ..Default::default()
+    };
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    s.force_open(t0, Duration::from_millis(500));
+    let t_ready = t0 + Duration::from_millis(501);
+    let status = s.gate_status(t_ready);
+    assert_eq!(status.circuit, CircuitPhase::HalfOpenReady);
+    assert!(!status.half_open_probe_in_flight);
+    // The read did NOT claim the slot: a subsequent real dispatch still
+    // gets the probe.
+    assert!(!s.half_open_probe_in_flight());
+    assert_eq!(s.try_dispatch(t_ready), GateDecision::Allow);
+}
+
+#[test]
 fn snapshot_open_during_cooldown_is_not_dispatchable() {
     let policy = ProviderRuntimePolicy {
         circuit_cooldown_ms: Some(1_000),

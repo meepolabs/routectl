@@ -32,7 +32,10 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 axum.workspace = true
-tower.workspace = true
+# `limit` + `load-shed` back the status-subtree-only middleware: a bounded
+# global concurrency cap on `/status*` that sheds excess as an immediate 503
+# rather than queueing (the ingress `/v1/*` lane carries none of this).
+tower = { workspace = true, features = ["limit", "load-shed"] }
 tower-http.workspace = true
 http.workspace = true
 bytes.workspace = true
@@ -58,6 +61,15 @@ base64 = "0.22"
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 arc-swap = { workspace = true }
+# Non-poisoning mutex for the `/status` panel-availability counters
+# (handlers::status::PanelCounters): a poisoned std mutex would silently
+# drop the last-available stamp. Already a dependency of routectl-router.
+parking_lot = "0.12"
+# The `/status/usage` panel classifies a SQLite busy/lock into the distinct
+# `db_busy` shed code (vs `db_unavailable`) by reading the underlying
+# `rusqlite` error code. Already in the graph via routectl-usage; a direct
+# dep lets the status module own its shed-code vocabulary.
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 # MITM front-proxy: reqwest talks to the upstream (promoted from
 # dev-only), the rest terminate/generate the local TLS listener.
 reqwest.workspace = true
@@ -109,9 +121,6 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util", "io-util"] }
 insta.workspace = true
 serial_test = "3"
-# Used by the `routectl usage` command tests to seed rows directly into a
-# temp usage DB via raw SQL. Test-only; the release binary never links it.
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 routectl-testkit.workspace = true
 # The config-migrate tests race config.toml through the SAME advisory
 # write lock the config writer holds (config_write::edit_config_toml), so
