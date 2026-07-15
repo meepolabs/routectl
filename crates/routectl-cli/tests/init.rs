@@ -25,7 +25,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_cli::commands::init::scaffold::scaffold_seed;
-use routectl_cli::commands::init::{self, InitArgs, InitIo, Offer};
+use routectl_cli::commands::init::{self, CredentialCapture, InitArgs, InitIo, Offer};
 use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddArgs};
 use routectl_core::Result;
 use routectl_router::{Config, build_provider, parse_config};
@@ -116,6 +116,7 @@ struct StubInitIo {
     stdin_value: String,
     offer_env: bool,
     prompt_value: String,
+    credential_capture: CredentialCapture,
     login_calls: Mutex<u32>,
     prompt_hidden_calls: Mutex<u32>,
 }
@@ -132,6 +133,7 @@ impl Default for StubInitIo {
             stdin_value: String::new(),
             offer_env: false,
             prompt_value: String::new(),
+            credential_capture: CredentialCapture::Skip,
             login_calls: Mutex::new(0),
             prompt_hidden_calls: Mutex::new(0),
         }
@@ -175,6 +177,9 @@ impl InitIo for StubInitIo {
     }
     fn confirm_wizard_ack(&self) -> bool {
         self.ack
+    }
+    fn offer_credential_capture(&self) -> CredentialCapture {
+        self.credential_capture
     }
 }
 
@@ -724,9 +729,10 @@ fn non_interactive_missing_value_run_terminates_without_hanging() {
     let xdg = tempfile::tempdir().unwrap();
 
     // Fresh empty XDG (no oauth creds) + no offerable env var means the wizard
-    // reaches a missing default route and errors -- with stdin closed, that path
-    // must never block on a prompt. The bounded receive fails the test on a
-    // hang instead of stalling the suite forever.
+    // reaches an empty offer list. With stdin closed it cannot capture a
+    // credential either, so it must print the actionable next step and exit --
+    // never block on a prompt, and never surface the raw missing-route error.
+    // The bounded receive fails the test on a hang instead of stalling forever.
     let (tx, rx) = std::sync::mpsc::channel();
     let path_arg = path.to_str().unwrap().to_string();
     let xdg_arg = xdg.path().to_str().unwrap().to_string();
@@ -736,19 +742,29 @@ fn non_interactive_missing_value_run_terminates_without_hanging() {
             .env("XDG_CONFIG_HOME", &xdg_arg)
             .env_remove(ANTHROPIC_ENV_VAR)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output();
-        let _ = tx.send(out.map(|o| o.status.success()));
+        let _ = tx.send(out);
     });
 
-    let success = rx
+    let out = rx
         .recv_timeout(Duration::from_secs(20))
         .expect("init must not hang on a non-interactive missing-value invocation")
         .expect("the init subprocess ran");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
     assert!(
-        !success,
-        "a non-interactive run with no offers cannot pick a default route; it must exit nonzero",
+        out.status.success(),
+        "a credential-less non-interactive run exits cleanly with guidance, not a routing error",
     );
-    assert!(!path.exists(), "the failed run wrote no config");
+    assert!(
+        stdout.contains("routectl login anthropic") && stdout.contains(ANTHROPIC_ENV_VAR),
+        "the actionable next step names both setup paths:\n{stdout}",
+    );
+    assert!(
+        !stdout.to_ascii_lowercase().contains("default route"),
+        "the raw missing-route error must never surface:\n{stdout}",
+    );
+    assert!(!path.exists(), "the run wrote no config");
 }
