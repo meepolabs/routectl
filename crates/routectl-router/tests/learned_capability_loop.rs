@@ -7,12 +7,13 @@
 //! `output_config.format` the egress lifts to a top-level `response_format`
 //! field -- with a byte-accurate 400 whose `/error/param` names that same
 //! wire field. The router translates the rejected param to its canonical key
-//! (`structured_output`), learns the negative under that key, and the chain
-//! filter routes away from the rejecting target on subsequent matching
-//! requests. A wire-body assertion on the OUTBOUND request confirms the
-//! rejected surface actually crossed the wire -- the guard against a
-//! synthetic proof where the rejected capability was dropped at egress and a
-//! real upstream could never have rejected it.
+//! (`structured_output`), the capture-side request-membership gate admits it
+//! because the request derived that same key, the negative is learned under
+//! it, and the chain filter routes away from the rejecting target on
+//! subsequent matching requests. A wire-body assertion on the OUTBOUND request
+//! confirms the rejected surface actually crossed the wire -- the guard
+//! against a synthetic proof where the rejected capability was dropped at
+//! egress and a real upstream could never have rejected it.
 //!
 //! The loop is observed through the PUBLIC router surface only:
 //! `Dispatched.meta.learned_capabilities` (the per-request learn events),
@@ -389,7 +390,8 @@ async fn real_envelope_response_format_400_learns_structured_output_and_routes_a
     assert!(!ev.remapped);
     assert!(
         ev.request_features.iter().any(|f| f == STRUCTURED_OUTPUT),
-        "the request naturally derives the learned capability",
+        "the request naturally derives the learned capability -- the capture \
+         membership gate admits it precisely because it is in this set",
     );
     assert_eq!(hits(&a).await, 1);
     assert_eq!(hits(&b).await, 1);
@@ -879,8 +881,12 @@ async fn two_expired_negatives_on_one_target_both_reprobe_and_clear() {
 
 // ---------------------------------------------------------------------------
 // Live-network smoke variant (ignored in CI). Run with a real openai-compat
-// base URL + key that rejects an unsupported built-in tool with a 400 whose
-// `/error/param` names it:
+// base URL + key that rejects a structured-output request with a 400 whose
+// `/error/param` is `response_format` -- the surface that actually SURVIVES
+// egress (a built-in tool the egress drops never crosses the wire, so no real
+// upstream could reject it). The resolver translates `response_format` onto
+// the canonical `structured_output` key the request derives, and the capture
+// membership gate admits it because the request carried that capability:
 //   ROUTECTL_LIVE_BASE_URL=... ROUTECTL_LIVE_API_KEY=... \
 //     cargo test -p routectl-router --test learned_capability_loop -- --ignored
 // ---------------------------------------------------------------------------
@@ -894,7 +900,6 @@ async fn live_openai_unsupported_parameter_is_learned() {
     ) else {
         panic!("set ROUTECTL_LIVE_BASE_URL and ROUTECTL_LIVE_API_KEY to run the live smoke");
     };
-    let feature = std::env::var("ROUTECTL_LIVE_FEATURE").unwrap_or_else(|_| WEB_SEARCH.to_string());
 
     let mut providers = BTreeMap::new();
     providers.insert(
@@ -924,7 +929,9 @@ async fn live_openai_unsupported_parameter_is_learned() {
     let mut router = Router::new(Arc::new(cfg));
     router.install_resolved_models(resolved);
 
-    let d = complete_with(&router, "live", &[feature.as_str()]).await;
+    let d = router
+        .complete_with_options(req_with_structured_output("live"), RouterOptions::default())
+        .await;
     assert!(
         !d.meta.learned_capabilities.is_empty(),
         "a real upstream unsupported-parameter 400 must produce a learn event: {:?}",
