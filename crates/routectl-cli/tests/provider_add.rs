@@ -36,7 +36,7 @@ port = 8787
 [providers.fast]
 kind = \"openai-compat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+api_key_ref = \"__API_KEY_REF__\"
 
 [models.gpt]
 provider = \"fast\"
@@ -151,6 +151,7 @@ fn provision_login_token(provider: &str) {
 
 fn write_config(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("config.toml");
+    let body = body.replace("__API_KEY_REF__", &common::file_ref("test-key"));
     std::fs::write(&path, body).unwrap();
     path
 }
@@ -580,20 +581,34 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     .await;
     assert_no_leak(&events, prompt_secret);
 
-    // --secret-ref carrying an inline `literal:` value: the value is written
-    // to config by design, but must never reach a tracing event (the audit
-    // records the scheme class only).
+    // --secret-ref carrying an inline `literal:` value is now rejected outright
+    // (an inline key on argv is a leak vector by construction). The rejection
+    // path must still never surface the value in a tracing event.
     let literal_secret = "leak-literal-secret-value-not-real";
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), V3_BASE);
-    let (_r, events) = routectl_testkit::with_capture(async {
+    let (result, events) = routectl_testkit::with_capture(async {
         let mut a = base_args("openai-compat", "grok3");
         a.base_url = Some("https://api.x.example/v1".to_string());
         a.secret_ref = Some(format!("literal:{literal_secret}"));
-        provider_add::run_with_io(&path, a, &StubIo::default())
-            .await
-            .expect("secret-ref add");
+        provider_add::run_with_io(&path, a, &StubIo::default()).await
     })
     .await;
-    assert_no_leak(&events, literal_secret);
+    assert!(
+        result.is_err(),
+        "an inline literal: secret-ref must be rejected"
+    );
+    for e in &events {
+        assert!(
+            !e.message.contains(literal_secret),
+            "secret leaked into a tracing message: {}",
+            e.message
+        );
+        for (k, v) in &e.fields {
+            assert!(
+                !v.contains(literal_secret),
+                "secret leaked into tracing field `{k}`: {v}"
+            );
+        }
+    }
 }

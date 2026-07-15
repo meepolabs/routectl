@@ -280,15 +280,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatches_literal_to_memory_store() {
+    async fn rejects_literal_via_memory_store() {
+        // A `literal:` ref routes to MemoryStore, which now refuses it with
+        // the safe-path steer -- and never echoes the inline value.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         let store = CompositeStore::open_at(&path).await.unwrap();
-        let v = store
+        let err = store
             .get(&SecretRef::Literal("inline-value".into()))
             .await
-            .unwrap();
-        assert_eq!(v, "inline-value");
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("inline-value"),
+            "rejection must not echo the value: {msg}"
+        );
+        assert!(
+            msg.contains("--api-key-stdin") && msg.contains("env://"),
+            "rejection must name the safe paths: {msg}"
+        );
     }
 
     #[tokio::test]

@@ -16,6 +16,8 @@ use routectl_router::{
     ResolvedModel, RetryPolicy, Router, RouterOptions,
 };
 
+mod common;
+
 /// Mock provider whose behavior is parameterized per-call.
 struct MockProvider {
     id: String,
@@ -241,7 +243,7 @@ fn build_router_v6_full(
     for (name, runtime) in provider_runtime {
         config_providers.insert(
             name,
-            ProviderEntry::openai_compat("http://example.invalid", "literal:x")
+            ProviderEntry::openai_compat("http://example.invalid", common::file_ref("x"))
                 .with_runtime(runtime),
         );
     }
@@ -1894,7 +1896,7 @@ mod max_output_tokens_resolution {
         let mut providers = BTreeMap::new();
         providers.insert(
             "p1".into(),
-            ProviderEntry::openai_compat("http://example.invalid", "literal:x"),
+            ProviderEntry::openai_compat("http://example.invalid", common::file_ref("x")),
         );
         let mut models = BTreeMap::new();
         let mut entry = ModelEntry::new("p1", "u");

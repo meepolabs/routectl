@@ -308,7 +308,7 @@ async fn mitm_absent_does_not_trip_the_hard_refuse_on_a_non_loopback_bind() {
     let config = Config {
         server: routectl_router::ServerConfig {
             auth: Some(ServerAuth {
-                tokens: vec!["literal:test-listener-token".to_string()],
+                tokens: vec![common::file_ref("test-listener-token")],
             }),
             ..routectl_router::ServerConfig::default()
         },

@@ -25,7 +25,7 @@ port = 8787
 [providers.fast]
 kind = \"openai-compat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+api_key_ref = \"__API_KEY_REF__\"
 
 [models.gpt]
 provider = \"fast\"
@@ -50,7 +50,7 @@ retry_denylist = []
 [providers.fast]
 kind = \"openai-compat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+api_key_ref = \"__API_KEY_REF__\"
 
 [models.gpt]
 provider = \"fast\"
@@ -94,6 +94,7 @@ fn migrate_temp(body: &str, expected_from: u32) -> (tempfile::TempDir, routectl_
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     let overlay_path = dir.path().join("catalog_overlay.json");
+    let body = body.replace("__API_KEY_REF__", &common::file_ref("test-key"));
     std::fs::write(&config_path, body).unwrap();
 
     let result = config_migrate_cmd::run_at(&config_path, &overlay_path, false, true)

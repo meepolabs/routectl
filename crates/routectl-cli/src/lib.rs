@@ -8,3 +8,5 @@ pub mod handlers;
 pub mod ingress;
 pub mod proxy;
 pub mod server;
+#[cfg(test)]
+pub(crate) mod test_secret;

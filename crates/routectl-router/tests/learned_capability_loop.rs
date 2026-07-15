@@ -23,6 +23,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use routectl_auth::{MemoryStore, SecretStore};
@@ -183,7 +185,7 @@ async fn build_router(
     for u in &upstreams {
         providers.insert(
             u.provider_name.clone(),
-            ProviderEntry::openai_compat(&u.base_url, "literal:test-key")
+            ProviderEntry::openai_compat(&u.base_url, common::file_ref("test-key"))
                 .with_runtime(u.runtime.clone()),
         );
         models.insert(
@@ -904,7 +906,7 @@ async fn live_openai_unsupported_parameter_is_learned() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "live".to_string(),
-        ProviderEntry::openai_compat(&base_url, format!("literal:{api_key}")),
+        ProviderEntry::openai_compat(&base_url, common::file_ref(&api_key)),
     );
     let mut models = BTreeMap::new();
     models.insert("m_live".to_string(), ModelEntry::new("live", "gpt-4o-mini"));

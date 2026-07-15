@@ -38,6 +38,8 @@ pub mod router;
 pub mod runtime_state;
 pub mod schema_gen;
 pub(crate) mod seat_pool;
+#[cfg(test)]
+pub(crate) mod test_secret;
 
 pub use activation::{
     ActivatedChange, ActivationDelta, ActivationEntry, ActivationState, ActivationStatus,

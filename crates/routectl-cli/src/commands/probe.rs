@@ -731,7 +731,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir.path().join("creds.json")).await;
-        let entry = ProviderEntry::openai_compat(server.uri(), "literal:probe-key");
+        let entry =
+            ProviderEntry::openai_compat(server.uri(), crate::test_secret::file_ref("probe-key"));
         let config = config_with(&[("slow", entry)]);
 
         let results = probe_all(&config, &store, Duration::from_millis(150)).await;

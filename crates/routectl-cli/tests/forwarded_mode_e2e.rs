@@ -382,7 +382,7 @@ fn forwarded_config_with_non_anthropic_provider(upstream_base: &str) -> Arc<Conf
     let mut providers = BTreeMap::new();
     providers.insert(
         "compat-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream_base.to_string(), common::file_ref("test-key")),
     );
     let mut models = BTreeMap::new();
     models.insert(
@@ -418,7 +418,7 @@ fn config_with_forwarded_and_own_providers(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "compat-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream_base.to_string(), common::file_ref("test-key")),
     );
     providers.insert(
         "forwarded-provider".to_string(),
@@ -458,7 +458,8 @@ fn backward_compat_config(upstream_base: &str, mitm: Option<MitmConfig>) -> Arc<
     let mut providers = BTreeMap::new();
     providers.insert(
         "anthropic-mock".to_string(),
-        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_base.to_string()),
+        ProviderEntry::anthropic_api(common::file_ref("test-key"))
+            .with_base_url(upstream_base.to_string()),
     );
     let mut models = BTreeMap::new();
     models.insert(

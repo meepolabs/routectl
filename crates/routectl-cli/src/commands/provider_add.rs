@@ -500,11 +500,12 @@ fn build_oauth(
 /// `api_key_ref`, its scheme CLASS, and any deferred capture. `--api-key-env
 /// VAR` verifies the var resolves now and yields `env://VAR`; `--secret-ref
 /// REF` validates the ref parses and writes it back verbatim (so a
-/// `file://`/`literal:` ref is preserved exactly, never round-tripped
-/// through the redacting `Display`); `--api-key-stdin` captures the piped
-/// value to the managed store; with no flag on a TTY, an already-resolvable
-/// conventional env var is OFFERED, else a hidden prompt captures the value.
-/// A missing key with no TTY errors actionably rather than hanging.
+/// `file://` ref is preserved exactly, never round-tripped through the
+/// redacting `Display`; a `literal:` ref is rejected at parse); `--api-key-stdin`
+/// captures the piped value to the managed store; with no flag on a TTY, an
+/// already-resolvable conventional env var is OFFERED, else a hidden prompt
+/// captures the value. A missing key with no TTY errors actionably rather
+/// than hanging.
 fn resolve_secret(
     args: &ProviderAddArgs,
     io: &dyn AddIo,
@@ -770,8 +771,7 @@ default = \"gpt\"
 
     // -----------------------------------------------------------------
     // Secret resolution: the ref STRING is computed without the value; a
-    // `literal:` secret-ref is written verbatim, never round-tripped through
-    // the redacting `Display`.
+    // `literal:` secret-ref is refused so no inline key reaches argv/config.
     // -----------------------------------------------------------------
 
     #[test]
@@ -794,16 +794,26 @@ default = \"gpt\"
     }
 
     #[test]
-    fn resolve_secret_writes_a_literal_ref_verbatim() {
-        // A `literal:` ref must be written EXACTLY as given -- routing it
-        // through `SecretRef`'s `Display` would corrupt it to
-        // `literal:[REDACTED]`.
+    fn resolve_secret_rejects_literal_ref() {
+        // `--secret-ref literal:...` is refused: the inline key would land
+        // on argv and be persisted in plaintext in config. The error must
+        // steer to the safe paths and never echo the key value.
         let mut a = args("openai-compat", "x");
         a.secret_ref = Some("literal:keep-me-exactly".to_string());
-        let (ref_str, class, _pending) = resolve_secret(&a, &FakeIo::default()).unwrap();
+        let err = match resolve_secret(&a, &FakeIo::default()) {
+            Ok(_) => panic!("a literal: secret-ref must be rejected"),
+            Err(e) => e,
+        };
 
-        assert_eq!(ref_str, "literal:keep-me-exactly");
-        assert_eq!(class, "literal");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("keep-me-exactly"),
+            "rejection must not echo the key value: {msg}"
+        );
+        assert!(
+            msg.contains("--api-key-stdin") && msg.contains("prompt") && msg.contains("env://"),
+            "rejection must name the safe paths: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------

@@ -4,10 +4,12 @@ use routectl_auth::{MemoryStore, SecretRef};
 use routectl_core::Error;
 use routectl_router::{ProviderEntry, ReasoningDialect, build_provider};
 
+mod common;
+
 #[tokio::test]
 async fn build_openai_compat_resolves_secret() {
     let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
-    let entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-abc");
+    let entry = ProviderEntry::openai_compat("https://example.com/v1", common::file_ref("sk-abc"));
     let provider = build_provider("test", &entry, store.clone())
         .await
         .expect("build");
@@ -17,7 +19,7 @@ async fn build_openai_compat_resolves_secret() {
 #[tokio::test]
 async fn build_anthropic_api_resolves_secret() {
     let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
-    let entry = ProviderEntry::anthropic_api("literal:sk-ant-abc");
+    let entry = ProviderEntry::anthropic_api(common::file_ref("sk-ant-abc"));
     let provider = build_provider("anthropic", &entry, store.clone())
         .await
         .expect("build");
@@ -291,14 +293,18 @@ mod openai_responses_tests {
     #[tokio::test]
     async fn factory_builds_openai_responses_chatgpt_oauth_provider() {
         // Arrange
-        let toml_src = r#"
+        let api_key_ref = crate::common::file_ref("test-jwt");
+        let account_id_ref = crate::common::file_ref("acct-uuid");
+        let toml_src = format!(
+            r#"
 [providers.gpt]
 kind = "openai-responses"
-api_key_ref = "literal:test-jwt"
-account_id_ref = "literal:acct-uuid"
+api_key_ref = "{api_key_ref}"
+account_id_ref = "{account_id_ref}"
 auth_kind = "chatgpt-oauth"
-"#;
-        let cfg: Config = toml::from_str(toml_src).expect("parse");
+"#
+        );
+        let cfg: Config = toml::from_str(&toml_src).expect("parse");
         let entry = cfg.providers.get("gpt").expect("gpt entry");
         let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
             std::sync::Arc::new(MemoryStore);
@@ -343,13 +349,16 @@ auth_kind = "chatgpt-oauth"
     #[tokio::test]
     async fn factory_builds_openai_responses_api_key_provider() {
         // Arrange: api-key surface, no account_id_ref, default base_url.
-        let toml_src = r#"
+        let api_key_ref = crate::common::file_ref("sk-test-123");
+        let toml_src = format!(
+            r#"
 [providers.gpt-api]
 kind = "openai-responses"
-api_key_ref = "literal:sk-test-123"
+api_key_ref = "{api_key_ref}"
 auth_kind = "api-key"
-"#;
-        let cfg: Config = toml::from_str(toml_src).expect("parse");
+"#
+        );
+        let cfg: Config = toml::from_str(&toml_src).expect("parse");
         let entry = cfg.providers.get("gpt-api").expect("gpt-api entry");
         let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
             std::sync::Arc::new(MemoryStore);

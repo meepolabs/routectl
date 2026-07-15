@@ -7,8 +7,8 @@ use routectl_router::{Config, ProviderEntry, collect_config_validation, locate_d
 use crate::server::CompositeStore;
 
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
-/// every secret reference (env / file / literal), and report any aliases that
-/// reference unknown providers.
+/// every secret reference (env / file / oauth; `literal:` refs are rejected),
+/// and report any aliases that reference unknown providers.
 ///
 /// `raw_text` is the config file's original TOML, threaded through so a
 /// semantic error whose message names a config key/path can be rendered with
