@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
+use routectl_auth::oauth::known_provider_ids;
 use routectl_auth::{LocalProbe, SecretRef, SecretStore};
 use routectl_core::ProbeOutcome;
 use routectl_router::{Config, Finding, ProviderEntry, Status, build_provider, overall_exit};
@@ -170,7 +171,7 @@ pub async fn run(config_path: &Path, name: Option<String>, json: bool) -> i32 {
             }
         }
     } else {
-        for line in render_human(&results) {
+        for line in render_human(&target, &results) {
             println!("{line}");
         }
     }
@@ -199,12 +200,31 @@ fn select_target(config: Config, name: Option<&str>) -> Result<Config, String> {
 }
 
 /// Map a batch of probe results to findings via the shared [`probe_finding`]
-/// seam. Used for the process exit code (`overall_exit`).
+/// seam. Used for the process exit code (`overall_exit`), which reads only
+/// each finding's status -- the login remediation is irrelevant here, so no
+/// login id is resolved.
 fn to_findings(results: &[(String, ProbeOutcome)]) -> Vec<Finding> {
     results
         .iter()
-        .map(|(name, outcome)| probe_finding(name, outcome))
+        .map(|(name, outcome)| probe_finding(name, outcome, None))
         .collect()
+}
+
+/// The canonical `routectl login` argument for `name`, or `None` when the
+/// provider is not oauth-backed (a static-credential scheme names no login
+/// command) or names an oauth id the login parser would reject. Resolving
+/// against [`known_provider_ids`] guarantees the suggested command round-trips
+/// through login's clap value-parser instead of naming the config key, which
+/// may differ from the oauth login id.
+pub(crate) fn login_id_for(config: &Config, name: &str) -> Option<&'static str> {
+    let entry = config.providers.get(name)?;
+    let SecretRef::OAuth { provider, .. } = SecretRef::parse(entry.api_key_ref()?).ok()? else {
+        return None;
+    };
+    known_provider_ids()
+        .iter()
+        .copied()
+        .find(|id| *id == provider)
 }
 
 /// THE shared `ProbeOutcome` -> [`Finding`] classification. Both the
@@ -213,8 +233,11 @@ fn to_findings(results: &[(String, ProbeOutcome)]) -> Vec<Finding> {
 /// outcome. Every non-clean outcome (Fail or Warn) carries a populated
 /// `remediation`; the remediation text lives HERE, not baked into the
 /// outcome's reason string, so it is attached once for both callers.
-pub(crate) fn probe_finding(name: &str, outcome: &ProbeOutcome) -> Finding {
-    let (detail, remediation) = describe(name, outcome);
+/// `login_id` is the oauth login argument to suggest for an `AuthFailed`
+/// outcome (see [`login_id_for`]); `None` suppresses the login suggestion for
+/// a non-oauth credential.
+pub(crate) fn probe_finding(name: &str, outcome: &ProbeOutcome, login_id: Option<&str>) -> Finding {
+    let (detail, remediation) = describe(outcome, login_id);
     Finding {
         section: "probe",
         name: name.to_string(),
@@ -238,18 +261,16 @@ pub(crate) const fn outcome_status(outcome: &ProbeOutcome) -> Status {
 
 /// Operator-facing detail line + remediation for a probe outcome. The
 /// remediation is `Some` for every Fail/Warn outcome and `None` for clean
-/// ones; it never carries a token, path, or env value.
-fn describe(name: &str, outcome: &ProbeOutcome) -> (String, Option<String>) {
+/// ones; it never carries a token, path, or env value. `login_id` is the
+/// oauth login argument to name for an `AuthFailed` outcome; `None` (a
+/// non-oauth credential) points at the configured api key instead.
+fn describe(outcome: &ProbeOutcome, login_id: Option<&str>) -> (String, Option<String>) {
     match outcome {
         ProbeOutcome::Reachable => ("reachable".to_string(), None),
         ProbeOutcome::Skipped(reason) => (format!("skipped ({reason})"), None),
-        ProbeOutcome::AuthFailed(reason) => (
-            reason.clone(),
-            Some(format!(
-                "run `routectl login {name}` if this provider uses oauth, otherwise \
-                 verify its configured api key"
-            )),
-        ),
+        ProbeOutcome::AuthFailed(reason) => {
+            (reason.clone(), Some(auth_failed_remediation(login_id)))
+        }
         ProbeOutcome::Unreachable(reason) => (
             reason.clone(),
             Some("verify the provider's base URL and network reachability".to_string()),
@@ -268,6 +289,17 @@ fn describe(name: &str, outcome: &ProbeOutcome) -> (String, Option<String>) {
             "unrecognized probe outcome".to_string(),
             Some("upgrade routectl to a build that understands this outcome".to_string()),
         ),
+    }
+}
+
+/// Remediation for an `AuthFailed` outcome. An oauth credential names the
+/// exact `routectl login` argument (already resolved to a parser-valid login
+/// id); a non-oauth credential points at the configured api key instead of a
+/// login command that would not apply.
+fn auth_failed_remediation(login_id: Option<&str>) -> String {
+    match login_id {
+        Some(id) => format!("run `routectl login {id}` to re-authenticate this provider"),
+        None => "verify this provider's configured api key".to_string(),
     }
 }
 
@@ -303,13 +335,13 @@ const fn status_label(status: Status) -> &'static str {
     }
 }
 
-fn render_human(results: &[(String, ProbeOutcome)]) -> Vec<String> {
+fn render_human(config: &Config, results: &[(String, ProbeOutcome)]) -> Vec<String> {
     if results.is_empty() {
         return vec!["no providers configured".to_string()];
     }
     let mut out = Vec::new();
     for (name, outcome) in results {
-        let finding = probe_finding(name, outcome);
+        let finding = probe_finding(name, outcome, login_id_for(config, name));
         out.push(format!(
             "{} {}: {}",
             status_label(finding.status),
@@ -463,7 +495,7 @@ mod tests {
             }
             other => panic!("expected AuthFailed for a missing seat, got {other:?}"),
         }
-        let finding = probe_finding(&results[0].0, outcome);
+        let finding = probe_finding(&results[0].0, outcome, login_id_for(&config, &results[0].0));
         assert_eq!(finding.status, Status::Fail);
         assert!(
             finding
@@ -483,7 +515,7 @@ mod tests {
             ProbeOutcome::AuthFailed(reason) => assert_eq!(reason, "token expired"),
             other => panic!("expected AuthFailed for an expired token, got {other:?}"),
         }
-        let finding = probe_finding("anthropic", &outcome);
+        let finding = probe_finding("anthropic", &outcome, Some("anthropic"));
         assert_eq!(finding.status, Status::Fail);
         assert!(
             finding
@@ -503,7 +535,7 @@ mod tests {
             matches!(outcome, ProbeOutcome::Unreachable(_)),
             "expected Unreachable, got {outcome:?}"
         );
-        let finding = probe_finding("anthropic", &outcome);
+        let finding = probe_finding("anthropic", &outcome, None);
         assert_eq!(finding.status, Status::Fail);
         assert!(
             finding.remediation.is_some(),
@@ -519,7 +551,7 @@ mod tests {
             ProbeOutcome::IndeterminateHttp { status: 500 },
             ProbeOutcome::UnsupportedFreeProbe,
         ] {
-            let finding = probe_finding("p", &outcome);
+            let finding = probe_finding("p", &outcome, None);
             assert!(
                 matches!(finding.status, Status::Fail | Status::Warn),
                 "outcome {outcome:?} should be Fail or Warn"
@@ -529,6 +561,84 @@ mod tests {
                 "{outcome:?} must carry a remediation"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // AuthFailed remediation: the suggested `routectl login` argument
+    // must be one the login clap parser accepts (an id from
+    // `known_provider_ids`), and a non-oauth credential earns no login
+    // suggestion at all.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn oauth_authfailed_names_a_parser_valid_login_id_not_the_config_key() {
+        // The config key deliberately differs from the oauth login id: the
+        // login parser accepts `anthropic`, never the arbitrary key `claude`.
+        let config = config_with(&[("claude", ProviderEntry::anthropic_api("oauth://anthropic"))]);
+
+        let login_id = login_id_for(&config, "claude");
+        assert_eq!(
+            login_id,
+            Some("anthropic"),
+            "the login suggestion must map the oauth ref to its login id, not the config key"
+        );
+        assert!(
+            routectl_auth::oauth::known_provider_ids().contains(&login_id.unwrap()),
+            "the suggested login id must round-trip through the login value-parser"
+        );
+
+        let finding = probe_finding(
+            "claude",
+            &ProbeOutcome::AuthFailed("not logged in".into()),
+            login_id,
+        );
+        let rem = finding
+            .remediation
+            .expect("AuthFailed carries a remediation");
+        assert!(
+            rem.contains("routectl login anthropic"),
+            "remediation must name the parser-valid login id: {rem}"
+        );
+        assert!(
+            !rem.contains("claude"),
+            "remediation must not name the config key the login parser rejects: {rem}"
+        );
+    }
+
+    #[test]
+    fn non_oauth_authfailed_omits_the_login_suggestion() {
+        let config = config_with(&[("static", ProviderEntry::anthropic_api("literal:k"))]);
+
+        let login_id = login_id_for(&config, "static");
+        assert_eq!(
+            login_id, None,
+            "a non-oauth credential names no login command"
+        );
+
+        let finding = probe_finding(
+            "static",
+            &ProbeOutcome::AuthFailed("provider rejected the probe credential".into()),
+            login_id,
+        );
+        let rem = finding
+            .remediation
+            .expect("a non-oauth AuthFailed still carries a remediation");
+        assert!(
+            !rem.contains("routectl login"),
+            "a non-oauth remediation must not suggest `routectl login`: {rem}"
+        );
+    }
+
+    #[test]
+    fn oauth_ref_the_login_parser_rejects_yields_no_login_suggestion() {
+        // `made-up` parses as an oauth ref but is not a known login id, so
+        // suggesting `routectl login made-up` would be rejected by clap.
+        let config = config_with(&[("weird", ProviderEntry::anthropic_api("oauth://made-up"))]);
+        assert_eq!(
+            login_id_for(&config, "weird"),
+            None,
+            "an oauth id the login parser would reject yields no login suggestion"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -576,7 +686,7 @@ mod tests {
             (503, "may be unhealthy"),
         ];
         for (status, needle) in cases {
-            let finding = probe_finding("p", &ProbeOutcome::IndeterminateHttp { status });
+            let finding = probe_finding("p", &ProbeOutcome::IndeterminateHttp { status }, None);
             let rem = finding.remediation.expect("remediation present");
             assert!(
                 rem.contains(needle),

@@ -33,7 +33,7 @@ use crate::commands::capability_legacy::{
 };
 use crate::commands::doctor_panels::{compute_would_trim_panel, render_would_trim_panel};
 use crate::commands::parse_error_redaction::redact_parse_error;
-use crate::commands::probe::{PROBE_DEADLINE, probe_all, probe_finding};
+use crate::commands::probe::{PROBE_DEADLINE, login_id_for, probe_all, probe_finding};
 use crate::server::CompositeStore;
 
 /// UNSTABLE report schema version. Bumped on ANY structural or semantic
@@ -437,7 +437,7 @@ fn build_report(ctx: &DoctorContext) -> DoctorReport {
 fn section_probe(ctx: &DoctorContext) -> Vec<Finding> {
     ctx.probe_results
         .iter()
-        .map(|(name, outcome)| probe_finding(name, outcome))
+        .map(|(name, outcome)| probe_finding(name, outcome, login_id_for(&ctx.config, name)))
         .collect()
 }
 
