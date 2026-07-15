@@ -25,6 +25,7 @@ use async_trait::async_trait;
 
 use super::edit_pipeline::preflight;
 use super::provider_add::{self, AddIo, RealAddIo};
+use super::provider_env::env_var_for_kind;
 use plan::{WizardAnswers, WizardPlan, build_plan};
 use scaffold::ScaffoldError;
 use write::commit_models_aliases;
@@ -54,6 +55,10 @@ pub trait InitIo: AddIo {
     /// The ONE wizard-level high-consequence ack before any write
     /// (live-daemon / config-migrate pattern; declining writes nothing).
     fn confirm_wizard_ack(&self) -> bool;
+    /// Credential-less interactive run: how to capture a credential now
+    /// (oauth login / hidden api-key prompt), or skip to the actionable
+    /// next-step message. Only consulted when the detected offer list is empty.
+    fn offer_credential_capture(&self) -> CredentialCapture;
 }
 
 /// Flag surface for `init`, assembled from the clap layer.
@@ -102,6 +107,26 @@ pub enum OfferSource {
     Oauth,
     Env,
     Forwarded,
+    /// Synthesis-only: a credential the operator will type at the interactive
+    /// hidden prompt. Detection never produces it (it cannot see a key not yet
+    /// entered); the empty-offer capture branch synthesizes it so `provider
+    /// add` reaches its existing hidden-prompt capture through the normal plan
+    /// pipeline, landing the value in the managed store as a `file://` ref.
+    ApiKeyPrompt,
+}
+
+/// How the operator wants to supply a missing credential on a credential-less
+/// interactive run, chosen from the empty-offer capture branch. Not a provider
+/// catalog -- a fixed choice over the two capture seams `provider add` already
+/// implements ([`AddIo::login`] and [`AddIo::prompt_hidden`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialCapture {
+    /// Run the oauth login flow for the `anthropic` id.
+    OauthLogin,
+    /// Enter an API key at the hidden prompt (captured to the managed store).
+    ApiKey,
+    /// Decline -- fall through to the actionable next-step message.
+    Skip,
 }
 
 /// One `[models.<nick>]` wiring the final write emits.
@@ -256,6 +281,21 @@ impl InitIo for RealInitIo {
         );
         yes_no("write it now? [y/N] ")
     }
+
+    fn offer_credential_capture(&self) -> CredentialCapture {
+        println!("no credentials detected. set one up now, or skip and configure later:");
+        println!("  1. log in to your Anthropic account (oauth)");
+        println!("  2. enter an API key");
+        println!("  3. skip for now");
+        match prompt("choose 1-3 (blank to skip): ")
+            .unwrap_or_default()
+            .as_str()
+        {
+            "1" => CredentialCapture::OauthLogin,
+            "2" => CredentialCapture::ApiKey,
+            _ => CredentialCapture::Skip,
+        }
+    }
 }
 
 /// Print `label`, flush, and read one trimmed line. `None` on a read error
@@ -340,6 +380,16 @@ async fn orchestrate(
         offers.push(detect::forwarded_offer());
     }
 
+    if offers.is_empty() {
+        match capture_missing_credential(args, io) {
+            Some(offer) => offers.push(offer),
+            None => {
+                print!("{}", missing_credential_next_steps());
+                return Ok(());
+            }
+        }
+    }
+
     let answers = collect_answers(args, &offers, io)?;
     let plan =
         build_plan(&answers, existing_config, &offers).map_err(|e| Error::Config(e.to_string()))?;
@@ -350,6 +400,65 @@ async fn orchestrate(
     }
 
     apply_plan(config_path, config_exists, plan, existing_config, io).await
+}
+
+/// The empty-offer capture branch: on a credential-less interactive run,
+/// offer to set up a provider now (oauth login or a hidden api-key prompt) and
+/// synthesize the matching [`Offer`] so the normal plan pipeline wires it
+/// through the SAME `provider add` seams a detected offer uses. Returns `None`
+/// when the run is non-interactive (`--yes`) or the operator declines -- the
+/// caller then prints the actionable next step instead of dead-ending at the
+/// missing route. No provider-catalog UI and no probe: a fixed two-choice
+/// branch over the one oauth id / api-key kind `provider add` can build.
+fn capture_missing_credential(args: &InitArgs, io: &dyn InitIo) -> Option<Offer> {
+    if args.yes {
+        return None;
+    }
+    match io.offer_credential_capture() {
+        CredentialCapture::OauthLogin => Some(oauth_capture_offer()),
+        CredentialCapture::ApiKey => Some(api_key_capture_offer()),
+        CredentialCapture::Skip => None,
+    }
+}
+
+/// The synthesized oauth offer for the empty-offer capture branch: the
+/// `anthropic` login id (the sole id `provider add` builds an oauth block for),
+/// wired post-confirm through `io.login` exactly as a detected oauth offer is.
+fn oauth_capture_offer() -> Offer {
+    Offer {
+        provider_name: "anthropic".to_string(),
+        kind: "anthropic-api".to_string(),
+        source: OfferSource::Oauth,
+        credential_class: "oauth".to_string(),
+    }
+}
+
+/// The synthesized api-key offer for the empty-offer capture branch: an
+/// `anthropic-api` provider whose credential is captured at `provider add`'s
+/// existing hidden prompt (no env var, no forwarded source), landing in the
+/// managed secret store as a `file://` ref.
+fn api_key_capture_offer() -> Offer {
+    Offer {
+        provider_name: "anthropic".to_string(),
+        kind: "anthropic-api".to_string(),
+        source: OfferSource::ApiKeyPrompt,
+        credential_class: "api-key".to_string(),
+    }
+}
+
+/// The actionable next step shown when a credential-less run cannot capture one
+/// (non-interactive, or the operator declined): the two supported setup paths
+/// and the re-run hint. Deliberately NEVER the raw `MissingDefaultRoute` -- a
+/// fresh machine has nothing to route, which is a setup gap to guide through,
+/// not a routing error to surface.
+fn missing_credential_next_steps() -> String {
+    let env_var = env_var_for_kind("anthropic-api").unwrap_or("ANTHROPIC_API_KEY");
+    format!(
+        "no credentials detected, so there is nothing to route yet.\n\
+         set up a provider, then re-run `routectl init`:\n  \
+         - log in to your Anthropic account:      routectl login anthropic\n  \
+         - or set an API key in the environment:  export {env_var}=<your-key>\n"
+    )
 }
 
 /// Gather the operator's answers -- from `io` prompts interactively, or from
@@ -638,6 +747,7 @@ mod tests {
         offer_env: bool,
         prompt_value: String,
         login_ok: bool,
+        credential_capture: CredentialCapture,
         login_calls: std::sync::Mutex<u32>,
         prompt_hidden_calls: std::sync::Mutex<u32>,
     }
@@ -655,6 +765,7 @@ mod tests {
                 offer_env: false,
                 prompt_value: String::new(),
                 login_ok: true,
+                credential_capture: CredentialCapture::Skip,
                 login_calls: std::sync::Mutex::new(0),
                 prompt_hidden_calls: std::sync::Mutex::new(0),
             }
@@ -701,6 +812,9 @@ mod tests {
         }
         fn confirm_wizard_ack(&self) -> bool {
             self.ack
+        }
+        fn offer_credential_capture(&self) -> CredentialCapture {
+            self.credential_capture
         }
     }
 
@@ -1354,6 +1468,130 @@ mod tests {
             default_alias_of(&cfg).as_deref(),
             Some("anthropic"),
             "the oauth provider is the confirmed default route"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Empty-offer credential capture (H2): a credential-less first run no
+    // longer dead-ends at the missing-route error. The oauth branch is the
+    // hermetic end-to-end vehicle (it wires an `oauth://anthropic` ref via
+    // the fake login seam, touching no managed secret store); the api-key
+    // branch's provider-arg mapping is pinned in plan.rs.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn empty_offers_oauth_capture_reaches_a_valid_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let fake = FakeInitIo {
+            credential_capture: CredentialCapture::OauthLogin,
+            offer_selection: vec![0],
+            model_id: Some("claude-sonnet-4-5".to_string()),
+            default_route: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+
+        orchestrate(
+            &path,
+            &init_args(false, false, None, false),
+            &Config::default(),
+            false,
+            Vec::new(),
+            &fake,
+        )
+        .await
+        .expect("an empty-offer oauth capture writes a routed config");
+
+        assert_eq!(
+            *fake.login_calls.lock().unwrap(),
+            1,
+            "the synthesized oauth offer drives exactly one login"
+        );
+        let cfg = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entry = cfg
+            .providers
+            .get("anthropic")
+            .expect("captured provider wired");
+        assert_eq!(entry.api_key_ref(), Some("oauth://anthropic"));
+        assert_eq!(
+            default_alias_of(&cfg).as_deref(),
+            Some("anthropic"),
+            "the captured credential becomes the default route"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_offers_declined_capture_writes_nothing_and_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let fake = FakeInitIo {
+            credential_capture: CredentialCapture::Skip,
+            ..Default::default()
+        };
+
+        orchestrate(
+            &path,
+            &init_args(false, false, None, false),
+            &Config::default(),
+            false,
+            Vec::new(),
+            &fake,
+        )
+        .await
+        .expect("declining capture is a graceful exit, not a routing error");
+
+        assert!(!path.exists(), "a declined capture writes nothing");
+        assert_eq!(
+            *fake.login_calls.lock().unwrap(),
+            0,
+            "no login when the operator declines"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_offers_under_yes_exits_cleanly_without_a_routing_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // No offers, no --forwarded: the non-interactive path cannot capture a
+        // credential, so it prints the actionable next step and returns Ok --
+        // never the raw MissingDefaultRoute the bare plan would produce.
+        orchestrate(
+            &path,
+            &init_args(false, true, Some("claude-sonnet-4-5"), false),
+            &Config::default(),
+            false,
+            Vec::new(),
+            &FakeInitIo::default(),
+        )
+        .await
+        .expect("an empty-offer --yes run must not surface the raw routing error");
+
+        assert!(
+            !path.exists(),
+            "nothing is written when there is no credential to route"
+        );
+    }
+
+    #[test]
+    fn missing_credential_next_steps_names_login_and_env_but_no_routing_error() {
+        let msg = missing_credential_next_steps();
+
+        assert!(
+            msg.contains("routectl login anthropic"),
+            "names the parser-valid login command: {msg}"
+        );
+        assert!(
+            msg.contains("ANTHROPIC_API_KEY"),
+            "names the conventional env var: {msg}"
+        );
+        assert!(
+            msg.contains("routectl init"),
+            "tells the operator to re-run init: {msg}"
+        );
+        assert!(
+            !msg.to_ascii_lowercase().contains("default route"),
+            "never surfaces the raw routing error: {msg}"
         );
     }
 }
