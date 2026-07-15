@@ -1304,6 +1304,59 @@ mod tests {
         assert_eq!(meta_version, SCHEMA_VERSION.to_string());
     }
 
+    /// The v9 -> v10 keyspace invalidation: a v9 DB carrying a pre-change,
+    /// token-keyed learn row is truncated so it cannot resurface under the new
+    /// canonical keyspace. Proves a warm-rebuild after the bump surfaces no
+    /// stale pre-change keys, and that the step is forward-only + idempotent.
+    #[test]
+    fn v9_to_v10_truncates_stale_pre_change_learn_rows() {
+        use crate::schema::CREATE_CAPABILITY_LEARN_EVENTS_TABLE;
+
+        // Arrange: a genuine v9 DB with a stale token-keyed learn row (the
+        // pre-change openai keyspace keyed on the `error.code` token).
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('schema_version', '9');",
+        )
+        .expect("seed meta");
+        conn.execute_batch(CREATE_CAPABILITY_LEARN_EVENTS_TABLE)
+            .expect("create learn table");
+        conn.execute(
+            "INSERT INTO capability_learn_events (ts, state_key, feature_key, \
+             provider_kind, signal_tier, observations, upstream_status, remapped, \
+             request_features) VALUES (1, 'nick', 'unsupported_parameter', \
+             'openai-compat', 'self-identifying', 1, 400, 0, '[]')",
+            [],
+        )
+        .expect("seed stale row");
+        conn.execute_batch("PRAGMA user_version = 9")
+            .expect("stamp v9");
+        assert_eq!(user_version(&conn), 9);
+
+        // Act
+        let version = migrate_to_current(&conn, 0).expect("migrate v9->v10");
+
+        // Assert: landed at v10 and the stale row is gone (the table survives).
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert!(table_exists(&conn, "capability_learn_events"));
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM capability_learn_events", [], |r| {
+                r.get(0)
+            })
+            .expect("count learn rows");
+        assert_eq!(
+            remaining, 0,
+            "pre-change token-keyed row must not resurface"
+        );
+
+        // Idempotent: re-running the ladder is a no-op.
+        let again = migrate_to_current(&conn, 0).expect("re-run migrate");
+        assert_eq!(again, SCHEMA_VERSION);
+    }
+
     /// A fresh DB opens directly at the current version with the
     /// near-lossless attribution columns (v8) present.
     #[test]

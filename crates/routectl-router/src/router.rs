@@ -22,7 +22,7 @@ use routectl_core::{
 };
 use serde_json::Value;
 
-use crate::capability_matcher::match_capability;
+use crate::capability_matcher::resolve_requested_capability;
 use crate::capability_strip::{Outcome, RequestInterceptor, StripContext, StripInterceptor};
 use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::{
@@ -3678,11 +3678,12 @@ impl Router {
     /// pays only the cheap early checks. The full eligibility gate (all
     /// must hold): the kill switch is on; the upstream fault is a request
     /// fault (400/422); the class was not operator-remapped; the request
-    /// did not carry a forwarded bearer; the matcher attributes the fault
-    /// to a capability; that capability is not the operator-remap
-    /// provenance token; and the capability is in the request's re-derived
-    /// feature set (the local-validation guardrail against learning a
-    /// negative for a capability the request never asked for).
+    /// did not carry a forwarded bearer; the resolver attributes the fault
+    /// to a canonical capability; and that capability is not the
+    /// operator-remap provenance token. The resolver keys on the
+    /// request-capability namespace and returns at most the one capability
+    /// the upstream named, so no cross-namespace intersection gate is needed
+    /// (the old one could never pass on real traffic).
     ///
     /// `dedupe` carries one entry per `(state_key, feature_key)` for the
     /// life of a single request: the error arm fires per attempt, so a
@@ -3718,19 +3719,24 @@ impl Router {
         let Some(provider_kind) = target.provider_kind else {
             return;
         };
-        let Some((feature_key, tier)) = match_capability(provider_kind, err, cf) else {
+        let Some((feature_key, tier)) = resolve_requested_capability(provider_kind, err, cf) else {
             return;
         };
         if feature_key == crate::class_policy::OPERATOR_REMAP_CAPABILITY {
             return;
         }
+        // The request's derived feature set is recorded on the learn event for
+        // observability, but is NOT a capture gate: the resolver already keys
+        // on the request-capability namespace and, by returning at most the one
+        // capability the upstream named (`/error/param` for openai-compat, a
+        // corroborated whole-phrase for the inferred tier), intrinsically
+        // learns nothing the request did not carry. The old cross-namespace
+        // gate compared the error-token namespace against this set and could
+        // never pass on real traffic.
         let request_features = crate::feature_keys::derive_feature_keys(
             req.tools.as_deref().unwrap_or(&[]),
             req.provider_extras.as_ref(),
         );
-        if !request_features.iter().any(|f| f == &feature_key) {
-            return;
-        }
         let state_key = target.state_key.clone();
         // MASK: an operator `force_supported` override for this (target,
         // feature) masks the learned negative. The act side already
@@ -11931,6 +11937,72 @@ mod feature_filter_tests {
     }
 
     #[test]
+    fn stripped_success_leaves_negative_while_admitted_probe_success_clears() {
+        // The two-sided invariant: an admitted probe's full-request 2xx clears
+        // its negative, but a stripped success clears nothing. advisor is an
+        // ACTING strip (stripped in place -> NO admission); context_management
+        // is PROBE-DUE (admitted, bypassed from the strip set). The filter
+        // records only the probe admission, so settling a 2xx over the recorded
+        // admissions clears context_management yet leaves the stripped advisor
+        // negative acting.
+        let router = Router::new(Arc::new(Config::default()));
+        let target = strip_target("nick");
+        let base = Instant::now();
+        router.learned_capabilities.import_entries(vec![
+            acting_negative("nick", "advisor", base),
+            probe_due_negative("nick", "context_management", base),
+        ]);
+
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let decision = router.unsupported_feature_for_target(
+            &target,
+            &["advisor".to_string(), "context_management".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+        assert_eq!(decision, None);
+        assert_eq!(strip_keys, vec!["advisor".to_string()]);
+        assert_eq!(
+            admissions.len(),
+            1,
+            "only the probe admits; the strip records no admission",
+        );
+
+        // A full-request 2xx settles exactly the recorded admissions.
+        for adm in &admissions {
+            router.learned_capabilities.record_probe_outcome(
+                &adm.state_key,
+                &adm.feature,
+                adm.provider_kind,
+                crate::learned_capability::ProbeOutcome::Success,
+                base,
+            );
+        }
+
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "nick",
+                "context_management",
+                "openai-compat",
+                base,
+            ),
+            crate::learned_capability::RoutingDecision::Allow,
+            "the admitted probe's 2xx cleared its negative",
+        );
+        assert_eq!(
+            router.learned_capabilities.acting_negative_for(
+                "nick",
+                "advisor",
+                "openai-compat",
+                base,
+            ),
+            crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+            "a stripped success never clears the stripped feature's negative",
+        );
+    }
+
+    #[test]
     fn probe_bypass_of_strip_eligible_feature_emits_probe_bypassed_warn() {
         // context_management is a probe-due droppable Strip (strip-eligible),
         // web_search is a probe-due essential (route-away). Both are admitted
@@ -17892,9 +17964,24 @@ mod learn_capture_tests {
     }
 
     /// Self-identifying openai-compat rejection: a 400 whose `error.code`
-    /// is `unsupported_parameter`, which the classifier lifts to
-    /// `FeatureUnsupported` with that capability token.
+    /// is `unsupported_parameter` (the classifier lifts it to
+    /// `FeatureUnsupported`) and whose `/error/param` names the real
+    /// capability `web_search` -- the field the shared resolver reads.
     fn self_identifying_provider() -> Arc<CapabilityRejectingProvider> {
+        Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 400,
+            body: r#"{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"web_search","message":"Unsupported parameter."}}"#.into(),
+            upstream_type: Some("invalid_request_error".into()),
+            upstream_code: Some("unsupported_parameter".into()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// A self-identifying openai-compat 400 whose `error.code` lifts to
+    /// `FeatureUnsupported` but whose body carries NO `/error/param`: the
+    /// resolver can attribute no capability, so nothing is learned.
+    fn paramless_unsupported_provider() -> Arc<CapabilityRejectingProvider> {
         Arc::new(CapabilityRejectingProvider {
             id: "p1",
             status: 400,
@@ -17949,10 +18036,9 @@ api_key_ref = "literal:k"
         let router = router_with(OPENAI_P1, self_identifying_provider());
 
         // Act
-        let (dispatched, events) = with_capture(router.complete_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         // Assert: the request still fails (learning never changes the
@@ -17961,16 +18047,13 @@ api_key_ref = "literal:k"
         assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
         let ev = &dispatched.meta.learned_capabilities[0];
         assert_eq!(ev.state_key, "m1");
-        assert_eq!(ev.feature_key, "unsupported_parameter");
+        assert_eq!(ev.feature_key, "web_search");
         assert_eq!(ev.provider_kind, "openai-compat");
         assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
         assert_eq!(ev.observations, 1);
         assert_eq!(ev.upstream_status, 400);
         assert!(!ev.remapped);
-        assert_eq!(
-            ev.request_features,
-            vec!["unsupported_parameter".to_string()]
-        );
+        assert_eq!(ev.request_features, vec!["web_search".to_string()]);
 
         // The structured WARN carries only the safe fields.
         let warns = learn_warns(&events);
@@ -17978,7 +18061,7 @@ api_key_ref = "literal:k"
         let warn = warns[0];
         assert_eq!(warn.field("event"), Some("learn"));
         assert_eq!(warn.field("state_key"), Some("m1"));
-        assert_eq!(warn.field("capability_key"), Some("unsupported_parameter"));
+        assert_eq!(warn.field("capability_key"), Some("web_search"));
         assert_eq!(warn.field("signal_tier"), Some("self-identifying"));
         assert_eq!(warn.field("observations"), Some("1"));
         assert_eq!(warn.field("acting"), Some("true"));
@@ -17989,7 +18072,7 @@ api_key_ref = "literal:k"
         assert_eq!(
             router.learned_capabilities.acting_negative_for(
                 "m1",
-                "unsupported_parameter",
+                "web_search",
                 "openai-compat",
                 Instant::now(),
             ),
@@ -18002,10 +18085,9 @@ api_key_ref = "literal:k"
         // The stream error arm is wired identically to the complete arm.
         let router = router_with(OPENAI_P1, self_identifying_provider());
 
-        let (dispatched, events) = with_capture(router.stream_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, events) = with_capture(
+            router.stream_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         assert!(dispatched.result.is_err());
@@ -18035,10 +18117,9 @@ api_key_ref = "literal:k"
         let router = router_with(toml, provider.clone());
 
         // Act
-        let (dispatched, events) = with_capture(router.complete_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         // Assert: the same provider WAS retried (two dispatches), so the
@@ -18071,10 +18152,9 @@ api_key_ref = "literal:k"
 "#;
         let router = router_with(toml, self_identifying_provider());
 
-        let (dispatched, events) = with_capture(router.complete_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         assert!(dispatched.meta.learned_capabilities.is_empty());
@@ -18095,7 +18175,7 @@ api_key_ref = "literal:k"
 
     #[tokio::test]
     async fn masked_reject_emits_suppression_warn_and_counter_and_skips_learn() {
-        // A force_supported override masks `unsupported_parameter` on m1: the
+        // A force_supported override masks `web_search` on m1: the
         // mask lets the target dispatch (act side short-circuits to Allow),
         // upstream still rejects it, and the learn side suppresses the observe
         // -- one suppression WARN + one counter, no learned negative, no learn
@@ -18103,14 +18183,13 @@ api_key_ref = "literal:k"
         let toml = format!(
             "{OPENAI_P1}\n\
              [capability.overrides.\"p1:m1\"]\n\
-             force_supported = [\"unsupported_parameter\"]\n"
+             force_supported = [\"web_search\"]\n"
         );
         let router = router_with(&toml, self_identifying_provider());
 
-        let (dispatched, events) = with_capture(router.complete_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         // The request still fails; nothing was learned and the ordinary learn
@@ -18128,10 +18207,7 @@ api_key_ref = "literal:k"
         assert_eq!(supp.len(), 1);
         assert_eq!(supp[0].field("event"), Some("suppression"));
         assert_eq!(supp[0].field("state_key"), Some("m1"));
-        assert_eq!(
-            supp[0].field("capability_key"),
-            Some("unsupported_parameter")
-        );
+        assert_eq!(supp[0].field("capability_key"), Some("web_search"));
         assert_eq!(supp[0].field("body"), None, "no body/message/prompt fields");
         assert_eq!(supp[0].field("message"), None);
 
@@ -18147,7 +18223,7 @@ api_key_ref = "literal:k"
         let toml = format!(
             "{OPENAI_P1}\n\
              [capability.overrides.\"p1:m1\"]\n\
-             force_supported = [\"unsupported_parameter\"]\n"
+             force_supported = [\"web_search\"]\n"
         );
         let router = router_with(&toml, self_identifying_provider());
 
@@ -18155,7 +18231,7 @@ api_key_ref = "literal:k"
         let t0 = Instant::now();
         router.learned_capabilities.observe(
             "m1",
-            "unsupported_parameter",
+            "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
             t0,
@@ -18163,10 +18239,9 @@ api_key_ref = "literal:k"
         let before = router.learned_capabilities.snapshot();
         assert_eq!(before.len(), 1);
 
-        let (dispatched, _events) = with_capture(router.complete_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, _events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         // No learn event, and the resident entry is untouched: neither
@@ -18199,10 +18274,9 @@ api_key_ref = "literal:k"
         });
         let router = router_with(OPENAI_P1, provider);
 
-        let (dispatched, events) = with_capture(router.complete_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         assert!(dispatched.meta.learned_capabilities.is_empty());
@@ -18210,11 +18284,12 @@ api_key_ref = "literal:k"
     }
 
     #[tokio::test]
-    async fn capability_absent_from_request_is_not_learned() {
-        // Self-identifying 400 for `unsupported_parameter`, but the request
-        // only carries a `web_search` tool -> the local-validation
-        // guardrail rejects a capability the request never asked for.
-        let router = router_with(OPENAI_P1, self_identifying_provider());
+    async fn unresolvable_openai_rejection_is_not_learned() {
+        // A self-identifying 400 whose body carries NO `/error/param`: the
+        // resolver can attribute no canonical capability, so nothing is
+        // learned. (The old cross-namespace gate is gone; the resolver's
+        // no-learn-on-unresolvable is the replacement guardrail.)
+        let router = router_with(OPENAI_P1, paramless_unsupported_provider());
 
         let (dispatched, events) = with_capture(
             router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
@@ -18230,7 +18305,7 @@ api_key_ref = "literal:k"
         // A request carrying a forwarded client bearer never contributes a
         // learned negative (the forwarded token owns its own retry/backoff).
         let router = router_with(OPENAI_P1, self_identifying_provider());
-        let mut req = req_with_tool("unsupported_parameter");
+        let mut req = req_with_tool("web_search");
         req.routectl_internal.forwarded_bearer = Some(ForwardedBearer::new("t".into()));
 
         let (dispatched, events) =
@@ -18257,10 +18332,9 @@ api_key_ref = "literal:k"
 "#;
         let router = router_with(toml, self_identifying_provider());
 
-        let (dispatched, events) = with_capture(router.complete_with_options(
-            req_with_tool("unsupported_parameter"),
-            RouterOptions::default(),
-        ))
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+        )
         .await;
 
         assert!(dispatched.meta.learned_capabilities.is_empty());
@@ -18337,14 +18411,11 @@ api_key_ref = "literal:k"
         // Arrange: an expired negative for the very feature the request asks
         // for; the target's provider then succeeds on the admitted re-probe.
         let router = router_with(OPENAI_P1, Arc::new(SuccessProvider { id: "p1" }));
-        seed_expired_negative(&router, "m1", "unsupported_parameter");
+        seed_expired_negative(&router, "m1", "web_search");
 
         // Act
         let dispatched = router
-            .complete_with_options(
-                req_with_tool("unsupported_parameter"),
-                RouterOptions::default(),
-            )
+            .complete_with_options(req_with_tool("web_search"), RouterOptions::default())
             .await;
 
         // Assert: the probe was admitted, the 2xx cleared the entry, and a
@@ -18355,7 +18426,7 @@ api_key_ref = "literal:k"
         assert_eq!(
             router.learned_capabilities.acting_negative_for(
                 "m1",
-                "unsupported_parameter",
+                "web_search",
                 "openai-compat",
                 Instant::now(),
             ),
@@ -18368,15 +18439,12 @@ api_key_ref = "literal:k"
         // Arrange: an expired negative; the probe target re-rejects the SAME
         // capability (self-identifying 400).
         let router = router_with(OPENAI_P1, self_identifying_provider());
-        seed_expired_negative(&router, "m1", "unsupported_parameter");
+        seed_expired_negative(&router, "m1", "web_search");
         let before = router.learned_capabilities.snapshot()[0].expires_at;
 
         // Act
         let dispatched = router
-            .complete_with_options(
-                req_with_tool("unsupported_parameter"),
-                RouterOptions::default(),
-            )
+            .complete_with_options(req_with_tool("web_search"), RouterOptions::default())
             .await;
 
         // Assert: the request still fails (a probe is a real user request),
@@ -18399,7 +18467,7 @@ api_key_ref = "literal:k"
         assert_eq!(
             router.learned_capabilities.acting_negative_for(
                 "m1",
-                "unsupported_parameter",
+                "web_search",
                 "openai-compat",
                 Instant::now(),
             ),
@@ -18413,14 +18481,11 @@ api_key_ref = "literal:k"
         // Arrange: an expired negative; the probe target fails with an error
         // that is NOT the same-capability rejection.
         let router = router_with(OPENAI_P1, other_error_provider());
-        seed_expired_negative(&router, "m1", "unsupported_parameter");
+        seed_expired_negative(&router, "m1", "web_search");
 
         // Act
         let dispatched = router
-            .complete_with_options(
-                req_with_tool("unsupported_parameter"),
-                RouterOptions::default(),
-            )
+            .complete_with_options(req_with_tool("web_search"), RouterOptions::default())
             .await;
 
         // Assert: the probe was admitted but a transient must NOT clear a valid
@@ -18439,7 +18504,7 @@ api_key_ref = "literal:k"
         assert_eq!(
             router.learned_capabilities.acting_negative_for(
                 "m1",
-                "unsupported_parameter",
+                "web_search",
                 "openai-compat",
                 Instant::now(),
             ),
@@ -18453,14 +18518,11 @@ api_key_ref = "literal:k"
         // The stream loop wires the settle guard identically to the complete
         // loop: a pre-first-chunk same-capability rejection settles the probe.
         let router = router_with(OPENAI_P1, self_identifying_provider());
-        seed_expired_negative(&router, "m1", "unsupported_parameter");
+        seed_expired_negative(&router, "m1", "web_search");
         let before = router.learned_capabilities.snapshot()[0].expires_at;
 
         let dispatched = router
-            .stream_with_options(
-                req_with_tool("unsupported_parameter"),
-                RouterOptions::default(),
-            )
+            .stream_with_options(req_with_tool("web_search"), RouterOptions::default())
             .await;
 
         assert!(dispatched.result.is_err());
@@ -18476,7 +18538,7 @@ api_key_ref = "literal:k"
         assert_eq!(
             router.learned_capabilities.acting_negative_for(
                 "m1",
-                "unsupported_parameter",
+                "web_search",
                 "openai-compat",
                 Instant::now(),
             ),
@@ -18490,13 +18552,11 @@ api_key_ref = "literal:k"
         // (OtherError): the token-count path is not a messages-capability test,
         // so the entry must not latch in_flight.
         let router = router_with(OPENAI_P1, self_identifying_provider());
-        seed_expired_negative(&router, "m1", "unsupported_parameter");
+        seed_expired_negative(&router, "m1", "web_search");
 
         // openai-compat cannot count_tokens, so the walk terminates without
         // touching the provider -- but the filter still admitted the probe.
-        let result = router
-            .count_tokens(req_with_tool("unsupported_parameter"))
-            .await;
+        let result = router.count_tokens(req_with_tool("web_search")).await;
 
         assert!(matches!(result, Err(Error::NotImplemented(..))));
         assert_eq!(router.metrics.probe_attempts_total(), 1);
@@ -18504,7 +18564,7 @@ api_key_ref = "literal:k"
         assert_eq!(
             router.learned_capabilities.acting_negative_for(
                 "m1",
-                "unsupported_parameter",
+                "web_search",
                 "openai-compat",
                 Instant::now(),
             ),

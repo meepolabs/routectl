@@ -283,6 +283,30 @@ fn migrate_v8_to_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v9 -> v10 step atomically: truncate `capability_learn_events`,
+/// bump `PRAGMA user_version` to 10, and update `meta.schema_version`. All in
+/// one transaction so a crash mid-step rolls back.
+///
+/// The learned-capability keyspace changed in this cycle: openai-compat
+/// negatives were previously keyed by the `error.code` TOKEN
+/// (`unsupported_parameter`, ...) but are now keyed by the CANONICAL
+/// capability the request carried (`/error/param`, e.g. `web_search`). Any
+/// pre-change row would replay under a keyspace that no longer exists, so the
+/// forward-only truncate invalidates them. Safe because nothing reads this
+/// table yet (it is the warm-rebuild landing pad); `DELETE FROM` is
+/// idempotent, so a re-run is a no-op.
+fn migrate_v9_to_v10(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("DELETE FROM capability_learn_events")?;
+    tx.execute_batch("PRAGMA user_version = 10")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "10"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -336,6 +360,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             6 => migrate_v6_to_v7(conn)?,
             7 => migrate_v7_to_v8(conn)?,
             8 => migrate_v8_to_v9(conn)?,
+            9 => migrate_v9_to_v10(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
