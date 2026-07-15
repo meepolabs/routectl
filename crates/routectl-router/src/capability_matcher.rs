@@ -74,6 +74,12 @@ const OPENAI_PARAM_TRANSLATIONS: &[(&str, &str)] = &[("response_format", STRUCTU
 /// applies to the whole account, not a single request field. For these the
 /// code token itself is the canonical key. Every other paramless openai
 /// rejection yields `None` (no-learn).
+///
+/// DORMANT at capture: this token is a target-level geo signal, not a
+/// request-derived feature, so `derive_feature_keys` never produces it and
+/// the request-membership gate in `observe_for_learning` blocks the learn.
+/// A target-level route-away for geo-blocks needs its own mechanism (out of
+/// scope here); the resolver arm stays so that mechanism can reuse it.
 const OPENAI_PARAMLESS_ROUTE_AWAY: &[&str] = &["unsupported_country_region_territory"];
 
 /// A learned capability key. Feature keys are open-namespace strings
@@ -84,6 +90,14 @@ type FeatureKey = String;
 /// one of the well-known `routectl_core::capability` consts): the registry
 /// namespace is open, so a capability the upstream names by prose is a
 /// first-class key.
+///
+/// DORMANT until an act-side derivation for this capability exists. The
+/// resolver emits `prefill` for a matched phrase, but `derive_feature_keys`
+/// has no rule that produces it, so the capture-side request-membership gate
+/// (`request_features.contains(key)` in `observe_for_learning`) blocks the
+/// learn: learn-side output is not yet a subset of the act-side vocabulary.
+/// The table and matcher stay wired so the day an act-side derivation lands,
+/// the loop closes with no matcher change.
 const PREFILL: &str = "prefill";
 
 /// One inferred-rejection phrase: a free-text `error.message` equal to
