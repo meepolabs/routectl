@@ -136,6 +136,7 @@ const fn source_rank(source: OfferSource) -> u8 {
         OfferSource::Oauth => 0,
         OfferSource::Env => 1,
         OfferSource::Forwarded => 2,
+        OfferSource::ApiKeyPrompt => 3,
     }
 }
 
@@ -171,6 +172,9 @@ fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
         OfferSource::Forwarded => (Some("forwarded".to_string()), None),
         OfferSource::Oauth => (None, None),
         OfferSource::Env => (None, env_var_for_kind(&offer.kind).map(str::to_string)),
+        // No env var and no forwarded source: `provider add` falls through to
+        // its interactive hidden-key prompt and captures to the managed store.
+        OfferSource::ApiKeyPrompt => (None, None),
     };
     ProviderAddArgs {
         kind: offer.provider_add_kind().to_string(),
@@ -199,6 +203,7 @@ mod tests {
                 OfferSource::Oauth => "oauth",
                 OfferSource::Env => "env",
                 OfferSource::Forwarded => "forwarded",
+                OfferSource::ApiKeyPrompt => "api-key",
             }
             .to_string(),
         }
@@ -260,6 +265,36 @@ mod tests {
         assert_eq!(oauth.credential_source, None);
         assert_eq!(oauth.api_key_env, None);
         assert!(oauth.yes);
+    }
+
+    #[test]
+    fn api_key_prompt_offer_maps_to_bare_anthropic_api_args_for_the_hidden_prompt() {
+        // The empty-offer capture branch's api-key offer carries no env var and
+        // no forwarded source, so `provider add` falls through to its hidden
+        // prompt and captures to the managed store. Anything else here (an env
+        // var, a forwarded source) would short-circuit that capture.
+        let offers = vec![offer(
+            "anthropic",
+            "anthropic-api",
+            OfferSource::ApiKeyPrompt,
+        )];
+        let a = answers(
+            offers.clone(),
+            &[("anthropic", "claude-sonnet-4-5")],
+            Some("anthropic"),
+        );
+
+        let plan = build_plan(&a, &Config::default(), &offers).expect("plan builds");
+        let args = &plan.provider_args[0];
+        assert_eq!(args.kind, "anthropic-api");
+        assert_eq!(args.api_key_env, None);
+        assert_eq!(args.credential_source, None);
+        assert_eq!(args.secret_ref, None);
+        assert!(!args.api_key_stdin);
+        assert!(
+            args.yes,
+            "init owns the ack; provider add's confirm is bypassed"
+        );
     }
 
     #[test]

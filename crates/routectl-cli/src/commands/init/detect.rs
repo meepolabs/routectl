@@ -126,6 +126,7 @@ const fn offer_sort_key(offer: &Offer) -> (u8, &str, &str) {
         OfferSource::Oauth => 0,
         OfferSource::Env => 1,
         OfferSource::Forwarded => 2,
+        OfferSource::ApiKeyPrompt => 3,
     };
     (
         source_rank,
