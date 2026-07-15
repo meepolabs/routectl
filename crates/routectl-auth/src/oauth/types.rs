@@ -169,6 +169,18 @@ impl TokenRecord {
     pub const fn near_expiry(&self, lead_secs: u64, now_unix: u64) -> bool {
         self.expires_at_unix.saturating_sub(now_unix) < lead_secs
     }
+
+    /// True when this seat can serve or renew a request without a fresh
+    /// login: the access token is unexpired (raw `expires_at_unix >
+    /// now_unix`, not the near-expiry lead) OR a refresh token is stored
+    /// to renew it. The single per-seat usability predicate: every read-only
+    /// diagnostic derives a seat's state from here so one credential never
+    /// renders two conflicting states across a report.
+    pub fn is_locally_usable(&self, now_unix: u64) -> bool {
+        let unexpired = self.expires_at_unix > now_unix;
+        let has_refresh = !self.refresh_token.expose().is_empty();
+        unexpired || has_refresh
+    }
 }
 
 /// Compose the `credentials.json` map key for a provider seat. An
@@ -290,6 +302,33 @@ mod tests {
     fn near_expiry_true_when_already_expired() {
         let rec = rec_at(50);
         assert!(rec.near_expiry(60, 100)); // expired -> "near" (saturates to 0)
+    }
+
+    fn rec_no_refresh(expires_at: u64) -> TokenRecord {
+        let mut rec = rec_at(expires_at);
+        rec.refresh_token = SecretToken::new("");
+        rec
+    }
+
+    #[test]
+    fn is_locally_usable_true_when_unexpired() {
+        assert!(rec_no_refresh(1000).is_locally_usable(500));
+    }
+
+    #[test]
+    fn is_locally_usable_true_when_expired_with_refresh() {
+        assert!(rec_at(500).is_locally_usable(1000));
+    }
+
+    #[test]
+    fn is_locally_usable_false_when_expired_and_no_refresh() {
+        assert!(!rec_no_refresh(500).is_locally_usable(1000));
+    }
+
+    #[test]
+    fn is_locally_usable_false_at_exact_expiry_without_refresh() {
+        // Raw `expires_at_unix > now`: equality is expired, not usable.
+        assert!(!rec_no_refresh(1000).is_locally_usable(1000));
     }
 
     #[test]

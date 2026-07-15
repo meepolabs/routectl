@@ -347,9 +347,7 @@ impl OAuthStore {
             let Some(rec) = guard.get(seat) else {
                 continue;
             };
-            let unexpired = rec.expires_at_unix > now;
-            let has_refresh = !rec.refresh_token.expose().is_empty();
-            if unexpired || has_refresh {
+            if rec.is_locally_usable(now) {
                 return LocalProbe::Present;
             }
         }

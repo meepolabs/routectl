@@ -861,7 +861,15 @@ fn section_auth(ctx: &DoctorContext) -> Vec<Finding> {
 }
 
 fn auth_finding(seat_key: &str, rec: &TokenRecord, now: u64) -> Finding {
-    if rec.expires_at_unix <= now {
+    if rec.is_locally_usable(now) {
+        Finding {
+            section: "auth",
+            name: seat_key.to_string(),
+            status: Status::Pass,
+            detail: "logged in".to_string(),
+            remediation: None,
+        }
+    } else {
         let provider = seat_provider(seat_key);
         Finding {
             section: "auth",
@@ -871,14 +879,6 @@ fn auth_finding(seat_key: &str, rec: &TokenRecord, now: u64) -> Finding {
             remediation: Some(format!(
                 "run `routectl login {provider}` to renew this seat"
             )),
-        }
-    } else {
-        Finding {
-            section: "auth",
-            name: seat_key.to_string(),
-            status: Status::Pass,
-            detail: "logged in".to_string(),
-            remediation: None,
         }
     }
 }
@@ -1203,9 +1203,19 @@ mod tests {
     }
 
     fn token_record(expires_at: u64) -> TokenRecord {
+        token_record_with_refresh(expires_at, "rtok")
+    }
+
+    /// A seat whose access token is expired AND carries no refresh token,
+    /// so it is genuinely unusable without a fresh login.
+    fn token_record_no_refresh(expires_at: u64) -> TokenRecord {
+        token_record_with_refresh(expires_at, "")
+    }
+
+    fn token_record_with_refresh(expires_at: u64, refresh: &str) -> TokenRecord {
         let json = serde_json::json!({
             "access_token": "tok",
-            "refresh_token": "rtok",
+            "refresh_token": refresh,
             "token_type": "Bearer",
             "expires_at_unix": expires_at,
             "scopes": ["user:inference"],
@@ -1441,7 +1451,7 @@ mod tests {
     fn expired_seat_warns_valid_seat_passes() {
         let seats = vec![
             ("anthropic".to_string(), token_record(2_000)),
-            ("codex#work".to_string(), token_record(500)),
+            ("codex#work".to_string(), token_record_no_refresh(500)),
         ];
         let context = ctx(Config::default(), Some("version = 3\n"), Vec::new(), seats);
         let findings = section_auth(&context);
@@ -1454,6 +1464,73 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("routectl login codex")
+        );
+    }
+
+    #[tokio::test]
+    async fn one_credential_state_agrees_across_report_surfaces() {
+        // A credential with an expired access token but a stored refresh
+        // token is locally usable -- it can be renewed without a fresh
+        // login. Every report surface derives that one state from the shared
+        // `is_locally_usable` predicate (config / inventory via the real
+        // `probe_local`, auth directly), so they cannot contradict one
+        // another for the same credential.
+        use routectl_auth::oauth::types::CredentialsFile;
+
+        let now = routectl_auth::oauth::types::unix_now();
+        let rec = token_record(now.saturating_sub(100));
+
+        // Seed a real store on disk and take the live probe, so the
+        // config/inventory surfaces are exercised through the actual
+        // derivation rather than a hand-rolled stand-in.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let mut file = CredentialsFile::empty();
+        file.upsert("anthropic", rec.clone());
+        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let store = OAuthStore::open(&path).await.unwrap();
+        let probe = store.probe_local("anthropic").await;
+        assert_eq!(
+            probe,
+            LocalProbe::Present,
+            "an expired-but-refreshable seat probes as Present"
+        );
+
+        let cfg = config_referencing_anthropic();
+        let secret_checks = gather_secret_checks(&cfg, &[("anthropic", probe)]);
+        let mut context = ctx(
+            cfg,
+            Some("version = 3\n"),
+            vec![("anthropic", probe)],
+            vec![("anthropic".to_string(), rec)],
+        );
+        context.secret_checks = secret_checks;
+        context.now_unix = now;
+
+        let report = build_report(&context);
+
+        // Inventory: usable -> Activated.
+        assert_eq!(
+            find(&report.findings, "inventory", "anthropic").status,
+            Status::Pass,
+            "inventory must show the credential as usable"
+        );
+        // Config: the oauth:// reference resolves.
+        assert_eq!(
+            find(&report.findings, "config", "anthropic").status,
+            Status::Pass,
+            "config must show the credential reference as resolving"
+        );
+        // Auth: logged in -- never "access token expired", which would
+        // contradict the present state the other two surfaces show.
+        let auth = find(&report.findings, "auth", "anthropic");
+        assert_eq!(auth.status, Status::Pass, "auth must agree it is usable");
+        assert!(
+            !auth.detail.contains("expired"),
+            "auth must not contradict the present state: {}",
+            auth.detail
         );
     }
 
