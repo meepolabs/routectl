@@ -278,23 +278,23 @@ const WOULD_TRIM_SQL: &str = "\
 SELECT
     COUNT(would_trim_tokens)                                            AS candidate_requests,
     COALESCE(SUM(would_trim_tokens), 0)                                AS would_trim_tokens,
-    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+    COALESCE(SUM(CASE WHEN would_trim_tokens IS NOT NULL
               AND would_trim_k_floor IS NOT NULL
               AND would_trim_break_even_k IS NOT NULL
               AND would_trim_k_floor >= would_trim_break_even_k
-         THEN 1 ELSE 0 END)                                            AS verdict_met,
-    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+         THEN 1 ELSE 0 END), 0)                                        AS verdict_met,
+    COALESCE(SUM(CASE WHEN would_trim_tokens IS NOT NULL
               AND would_trim_k_floor IS NOT NULL
               AND would_trim_break_even_k IS NOT NULL
               AND would_trim_k_floor < would_trim_break_even_k
-         THEN 1 ELSE 0 END)                                            AS verdict_unmet,
-    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+         THEN 1 ELSE 0 END), 0)                                        AS verdict_unmet,
+    COALESCE(SUM(CASE WHEN would_trim_tokens IS NOT NULL
               AND would_trim_break_even_k IS NOT NULL
               AND would_trim_k_floor IS NULL
-         THEN 1 ELSE 0 END)                                            AS verdict_cold,
-    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+         THEN 1 ELSE 0 END), 0)                                        AS verdict_cold,
+    COALESCE(SUM(CASE WHEN would_trim_tokens IS NOT NULL
               AND would_trim_break_even_k IS NULL
-         THEN 1 ELSE 0 END)                                            AS verdict_unpriced
+         THEN 1 ELSE 0 END), 0)                                        AS verdict_unpriced
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2";
 
@@ -1352,6 +1352,22 @@ mod tests {
         let s = would_trim_summary(&db, 0, 1000).expect("summary");
         assert_eq!(s.candidate_requests, 0);
         assert_eq!(s.would_trim_tokens, 0);
+    }
+
+    #[test]
+    fn would_trim_summary_on_empty_ledger_returns_all_zeros() {
+        // Arrange: a healthy but EMPTY ledger (no rows at all). Over zero
+        // matching rows the verdict `SUM(CASE ...)` columns return SQL NULL,
+        // which the row mapping would read as a non-nullable i64 and error
+        // (InvalidColumnType Null). The COALESCE guard yields a zeroed summary.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+
+        // Act
+        let s = would_trim_summary(&db, 0, 1000).expect("summary over empty ledger");
+
+        // Assert: a valid, fully-zeroed summary rather than a query error.
+        assert_eq!(s, WouldTrimSummary::default());
     }
 
     /// Insert a row carrying the M1 attribution columns, or a baseline
