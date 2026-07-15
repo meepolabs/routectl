@@ -3,10 +3,12 @@
 //! result through the same single write primitive as `config set`.
 //!
 //! The pipeline is check-before-write end to end: the ladder runs as a PURE
-//! planning phase ([`plan_migration`]) that produces a
-//! `MigrationPlan { config_candidate, overlay_candidate, from, to, write_kind,
-//! removed_keys }` WITHOUT touching disk, so every refusal and validation
-//! check clears before any mutation:
+//! planning phase ([`plan_migration`]) that produces a `MigrationPlan` whose
+//! `write_kind` (`NoChange` / `ConfigOnly(text)` / `ConfigAndOverlay(text,
+//! overlay)`) folds the config candidate and the pending overlay write INTO
+//! the variant that needs them, so no cross-field invariant is left for the
+//! caller to `.expect()`. Planning touches NO disk, so every refusal and
+//! validation check clears before any mutation:
 //!
 //!   1. Snapshot the raw bytes and read the file's raw `version`.
 //!   2. Plan the migration purely. A [`Refusal`] (behavior-bearing / malformed
@@ -31,20 +33,25 @@
 //!
 //! Two-file (config + overlay) is not literally atomic without a journal; the
 //! honest target is recoverable two-phase + a truthful audit + an idempotent
-//! rerun. The audit event carries from/to version, dry-run, ack/force, outcome
-//! (`aborted` / `refused` / `dry_run` / `written` / `no_change` /
-//! `incomplete`), refusal kind, and the config path -- never the candidate
-//! bytes and never a config value. The `acknowledged` field reflects a REAL
-//! prompt: it is true only after an interactive `y`, never synthesized.
+//! rerun. The overlay commit goes through [`with_overlay_write_lock`] so a
+//! concurrent `catalog` writer cannot slip between the revision check and the
+//! rename and be silently overwritten. The audit event carries from/to
+//! version, dry-run, ack/force, outcome, refusal kind, and the config path --
+//! never the candidate bytes and never a config value. The outcome is one of
+//! `no_change` / `refused` / `version_too_new` / `v1_migration_failed` /
+//! `invalid` / `dry_run` / `aborted` / `written` / `incomplete` / `conflict` /
+//! `write_failed`. The `acknowledged` field reflects a REAL prompt: it is true
+//! only after an interactive `y`, never synthesized.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use routectl_core::{Error, Result};
 use routectl_router::{
-    CURRENT_CONFIG_VERSION, CachePricingOverride, Config, ConfigWriteError, EditOutcome,
-    MigrateError, MigrationPlan, Refusal, WriteKind, apply_config_transforms, edit_config_toml,
-    parse_config, plan_migration, save_catalog_overlay,
+    CURRENT_CONFIG_VERSION, CachePricingOverride, CatalogOverlay, Config, ConfigWriteError,
+    EditOutcome, MigrateError, MigrationPlan, OverlayError, OverlayWrite, Refusal, WriteKind,
+    apply_config_transforms, edit_config_toml, parse_config, plan_migration,
+    with_overlay_write_lock,
 };
 use toml_edit::DocumentMut;
 
@@ -131,25 +138,26 @@ pub fn run_at(
         .map_err(|e| render_ladder_error(e, config_path, from_version, dry_run))?;
     let to_version = plan.to;
 
-    if matches!(plan.write_kind, WriteKind::NoChange) {
-        println!("config is already at version {CURRENT_CONFIG_VERSION}; nothing to migrate.");
-        audit_event(
-            config_path,
-            from_version,
-            from_version,
-            dry_run,
-            false,
-            false,
-            "no_change",
-            None,
-        );
-        return Ok(MigrateResult::AlreadyCurrent);
-    }
-
-    let candidate_text = plan
-        .config_candidate
-        .as_deref()
-        .expect("a non-NoChange plan carries a config candidate");
+    // A `NoChange` plan short-circuits; every other plan carries its config
+    // candidate in `write_kind`, so the text is read straight off the enum
+    // -- no separate `Option` field to `.expect()` against.
+    let candidate_text = match plan.config_candidate() {
+        None => {
+            println!("config is already at version {CURRENT_CONFIG_VERSION}; nothing to migrate.");
+            audit_event(
+                config_path,
+                from_version,
+                from_version,
+                dry_run,
+                false,
+                false,
+                "no_change",
+                None,
+            );
+            return Ok(MigrateResult::AlreadyCurrent);
+        }
+        Some(text) => text,
+    };
 
     // Validation gate -- still before any write.
     gate(candidate_text).map_err(|errors| {
@@ -201,14 +209,12 @@ pub fn run_at(
         return Ok(MigrateResult::Aborted);
     }
 
-    commit_plan(&plan, config_path, overlay_path, &snapshot, from_version).map_err(|failure| {
+    commit_plan(plan, config_path, overlay_path, &snapshot, from_version).map_err(|failure| {
         // A commit failure AFTER the overlay was written is resumable and must
-        // NEVER claim "nothing was written" (the overlay mutation is durable).
-        let outcome = if failure.overlay_written {
-            "incomplete"
-        } else {
-            "conflict"
-        };
+        // NEVER claim "nothing was written" (the overlay mutation is durable);
+        // `failure.outcome` is labelled at the failure site by the underlying
+        // error variant, so a revision conflict reads `conflict` while an
+        // I/O / parse / revalidation failure reads the neutral `write_failed`.
         audit_event(
             config_path,
             from_version,
@@ -216,7 +222,7 @@ pub fn run_at(
             false,
             !force,
             force,
-            outcome,
+            failure.outcome,
             None,
         );
         *failure.error
@@ -247,45 +253,55 @@ pub fn run_at(
     Ok(MigrateResult::Migrated { from_version })
 }
 
-/// A commit failure, carrying whether the overlay half already landed so the
-/// caller can pick a truthful audit outcome and a message that never falsely
-/// claims "nothing was written".
+/// A commit failure, carrying the truthful audit outcome the caller should
+/// record. The overlay half is committed FIRST, so a config-phase failure
+/// after it lands is `incomplete` (resumable, the overlay mutation is
+/// durable); a failure before anything lands is labelled by the underlying
+/// error variant -- `conflict` for a genuine revision / base-bytes conflict,
+/// the neutral `write_failed` for any other I/O / parse / revalidation
+/// failure.
 struct CommitFailure {
     error: Box<Error>,
-    overlay_written: bool,
+    outcome: &'static str,
 }
 
 /// Commit a validated [`MigrationPlan`] in two phases: the overlay FIRST
-/// (revision-checked, idempotent), then `config.toml` LAST as the visible
-/// completion marker. The config write reproduces the SAME pure transform the
-/// plan gated, under the write lock against the original snapshot bytes.
+/// (revision-checked, under the overlay write lock, idempotent), then
+/// `config.toml` LAST as the visible completion marker. The config write
+/// reproduces the SAME pure transform the plan gated, under the write lock
+/// against the original snapshot bytes. Takes the plan BY VALUE so the
+/// pending overlay cells move into the commit rather than being cloned.
 ///
 /// Two-file commit is not literally atomic without a journal. It is
 /// recoverable instead: a crash (or a config-side conflict) after the overlay
 /// write leaves `config.toml` at its old version, so a rerun re-plans (the
 /// overlay fold is now an idempotent no-op) and completes the config stamp.
 fn commit_plan(
-    plan: &MigrationPlan,
+    plan: MigrationPlan,
     config_path: &Path,
     overlay_path: &Path,
     snapshot: &[u8],
     from_version: u32,
 ) -> std::result::Result<(), CommitFailure> {
-    // Phase 1: the overlay. A revision conflict here fails closed BEFORE its
-    // atomic rename, so nothing is written -- a truthful "nothing written".
-    let overlay_written = match &plan.overlay_candidate {
-        Some(ow) => {
-            save_catalog_overlay(overlay_path, ow.base_revision, ow.cells.clone()).map_err(
-                |e| CommitFailure {
-                    error: Box::new(Error::Config(format!(
-                        "cache-pricing migration: overlay write failed, nothing was written: {e}"
-                    ))),
-                    overlay_written: false,
+    // Phase 1: the overlay, under the overlay write lock. The revision check
+    // runs INSIDE the lock, so a concurrent writer can neither slip between
+    // the check and the rename nor be silently overwritten. A conflict (or
+    // any load failure) fails closed BEFORE any write -- a truthful "nothing
+    // written".
+    let overlay_written = match plan.write_kind {
+        WriteKind::ConfigAndOverlay(_, overlay) => {
+            commit_overlay(overlay_path, overlay).map_err(|e| CommitFailure {
+                error: Box::new(Error::Config(format!(
+                    "cache-pricing migration: overlay write failed, nothing was written: {e}"
+                ))),
+                outcome: match e {
+                    OverlayError::RevisionConflict { .. } => "conflict",
+                    _ => "write_failed",
                 },
-            )?;
+            })?;
             true
         }
-        None => false,
+        _ => false,
     };
 
     // Phase 2: config.toml LAST, the visible version marker.
@@ -296,16 +312,50 @@ fn commit_plan(
             Err(_) => Err(CommitError::Revalidation),
         }
     })
-    .map_err(|e| CommitFailure {
-        error: Box::new(if overlay_written {
-            resumable_commit_error(&e)
+    .map_err(|e| {
+        if overlay_written {
+            CommitFailure {
+                error: Box::new(resumable_commit_error(&e)),
+                outcome: "incomplete",
+            }
         } else {
-            render_write_error(e)
-        }),
-        overlay_written,
+            CommitFailure {
+                outcome: match &e {
+                    ConfigWriteError::Conflict { .. } => "conflict",
+                    _ => "write_failed",
+                },
+                error: Box::new(render_write_error(e)),
+            }
+        }
     })?;
 
     Ok(())
+}
+
+/// Commit the pending overlay fold through [`with_overlay_write_lock`],
+/// preserving the plan-time revision check: the closure runs under the
+/// advisory write lock (closing the load->save race a bare `save` leaves
+/// open) and refuses with a [`OverlayError::RevisionConflict`] if the on-disk
+/// revision moved since the plan computed the merge against `base_revision`.
+/// On a matching revision it persists the merged cells; the lock is released
+/// on return either way.
+fn commit_overlay(
+    overlay_path: &Path,
+    overlay: OverlayWrite,
+) -> std::result::Result<(), OverlayError> {
+    with_overlay_write_lock::<OverlayError, _>(overlay_path, |loaded| {
+        if loaded.revision != overlay.base_revision {
+            return Err(OverlayError::RevisionConflict {
+                expected: overlay.base_revision,
+                actual: loaded.revision,
+            });
+        }
+        Ok(CatalogOverlay {
+            cells: overlay.cells,
+            ..loaded
+        })
+    })
+    .map(|_| ())
 }
 
 /// A config-commit failure that lands AFTER the overlay was already written.
@@ -1299,6 +1349,128 @@ default = \"gpt\"
             std::fs::read(&f.overlay).unwrap(),
             overlay_after_first,
             "the rerun must not write the overlay a second time"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The overlay commit runs under the overlay write lock and keeps the
+    // plan-time revision check: a concurrent writer that advanced the
+    // on-disk revision between the plan and the commit is NOT silently
+    // overwritten -- the commit conflicts and leaves the file byte-intact.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn overlay_commit_refuses_a_stale_base_revision_without_clobbering() {
+        let f = fixture(V1_WITH_CACHE_PRICING);
+        // Seed the overlay so its on-disk revision is 1 -- ahead of a plan
+        // computed against revision 0 (a concurrent `catalog` write landed in
+        // between the plan and the commit).
+        routectl_router::save_catalog_overlay(&f.overlay, 0, BTreeMap::new())
+            .expect("seed overlay at revision 1");
+        let before = std::fs::read(&f.overlay).unwrap();
+
+        let stale = OverlayWrite {
+            base_revision: 0,
+            cells: BTreeMap::new(),
+        };
+        let err = commit_overlay(&f.overlay, stale)
+            .expect_err("a stale base_revision must conflict under the lock");
+        assert!(
+            matches!(
+                err,
+                OverlayError::RevisionConflict {
+                    expected: 0,
+                    actual: 1
+                }
+            ),
+            "err: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&f.overlay).unwrap(),
+            before,
+            "a conflict must leave the concurrent write in place, not clobber it"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // A LIVE mid-commit failure: the overlay phase lands, then config.toml
+    // is raced so the base-bytes revision check conflicts at the config
+    // phase. The audit outcome is `incomplete` (never "nothing written"),
+    // the error is the resumable message, and the overlay stays committed.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn live_mid_commit_config_conflict_lands_overlay_and_reports_incomplete() {
+        let f = fixture(V1_WITH_CACHE_PRICING);
+        let snapshot = std::fs::read(&f.config).unwrap();
+        let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
+
+        // Plan against the pristine v1 snapshot: a new `[cache_pricing]` cell
+        // makes this a ConfigAndOverlay plan (overlay first, config last).
+        let doc = parse_document(&snapshot_text).expect("parse");
+        let cache_pricing =
+            load_v1_cache_pricing(&snapshot_text, &f.config).expect("cache pricing");
+        let plan = plan_migration(&doc, 1, &cache_pricing, &f.overlay).expect("plan");
+        assert!(matches!(plan.write_kind, WriteKind::ConfigAndOverlay(..)));
+
+        // Race config.toml: a concurrent writer rewrites it AFTER planning, so
+        // the base-bytes check fails at the config phase -- but only after the
+        // overlay phase has already landed.
+        let concurrent = snapshot_text.replacen("port = 8787", "port = 8788", 1);
+        std::fs::write(&f.config, &concurrent).unwrap();
+
+        // `run_at` feeds `failure.outcome` verbatim to the audit event, so the
+        // asserted outcome IS the audited outcome.
+        let failure = commit_plan(plan, &f.config, &f.overlay, &snapshot, 1)
+            .expect_err("a config-phase conflict after the overlay lands must fail");
+        assert_eq!(failure.outcome, "incomplete");
+        assert!(
+            failure.error.to_string().contains("rerun `config migrate`"),
+            "the resumable message must never claim nothing was written, got: {}",
+            failure.error
+        );
+
+        // The overlay is left as committed (durable) ...
+        let overlay = routectl_router::load_catalog_overlay(&f.overlay).expect("overlay loads");
+        assert!(
+            overlay.cells.contains_key("openai-compat:grok-*"),
+            "the overlay fold must remain committed after the config conflict"
+        );
+        // ... and the concurrent config write was not clobbered.
+        assert_eq!(
+            std::fs::read_to_string(&f.config).unwrap(),
+            concurrent,
+            "a config conflict must leave the concurrent write in place"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // A config-phase conflict with NO overlay write (a ConfigOnly plan)
+    // audits `conflict` -- labelled by the ConfigWriteError variant, not
+    // the old hardcoded value.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn config_phase_conflict_without_overlay_reports_conflict() {
+        let f = fixture(V2_CLEAN);
+        let snapshot = std::fs::read(&f.config).unwrap();
+        let snapshot_text = String::from_utf8(snapshot.clone()).unwrap();
+        let doc = parse_document(&snapshot_text).expect("parse");
+        let plan = plan_migration(&doc, 2, &BTreeMap::new(), &f.overlay).expect("plan");
+        assert!(matches!(plan.write_kind, WriteKind::ConfigOnly(_)));
+
+        std::fs::write(
+            &f.config,
+            snapshot_text.replacen("port = 8787", "port = 8788", 1),
+        )
+        .unwrap();
+
+        let failure = commit_plan(plan, &f.config, &f.overlay, &snapshot, 2)
+            .expect_err("a stale snapshot must conflict at the config phase");
+        assert_eq!(failure.outcome, "conflict");
+        assert!(
+            !f.overlay.exists(),
+            "a ConfigOnly plan must not write the overlay"
         );
     }
 }
