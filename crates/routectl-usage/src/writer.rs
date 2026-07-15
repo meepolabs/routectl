@@ -403,7 +403,7 @@ fn json_text(value: &Option<serde_json::Value>) -> Option<String> {
     value.as_ref().and_then(|v| serde_json::to_string(v).ok())
 }
 
-/// Per-row byte cap on the `would_trim_raw_marks` blob (D8 bounded-capture
+/// Per-row byte cap on the `would_trim_raw_marks` blob (bounded-capture
 /// house style -- see `routectl_providers::anthropic_api::sse_opaque` --
 /// degrade gracefully on overflow rather than mid-value truncate into
 /// invalid JSON). 64 KB is generous for any reasonable per-request mark

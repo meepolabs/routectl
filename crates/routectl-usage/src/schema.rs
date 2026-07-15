@@ -138,9 +138,10 @@ CREATE TABLE IF NOT EXISTS requests (
     -- COLUMN` (which always appends). The live request is NEVER mutated.
     would_trim_shadow_misfire INTEGER,
 
-    -- NEAR-LOSSLESS ATTRIBUTION (v8): plumbing only -- this task wires the
+    -- NEAR-LOSSLESS ATTRIBUTION (v8): plumbing only -- this wires the
     -- columns end-to-end (DispatchMeta -> observe_meta -> UsageRecord ->
-    -- SQLite); lossy-trim.f1.06 computes the values. `would_trim_dedup_tokens`
+    -- SQLite); the near-lossless recorder pass computes the values.
+    -- `would_trim_dedup_tokens`
     -- / `would_trim_supersession_tokens` are per-heuristic freed-token counts
     -- (plain columns, not a bitmask). `would_trim_path_units` /
     -- `would_trim_path_extractable` are a count-pair (NOT a pre-averaged

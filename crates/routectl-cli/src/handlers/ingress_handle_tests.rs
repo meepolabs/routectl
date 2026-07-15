@@ -3009,9 +3009,9 @@ async fn enforce_case1_token_missing() {
     );
 }
 
-/// Case 2 (migrated for f3): a request without the seam header (a direct
+/// Case 2: a request without the seam header (a direct
 /// :9100 loopback client) is ADMITTED regardless of the other headers --
-/// f3 dropped the request-global `not_mitm` rejection, which used to 400
+/// the request-global `not_mitm` rejection was dropped, which used to 400
 /// this exact traffic shape.
 #[tokio::test]
 async fn enforce_case2_no_seam_is_admitted() {
@@ -3072,9 +3072,9 @@ async fn enforce_case3_identity_missing_and_never_leaks_bearer() {
     );
 }
 
-/// Case 4 (migrated for f3): a fully-formed seam-present request (bearer +
-/// session id) is ADMITTED even on the OpenAI-envelope dialect -- f3
-/// dropped the request-global `non_anthropic_dialect` rejection, which used
+/// Case 4: a fully-formed seam-present request (bearer +
+/// session id) is ADMITTED even on the OpenAI-envelope dialect -- the
+/// request-global `non_anthropic_dialect` rejection was dropped, which used
 /// to 400 this exact case even with every other admission key satisfied.
 #[tokio::test]
 async fn enforce_case4_seam_present_openai_envelope_is_admitted() {
