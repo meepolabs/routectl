@@ -1,13 +1,15 @@
 //! End-to-end learned-capability loop, driven at the router level against
-//! wiremock upstreams.
+//! wiremock upstreams with REAL upstream error envelopes.
 //!
-//! A wiremock provider 400s a named capability on a request that carries
-//! it; the router learns the negative (self-identifying tier), the chain
-//! filter de-prioritizes that target on subsequent matching requests, an
-//! expiry admits exactly one re-probe, and a 2xx clears the entry. The
-//! never-learn guards (operator-remapped classification, health-status
-//! errors) and the D17 route-away-with-floor invariant are pinned in the
-//! same shape.
+//! The behavior this suite proves: an openai-compat upstream rejects a
+//! capability the request NATURALLY carries -- a built-in tool whose `type`
+//! names the capability -- with a byte-accurate 400 whose `/error/param`
+//! names that same capability. The router resolves the param to its
+//! canonical key (`web_search`), learns the negative under that key, and the
+//! chain filter routes away from the rejecting target on subsequent matching
+//! requests. This is the non-synthetic proof: the request carries
+//! `web_search`, the upstream names `web_search`, and the two meet through
+//! the shared resolver -- no forged tool-type that doubles as the error code.
 //!
 //! The loop is observed through the PUBLIC router surface only:
 //! `Dispatched.meta.learned_capabilities` (the per-request learn events),
@@ -21,6 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_core::capability::SignalTier;
+use routectl_core::schema::ForwardedBearer;
 use routectl_core::{ChatRequest, Error, Message, MessageContent, Role, ToolDef};
 use routectl_router::class_policy::ConfigFailureClass;
 use routectl_router::{
@@ -31,24 +34,32 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-/// The openai-compat self-identifying `error.code` token the classifier
-/// lifts to a `FeatureUnsupported` capability. It doubles as the request's
-/// derived feature key (carried as a tool `type`) so the capture gate's
-/// "capability was in flight" check passes.
-const CAP_TOKEN: &str = "unsupported_parameter";
+/// A route-away capability the request carries as a built-in tool `type`
+/// and the upstream names in `/error/param`. `web_search` is a policy
+/// essential (`action_for` -> RouteAway), so a learned negative
+/// de-prioritizes the target rather than stripping.
+const WEB_SEARCH: &str = "web_search";
 
-/// A second self-identifying token, distinct from [`CAP_TOKEN`], so one
-/// target can carry two independent learned negatives.
-const CAP_TOKEN_2: &str = "unsupported_value";
+/// A second distinct route-away capability, so one target can carry two
+/// independent learned negatives.
+const COMPUTER_USE: &str = "computer_use";
+
+/// A byte-accurate openai-compat `unsupported_parameter` 400. The request
+/// carries a `web_search_20250305` built-in tool; the upstream rejects with
+/// `/error/param` naming exactly that field. `param` and the request's
+/// tool `type` both reduce to `web_search` through the shared resolver's
+/// `strip_date_suffix` + normalization, so the learned key meets the
+/// request-derived key.
+const OPENAI_UNSUPPORTED_PARAMETER_400: &str = r#"{"error":{"message":"Unsupported parameter: 'web_search_20250305' is not supported with this model.","type":"invalid_request_error","param":"web_search_20250305","code":"unsupported_parameter"}}"#;
 
 /// A wiremock responder that walks a fixed sequence of `(status, body)`
 /// steps across successive calls, repeating the last step once the
-/// sequence is exhausted. Deterministic and order-independent (a single
-/// mounted mock), so response sequencing does not depend on wiremock's
-/// mount-order matching semantics.
+/// sequence is exhausted. Bodies are raw strings so a captured envelope is
+/// served byte-for-byte. Deterministic and order-independent (a single
+/// mounted mock).
 struct SequencedResponder {
     calls: AtomicUsize,
-    steps: Vec<(u16, Value)>,
+    steps: Vec<(u16, String)>,
 }
 
 impl Respond for SequencedResponder {
@@ -61,19 +72,39 @@ impl Respond for SequencedResponder {
         });
         ResponseTemplate::new(*status)
             .insert_header("content-type", "application/json")
-            .set_body_json(body.clone())
+            .set_body_string(body.clone())
     }
 }
 
-/// A wiremock upstream that answers `POST /chat/completions` with the
-/// given response sequence.
+/// A wiremock upstream that answers `POST /chat/completions` with the given
+/// raw response sequence.
 async fn upstream_server(steps: Vec<(u16, Value)>) -> MockServer {
+    let steps = steps
+        .into_iter()
+        .map(|(status, body)| (status, body.to_string()))
+        .collect();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(SequencedResponder {
             calls: AtomicUsize::new(0),
             steps,
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A wiremock upstream that serves the exact captured `body` string on
+/// every call (byte-for-byte), for the byte-accurate real-envelope proof.
+async fn raw_upstream_server(status: u16, body: &str) -> MockServer {
+    let server = MockServer::start().await;
+    let body = body.to_string();
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(SequencedResponder {
+            calls: AtomicUsize::new(0),
+            steps: vec![(status, body)],
         })
         .mount(&server)
         .await;
@@ -120,8 +151,8 @@ fn fast_retry() -> RetryPolicy {
 }
 
 /// Build a router whose chain resolves `alias` to `chain` (nicknames in
-/// order), with `[capability]` enabled at `decay_hours`. Providers are
-/// real openai-compat egresses pointed at the wiremock URLs.
+/// order), with `[capability]` enabled at `decay_hours`. Providers are real
+/// openai-compat egresses pointed at the wiremock URLs.
 async fn build_router(
     upstreams: Vec<Upstream>,
     alias: &str,
@@ -174,21 +205,7 @@ async fn build_router(
 /// A request against `alias` carrying a built-in tool whose `type` is
 /// `feature`, so `derive_feature_keys` yields `[feature]`.
 fn req_with_feature(alias: &str, feature: &str) -> ChatRequest {
-    ChatRequest {
-        model: alias.to_string(),
-        messages: vec![Message {
-            refusal: None,
-            role: Role::User,
-            content: MessageContent::Text("hi".into()),
-            reasoning: None,
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        }],
-        tools: Some(vec![ToolDef::Other(json!({"type": feature, "name": "t"}))]),
-        ..Default::default()
-    }
+    req_with_features(alias, &[feature])
 }
 
 /// A request against `alias` carrying built-in tools whose `type` is each
@@ -216,20 +233,16 @@ fn req_with_features(alias: &str, features: &[&str]) -> ChatRequest {
     }
 }
 
-/// An openai-compat 400 whose `error.code` names an unsupported parameter:
-/// the classifier lifts this to `FeatureUnsupported { capability }`.
-fn unsupported_body() -> Value {
-    unsupported_body_for(CAP_TOKEN)
-}
-
-/// An openai-compat 400 whose `error.code` is `code`; the classifier lifts
-/// it to `FeatureUnsupported { capability: code }`.
-fn unsupported_body_for(code: &str) -> Value {
+/// An openai-compat 400 whose `/error/param` is `param`; the classifier
+/// lifts the `unsupported_parameter` code to `FeatureUnsupported` and the
+/// resolver reads `param` as the real capability.
+fn unsupported_body_for(param: &str) -> Value {
     json!({
         "error": {
             "type": "invalid_request_error",
-            "code": code,
-            "message": "The requested parameter is not supported by this model."
+            "code": "unsupported_parameter",
+            "param": param,
+            "message": format!("Unsupported parameter: '{param}' is not supported with this model.")
         }
     })
 }
@@ -256,9 +269,7 @@ fn ok_body() -> Value {
 }
 
 async fn complete(router: &Router, alias: &str) -> routectl_router::Dispatched {
-    router
-        .complete_with_options(req_with_feature(alias, CAP_TOKEN), RouterOptions::default())
-        .await
+    complete_with(router, alias, &[WEB_SEARCH]).await
 }
 
 /// Dispatch a request against `alias` carrying `features` as derived tool
@@ -274,15 +285,18 @@ async fn complete_with(
 }
 
 // ---------------------------------------------------------------------------
-// Leg 1: learn -> de-prioritize the matching target.
+// The real-envelope route-away proof. Replaces the forged-tool-type
+// test whose request carried the error code as a tool type.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn learn_then_deprioritizes_matching_target() {
-    // A always 400s the capability; B always succeeds. A large decay keeps
-    // the learned negative acting so it de-prioritizes rather than
-    // re-probing.
-    let a = upstream_server(vec![(400, unsupported_body())]).await;
+async fn real_envelope_400_learns_and_routes_away() {
+    // A serves a byte-accurate captured openai `unsupported_parameter` 400
+    // whose `/error/param` is `web_search_20250305`; the request carries a
+    // `web_search_20250305` built-in tool. Both reduce to `web_search`, so
+    // the router learns the negative under the canonical key and routes away
+    // from A on the next matching request. B always succeeds.
+    let a = raw_upstream_server(400, OPENAI_UNSUPPORTED_PARAMETER_400).await;
     let b = upstream_server(vec![(200, ok_body())]).await;
     let router = build_router(
         vec![
@@ -295,9 +309,10 @@ async fn learn_then_deprioritizes_matching_target() {
     )
     .await;
 
-    // Request 1: A rejects the capability (self-identifying learn), the
-    // chain falls back to B.
-    let d1 = complete(&router, "chain").await;
+    // Request 1: A rejects the capability the request carries, the router
+    // learns it (self-identifying) under the CANONICAL key, and the chain
+    // falls back to B.
+    let d1 = complete_with(&router, "chain", &["web_search_20250305"]).await;
     assert!(
         d1.result.is_ok(),
         "request 1 should fall back to B: {:?}",
@@ -307,24 +322,24 @@ async fn learn_then_deprioritizes_matching_target() {
     assert_eq!(
         d1.meta.learned_capabilities.len(),
         1,
-        "A's rejection must produce exactly one learn event",
+        "A's real-envelope rejection must produce exactly one learn event",
     );
     let ev = &d1.meta.learned_capabilities[0];
-    assert_eq!(ev.feature_key, CAP_TOKEN);
+    assert_eq!(
+        ev.feature_key, WEB_SEARCH,
+        "the learned key is the canonical capability, not the error.code token",
+    );
     assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
     assert_eq!(ev.upstream_status, 400);
     assert_eq!(ev.observations, 1);
     assert!(!ev.remapped);
-    assert!(
-        ev.request_features.iter().any(|f| f == CAP_TOKEN),
-        "the learned capability must be in the request's derived feature set",
-    );
     assert_eq!(hits(&a).await, 1);
     assert_eq!(hits(&b).await, 1);
 
-    // Request 2: A is now an acting learned negative -> de-prioritized to
-    // the tail. B serves first and A is never re-dialed.
-    let d2 = complete(&router, "chain").await;
+    // Request 2: A is now an acting learned negative for `web_search` -> the
+    // chain filter de-prioritizes it to the tail. B serves first and A is
+    // never re-dialed.
+    let d2 = complete_with(&router, "chain", &["web_search_20250305"]).await;
     assert!(d2.result.is_ok());
     assert_eq!(d2.meta.served_provider.as_deref(), Some("prov_b"));
     assert!(
@@ -334,8 +349,45 @@ async fn learn_then_deprioritizes_matching_target() {
     assert_eq!(
         hits(&a).await,
         1,
-        "A must NOT be re-dialed: the learned negative de-prioritized it",
+        "A must NOT be re-dialed: the learned negative routed away from it",
     );
+    assert_eq!(hits(&b).await, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Leg 1: learn -> de-prioritize the matching target.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn learn_then_deprioritizes_matching_target() {
+    let a = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
+    let b = upstream_server(vec![(200, ok_body())]).await;
+    let router = build_router(
+        vec![
+            Upstream::openai("m_a", "prov_a", &a.uri()),
+            Upstream::openai("m_b", "prov_b", &b.uri()),
+        ],
+        "chain",
+        &["m_a", "m_b"],
+        48,
+    )
+    .await;
+
+    let d1 = complete(&router, "chain").await;
+    assert!(d1.result.is_ok(), "request 1 falls back to B");
+    assert_eq!(d1.meta.served_provider.as_deref(), Some("prov_b"));
+    assert_eq!(d1.meta.learned_capabilities.len(), 1);
+    let ev = &d1.meta.learned_capabilities[0];
+    assert_eq!(ev.feature_key, WEB_SEARCH);
+    assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
+    assert!(ev.request_features.iter().any(|f| f == WEB_SEARCH));
+    assert_eq!(hits(&a).await, 1);
+
+    let d2 = complete(&router, "chain").await;
+    assert!(d2.result.is_ok());
+    assert_eq!(d2.meta.served_provider.as_deref(), Some("prov_b"));
+    assert!(d2.meta.learned_capabilities.is_empty());
+    assert_eq!(hits(&a).await, 1, "learned negative de-prioritized A");
     assert_eq!(hits(&b).await, 2);
 }
 
@@ -345,13 +397,10 @@ async fn learn_then_deprioritizes_matching_target() {
 
 #[tokio::test]
 async fn expiry_admits_single_reprobe_then_success_clears() {
-    // `decay_hours = 0` lapses a learned negative into a re-probe
-    // immediately. A single-provider chain lets the hit count read the
-    // re-probe directly.
     let a = upstream_server(vec![
-        (400, unsupported_body()), // request 1: learn (observations = 1)
-        (200, ok_body()),          // request 2: the admitted re-probe, clears
-        (400, unsupported_body()), // request 3: a FRESH learn (proves the clear)
+        (400, unsupported_body_for(WEB_SEARCH)), // request 1: learn
+        (200, ok_body()),                        // request 2: admitted re-probe clears
+        (400, unsupported_body_for(WEB_SEARCH)), // request 3: fresh learn (proves the clear)
     ])
     .await;
     let router = build_router(
@@ -362,8 +411,6 @@ async fn expiry_admits_single_reprobe_then_success_clears() {
     )
     .await;
 
-    // Request 1: A rejects; nothing to fall back to, so the 400 surfaces.
-    // The negative is learned at one observation.
     let d1 = complete(&router, "solo").await;
     assert!(matches!(
         d1.result,
@@ -373,8 +420,6 @@ async fn expiry_admits_single_reprobe_then_success_clears() {
     assert_eq!(d1.meta.learned_capabilities[0].observations, 1);
     assert_eq!(hits(&a).await, 1);
 
-    // Request 2: the negative has lapsed (decay 0), so this request is
-    // admitted as the single re-probe to A. A's 2xx clears the entry.
     let d2 = complete(&router, "solo").await;
     assert!(
         d2.result.is_ok(),
@@ -382,15 +427,9 @@ async fn expiry_admits_single_reprobe_then_success_clears() {
         d2.result.err()
     );
     assert_eq!(d2.meta.served_provider.as_deref(), Some("prov_a"));
-    assert!(
-        d2.meta.learned_capabilities.is_empty(),
-        "a clearing re-probe emits no learn event",
-    );
+    assert!(d2.meta.learned_capabilities.is_empty());
     assert_eq!(hits(&a).await, 2, "exactly one re-probe dialed A");
 
-    // Request 3: the entry was cleared, so this rejection is a brand-new
-    // negative at observations = 1. A stale, still-acting entry would have
-    // been reconfirmed at observations >= 2 instead.
     let d3 = complete(&router, "solo").await;
     assert!(matches!(
         d3.result,
@@ -405,13 +444,11 @@ async fn expiry_admits_single_reprobe_then_success_clears() {
 }
 
 // ---------------------------------------------------------------------------
-// Leg 3: never-learn cases (health statuses, operator-remapped class).
+// Leg 3: never-learn cases (health statuses, operator-remapped, forwarded).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn health_status_errors_never_learn() {
-    // 429 / 5xx are health signals, not request faults: the learn gate
-    // (400/422 only) excludes them.
     for status in [429u16, 500u16] {
         let a = upstream_server(vec![(status, health_body())]).await;
         let b = upstream_server(vec![(200, ok_body())]).await;
@@ -431,25 +468,23 @@ async fn health_status_errors_never_learn() {
             d.meta.learned_capabilities.is_empty(),
             "status {status} must not learn",
         );
-        assert!(
-            d.result.is_ok(),
-            "status {status}: chain should fall back to B",
-        );
+        assert!(d.result.is_ok(), "status {status}: fall back to B");
         assert_eq!(d.meta.served_provider.as_deref(), Some("prov_b"));
     }
 }
 
 #[tokio::test]
 async fn remapped_classification_never_learns() {
-    // An operator remap of A's 400s (`class_overrides`) sets `remapped =
-    // true`, which the learn gate excludes -- even though the identical
-    // body learns in leg 1.
-    let a = upstream_server(vec![(400, unsupported_body())]).await;
+    // An operator remap of A's 400s to FeatureUnsupported sets `remapped =
+    // true`. The 400 body still carries a resolvable `/error/param`, so
+    // WITHOUT the remap guard the resolver would learn `web_search`; the
+    // `remapped` early return is the only thing that blocks it.
+    let a = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
     let b = upstream_server(vec![(200, ok_body())]).await;
     let mut runtime_a = ProviderRuntimePolicy::default();
     runtime_a
         .class_overrides
-        .insert(400, ConfigFailureClass::BadRequest);
+        .insert(400, ConfigFailureClass::FeatureUnsupported);
     let router = build_router(
         vec![
             Upstream {
@@ -470,13 +505,8 @@ async fn remapped_classification_never_learns() {
         "a remapped classification must not learn",
     );
     assert_eq!(hits(&a).await, 1, "A was still dialed (and remapped)");
-    assert!(
-        d.result.is_ok(),
-        "remapped bad-request still falls back to B"
-    );
+    assert!(d.result.is_ok(), "remapped still falls back to B");
 
-    // The negative was not recorded, so a second request re-dials A rather
-    // than de-prioritizing it.
     let d2 = complete(&router, "chain").await;
     assert!(d2.meta.learned_capabilities.is_empty());
     assert_eq!(
@@ -486,17 +516,140 @@ async fn remapped_classification_never_learns() {
     );
 }
 
+#[tokio::test]
+async fn forwarded_request_never_learns() {
+    // A request carrying a forwarded bearer is a pass-through; the router
+    // must never learn a negative from it (the request is not routectl's own
+    // catalog request). Even a resolvable 400 records nothing.
+    let a = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
+    let b = upstream_server(vec![(200, ok_body())]).await;
+    let router = build_router(
+        vec![
+            Upstream::openai("m_a", "prov_a", &a.uri()),
+            Upstream::openai("m_b", "prov_b", &b.uri()),
+        ],
+        "chain",
+        &["m_a", "m_b"],
+        48,
+    )
+    .await;
+
+    let mut req = req_with_feature("chain", WEB_SEARCH);
+    req.routectl_internal.forwarded_bearer = Some(ForwardedBearer::new("fwd-token".to_string()));
+    let d = router
+        .complete_with_options(req, RouterOptions::default())
+        .await;
+    assert!(
+        d.meta.learned_capabilities.is_empty(),
+        "a forwarded request must not learn",
+    );
+    assert!(d.result.is_ok(), "forwarded still falls back to B");
+    assert_eq!(hits(&a).await, 1, "A was dialed (forwarded, not learned)");
+
+    // No negative recorded, so a second forwarded request re-dials A.
+    let mut req2 = req_with_feature("chain", WEB_SEARCH);
+    req2.routectl_internal.forwarded_bearer = Some(ForwardedBearer::new("fwd-token".to_string()));
+    let d2 = router
+        .complete_with_options(req2, RouterOptions::default())
+        .await;
+    assert!(d2.meta.learned_capabilities.is_empty());
+    assert_eq!(hits(&a).await, 2, "A not de-prioritized");
+}
+
+#[tokio::test]
+async fn unresolvable_rejection_does_not_learn() {
+    // A 400 whose `/error/param` is absent (a paramless `unsupported_value`)
+    // names no capability the resolver can attribute -> no learn, and A is
+    // never de-prioritized on the next request.
+    let paramless = json!({
+        "error": {
+            "type": "invalid_request_error",
+            "code": "unsupported_value",
+            "message": "Unsupported value."
+        }
+    });
+    let a = upstream_server(vec![(400, paramless)]).await;
+    let b = upstream_server(vec![(200, ok_body())]).await;
+    let router = build_router(
+        vec![
+            Upstream::openai("m_a", "prov_a", &a.uri()),
+            Upstream::openai("m_b", "prov_b", &b.uri()),
+        ],
+        "chain",
+        &["m_a", "m_b"],
+        48,
+    )
+    .await;
+
+    let d = complete(&router, "chain").await;
+    assert!(
+        d.meta.learned_capabilities.is_empty(),
+        "an unresolvable rejection must not learn",
+    );
+    assert!(d.result.is_ok());
+
+    let d2 = complete(&router, "chain").await;
+    assert!(d2.meta.learned_capabilities.is_empty());
+    assert_eq!(hits(&a).await, 2, "A re-dialed: nothing was learned");
+}
+
 // ---------------------------------------------------------------------------
-// Leg 4: D17 route-away-with-floor vs statically-empty 501.
+// Leg 4: same-capability probe backoff.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn same_capability_probe_backs_off_on_repeat_rejection() {
+    // decay 0 lapses the negative into a re-probe on each request; every
+    // re-probe hits the SAME capability rejection again. Each admission settles
+    // via the capped-backoff path -- the probe owns its own observation bump,
+    // so it emits NO fresh learn event and keeps the entry acting (never
+    // cleared). A cleared-then-relearned entry would instead emit a fresh learn
+    // event at observations = 1; the sustained ABSENCE of learn events across
+    // repeated re-probes is the proof the entry stayed on the backoff path.
+    let a = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
+    let b = upstream_server(vec![(200, ok_body())]).await;
+    let router = build_router(
+        vec![
+            Upstream::openai("m_a", "prov_a", &a.uri()),
+            Upstream::openai("m_b", "prov_b", &b.uri()),
+        ],
+        "chain",
+        &["m_a", "m_b"],
+        0,
+    )
+    .await;
+
+    // Request 1: A rejects and the negative is learned (one learn event).
+    let d1 = complete(&router, "chain").await;
+    assert!(d1.result.is_ok(), "request 1 falls back to B");
+    assert_eq!(d1.meta.learned_capabilities.len(), 1);
+    assert_eq!(d1.meta.learned_capabilities[0].observations, 1);
+    assert_eq!(hits(&a).await, 1);
+
+    // Requests 2 and 3: the negative lapses (decay 0) and A is admitted for a
+    // single re-probe each time. A re-rejects the same capability, so each
+    // admission settles as a same-capability backoff refresh -- NO fresh learn
+    // event. If the entry had been cleared, this would relearn from scratch and
+    // emit an event.
+    for req in 2..=3 {
+        let d = complete(&router, "chain").await;
+        assert!(d.result.is_ok(), "re-probe {req} rejected, falls back to B");
+        assert!(
+            d.meta.learned_capabilities.is_empty(),
+            "re-probe {req}: a same-capability settle emits no learn event",
+        );
+        assert_eq!(hits(&a).await, req, "re-probe {req} dialed A exactly once");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Leg 6: D17 route-away-with-floor vs statically-empty 501.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn all_targets_learned_still_attempts_the_tail() {
-    // Both chain members reject the capability, so both become acting
-    // learned negatives. A subsequent matching request must still ATTEMPT
-    // the de-prioritized tail (D17), never hard-empty into NotImplemented.
-    let a = upstream_server(vec![(400, unsupported_body())]).await;
-    let b = upstream_server(vec![(400, unsupported_body())]).await;
+    let a = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
+    let b = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
     let router = build_router(
         vec![
             Upstream::openai("m_a", "prov_a", &a.uri()),
@@ -508,7 +661,6 @@ async fn all_targets_learned_still_attempts_the_tail() {
     )
     .await;
 
-    // Request 1: A and B both reject; both are learned (acting).
     let d1 = complete(&router, "d17").await;
     assert!(matches!(
         d1.result,
@@ -517,14 +669,11 @@ async fn all_targets_learned_still_attempts_the_tail() {
     assert_eq!(
         d1.meta.learned_capabilities.len(),
         2,
-        "both chain members must learn the negative",
+        "both chain members learn the negative",
     );
     assert_eq!(hits(&a).await, 1);
     assert_eq!(hits(&b).await, 1);
 
-    // Request 2: every target is a learned negative -> the whole chain is
-    // the de-prioritized tail. D17 still attempts it (a WARN marks the
-    // route-away floor) instead of returning NotImplemented.
     let (d2, events) = routectl_testkit::with_capture(complete(&router, "d17")).await;
     assert!(
         matches!(d2.result, Err(Error::Upstream { status: 400, .. })),
@@ -548,12 +697,11 @@ async fn all_targets_learned_still_attempts_the_tail() {
 
 #[tokio::test]
 async fn statically_unsupported_chain_returns_not_implemented() {
-    // A STATIC `unsupported_features` match hard-drops the only chain
-    // member, emptying the chain: NotImplemented, and the upstream is
-    // never dialed. (Contrast with the learned tail above.)
+    // A STATIC `unsupported_features` match hard-drops the only chain member,
+    // emptying the chain: NotImplemented, and the upstream is never dialed.
     let a = upstream_server(vec![(200, ok_body())]).await;
     let mut runtime_a = ProviderRuntimePolicy::default();
-    runtime_a.unsupported_features = vec![CAP_TOKEN.to_string()];
+    runtime_a.unsupported_features = vec![WEB_SEARCH.to_string()];
     let router = build_router(
         vec![Upstream {
             runtime: runtime_a,
@@ -579,25 +727,18 @@ async fn statically_unsupported_chain_returns_not_implemented() {
 }
 
 // ---------------------------------------------------------------------------
-// Leg 5: two distinct learned negatives on ONE target both re-probe and
+// Leg 7: two distinct learned negatives on ONE target both re-probe and
 // both settle -- neither admission leaks its in_flight slot.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn two_expired_negatives_on_one_target_both_reprobe_and_clear() {
-    // One solo target learns TWO distinct capability negatives (F1, F2).
-    // `decay_hours = 0` lapses both immediately, so a request carrying both
-    // features admits TWO re-probes on the same target in one dispatch. A
-    // 2xx must settle BOTH: each entry clears and neither in_flight slot
-    // latches. The fresh relearns in requests 4/5 prove both cleared -- a
-    // leaked slot would leave its feature routed-away (reconfirmed at
-    // observations >= 2) instead of relearning from scratch.
     let a = upstream_server(vec![
-        (400, unsupported_body_for(CAP_TOKEN)),   // req 1: learn F1
-        (400, unsupported_body_for(CAP_TOKEN_2)), // req 2: learn F2
-        (200, ok_body()),                         // req 3: the double re-probe clears both
-        (400, unsupported_body_for(CAP_TOKEN)),   // req 4: fresh learn F1 (proves clear)
-        (400, unsupported_body_for(CAP_TOKEN_2)), // req 5: fresh learn F2 (proves clear)
+        (400, unsupported_body_for(WEB_SEARCH)),   // req 1: learn F1
+        (400, unsupported_body_for(COMPUTER_USE)), // req 2: learn F2
+        (200, ok_body()),                          // req 3: double re-probe clears both
+        (400, unsupported_body_for(WEB_SEARCH)),   // req 4: fresh learn F1 (proves clear)
+        (400, unsupported_body_for(COMPUTER_USE)), // req 5: fresh learn F2 (proves clear)
     ])
     .await;
     let router = build_router(
@@ -608,70 +749,49 @@ async fn two_expired_negatives_on_one_target_both_reprobe_and_clear() {
     )
     .await;
 
-    // Request 1: A rejects F1; solo chain, so the 400 surfaces. F1 learned.
-    let d1 = complete_with(&router, "solo", &[CAP_TOKEN]).await;
+    let d1 = complete_with(&router, "solo", &[WEB_SEARCH]).await;
     assert!(matches!(
         d1.result,
         Err(Error::Upstream { status: 400, .. })
     ));
     assert_eq!(d1.meta.learned_capabilities.len(), 1);
-    assert_eq!(d1.meta.learned_capabilities[0].feature_key, CAP_TOKEN);
+    assert_eq!(d1.meta.learned_capabilities[0].feature_key, WEB_SEARCH);
     assert_eq!(d1.meta.learned_capabilities[0].observations, 1);
 
-    // Request 2: A rejects F2. F2 learned as a second, independent negative.
-    let d2 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
+    let d2 = complete_with(&router, "solo", &[COMPUTER_USE]).await;
     assert!(matches!(
         d2.result,
         Err(Error::Upstream { status: 400, .. })
     ));
     assert_eq!(d2.meta.learned_capabilities.len(), 1);
-    assert_eq!(d2.meta.learned_capabilities[0].feature_key, CAP_TOKEN_2);
-    assert_eq!(d2.meta.learned_capabilities[0].observations, 1);
+    assert_eq!(d2.meta.learned_capabilities[0].feature_key, COMPUTER_USE);
     assert_eq!(hits(&a).await, 2);
 
-    // Request 3: both negatives have lapsed (decay 0) and the request carries
-    // both features, so A is admitted to re-probe BOTH in one dispatch. Its
-    // 2xx must clear both entries. A clearing re-probe emits no learn event.
-    let d3 = complete_with(&router, "solo", &[CAP_TOKEN, CAP_TOKEN_2]).await;
+    let d3 = complete_with(&router, "solo", &[WEB_SEARCH, COMPUTER_USE]).await;
     assert!(
         d3.result.is_ok(),
         "the double re-probe must reach A and succeed: {:?}",
         d3.result.err()
     );
     assert_eq!(d3.meta.served_provider.as_deref(), Some("prov_a"));
-    assert!(
-        d3.meta.learned_capabilities.is_empty(),
-        "a clearing re-probe emits no learn event",
-    );
-    assert_eq!(
-        hits(&a).await,
-        3,
-        "exactly one dispatch carried both probes"
-    );
+    assert!(d3.meta.learned_capabilities.is_empty());
+    assert_eq!(hits(&a).await, 3, "one dispatch carried both probes");
 
-    // Request 4: F1's entry was cleared, so this rejection is a brand-new
-    // negative at observations = 1. A leaked in_flight slot would have kept
-    // F1 routed-away and reconfirmed it at observations >= 2 instead.
-    let d4 = complete_with(&router, "solo", &[CAP_TOKEN]).await;
+    let d4 = complete_with(&router, "solo", &[WEB_SEARCH]).await;
     assert!(matches!(
         d4.result,
         Err(Error::Upstream { status: 400, .. })
     ));
-    assert_eq!(d4.meta.learned_capabilities.len(), 1);
-    assert_eq!(d4.meta.learned_capabilities[0].feature_key, CAP_TOKEN);
     assert_eq!(
         d4.meta.learned_capabilities[0].observations, 1,
         "F1 must relearn from scratch -- its probe slot did not leak",
     );
 
-    // Request 5: same proof for F2's cleared entry.
-    let d5 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
+    let d5 = complete_with(&router, "solo", &[COMPUTER_USE]).await;
     assert!(matches!(
         d5.result,
         Err(Error::Upstream { status: 400, .. })
     ));
-    assert_eq!(d5.meta.learned_capabilities.len(), 1);
-    assert_eq!(d5.meta.learned_capabilities[0].feature_key, CAP_TOKEN_2);
     assert_eq!(
         d5.meta.learned_capabilities[0].observations, 1,
         "F2 must relearn from scratch -- its probe slot did not leak",
@@ -679,78 +799,57 @@ async fn two_expired_negatives_on_one_target_both_reprobe_and_clear() {
     assert_eq!(hits(&a).await, 5);
 }
 
+// ---------------------------------------------------------------------------
+// Live-network smoke variant (ignored in CI). Run with a real openai-compat
+// base URL + key that rejects an unsupported built-in tool with a 400 whose
+// `/error/param` names it:
+//   ROUTECTL_LIVE_BASE_URL=... ROUTECTL_LIVE_API_KEY=... \
+//     cargo test -p routectl-router --test learned_capability_loop -- --ignored
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn mixed_outcome_settles_matched_probe_and_drops_the_rest() {
-    // One solo target holds two expired negatives (F1, F2) and is admitted to
-    // re-probe BOTH on a single request. The dispatch rejects the SAME
-    // capability for F1 only: that admission must settle as a same-capability
-    // refresh (no fresh observe event, its own backoff owns the bump) while
-    // the still-held F2 admission drops as OtherError -- releasing F2's
-    // in_flight slot without clearing the entry, so F2 stays re-probable.
-    let a = upstream_server(vec![
-        (400, unsupported_body_for(CAP_TOKEN)),   // req 1: learn F1
-        (400, unsupported_body_for(CAP_TOKEN_2)), // req 2: learn F2
-        (400, unsupported_body_for(CAP_TOKEN)),   // req 3: double re-probe, F1 rejects again
-        (200, ok_body()),                         // req 4: F2's fresh re-probe clears it
-        (400, unsupported_body_for(CAP_TOKEN_2)), // req 5: fresh learn F2 (proves clear)
-    ])
-    .await;
-    let router = build_router(
-        vec![Upstream::openai("m_a", "prov_a", &a.uri())],
-        "solo",
-        &["m_a"],
-        0,
-    )
-    .await;
+#[ignore = "live network: requires ROUTECTL_LIVE_BASE_URL + ROUTECTL_LIVE_API_KEY"]
+async fn live_openai_unsupported_parameter_is_learned() {
+    let (Ok(base_url), Ok(api_key)) = (
+        std::env::var("ROUTECTL_LIVE_BASE_URL"),
+        std::env::var("ROUTECTL_LIVE_API_KEY"),
+    ) else {
+        panic!("set ROUTECTL_LIVE_BASE_URL and ROUTECTL_LIVE_API_KEY to run the live smoke");
+    };
+    let feature = std::env::var("ROUTECTL_LIVE_FEATURE").unwrap_or_else(|_| WEB_SEARCH.to_string());
 
-    let d1 = complete_with(&router, "solo", &[CAP_TOKEN]).await;
-    assert_eq!(d1.meta.learned_capabilities.len(), 1);
-    assert_eq!(d1.meta.learned_capabilities[0].observations, 1);
-    let d2 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
-    assert_eq!(d2.meta.learned_capabilities.len(), 1);
-    assert_eq!(d2.meta.learned_capabilities[0].observations, 1);
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "live".to_string(),
+        ProviderEntry::openai_compat(&base_url, format!("literal:{api_key}")),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m_live".to_string(), ModelEntry::new("live", "gpt-4o-mini"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("live".to_string(), AliasValue::Single("m_live".to_string()));
 
-    // Request 3: both negatives lapsed and both features present, so A is
-    // admitted to re-probe both. A re-rejects F1 (same capability). That
-    // admission settles via the capped-backoff path -- so NO learn event is
-    // emitted (a same-capability probe settle owns the observation bump
-    // itself). The unmatched F2 admission is dropped as OtherError.
-    let d3 = complete_with(&router, "solo", &[CAP_TOKEN, CAP_TOKEN_2]).await;
-    assert!(matches!(
-        d3.result,
-        Err(Error::Upstream { status: 400, .. })
-    ));
+    let mut cfg = Config {
+        providers,
+        models,
+        aliases,
+        retry: fast_retry(),
+        ..Config::default()
+    };
+    cfg.capability.enabled = true;
+    cfg.capability.decay_hours = 48;
+
+    let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+    let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+        .await
+        .expect("build_resolved_models");
+    assert!(failed.is_empty(), "provider build failures: {failed:?}");
+    let mut router = Router::new(Arc::new(cfg));
+    router.install_resolved_models(resolved);
+
+    let d = complete_with(&router, "live", &[feature.as_str()]).await;
     assert!(
-        d3.meta.learned_capabilities.is_empty(),
-        "F1's rejection must settle its own held probe, not emit a fresh observe event",
+        !d.meta.learned_capabilities.is_empty(),
+        "a real upstream unsupported-parameter 400 must produce a learn event: {:?}",
+        d.result,
     );
-    assert_eq!(hits(&a).await, 3);
-
-    // Request 4: F2's admission was released (OtherError, not cleared), so F2
-    // is still an expired negative -- this request re-probes it, and the 2xx
-    // clears it. A leaked in_flight slot would have kept F2 routed-away.
-    let d4 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
-    assert!(
-        d4.result.is_ok(),
-        "F2's slot was released, so it re-probes: {:?}",
-        d4.result.err()
-    );
-    assert_eq!(d4.meta.served_provider.as_deref(), Some("prov_a"));
-    assert!(d4.meta.learned_capabilities.is_empty());
-    assert_eq!(hits(&a).await, 4);
-
-    // Request 5: F2 was cleared by its re-probe, so this rejection relearns
-    // from scratch at observations = 1.
-    let d5 = complete_with(&router, "solo", &[CAP_TOKEN_2]).await;
-    assert!(matches!(
-        d5.result,
-        Err(Error::Upstream { status: 400, .. })
-    ));
-    assert_eq!(d5.meta.learned_capabilities.len(), 1);
-    assert_eq!(d5.meta.learned_capabilities[0].feature_key, CAP_TOKEN_2);
-    assert_eq!(
-        d5.meta.learned_capabilities[0].observations, 1,
-        "F2 must relearn from scratch -- its dropped probe released the slot",
-    );
-    assert_eq!(hits(&a).await, 5);
 }
