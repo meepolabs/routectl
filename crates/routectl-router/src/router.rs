@@ -3080,13 +3080,33 @@ impl Router {
                     // so a 429 here does NOT walk.
                     let policy = self.policy_for(&req.model);
                     let native_cf = classify(&e, target.provider_kind);
-                    let (cf, _remapped) = apply_remap(
+                    let (cf, remapped) = apply_remap(
                         native_cf,
                         upstream_status_for_remap(&e),
                         &target.class_overrides,
                     );
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
-                    if class_debits(&cf.class) {
+                    let debit = class_debits(&cf.class);
+                    // The class/remap/debit decision on the token-count path was
+                    // otherwise silent (unlike the messages path, which emits a
+                    // class-decision event at every error arm). One INFO event at
+                    // the settle point makes a count_tokens breaker debit / park
+                    // triageable. Safe dimensions only -- NEVER a body or prompt.
+                    let facts = upstream_facts(&e);
+                    tracing::info!(
+                        event = "count_tokens",
+                        state_key = %target.state_key,
+                        provider = provider_name,
+                        status = facts.status.unwrap_or(0),
+                        upstream_type = facts.upstream_type.unwrap_or(""),
+                        upstream_code = facts.upstream_code.unwrap_or(""),
+                        effective_class = class_label(&cf.class),
+                        matched_by = matched_by_label(cf.matched_by),
+                        remapped,
+                        debit,
+                        "count_tokens seat terminal; resilience class policy applied",
+                    );
+                    if debit {
                         match reset_hint {
                             Some(h) => self.park_provider(&target.state_key, h),
                             None => self.record_failure(&target.state_key),
@@ -18809,6 +18829,7 @@ mod strip_interceptor_dispatch_tests {
     use routectl_core::{
         ChatChunk, ChatRequest, ChatResponse, Choice, Message, Provider, TokenCount, ToolDef,
     };
+    use routectl_testkit::with_capture;
     use serde_json::json;
     use std::time::{Duration, Instant};
 
@@ -19176,6 +19197,101 @@ mod strip_interceptor_dispatch_tests {
             "a rolled-back seat never calls the upstream count_tokens",
         );
         assert_eq!(router.metrics.strip_rollback_total(), 1);
+    }
+
+    /// An `anthropic-api`-kind provider whose `count_tokens` always fails
+    /// with a fixed upstream health status, so the seat reaches the
+    /// class/remap/debit settle point rather than returning a count.
+    struct HealthErrorProvider {
+        status: u16,
+    }
+
+    #[async_trait]
+    impl Provider for HealthErrorProvider {
+        fn id(&self) -> &'static str {
+            "health"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("health", "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            Err(Error::upstream("health", self.status, "unused"))
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            Err(Error::upstream("health", self.status, "unused"))
+        }
+        async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+            Err(Error::upstream(
+                "health",
+                self.status,
+                "upstream health error",
+            ))
+        }
+    }
+
+    fn plain_count_request() -> ChatRequest {
+        ChatRequest {
+            model: "haiku".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn count_tokens_class_path_emits_one_observability_event() {
+        // A 500 is a health class the seat debits: the terminal walk exits
+        // here (count_tokens never falls back on health), so the settle point
+        // fires exactly one INFO `count_tokens` event carrying the class
+        // decision -- no longer silent.
+        let provider: Arc<dyn Provider> = Arc::new(HealthErrorProvider { status: 500 });
+        let router = build_router(provider, false);
+
+        let (result, events) = with_capture(router.count_tokens(plain_count_request())).await;
+
+        assert!(result.is_err(), "the 500 health error surfaces terminal");
+        let emitted: Vec<_> = events
+            .iter()
+            .filter(|e| e.field("event") == Some("count_tokens"))
+            .collect();
+        assert_eq!(
+            emitted.len(),
+            1,
+            "the class/remap/debit path emits exactly one count_tokens event",
+        );
+        let ev = emitted[0];
+        assert_eq!(ev.level, tracing::Level::INFO);
+        assert_eq!(ev.field("state_key"), Some("haiku"));
+        assert_eq!(ev.field("status"), Some("500"));
+        assert_eq!(ev.field("effective_class"), Some("server_error"));
+        assert_eq!(ev.field("debit"), Some("true"));
+        assert_eq!(ev.field("remapped"), Some("false"));
+        assert!(
+            !ev.fields.iter().any(|(k, _)| k == "body" || k == "prompt"),
+            "the event carries no body or prompt",
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_clean_passthrough_emits_no_class_event() {
+        // A successful count never reaches the class/remap/debit settle point,
+        // so no count_tokens observability event fires on the happy path.
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, false);
+
+        let (result, events) = with_capture(router.count_tokens(plain_count_request())).await;
+
+        assert!(result.is_ok(), "a clean count_tokens passthrough succeeds");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.field("event") == Some("count_tokens")),
+            "a clean passthrough must not emit the class-decision event",
+        );
     }
 }
 
