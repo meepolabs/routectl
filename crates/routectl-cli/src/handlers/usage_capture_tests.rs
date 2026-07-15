@@ -356,7 +356,7 @@ async fn any_dispatch_meta() -> routectl_router::DispatchMeta {
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));

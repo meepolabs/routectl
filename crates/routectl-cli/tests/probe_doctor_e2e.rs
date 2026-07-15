@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod common;
+
 /// The real `routectl` binary under test, resolved by cargo for this
 /// integration crate.
 const BIN: &str = env!("CARGO_BIN_EXE_routectl");
@@ -52,7 +54,7 @@ api_key_ref = \"oauth://anthropic\"
 [providers.unreachable]
 kind = \"openai-compat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:probe-key-not-real\"
+api_key_ref = \"__API_KEY_REF__\"
 
 [models.sonnet]
 provider = \"anthropic\"
@@ -154,6 +156,7 @@ fn write_config(xdg: &Path, body: &str) -> PathBuf {
     let dir = routectl_dir(xdg);
     std::fs::create_dir_all(&dir).expect("create routectl config dir");
     let path = dir.join("config.toml");
+    let body = body.replace("__API_KEY_REF__", &common::file_ref("probe-key-not-real"));
     std::fs::write(&path, body).expect("write config");
     path
 }

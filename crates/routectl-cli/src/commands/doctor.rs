@@ -631,10 +631,11 @@ fn classify_secret_ref(
             (presence, None)
         }
         Ok(SecretRef::File(path)) => (classify_file(&path), None),
-        Ok(SecretRef::Literal(_)) => (SecretPresence::Present, None),
         // A future `SecretRef` variant (the enum is `#[non_exhaustive]`)
         // whose presence this build cannot confirm: treat conservatively as
-        // unresolved rather than assume it is usable.
+        // unresolved rather than assume it is usable. A `literal:` ref no
+        // longer parses (rejected at the resolver), so it lands in `Err`
+        // below and reports as Invalid.
         Ok(_) => (SecretPresence::Missing, None),
         Err(_) => (SecretPresence::Invalid, None),
     }

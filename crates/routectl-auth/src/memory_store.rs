@@ -1,6 +1,8 @@
-//! Default `SecretStore` impl. Resolves `env://`, `file://`, and
-//! `literal:` secret references at read-time. There is no in-memory
-//! key/value back end any more -- the name is preserved for
+//! Default `SecretStore` impl. Resolves `env://` and `file://` secret
+//! references at read-time. `literal:` refs are rejected here as well as
+//! at parse -- defense in depth for a programmatically-constructed
+//! `SecretRef::Literal`, which can never come from a URI. There is no
+//! in-memory key/value back end any more -- the name is preserved for
 //! backwards-compat with existing callers and tests.
 //!
 //! Routectl never auto-discovers credentials from third-party tools;
@@ -35,7 +37,7 @@ impl SecretStore for MemoryStore {
                 );
                 Error::Auth(format!("env var {var} not set"))
             }),
-            SecretRef::Literal(s) => Ok(s.clone()),
+            SecretRef::Literal(_) => Err(crate::secret_ref::literal_rejected()),
             SecretRef::File(path) => read_secret_file(path).await,
             SecretRef::OAuth { provider, .. } => {
                 // MemoryStore does not own the OAuth store. The
@@ -60,10 +62,10 @@ impl SecretStore for MemoryStore {
     }
 
     async fn set(&self, _secret_ref: &SecretRef, _value: &str) -> Result<()> {
-        // All four sources are read-only via routectl. Users manage
-        // env vars, files, inline literals, and OAuth tokens through
-        // their own tooling -- routectl just resolves them at request
-        // time (OAuth tokens flow through `routectl login`, not `set`).
+        // All sources are read-only via routectl. Users manage env vars,
+        // files, and OAuth tokens through their own tooling -- routectl
+        // just resolves them at request time (OAuth tokens flow through
+        // `routectl login`, not `set`).
         Err(Error::Auth(
             "secrets are read-only via routectl; manage env vars / files outside the binary".into(),
         ))

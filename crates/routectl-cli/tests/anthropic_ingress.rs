@@ -72,7 +72,8 @@ fn anthropic_proxy_config(
     let mut providers = BTreeMap::new();
     providers.insert(
         "anthropic-mock".to_string(),
-        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_base.to_string()),
+        ProviderEntry::anthropic_api(common::file_ref("test-key"))
+            .with_base_url(upstream_base.to_string()),
     );
 
     let mut models = BTreeMap::new();
@@ -404,7 +405,7 @@ async fn auth_accepts_x_api_key() {
 
     let config = anthropic_proxy_config(
         &upstream.uri(),
-        Some(vec!["literal:sk-routectl-good".into()]),
+        Some(vec![common::file_ref("sk-routectl-good")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -434,7 +435,7 @@ async fn auth_accepts_authorization_bearer() {
 
     let config = anthropic_proxy_config(
         &upstream.uri(),
-        Some(vec!["literal:sk-routectl-good".into()]),
+        Some(vec![common::file_ref("sk-routectl-good")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -457,7 +458,7 @@ async fn auth_accepts_authorization_bearer() {
 async fn auth_rejects_bogus_token() {
     let config = anthropic_proxy_config(
         "http://127.0.0.1:1",
-        Some(vec!["literal:sk-real".into()]),
+        Some(vec![common::file_ref("sk-real")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -490,7 +491,7 @@ async fn auth_rejects_bogus_token() {
 async fn auth_rejects_anthropic_messages_with_anthropic_envelope() {
     let config = anthropic_proxy_config(
         "http://127.0.0.1:1",
-        Some(vec!["literal:sk-real".into()]),
+        Some(vec![common::file_ref("sk-real")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -517,7 +518,7 @@ async fn auth_rejects_anthropic_messages_with_anthropic_envelope() {
 async fn auth_rejects_openai_chat_completions_with_openai_envelope() {
     let config = anthropic_proxy_config(
         "http://127.0.0.1:1",
-        Some(vec!["literal:sk-real".into()]),
+        Some(vec![common::file_ref("sk-real")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -544,7 +545,7 @@ async fn auth_rejects_openai_chat_completions_with_openai_envelope() {
 async fn auth_rejects_missing_credentials_when_required() {
     let config = anthropic_proxy_config(
         "http://127.0.0.1:1",
-        Some(vec!["literal:sk-real".into()]),
+        Some(vec![common::file_ref("sk-real")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -663,7 +664,7 @@ async fn health_endpoint_bypasses_auth() {
     // when [server.auth].tokens is configured.
     let config = anthropic_proxy_config(
         "http://127.0.0.1:1",
-        Some(vec!["literal:sk-real".into()]),
+        Some(vec![common::file_ref("sk-real")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -843,7 +844,7 @@ async fn header_used_for_listener_auth_does_not_pollute_upstream() {
 
     let config = anthropic_proxy_config(
         &upstream.uri(),
-        Some(vec!["literal:sk-routectl".into()]),
+        Some(vec![common::file_ref("sk-routectl")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -1405,7 +1406,7 @@ fn openai_compat_proxy_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "deepseek-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream_base.to_string(), common::file_ref("test-key")),
     );
     let mut models = BTreeMap::new();
     models.insert(
@@ -2041,7 +2042,7 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "deepseek-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream_base.to_string(), common::file_ref("test-key")),
     );
     let mut models = BTreeMap::new();
     models.insert(
@@ -2072,7 +2073,7 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "vllm-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream_base.to_string(), common::file_ref("test-key")),
     );
     let mut models = BTreeMap::new();
     models.insert(
@@ -2879,7 +2880,7 @@ async fn count_tokens_endpoint_listed_in_route_table_under_auth_layer() {
     // Anthropic envelope per the path-aware auth-layer policy.
     let config = anthropic_proxy_config(
         "http://127.0.0.1:1",
-        Some(vec!["literal:sk-real".into()]),
+        Some(vec![common::file_ref("sk-real")]),
         BTreeMap::new(),
     );
     let base = helpers::spawn(config).await;
@@ -2962,7 +2963,7 @@ async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
         "anthropic-beta".to_string(),
         "provider-source-beta".to_string(),
     );
-    let provider_entry = ProviderEntry::anthropic_api("literal:test-key")
+    let provider_entry = ProviderEntry::anthropic_api(common::file_ref("test-key"))
         .with_base_url(upstream.uri())
         .with_header_extras(provider_headers);
     providers.insert("anthropic-mock".to_string(), provider_entry);
@@ -3059,7 +3060,7 @@ async fn per_model_non_beta_header_extras_reaches_wire() {
         .await;
 
     let provider_entry =
-        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream.uri());
+        ProviderEntry::anthropic_api(common::file_ref("test-key")).with_base_url(upstream.uri());
     let mut providers = BTreeMap::new();
     providers.insert("anthropic-mock".to_string(), provider_entry);
 
@@ -3129,7 +3130,8 @@ fn anthropic_proxy_config_with_max_output_tokens(
     let mut providers = BTreeMap::new();
     providers.insert(
         "anthropic-mock".to_string(),
-        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_base.to_string()),
+        ProviderEntry::anthropic_api(common::file_ref("test-key"))
+            .with_base_url(upstream_base.to_string()),
     );
 
     let mut models = BTreeMap::new();
