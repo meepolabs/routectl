@@ -3679,11 +3679,13 @@ impl Router {
     /// must hold): the kill switch is on; the upstream fault is a request
     /// fault (400/422); the class was not operator-remapped; the request
     /// did not carry a forwarded bearer; the resolver attributes the fault
-    /// to a canonical capability; and that capability is not the
-    /// operator-remap provenance token. The resolver keys on the
-    /// request-capability namespace and returns at most the one capability
-    /// the upstream named, so no cross-namespace intersection gate is needed
-    /// (the old one could never pass on real traffic).
+    /// to a canonical capability; that capability is not the
+    /// operator-remap provenance token; and the capability is a member of
+    /// the request's derived feature set (`derive_feature_keys`). The
+    /// resolver keys on the request-capability namespace, so this final
+    /// membership check learns a negative ONLY for a capability the request
+    /// actually carried -- a misbehaving upstream naming an off-request
+    /// param never plants a routing entry.
     ///
     /// `dedupe` carries one entry per `(state_key, feature_key)` for the
     /// life of a single request: the error arm fires per attempt, so a
@@ -3725,18 +3727,26 @@ impl Router {
         if feature_key == crate::class_policy::OPERATOR_REMAP_CAPABILITY {
             return;
         }
-        // The request's derived feature set is recorded on the learn event for
-        // observability, but is NOT a capture gate: the resolver already keys
-        // on the request-capability namespace and, by returning at most the one
-        // capability the upstream named (`/error/param` for openai-compat, a
-        // corroborated whole-phrase for the inferred tier), intrinsically
-        // learns nothing the request did not carry. The old cross-namespace
-        // gate compared the error-token namespace against this set and could
-        // never pass on real traffic.
+        // Request-membership gate: learn a negative ONLY for a capability the
+        // request actually carried. `request_features` is the act-side lookup
+        // vocabulary (`derive_feature_keys` output); the resolver now emits
+        // canonical act-side keys, so a genuine rejection is a member by
+        // construction -- `response_format` -> `structured_output` for a
+        // request whose `output_config.format` was set, and a tool-type
+        // passthrough for a request that carried that tool type. A resolved
+        // key the request never sent (a poisoned or spurious upstream param,
+        // or a capability with no act-side derivation -- an inferred `prefill`,
+        // a paramless geo-block token) fails the check and never learns, so a
+        // misbehaving upstream cannot plant a routing entry the act side could
+        // never look up. This is the gate the original cross-namespace check
+        // meant to be: correct now that both sides meet on identical keys.
         let request_features = crate::feature_keys::derive_feature_keys(
             req.tools.as_deref().unwrap_or(&[]),
             req.provider_extras.as_ref(),
         );
+        if !request_features.contains(&feature_key) {
+            return;
+        }
         let state_key = target.state_key.clone();
         // MASK: an operator `force_supported` override for this (target,
         // feature) masks the learned negative. The act side already
@@ -17992,6 +18002,35 @@ mod learn_capture_tests {
         })
     }
 
+    /// A self-identifying openai-compat 400 whose `/error/param` canonicalizes
+    /// to the well-known tool-type key `web_search` -- but the triggering
+    /// request carries NO web_search tool. Models a misbehaving or compromised
+    /// upstream naming an off-request capability.
+    fn poisoned_param_provider() -> Arc<CapabilityRejectingProvider> {
+        Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 400,
+            body: r#"{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"web_search_20250305","message":"Unsupported parameter."}}"#.into(),
+            upstream_type: Some("invalid_request_error".into()),
+            upstream_code: Some("unsupported_parameter".into()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// An anthropic-api 400 carrying the verbatim prefill-unsupported phrase
+    /// in free-text `error.message` -- a generic BadRequest the resolver's
+    /// inferred arm maps to `prefill`.
+    fn prefill_inferred_provider() -> Arc<CapabilityRejectingProvider> {
+        Arc::new(CapabilityRejectingProvider {
+            id: "p1",
+            status: 400,
+            body: r#"{"type":"error","error":{"type":"invalid_request_error","message":"Prefilling assistant messages is not supported for this model."}}"#.into(),
+            upstream_type: Some("invalid_request_error".into()),
+            upstream_code: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
     fn router_with(toml_text: &str, provider: Arc<dyn Provider>) -> Router {
         let config: Config = toml::from_str(toml_text).expect("valid test toml");
         let mut router = Router::new(Arc::new(config));
@@ -18011,6 +18050,13 @@ mod learn_capture_tests {
 kind = "openai-compat"
 base_url = "https://example.test/v1"
 api_key_ref = "literal:k"
+"#;
+
+    /// A minimal anthropic-api provider config (capability subsystem left at
+    /// its default: enabled). Serves the inferred-arm dormancy test.
+    const ANTHROPIC_P1: &str = r#"
+[providers.p1]
+kind = "anthropic-api"
 "#;
 
     fn req_with_tool(tool_type: &str) -> ChatRequest {
@@ -18298,6 +18344,63 @@ api_key_ref = "literal:k"
 
         assert!(dispatched.meta.learned_capabilities.is_empty());
         assert!(learn_warns(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn off_request_param_is_not_learned() {
+        // Poisoning guard: the upstream names `web_search` in `/error/param`
+        // (the resolver canonicalizes the dated variant to the well-known
+        // key), but the triggering request carried only `computer_use` -- so
+        // `web_search` is NOT in the request's derived feature set. The
+        // capture membership gate blocks the learn: a misbehaving upstream
+        // cannot teach a capability the request never sent, and no registry
+        // entry is planted.
+        let router = router_with(OPENAI_P1, poisoned_param_provider());
+
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("computer_use"), RouterOptions::default()),
+        )
+        .await;
+
+        assert!(dispatched.result.is_err());
+        assert!(
+            dispatched.meta.learned_capabilities.is_empty(),
+            "an off-request param must never produce a learn event",
+        );
+        assert!(learn_warns(&events).is_empty());
+        assert!(
+            router.learned_capabilities.is_empty(),
+            "an off-request param must never create a registry entry",
+        );
+    }
+
+    #[tokio::test]
+    async fn inferred_prefill_is_dormant_and_not_learned() {
+        // The inferred arm resolves the anthropic prefill phrase to `prefill`,
+        // but `derive_feature_keys` never produces that key, so a request's
+        // derived feature set can never contain it. The capture membership
+        // gate blocks the learn end-to-end: the inferred table ships dormant
+        // until an act-side derivation for `prefill` exists.
+        let router = router_with(ANTHROPIC_P1, prefill_inferred_provider());
+
+        // A prefill request carries no built-in tool / output_config, so its
+        // derived feature set is empty.
+        let req = ChatRequest {
+            model: "m1".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+
+        let (dispatched, events) =
+            with_capture(router.complete_with_options(req, RouterOptions::default())).await;
+
+        assert!(dispatched.result.is_err());
+        assert!(
+            dispatched.meta.learned_capabilities.is_empty(),
+            "inferred prefill is dormant: nothing derives it act-side, so it must not learn",
+        );
+        assert!(learn_warns(&events).is_empty());
+        assert!(router.learned_capabilities.is_empty());
     }
 
     #[tokio::test]
