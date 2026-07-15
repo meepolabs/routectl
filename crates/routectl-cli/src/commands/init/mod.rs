@@ -721,7 +721,7 @@ async fn gather_probes() -> Vec<(&'static str, LocalProbe)> {
     }
 }
 
-/// Wrap a post-ack failure with the f1-style explicit recovery message: the
+/// Wrap a post-ack failure with an explicit recovery message: the
 /// on-disk config is valid, any providers/credentials already written persist
 /// and are reused on re-run (ref paths are deterministic), so re-running init
 /// completes the setup. No rollback engine, no secret auto-delete.

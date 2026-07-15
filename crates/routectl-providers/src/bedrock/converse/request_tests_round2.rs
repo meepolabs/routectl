@@ -807,7 +807,7 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
 }
 
 // ---------------------------------------------------------------------------
-// M-A: true round-trip: response -> canonical -> request
+// true round-trip: response -> canonical -> request
 // ---------------------------------------------------------------------------
 
 #[test]

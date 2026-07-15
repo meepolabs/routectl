@@ -8,7 +8,7 @@
 //! At request time the router asks [`seat_order_for_request`] for the order
 //! in which to walk those seats. The seats then slot into the existing
 //! fallback chain as ordinary dispatch hops -- the per-target circuit
-//! breaker, retry caps, probe fast-fail, and D1 `Retry-After` park all key
+//! breaker, retry caps, probe fast-fail, and the `Retry-After` park all key
 //! off the per-seat `state_key`, so seat rotation and cooling are delivered
 //! by machinery that already exists. This module owns only the expansion
 //! glue and the round-robin counter, keeping it out of the oversized

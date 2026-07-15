@@ -432,7 +432,7 @@
       "oneOf": [
         {
           "const": "own",
-          "description": "Authenticate to the upstream with routectl's own managed\ncredential (f1 behavior).",
+          "description": "Authenticate to the upstream with routectl's own managed\ncredential (the default behavior).",
           "type": "string"
         },
         {
@@ -509,7 +509,7 @@
     },
     "MitmConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts a first-party upstream\n(e.g. Claude Code talking to `api.anthropic.com`) so routectl can\nobserve and translate the decrypted traffic. Presence of the\n`[mitm]` block gates the feature on, matching the `[server.auth]`\nconvention -- `Config::mitm == None` keeps zero proxy startup and\nzero behavior change.\n\nTransport-only (the f1 shape): this block carries no credential\nknob. Which credential a forwarded egress uses is a per-provider\nchoice (`ProviderEntry::AnthropicApi.credential_source`) -- see\n`preflight_legacy_mitm_credential_source` for the pre-parse check\nthat catches a config still carrying the removed `[mitm]\ncredential_source` key and names the replacement.",
+      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts a first-party upstream\n(e.g. Claude Code talking to `api.anthropic.com`) so routectl can\nobserve and translate the decrypted traffic. Presence of the\n`[mitm]` block gates the feature on, matching the `[server.auth]`\nconvention -- `Config::mitm == None` keeps zero proxy startup and\nzero behavior change.\n\nTransport-only (the original shape): this block carries no credential\nknob. Which credential a forwarded egress uses is a per-provider\nchoice (`ProviderEntry::AnthropicApi.credential_source`) -- see\n`preflight_legacy_mitm_credential_source` for the pre-parse check\nthat catches a config still carrying the removed `[mitm]\ncredential_source` key and names the replacement.",
       "properties": {
         "cert_dir": {
           "default": "~/.config/routectl/mitm-certs",
