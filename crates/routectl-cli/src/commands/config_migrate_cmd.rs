@@ -2,41 +2,40 @@
 //! current schema version through the shared migration ladder, committing the
 //! result through the same single write primitive as `config set`.
 //!
-//! The pipeline mirrors `config_edit`'s discipline: every transform runs in
-//! memory, the candidate is validated through the SAME shared gate the reload
-//! path runs, and the operator acknowledges the break BEFORE any on-disk
-//! mutation -- the ladder's v1 rung writes `config.toml` and the overlay as it
-//! runs, so authorization has to clear ahead of it, not after. A refusal, a
-//! declined prompt, a gate failure, or a stale-bytes conflict leaves the file
-//! byte-identical.
+//! The pipeline is check-before-write end to end: the ladder runs as a PURE
+//! planning phase ([`plan_migration`]) that produces a
+//! `MigrationPlan { config_candidate, overlay_candidate, from, to, write_kind,
+//! removed_keys }` WITHOUT touching disk, so every refusal and validation
+//! check clears before any mutation:
 //!
 //!   1. Snapshot the raw bytes and read the file's raw `version`.
-//!   2. Authorize FIRST on a real migration below the current version:
-//!      interactive `y`, or `--force` non-interactively; a non-interactive run
-//!      without `--force` refuses. This precedes the ladder because the v1 rung
-//!      mutates disk, so a declined prompt must never leave a half-migrated
-//!      file. `--dry-run`, an already-current file, and a future-version file
-//!      need no acknowledgement (none of them mutate the real config).
-//!   3. Run the [`migrate_to_current`] ladder to produce the candidate. A
-//!      [`Refusal`] (behavior-bearing / malformed retry lists) or a
-//!      future-version file renders its reason plus an explicit "nothing was
-//!      written" and exits non-zero.
-//!   4. Gate the candidate through the shared `parse_config` +
+//!   2. Plan the migration purely. A [`Refusal`] (behavior-bearing / malformed
+//!      retry lists, or an egress allowlist) or a future-version file surfaces
+//!      here with an explicit "nothing was written" -- nothing has been.
+//!   3. Gate the candidate config text through the shared `parse_config` +
 //!      `validation_report` suite; a gate failure renders the report and
 //!      writes nothing.
-//!   5. `--dry-run` renders the exact candidate file text plus a change
-//!      summary and stops here -- it cannot write by construction and needs no
-//!      acknowledgement (see [`run_ladder_for_dry_run`] for how the v1 rung's
-//!      IO is kept off the real files).
-//!   6. Commit the v2->v3 rung through [`edit_config_toml`] (base-bytes
-//!      revision check -> conflict = no write). For a v1 file the ladder has
-//!      already atomically stamped `version = 2` on disk, so the base-bytes
-//!      check re-snapshots the now-v2 file (a crash between the two rungs is
-//!      recoverable: a rerun continues at v2).
+//!   4. `--dry-run` renders the exact candidate plus a change summary and stops
+//!      -- it needs no acknowledgement (nothing is written) and no temp copy
+//!      (planning never touched the real files).
+//!   5. Acknowledge EVERY real write (a version bump OR a same-version v3
+//!      normalization): interactive `y`, or `--force` non-interactively; a
+//!      non-interactive run without `--force` refuses. The acknowledgement runs
+//!      AFTER the gate (only a valid migration is worth prompting for) and
+//!      BEFORE any write.
+//!   6. Commit in two phases: the overlay FIRST (revision-checked, idempotent),
+//!      then `config.toml` LAST via [`edit_config_toml`] as the visible
+//!      completion marker (base-bytes revision check -> conflict = no write).
+//!      A crash between the phases is recoverable: a rerun re-plans (the
+//!      overlay fold is now a no-op) and stamps config.toml.
 //!
-//! Audit events on the migrator surface carry from/to version, dry-run,
-//! ack/force, outcome, refusal kind, and the config path -- never the
-//! candidate bytes and never a config value.
+//! Two-file (config + overlay) is not literally atomic without a journal; the
+//! honest target is recoverable two-phase + a truthful audit + an idempotent
+//! rerun. The audit event carries from/to version, dry-run, ack/force, outcome
+//! (`aborted` / `refused` / `dry_run` / `written` / `no_change` /
+//! `incomplete`), refusal kind, and the config path -- never the candidate
+//! bytes and never a config value. The `acknowledged` field reflects a REAL
+//! prompt: it is true only after an interactive `y`, never synthesized.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -44,8 +43,8 @@ use std::path::Path;
 use routectl_core::{Error, Result};
 use routectl_router::{
     CURRENT_CONFIG_VERSION, CachePricingOverride, Config, ConfigWriteError, EditOutcome,
-    MigrateError, Refusal, StepOutcome, V1Migration, edit_config_toml, migrate_to_current,
-    migrate_v2_to_v3, normalize_capability_overrides, parse_config,
+    MigrateError, MigrationPlan, Refusal, WriteKind, apply_config_transforms, edit_config_toml,
+    parse_config, plan_migration, save_catalog_overlay,
 };
 use toml_edit::DocumentMut;
 
@@ -114,7 +113,7 @@ pub fn run_at(
         ))
     })?;
 
-    let mut doc = parse_document(&snapshot_text)?;
+    let doc = parse_document(&snapshot_text)?;
     let from_version = raw_version_of(&doc)?;
 
     // The v1 rung folds the operator's `[cache_pricing]` table (merged with
@@ -125,46 +124,14 @@ pub fn run_at(
         BTreeMap::new()
     };
 
-    // Authorization must precede ANY on-disk mutation. On a real migration
-    // below the current version, the ladder's v1 rung rewrites `config.toml`
-    // and folds the overlay as it runs, so the acknowledgement has to clear
-    // BEFORE the ladder is invoked -- a declined prompt leaves the file
-    // byte-identical. `from_version` is known from the cheap snapshot read;
-    // the prompt states `from_version -> CURRENT_CONFIG_VERSION` without
-    // needing the ladder's output. An already-current or future-version file
-    // never enters this branch (both are ladder no-ops / errors that touch
-    // nothing), and `--dry-run` acknowledges nothing by construction.
-    if !dry_run
-        && from_version < CURRENT_CONFIG_VERSION
-        && !confirm_migration(from_version, CURRENT_CONFIG_VERSION, force)
-    {
-        println!("aborted; nothing further written.");
-        audit_event(
-            config_path,
-            from_version,
-            CURRENT_CONFIG_VERSION,
-            false,
-            false,
-            force,
-            "aborted",
-            None,
-        );
-        return Ok(MigrateResult::Aborted);
-    }
+    // PURE planning phase: build the plan with NO on-disk mutation. Every
+    // refusal / conflict / future-version check clears here, so a returned
+    // plan means all of the migrator's validation has passed.
+    let plan = plan_migration(&doc, from_version, &cache_pricing, overlay_path)
+        .map_err(|e| render_ladder_error(e, config_path, from_version, dry_run))?;
+    let to_version = plan.to;
 
-    let steps = if dry_run && from_version <= LEGACY_CONFIG_VERSION {
-        run_ladder_for_dry_run(&mut doc, from_version, &snapshot, &cache_pricing)?
-    } else {
-        let v1 = V1Migration {
-            cache_pricing: &cache_pricing,
-            config_path,
-            overlay_path,
-        };
-        migrate_to_current(&mut doc, from_version, &v1)
-            .map_err(|e| render_ladder_error(e, config_path, from_version, dry_run))?
-    };
-
-    if steps.is_empty() {
+    if matches!(plan.write_kind, WriteKind::NoChange) {
         println!("config is already at version {CURRENT_CONFIG_VERSION}; nothing to migrate.");
         audit_event(
             config_path,
@@ -179,12 +146,13 @@ pub fn run_at(
         return Ok(MigrateResult::AlreadyCurrent);
     }
 
-    let to_version = steps
-        .last()
-        .map_or(CURRENT_CONFIG_VERSION, |s| s.to_version);
-    let candidate_text = doc.to_string();
+    let candidate_text = plan
+        .config_candidate
+        .as_deref()
+        .expect("a non-NoChange plan carries a config candidate");
 
-    gate(&candidate_text).map_err(|errors| {
+    // Validation gate -- still before any write.
+    gate(candidate_text).map_err(|errors| {
         render_gate_errors(&errors);
         audit_event(
             config_path,
@@ -199,10 +167,9 @@ pub fn run_at(
         Error::Config(format!("{} config error(s)", errors.len()))
     })?;
 
-    let removed = removed_keys(&snapshot_text, from_version);
-
+    // `--dry-run` renders the candidate and stops -- no write, no ack.
     if dry_run {
-        render_dry_run(&candidate_text, from_version, to_version, &removed);
+        render_dry_run(candidate_text, from_version, to_version, &plan.removed_keys);
         audit_event(
             config_path,
             from_version,
@@ -216,45 +183,32 @@ pub fn run_at(
         return Ok(MigrateResult::DryRun);
     }
 
-    // The break was acknowledged before the ladder ran (see the authorization
-    // gate above), so the acked path commits directly. For a v1 file the
-    // ladder already atomically stamped `version = 2` on disk, so the
-    // base-bytes revision check must run against the current (v2) file, not
-    // the original v1 snapshot.
-    let touched_v1 = steps
-        .iter()
-        .any(|s| s.from_version == LEGACY_CONFIG_VERSION);
-    let base = if touched_v1 {
-        std::fs::read(config_path).map_err(|e| {
-            Error::Config(format!(
-                "cannot re-read config `{}` after the v1 migration step: {e}",
-                config_path.display()
-            ))
-        })?
-    } else {
-        snapshot
-    };
+    // Acknowledge EVERY real write (a version bump OR a same-version v3
+    // normalization), now that the candidate is known valid and a write is
+    // known to be pending. A declined prompt leaves both files byte-identical.
+    if !confirm_migration(from_version, to_version, force) {
+        println!("aborted; nothing further written.");
+        audit_event(
+            config_path,
+            from_version,
+            to_version,
+            false,
+            false,
+            force,
+            "aborted",
+            None,
+        );
+        return Ok(MigrateResult::Aborted);
+    }
 
-    // The same-version v3 normalization runs for a file already at the
-    // current version; a lower version runs the version-bump rung instead.
-    // The commit closure must reproduce EXACTLY the transform the main flow
-    // gated, so it dispatches on the same condition.
-    let normalize_only = from_version >= CURRENT_CONFIG_VERSION;
-    let result = edit_config_toml::<CommitError, _>(config_path, &base, |d| {
-        if normalize_only {
-            normalize_capability_overrides(d).map_err(CommitError::Refused)?;
+    commit_plan(&plan, config_path, overlay_path, &snapshot, from_version).map_err(|failure| {
+        // A commit failure AFTER the overlay was written is resumable and must
+        // NEVER claim "nothing was written" (the overlay mutation is durable).
+        let outcome = if failure.overlay_written {
+            "incomplete"
         } else {
-            migrate_v2_to_v3(d).map_err(CommitError::Refused)?;
-        }
-        match gate(&d.to_string()) {
-            Ok(_) => Ok(EditOutcome::Modified),
-            Err(_) => Err(CommitError::Revalidation),
-        }
-    })
-    .map_err(render_write_error)?;
-
-    if result.outcome == EditOutcome::Unchanged {
-        println!("config is already at version {CURRENT_CONFIG_VERSION}; nothing to migrate.");
+            "conflict"
+        };
         audit_event(
             config_path,
             from_version,
@@ -262,11 +216,11 @@ pub fn run_at(
             false,
             !force,
             force,
-            "no_change",
+            outcome,
             None,
         );
-        return Ok(MigrateResult::AlreadyCurrent);
-    }
+        *failure.error
+    })?;
 
     audit_event(
         config_path,
@@ -291,6 +245,83 @@ pub fn run_at(
         );
     }
     Ok(MigrateResult::Migrated { from_version })
+}
+
+/// A commit failure, carrying whether the overlay half already landed so the
+/// caller can pick a truthful audit outcome and a message that never falsely
+/// claims "nothing was written".
+struct CommitFailure {
+    error: Box<Error>,
+    overlay_written: bool,
+}
+
+/// Commit a validated [`MigrationPlan`] in two phases: the overlay FIRST
+/// (revision-checked, idempotent), then `config.toml` LAST as the visible
+/// completion marker. The config write reproduces the SAME pure transform the
+/// plan gated, under the write lock against the original snapshot bytes.
+///
+/// Two-file commit is not literally atomic without a journal. It is
+/// recoverable instead: a crash (or a config-side conflict) after the overlay
+/// write leaves `config.toml` at its old version, so a rerun re-plans (the
+/// overlay fold is now an idempotent no-op) and completes the config stamp.
+fn commit_plan(
+    plan: &MigrationPlan,
+    config_path: &Path,
+    overlay_path: &Path,
+    snapshot: &[u8],
+    from_version: u32,
+) -> std::result::Result<(), CommitFailure> {
+    // Phase 1: the overlay. A revision conflict here fails closed BEFORE its
+    // atomic rename, so nothing is written -- a truthful "nothing written".
+    let overlay_written = match &plan.overlay_candidate {
+        Some(ow) => {
+            save_catalog_overlay(overlay_path, ow.base_revision, ow.cells.clone()).map_err(
+                |e| CommitFailure {
+                    error: Box::new(Error::Config(format!(
+                        "cache-pricing migration: overlay write failed, nothing was written: {e}"
+                    ))),
+                    overlay_written: false,
+                },
+            )?;
+            true
+        }
+        None => false,
+    };
+
+    // Phase 2: config.toml LAST, the visible version marker.
+    edit_config_toml::<CommitError, _>(config_path, snapshot, |d| {
+        apply_config_transforms(d, from_version).map_err(CommitError::Refused)?;
+        match gate(&d.to_string()) {
+            Ok(_) => Ok(EditOutcome::Modified),
+            Err(_) => Err(CommitError::Revalidation),
+        }
+    })
+    .map_err(|e| CommitFailure {
+        error: Box::new(if overlay_written {
+            resumable_commit_error(&e)
+        } else {
+            render_write_error(e)
+        }),
+        overlay_written,
+    })?;
+
+    Ok(())
+}
+
+/// A config-commit failure that lands AFTER the overlay was already written.
+/// Phrased so it never claims "nothing was written" -- the overlay change is
+/// durable and the migration is resumable by a rerun.
+fn resumable_commit_error(e: &ConfigWriteError<CommitError>) -> Error {
+    let reason = match e {
+        ConfigWriteError::Conflict { .. } => {
+            "config.toml changed on disk before it could be stamped".to_string()
+        }
+        other => other.to_string(),
+    };
+    Error::Config(format!(
+        "the catalog overlay was migrated, but config.toml was not committed ({reason}); the \
+         overlay change is durable -- rerun `config migrate` to finish stamping config.toml"
+    ))
 }
 
 /// Read the file's raw `version` off the document: an absent key is legacy v1,
@@ -339,36 +370,6 @@ fn load_v1_cache_pricing(
         ),
     }
     Ok(config.cache_pricing)
-}
-
-/// Run the ladder for a `--dry-run` on a v1 file against a throwaway copy of
-/// the config (and a fresh temp overlay), so the v1 rung's atomic
-/// `config.toml` rewrite and overlay fold land on temp files that vanish with
-/// the `TempDir` -- the real config and overlay are provably untouched. `doc`
-/// is left holding the fully-migrated candidate the caller renders.
-fn run_ladder_for_dry_run(
-    doc: &mut DocumentMut,
-    from_version: u32,
-    snapshot: &[u8],
-    cache_pricing: &BTreeMap<String, CachePricingOverride>,
-) -> Result<Vec<StepOutcome>> {
-    let tmp = tempfile::tempdir().map_err(|e| {
-        Error::Config(format!(
-            "cannot create a scratch directory for dry-run: {e}"
-        ))
-    })?;
-    let tmp_config = tmp.path().join("config.toml");
-    let tmp_overlay = tmp.path().join("catalog_overlay.json");
-    std::fs::write(&tmp_config, snapshot)
-        .map_err(|e| Error::Config(format!("cannot stage dry-run config copy: {e}")))?;
-
-    let v1 = V1Migration {
-        cache_pricing,
-        config_path: &tmp_config,
-        overlay_path: &tmp_overlay,
-    };
-    migrate_to_current(doc, from_version, &v1)
-        .map_err(|e| render_ladder_error(e, &tmp_config, from_version, true))
 }
 
 /// Shared validation gate: `parse_config` then the centralized validator suite
@@ -469,65 +470,6 @@ fn render_write_error(err: ConfigWriteError<CommitError>) -> Error {
     Error::Config(err.to_string())
 }
 
-/// The keys this migration removes, for the dry-run change summary. Derived
-/// from the ORIGINAL document so the summary names exactly what leaves.
-fn removed_keys(snapshot_text: &str, from_version: u32) -> Vec<String> {
-    let mut removed = Vec::new();
-    if let Ok(doc) = snapshot_text.parse::<DocumentMut>() {
-        if let Some(retry) = doc.get("retry").and_then(|i| i.as_table_like()) {
-            if retry.contains_key("retry_allowlist") {
-                removed.push("retry.retry_allowlist".to_string());
-            }
-            if retry.contains_key("retry_denylist") {
-                removed.push("retry.retry_denylist".to_string());
-            }
-        }
-        if from_version <= LEGACY_CONFIG_VERSION && doc.contains_key("cache_pricing") {
-            removed.push("[cache_pricing] (folded into the catalog overlay)".to_string());
-        }
-        if from_version >= CURRENT_CONFIG_VERSION {
-            collect_unsupported_features_removals(&doc, &mut removed);
-        }
-    }
-    removed
-}
-
-/// Append the provider / model `unsupported_features` keys the same-version
-/// v3 normalization folds into `[capability.overrides]`, for the dry-run
-/// summary.
-fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<String>) {
-    if let Some(providers) = doc.get("providers").and_then(|i| i.as_table_like()) {
-        for (name, item) in providers.iter() {
-            if item
-                .as_table_like()
-                .is_some_and(|t| t.contains_key("unsupported_features"))
-            {
-                removed.push(format!(
-                    "[providers.{name}].unsupported_features (folded into \
-                     [capability.overrides.{name}].unsupported)"
-                ));
-            }
-        }
-    }
-    if let Some(models) = doc.get("models").and_then(|i| i.as_table_like()) {
-        for (nick, item) in models.iter() {
-            let Some(entry) = item.as_table_like() else {
-                continue;
-            };
-            if entry.contains_key("unsupported_features") {
-                let provider = entry.get("provider").and_then(|p| p.as_str());
-                match provider {
-                    Some(provider) => removed.push(format!(
-                        "[models.{nick}].unsupported_features (folded into \
-                         [capability.overrides.\"{provider}:{nick}\"].unsupported)"
-                    )),
-                    None => removed.push(format!("[models.{nick}].unsupported_features")),
-                }
-            }
-        }
-    }
-}
-
 fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, removed: &[String]) {
     println!("--- candidate config.toml (version {to_version}) ---");
     print!("{candidate_text}");
@@ -550,20 +492,29 @@ fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, remo
     println!("dry-run: nothing was written.");
 }
 
-/// Acknowledge the schema break before the write lock. `--force` bypasses the
+/// Acknowledge the schema change before the write lock. `--force` bypasses the
 /// prompt; a non-interactive run without `--force` reads EOF and refuses.
-/// Never called while the write lock is held.
+/// Never called while the write lock is held. Called for EVERY real write,
+/// including a same-version v3 normalization (`from_version == to_version`).
 fn confirm_migration(from_version: u32, to_version: u32, force: bool) -> bool {
     if force {
         return true;
     }
     use std::io::Write as _;
-    println!(
-        "this migrates config.toml from version {from_version} to {to_version}. The break \
-         retires per-status retry lists (and, from a v1 file, the `[cache_pricing]` table). A \
-         running routectl daemon must be restarted onto the matching binary after migration."
-    );
-    print!("proceed with the migration? [y/N] ");
+    if from_version == to_version {
+        println!(
+            "this normalizes config.toml at version {to_version}, folding legacy \
+             `unsupported_features` lists into `[capability.overrides]` and removing the retired \
+             keys. A running routectl daemon must be restarted onto the matching binary afterward."
+        );
+    } else {
+        println!(
+            "this migrates config.toml from version {from_version} to {to_version}. The break \
+             retires per-status retry lists (and, from a v1 file, the `[cache_pricing]` table). A \
+             running routectl daemon must be restarted onto the matching binary after migration."
+        );
+    }
+    print!("proceed? [y/N] ");
     let _ = std::io::stdout().flush();
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_err() {
@@ -957,7 +908,7 @@ default = \"gpt\"
         let after_concurrent = std::fs::read(&f.config).unwrap();
 
         let err = edit_config_toml::<CommitError, _>(&f.config, &stale, |d| {
-            migrate_v2_to_v3(d).map_err(CommitError::Refused)?;
+            apply_config_transforms(d, 2).map_err(CommitError::Refused)?;
             Ok(EditOutcome::Modified)
         })
         .expect_err("stale base bytes must conflict");
@@ -1168,6 +1119,186 @@ default = \"gpt\"
             std::fs::read(&f.config).unwrap(),
             before,
             "dry-run must not write"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // f02: a v1 file that hits a v2->v3 refusal DURING planning leaves BOTH
+    // config.toml AND the overlay byte-untouched. The old impure ladder wrote
+    // the overlay and stamped config.toml to v2 BEFORE the refusal, then
+    // printed a false "nothing was written"; the pure planner refuses first.
+    // -----------------------------------------------------------------
+
+    /// A legacy v1 config carrying both a `[cache_pricing]` table AND a
+    /// behavior-bearing `retry_allowlist`, so the ladder's v2->v3 rung refuses.
+    const V1_CACHE_PRICING_AND_BEHAVIOR_BEARING: &str = "\
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[cache_pricing]
+\"openai-compat:grok-*\" = { wm = 1.5, override_acknowledges_cost_risk = true }
+
+[retry]
+retry_allowlist = [503]
+
+[providers.fast]
+kind = \"openai-compat\"
+base_url = \"http://127.0.0.1:1\"
+api_key_ref = \"literal:test-key\"
+
+[models.gpt]
+provider = \"fast\"
+upstream = \"gpt-4o\"
+
+[aliases]
+default = \"gpt\"
+";
+
+    #[test]
+    fn v1_refusal_leaves_config_and_overlay_byte_untouched() {
+        let f = fixture(V1_CACHE_PRICING_AND_BEHAVIOR_BEARING);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let err = run_at(&f.config, &f.overlay, false, true)
+            .expect_err("a v1 file with a behavior-bearing list must refuse");
+        assert!(err.to_string().contains("503"), "err: {err}");
+        // Both files untouched -- the overlay was never even created, and the
+        // config was never stamped to v2.
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "a refused v1 migration must leave config.toml byte-identical"
+        );
+        assert!(
+            !f.overlay.exists(),
+            "a refused v1 migration must not fold the overlay"
+        );
+    }
+
+    #[test]
+    fn v1_refusal_audit_never_reports_written_and_names_the_kind() {
+        let f = fixture(V1_CACHE_PRICING_AND_BEHAVIOR_BEARING);
+        let events = routectl_testkit::capture_events(|| {
+            let _ = run_at(&f.config, &f.overlay, false, true);
+        });
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("outcome"), Some("refused"));
+        assert_eq!(audit.field("refusal_kind"), Some("behavior_bearing"));
+    }
+
+    // -----------------------------------------------------------------
+    // f20: a same-version v3 normalization is a REAL write and must be
+    // prompt/force-gated like any other, and its audit must reflect the true
+    // acknowledgement (never a synthesized acknowledged=true).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn v3_normalize_non_interactive_without_force_aborts_byte_identical() {
+        // stdin is not a TTY under the test harness: read_line hits EOF, so
+        // the normalize prompt is declined and nothing is written.
+        let f = fixture(V3_WITH_LEGACY);
+        let before = std::fs::read(&f.config).unwrap();
+
+        let result =
+            run_at(&f.config, &f.overlay, false, false).expect("declining is not an error");
+        assert_eq!(result, MigrateResult::Aborted);
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            before,
+            "an unacknowledged v3 normalization must not write"
+        );
+    }
+
+    #[test]
+    fn v3_normalize_forced_audit_records_acknowledged_false_not_synthesized() {
+        // A forced normalize was authorized by --force, NOT by an interactive
+        // acknowledgement, so `acknowledged` must be false -- the f20 defect
+        // was a synthesized acknowledged=true on this exact path.
+        let f = fixture(V3_WITH_LEGACY);
+        let events = routectl_testkit::capture_events(|| {
+            run_at(&f.config, &f.overlay, false, true).expect("normalize");
+        });
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("outcome"), Some("written"));
+        assert_eq!(audit.field("forced"), Some("true"));
+        assert_eq!(
+            audit.field("acknowledged"),
+            Some("false"),
+            "a --force normalize must not synthesize acknowledged=true"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The audit distinguishes aborted / refused / dry_run / written.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn aborted_audit_event_names_aborted() {
+        let f = fixture(V2_CLEAN);
+        let events = routectl_testkit::capture_events(|| {
+            // Non-interactive without --force declines at the prompt.
+            let _ = run_at(&f.config, &f.overlay, false, false);
+        });
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("outcome"), Some("aborted"));
+    }
+
+    #[test]
+    fn dry_run_audit_event_names_dry_run() {
+        let f = fixture(V2_CLEAN);
+        let events = routectl_testkit::capture_events(|| {
+            run_at(&f.config, &f.overlay, true, false).expect("dry-run");
+        });
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("outcome"), Some("dry_run"));
+        assert_eq!(audit.field("dry_run"), Some("true"));
+    }
+
+    // -----------------------------------------------------------------
+    // A partial-commit state (overlay written, config still old) reruns
+    // safely to a consistent result without a double overlay write.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn partial_commit_state_reruns_safely_to_completion() {
+        let f = fixture(V1_WITH_CACHE_PRICING);
+        let v1_body = std::fs::read(&f.config).unwrap();
+
+        // First run completes both phases (overlay folded, config -> v3).
+        run_at(&f.config, &f.overlay, false, true).expect("first migrate");
+        assert!(f.overlay.exists(), "first run folds the overlay");
+        let overlay_after_first = std::fs::read(&f.overlay).unwrap();
+
+        // Simulate a crash between the overlay commit and the config stamp:
+        // config.toml is rolled back to its original v1 content while the
+        // overlay's write is durable.
+        std::fs::write(&f.config, &v1_body).unwrap();
+
+        // Rerun completes safely: the overlay fold is now an idempotent no-op
+        // (no double write) and config.toml is stamped forward to v3.
+        let result = run_at(&f.config, &f.overlay, false, true).expect("rerun");
+        assert_eq!(result, MigrateResult::Migrated { from_version: 1 });
+        let text = read(&f.config);
+        assert!(text.contains("version = 3"), "{text}");
+        assert!(!text.contains("cache_pricing"), "{text}");
+        gate(&text).expect("the completed config must pass the gate");
+        assert_eq!(
+            std::fs::read(&f.overlay).unwrap(),
+            overlay_after_first,
+            "the rerun must not write the overlay a second time"
         );
     }
 }

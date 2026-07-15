@@ -266,8 +266,8 @@ pub fn preflight_config_version(raw_toml: &str) -> Result<u32, ConfigVersionErro
 
 /// At `version >= CURRENT_CONFIG_VERSION`, a non-empty legacy
 /// `[cache_pricing]` table is a startup-time misconfiguration, not
-/// silently-ignored data: the v1->v2 migration
-/// (`crate::config_migrate::migrate_v1_to_v2`) already folds
+/// silently-ignored data: the config migrate ladder
+/// (`crate::config_migrate::plan_migration`) already folds
 /// `[cache_pricing]` into the catalog overlay and clears it from
 /// `config.toml`, so a non-empty table at v2+ means the file was
 /// hand-edited back into an inconsistent state (or authored fresh from a
@@ -277,9 +277,8 @@ pub fn validate_cache_pricing_retired(config: &Config) -> Result<(), String> {
         return Err(format!(
             "config version {} carries a non-empty [cache_pricing] table ({} entries), but \
              [cache_pricing] is retired as of version {CURRENT_CONFIG_VERSION} -- it should \
-             have been migrated into the catalog overlay by the v1->v2 migrator \
-             (crate::config_migrate::migrate_v1_to_v2); run `config migrate` to fold it \
-             forward, or remove [cache_pricing] by hand",
+             have been migrated into the catalog overlay by the `config_migrate` ladder; run \
+             `config migrate` to fold it forward, or remove [cache_pricing] by hand",
             config.version,
             config.cache_pricing.len(),
         ));

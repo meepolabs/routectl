@@ -87,9 +87,9 @@ pub use config_effective::{
 pub use config_error::parse_config;
 pub use config_locate::locate_dotted_path;
 pub use config_migrate::{
-    MigrateError, MigrationError, MigrationOutcome, Refusal, RefusalSource, StepOutcome,
-    V1Migration, migrate_to_current, migrate_v1_to_v2, migrate_v2_to_v3,
-    normalize_capability_overrides,
+    MigrateError, MigrationError, MigrationPlan, OverlayWrite, Refusal, RefusalSource, StepOutcome,
+    WriteKind, apply_config_transforms, migrate_v2_to_v3, normalize_capability_overrides,
+    plan_migration,
 };
 pub use config_path::{PathError, PathShape, validate_config_path};
 pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};

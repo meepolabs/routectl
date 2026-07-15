@@ -1,25 +1,33 @@
-//! v1 -> v2 config migration: retires the legacy `[cache_pricing]`
-//! TOML table into the catalog overlay ([`crate::catalog_overlay`]).
+//! Config schema migration: a PURE planning phase plus a caller-owned
+//! two-phase commit.
 //!
-//! TWO-PHASE + IDEMPOTENT, driven by [`migrate_v1_to_v2`]:
-//!   1. Build an overlay candidate cell for every entry in the (already
-//!      sidecar-merged, by the caller) `[cache_pricing]` table, then
-//!      atomically write it into `catalog_overlay.json` via the revision-
-//!      checked `crate::catalog_overlay::save`. A pre-existing overlay key
-//!      whose value DIFFERS from the candidate is a conflict: nothing is
-//!      written, for ANY key -- fail closed rather than guess which side
-//!      is right.
-//!   2. Format-preserving rewrite of `config.toml` via `toml_edit`: set
-//!      `version = 2`, drop `[cache_pricing]`. A plain `toml::to_string`
-//!      round trip would destroy operator comments; `toml_edit` edits the
-//!      original document in place instead.
+//! [`plan_migration`] computes a [`MigrationPlan`] WITHOUT touching disk:
+//! it runs every ladder transform in memory (the v1 `[cache_pricing]` ->
+//! catalog-overlay fold, the v2 -> v3 retry-list retirement, the v3 -> v3
+//! `unsupported_features` normalization) and returns the config-text
+//! candidate, the overlay candidate, and the removed keys. Every refusal
+//! and conflict check is part of planning, so no on-disk mutation can
+//! occur before the caller has a validated plan in hand -- a [`Refusal`]
+//! or an overlay conflict surfaces from the pure planner, leaving both
+//! files byte-untouched.
 //!
-//! Crash between phase 1 and phase 2 leaves `config.toml` still reporting
-//! `version < 2`, so the caller reruns this whole function unchanged on
-//! the next load. Phase 1 is naturally idempotent (a candidate whose value
-//! already matches what phase 1 wrote last time is a silent no-op, not a
-//! conflict -- see [`cell_values_equal`]); phase 2 is a single atomic
-//! rewrite, so it either has not run yet or has already fully completed.
+//! The caller commits the plan in two phases (recoverable, not literally
+//! atomic across two files without a journal):
+//!   1. Overlay first: fold `[cache_pricing]` into `catalog_overlay.json`
+//!      via the revision-checked `crate::catalog_overlay::save`. A
+//!      pre-existing overlay key whose value DIFFERS from the candidate is
+//!      a conflict caught at plan time -- nothing is written, for ANY key.
+//!   2. `config.toml` LAST, as the visible completion marker: a
+//!      format-preserving rewrite (via `toml_edit`, so operator comments
+//!      survive) that stamps the new `version` and drops the retired keys.
+//!
+//! A crash between the two phases leaves `config.toml` still reporting the
+//! OLD version, so a rerun re-plans from scratch: the overlay fold is
+//! idempotent (a candidate whose value already matches what a prior run
+//! wrote is a silent no-op, not a conflict -- see [`cell_values_equal`],
+//! so the rerun's plan carries no overlay write) and the single config
+//! rewrite then stamps the new version. The migration therefore always
+//! reruns safely to a consistent result.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -37,20 +45,68 @@ use crate::config::CURRENT_CONFIG_VERSION;
 /// Seconds in a day, for epoch-day arithmetic off the system clock.
 const SECONDS_PER_DAY: i64 = 86_400;
 
-/// What [`migrate_v1_to_v2`] did, for the caller's log line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MigrationOutcome {
-    /// Number of `[cache_pricing]` entries folded into the overlay
-    /// candidate (including ones that turned out to already match an
-    /// existing overlay cell and triggered no write).
-    pub cells_migrated: usize,
+/// A pending catalog-overlay write computed by [`plan_v1_overlay`]: the
+/// merged cell map plus the `base_revision` it was merged against. The
+/// caller commits it through the revision-checked `catalog_overlay::save`,
+/// which refuses (no write) if the on-disk revision has moved since.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayWrite {
+    /// The overlay revision the merge was computed against; `save` writes
+    /// `base_revision + 1` only if the on-disk revision still matches.
+    pub base_revision: u64,
+    /// The full merged cell map to persist.
+    pub cells: BTreeMap<String, Option<OverlayCell>>,
 }
 
-/// Errors from [`migrate_v1_to_v2`]. Every variant fails closed: on any
-/// error, NEITHER the overlay NOR `config.toml` has been modified for this
-/// call (a partial phase-1 write across multiple keys never happens --
-/// conflicts are collected up front and the whole write is skipped when
-/// any exist).
+/// Which on-disk files a [`MigrationPlan`] will touch when committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteKind {
+    /// The file is already current with nothing to fold; committing is a
+    /// no-op and writes nothing.
+    NoChange,
+    /// Only `config.toml` changes (a v2 -> v3 rung, or a v3 -> v3
+    /// normalization, or a v1 file whose overlay fold is an idempotent
+    /// no-op because the cells already match).
+    ConfigOnly,
+    /// Both `catalog_overlay.json` and `config.toml` change (a v1 file
+    /// whose `[cache_pricing]` fold adds or edits an overlay cell).
+    ConfigAndOverlay,
+}
+
+/// The fully-computed result of the PURE planning phase: everything the
+/// caller needs to commit the migration, with no on-disk mutation yet
+/// performed. Produced by [`plan_migration`].
+///
+/// A refusal or conflict is reported as an `Err` from [`plan_migration`]
+/// instead of a plan, so holding a `MigrationPlan` means every refusal and
+/// validation check the migrator owns has already passed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MigrationPlan {
+    /// The fully-migrated `config.toml` text to commit LAST. `None` only
+    /// when [`WriteKind::NoChange`] (nothing to write).
+    pub config_candidate: Option<String>,
+    /// The overlay write to commit FIRST, or `None` when the migration
+    /// touches no overlay cell (every non-v1 file, and a v1 file whose
+    /// fold is an idempotent no-op).
+    pub overlay_candidate: Option<OverlayWrite>,
+    /// The raw on-disk version the plan migrates from.
+    pub from: u32,
+    /// The version the committed `config.toml` will stamp (equal to `from`
+    /// for a same-version v3 normalization).
+    pub to: u32,
+    /// Which files the commit will touch.
+    pub write_kind: WriteKind,
+    /// Human-readable descriptions of the keys this migration removes, for
+    /// a dry-run change summary. Derived purely from the original document.
+    pub removed_keys: Vec<String>,
+    /// The per-rung outcomes, in ladder order.
+    pub steps: Vec<StepOutcome>,
+}
+
+/// Errors from the v1 overlay fold in [`plan_v1_overlay`]. Every variant
+/// fails closed: on any error the overlay is left byte-untouched (a partial
+/// write across multiple keys never happens -- conflicts are collected up
+/// front and the whole write is skipped when any exist).
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationError {
     /// A `[cache_pricing]` selector key does not parse as
@@ -78,29 +134,29 @@ pub enum MigrationError {
     /// Loading the current overlay failed (corrupt, too-new schema, I/O).
     #[error("cache-pricing migration: {0}")]
     Overlay(#[from] catalog_overlay::OverlayError),
-
-    /// A filesystem failure specific to the `config.toml` rewrite phase.
-    #[error("cache-pricing migration: config `{path}`: {reason}")]
-    ConfigIo { path: String, reason: String },
 }
 
-/// Run the v1 -> v2 migration against the config at `config_path`, folding
-/// `cache_pricing` (the operator's `[cache_pricing]` table, ALREADY merged
-/// with any legacy `pricing_verifications.json` stamps by the caller --
-/// see `crate::config::CachePricingOverride`'s doc and
-/// `routectl-cli`'s `commands::catalog::load_and_merge_verifications`) into
-/// the catalog overlay at `overlay_path`, then rewriting `config.toml` to
-/// `version = 2` with `[cache_pricing]` dropped.
+/// Compute the v1 `[cache_pricing]` -> catalog-overlay fold as a PENDING
+/// write, WITHOUT touching disk. Loads the current overlay (a read),
+/// validates and merges every `[cache_pricing]` candidate cell, and detects
+/// conflicts up front:
 ///
-/// Safe to call unconditionally when the caller already knows
-/// `config.version < CURRENT_CONFIG_VERSION`: an empty `cache_pricing` is a
-/// no-op for phase 1 (no overlay write) but phase 2 still runs, bumping the
-/// version stamp so this function is not invoked again on the next load.
-pub fn migrate_v1_to_v2(
+/// - `Ok(Some(write))`: at least one cell is new or edited; the caller
+///   commits `write` through the revision-checked `catalog_overlay::save`.
+/// - `Ok(None)`: every candidate already matches an existing overlay cell
+///   (an idempotent rerun) -- no overlay write is needed.
+/// - `Err(Conflict)`: one or more candidate selectors already carry a
+///   DIFFERENT overlay value (or are explicitly disabled). Nothing is
+///   written, for ANY key -- fail closed rather than guess which side is
+///   right.
+///
+/// `cache_pricing` is the operator's `[cache_pricing]` table, ALREADY
+/// merged with any legacy `pricing_verifications.json` stamps by the caller
+/// (see `routectl-cli`'s `commands::catalog::load_and_merge_verifications`).
+fn plan_v1_overlay(
     cache_pricing: &BTreeMap<String, CachePricingOverride>,
-    config_path: &Path,
     overlay_path: &Path,
-) -> Result<MigrationOutcome, MigrationError> {
+) -> Result<Option<OverlayWrite>, MigrationError> {
     let candidates = build_candidate_cells(cache_pricing)?;
 
     let overlay = catalog_overlay::load(overlay_path)?;
@@ -126,14 +182,13 @@ pub fn migrate_v1_to_v2(
         return Err(MigrationError::Conflict(conflicts));
     }
 
-    if changed {
-        catalog_overlay::save(overlay_path, overlay.revision, merged_cells)?;
-    }
-
-    rewrite_config_to_v2(config_path)?;
-
-    Ok(MigrationOutcome {
-        cells_migrated: candidates.len(),
+    Ok(if changed {
+        Some(OverlayWrite {
+            base_revision: overlay.revision,
+            cells: merged_cells,
+        })
+    } else {
+        None
     })
 }
 
@@ -208,39 +263,18 @@ fn cell_values_equal(a: &OverlayCell, b: &OverlayCell) -> bool {
         && a.capabilities == b.capabilities
 }
 
-/// Format-preserving rewrite: set `version = 2` and drop `[cache_pricing]`
-/// via `toml_edit`, then write the result back atomically (temp file in
-/// the same directory, fsync, rename). The original file's permission
-/// bits are restored after the rename (best-effort) -- unlike the catalog
-/// overlay's writer, `config.toml` is an operator-facing file, so this
-/// must not silently narrow (or widen) its mode.
-fn rewrite_config_to_v2(config_path: &Path) -> Result<(), MigrationError> {
-    let display = config_path.display().to_string();
-    let text = std::fs::read_to_string(config_path).map_err(|e| MigrationError::ConfigIo {
-        path: display.clone(),
-        reason: format!("read: {e}"),
-    })?;
-
-    let mut doc = text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| MigrationError::ConfigIo {
-            path: display.clone(),
-            reason: format!("parse for rewrite: {e}"),
-        })?;
-
-    // Each step stamps its own LITERAL target: v1 -> v2 stamps `2`. Only
-    // the ladder in `migrate_to_current` knows what "current" is, so a
-    // later bump of `CURRENT_CONFIG_VERSION` cannot make this v1->v2 rung
-    // silently over-stamp a version it did not actually migrate to.
+/// Pure v1 -> v2 transform on the RAW toml_edit document: set `version = 2`
+/// and drop `[cache_pricing]`. NO IO -- the caller owns the single commit.
+/// The `[cache_pricing]` fold into the overlay is [`plan_v1_overlay`]'s
+/// separate concern; this touches only the document.
+///
+/// Stamps the LITERAL target `2`: only the ladder in [`apply_config_transforms`]
+/// knows what "current" is, so a later bump of `CURRENT_CONFIG_VERSION`
+/// cannot make this v1 -> v2 rung silently over-stamp a version it did not
+/// actually migrate to.
+fn apply_v1_to_v2_doc(doc: &mut DocumentMut) {
     doc["version"] = toml_edit::value(2i64);
     doc.remove("cache_pricing");
-
-    crate::config_write::write_config_atomic(config_path, doc.to_string().as_bytes()).map_err(
-        |reason| MigrationError::ConfigIo {
-            path: display,
-            reason,
-        },
-    )
 }
 
 /// Today's date as `"YYYY-MM-DD"`, derived from the system clock via pure
@@ -277,7 +311,7 @@ fn civil_from_epoch_day(z: i64) -> (i64, u32, u32) {
     )
 }
 
-/// The highest config version the step ladder in [`migrate_to_current`]
+/// The highest config version the step ladder in [`apply_config_transforms`]
 /// knows how to produce. Deliberately a LITERAL, not `CURRENT_CONFIG_VERSION`:
 /// the two are kept equal, but the ladder's rungs and its "too new" ceiling
 /// must stay pinned to the versions whose transforms actually exist, so a
@@ -437,14 +471,15 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Errors from the [`migrate_to_current`] ladder.
+/// Errors from the [`plan_migration`] planner.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrateError {
-    /// The v1 -> v2 rung failed (overlay fold or its atomic config rewrite).
+    /// The v1 overlay fold planning failed (validation or a conflict).
     #[error(transparent)]
     V1ToV2(#[from] MigrationError),
 
-    /// The v2 -> v3 rung refused a behavior-bearing config; nothing written.
+    /// The v2 -> v3 rung or the v3 -> v3 normalization refused a
+    /// behavior-bearing config; nothing written.
     #[error("config migration to version 3 refused:\n{0}")]
     Refused(Refusal),
 
@@ -459,20 +494,6 @@ pub enum MigrateError {
         /// The latest version the ladder knows how to produce.
         supported: u32,
     },
-}
-
-/// The inputs the v1 -> v2 rung needs to run its catalog-overlay fold and
-/// atomic `config.toml` rewrite. Grouped so [`migrate_to_current`]'s
-/// signature stays legible; a v2 (or later) file ignores them entirely.
-pub struct V1Migration<'a> {
-    /// The operator's `[cache_pricing]` table, ALREADY merged with any
-    /// legacy sidecar stamps by the caller (see [`migrate_v1_to_v2`]).
-    pub cache_pricing: &'a BTreeMap<String, CachePricingOverride>,
-    /// Path to the `config.toml` the v1 -> v2 rung reads and atomically
-    /// rewrites in place.
-    pub config_path: &'a Path,
-    /// Path to the catalog overlay the fold writes into.
-    pub overlay_path: &'a Path,
 }
 
 /// Read a `[retry]` key as a list of `u16` status codes off the RAW doc.
@@ -884,67 +905,40 @@ fn ensure_overrides_table(doc: &mut DocumentMut) -> Option<&mut dyn TableLike> {
     capability.get_mut("overrides")?.as_table_like_mut()
 }
 
-/// Migrate a config from its RAW on-disk `version` up to the latest the
-/// build knows, applying each step in order. Dispatches on `raw_version`
-/// (never a typed parse -- a too-old file may not deserialize under the
-/// current schema) and mutates `doc` in place so that, on success, `doc`
-/// is the fully-migrated document the caller commits.
+/// Apply the PURE `config.toml` document transforms for the ladder, from
+/// `raw_version` up to the latest, mutating `doc` in place. Performs NO IO
+/// and touches NO overlay -- the v1 `[cache_pricing]` fold is
+/// [`plan_v1_overlay`]'s separate concern. Both [`plan_migration`] (on a
+/// clone, to build the candidate) and the caller's commit closure (on the
+/// re-read document under the write lock) call this, so the committed bytes
+/// reproduce exactly what planning gated.
 ///
 /// The ladder is deliberately a flat sequence of literal rungs, not a
 /// trait or registry: the next break is one file-local step function plus
 /// one rung here.
 ///
-/// - `raw_version <= 1`: runs [`migrate_v1_to_v2`], which folds
-///   `[cache_pricing]` into the overlay and ATOMICALLY rewrites
-///   `config.toml` to `version = 2` (overlay fold ordered BEFORE the stamp,
-///   so a crash between them is recoverable by rerun). Because that rung
-///   commits its own result to disk, `doc` is then re-read from
-///   `config_path` so the in-memory document reflects the v2 result before
-///   the pure v2 -> v3 rung runs on it.
-/// - `raw_version == 2`: runs the pure [`migrate_v2_to_v3`] transform on
-///   `doc`; NO IO -- the caller performs the single final commit.
-/// - `raw_version == LATEST` ([`LATEST_MIGRATION_VERSION`]): runs the pure
-///   same-version [`normalize_capability_overrides`] transform (folds legacy
-///   `unsupported_features` into `[capability.overrides]`), recording a
-///   3 -> 3 step only when the doc actually changed. A plain v3 file is a
-///   no-op (no step). This runs ONLY for a file already at v3 -- a lower
-///   version's rungs mutate disk as they go, so it re-runs `config migrate`
-///   at v3 to normalize.
-/// - `raw_version > LATEST`: [`MigrateError::VersionTooNew`].
+/// - `raw_version <= 1`: [`apply_v1_to_v2_doc`] stamps `version = 2` and
+///   drops `[cache_pricing]`, then the v2 -> v3 rung runs on the result.
+/// - `raw_version == 2`: [`migrate_v2_to_v3`] retires the per-status retry
+///   lists and stamps `version = 3`.
+/// - `raw_version == LATEST` ([`LATEST_MIGRATION_VERSION`]): the same-version
+///   [`normalize_capability_overrides`] folds legacy `unsupported_features`
+///   into `[capability.overrides]`, recording a 3 -> 3 step only when the
+///   doc actually changed. A plain v3 file is a no-op (no step).
 ///
 /// # Errors
 ///
-/// [`MigrateError::VersionTooNew`] for a future version, [`MigrateError::V1ToV2`]
-/// if the v1 rung's IO fails, [`MigrateError::Refused`] if the v2 rung or the
-/// same-version normalization declines.
-pub fn migrate_to_current(
+/// A [`Refusal`] from the v2 -> v3 rung or the same-version normalization,
+/// leaving `doc` byte-untouched.
+pub fn apply_config_transforms(
     doc: &mut DocumentMut,
     raw_version: u32,
-    v1: &V1Migration<'_>,
-) -> Result<Vec<StepOutcome>, MigrateError> {
-    if raw_version > LATEST_MIGRATION_VERSION {
-        return Err(MigrateError::VersionTooNew {
-            found: raw_version,
-            supported: LATEST_MIGRATION_VERSION,
-        });
-    }
-
+) -> Result<Vec<StepOutcome>, Refusal> {
     let mut steps = Vec::new();
     let mut version = raw_version;
 
     if version <= 1 {
-        migrate_v1_to_v2(v1.cache_pricing, v1.config_path, v1.overlay_path)?;
-        let text =
-            std::fs::read_to_string(v1.config_path).map_err(|e| MigrationError::ConfigIo {
-                path: v1.config_path.display().to_string(),
-                reason: format!("reread after v1->v2: {e}"),
-            })?;
-        *doc = text
-            .parse::<DocumentMut>()
-            .map_err(|e| MigrationError::ConfigIo {
-                path: v1.config_path.display().to_string(),
-                reason: format!("reparse after v1->v2: {e}"),
-            })?;
+        apply_v1_to_v2_doc(doc);
         steps.push(StepOutcome {
             from_version: 1,
             to_version: 2,
@@ -953,20 +947,13 @@ pub fn migrate_to_current(
     }
 
     if version == 2 {
-        let outcome = migrate_v2_to_v3(doc).map_err(MigrateError::Refused)?;
-        steps.push(outcome);
+        steps.push(migrate_v2_to_v3(doc)?);
     }
 
     // Same-version (v3 -> v3) normalization runs ONLY for a file already at
-    // the latest version: a v1/v2 file's version rungs commit to disk as they
-    // run, so a normalization refusal after them would strand a half-migrated
-    // file -- a file at v3 has run no disk-mutating rung, so a refusal here is
-    // truly byte-identical. A v1/v2 file re-runs `config migrate` once it is
-    // at v3 to normalize (idempotent). No version bump; the step (if any) is
-    // recorded 3 -> 3 so the caller commits it exactly like a version rung.
-    if raw_version == LATEST_MIGRATION_VERSION
-        && normalize_capability_overrides(doc).map_err(MigrateError::Refused)?
-    {
+    // the latest version: a lower-version file reaches v3 through the rungs
+    // above and re-runs `config migrate` at v3 to normalize (idempotent).
+    if raw_version == LATEST_MIGRATION_VERSION && normalize_capability_overrides(doc)? {
         steps.push(StepOutcome {
             from_version: LATEST_MIGRATION_VERSION,
             to_version: LATEST_MIGRATION_VERSION,
@@ -976,21 +963,149 @@ pub fn migrate_to_current(
     Ok(steps)
 }
 
+/// Compute a [`MigrationPlan`] for the config `base_doc` at its RAW on-disk
+/// `raw_version`, WITHOUT touching disk. Runs every ladder transform in
+/// memory and every refusal / conflict check up front, so a returned plan
+/// means all of the migrator's validation has passed and the caller can
+/// commit it (overlay first, `config.toml` last).
+///
+/// Dispatches on `raw_version` (never a typed parse -- a too-old file may
+/// not deserialize under the current schema). `cache_pricing` is the v1
+/// fold input (already sidecar-merged by the caller); `overlay_path` is
+/// READ to detect a conflicting or already-folded overlay cell.
+///
+/// # Errors
+///
+/// [`MigrateError::VersionTooNew`] for a future version;
+/// [`MigrateError::V1ToV2`] for an overlay conflict or an invalid
+/// `[cache_pricing]` entry; [`MigrateError::Refused`] when a rung declines a
+/// behavior-bearing config. Every error leaves both files byte-untouched.
+pub fn plan_migration(
+    base_doc: &DocumentMut,
+    raw_version: u32,
+    cache_pricing: &BTreeMap<String, CachePricingOverride>,
+    overlay_path: &Path,
+) -> Result<MigrationPlan, MigrateError> {
+    if raw_version > LATEST_MIGRATION_VERSION {
+        return Err(MigrateError::VersionTooNew {
+            found: raw_version,
+            supported: LATEST_MIGRATION_VERSION,
+        });
+    }
+
+    // Overlay fold candidate (v1 only). Ordered before the config transform
+    // so an overlay conflict is reported the same way the old ladder did --
+    // and, like the config transform, it writes nothing.
+    let overlay_candidate = if raw_version <= 1 {
+        plan_v1_overlay(cache_pricing, overlay_path).map_err(MigrateError::V1ToV2)?
+    } else {
+        None
+    };
+
+    // Config document transform on a CLONE: a Refusal surfaces here, leaving
+    // the caller's `base_doc` (and the real file) untouched.
+    let mut doc = base_doc.clone();
+    let steps = apply_config_transforms(&mut doc, raw_version).map_err(MigrateError::Refused)?;
+
+    let removed_keys = collect_removed_keys(base_doc, raw_version);
+    let to = steps.last().map_or(raw_version, |s| s.to_version);
+
+    let (config_candidate, write_kind) = if steps.is_empty() {
+        (None, WriteKind::NoChange)
+    } else if overlay_candidate.is_some() {
+        (Some(doc.to_string()), WriteKind::ConfigAndOverlay)
+    } else {
+        (Some(doc.to_string()), WriteKind::ConfigOnly)
+    };
+
+    Ok(MigrationPlan {
+        config_candidate,
+        overlay_candidate,
+        from: raw_version,
+        to,
+        write_kind,
+        removed_keys,
+        steps,
+    })
+}
+
+/// Human-readable descriptions of the keys the migration removes, derived
+/// PURELY from the original document, for a dry-run change summary.
+fn collect_removed_keys(doc: &DocumentMut, raw_version: u32) -> Vec<String> {
+    let mut removed = Vec::new();
+    if let Some(retry) = doc.get("retry").and_then(Item::as_table_like) {
+        if retry.contains_key("retry_allowlist") {
+            removed.push("retry.retry_allowlist".to_string());
+        }
+        if retry.contains_key("retry_denylist") {
+            removed.push("retry.retry_denylist".to_string());
+        }
+    }
+    if raw_version <= 1 && doc.contains_key("cache_pricing") {
+        removed.push("[cache_pricing] (folded into the catalog overlay)".to_string());
+    }
+    if raw_version >= LATEST_MIGRATION_VERSION {
+        collect_unsupported_features_removals(doc, &mut removed);
+    }
+    removed
+}
+
+/// Append the provider / model `unsupported_features` keys the same-version
+/// v3 normalization folds into `[capability.overrides]`, for the summary.
+fn collect_unsupported_features_removals(doc: &DocumentMut, removed: &mut Vec<String>) {
+    if let Some(providers) = doc.get("providers").and_then(Item::as_table_like) {
+        for (name, item) in providers.iter() {
+            if item
+                .as_table_like()
+                .is_some_and(|t| t.contains_key("unsupported_features"))
+            {
+                removed.push(format!(
+                    "[providers.{name}].unsupported_features (folded into \
+                     [capability.overrides.{name}].unsupported)"
+                ));
+            }
+        }
+    }
+    if let Some(models) = doc.get("models").and_then(Item::as_table_like) {
+        for (nick, item) in models.iter() {
+            let Some(entry) = item.as_table_like() else {
+                continue;
+            };
+            if entry.contains_key("unsupported_features") {
+                match entry.get("provider").and_then(Item::as_str) {
+                    Some(provider) => removed.push(format!(
+                        "[models.{nick}].unsupported_features (folded into \
+                         [capability.overrides.\"{provider}:{nick}\"].unsupported)"
+                    )),
+                    None => removed.push(format!("[models.{nick}].unsupported_features")),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn write_config(dir: &Path, body: &str) -> std::path::PathBuf {
-        let path = dir.join("config.toml");
-        std::fs::write(&path, body).unwrap();
-        path
-    }
 
     fn override_with_wm(wm: f32) -> CachePricingOverride {
         CachePricingOverride {
             wm: Some(wm),
             override_acknowledges_cost_risk: wm < 2.0,
             ..Default::default()
+        }
+    }
+
+    fn doc_of(text: &str) -> DocumentMut {
+        text.parse::<DocumentMut>().unwrap()
+    }
+
+    /// Commit a plan's overlay candidate the way the caller's commit does,
+    /// so a test can assert the on-disk overlay after a would-be migration.
+    fn commit_overlay(plan: &MigrationPlan, overlay_path: &Path) {
+        if let Some(ow) = &plan.overlay_candidate {
+            catalog_overlay::save(overlay_path, ow.base_revision, ow.cells.clone())
+                .expect("overlay save");
         }
     }
 
@@ -1020,27 +1135,25 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Happy path: cache_pricing entries land in the overlay, config.toml
-    // is rewritten to version = 2 with [cache_pricing] dropped, and
-    // operator comments/ordering survive.
+    // Happy path (pure plan): cache_pricing folds into the overlay CANDIDATE,
+    // the config CANDIDATE bumps to v3 with [cache_pricing] dropped and
+    // operator comments preserved -- and NOTHING is written to disk.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn migrate_happy_path_moves_cache_pricing_into_overlay_and_bumps_version() {
+    fn plan_v1_folds_cache_pricing_into_overlay_candidate_and_bumps_config_to_v3() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
-            "# operator note: grok override below\n\
+        let src = "# operator note: grok override below\n\
              [server]\n\
              host = \"127.0.0.1\" # loopback only\n\
              port = 8787\n\
              \n\
              [cache_pricing]\n\
              \"openai-compat:grok-*\" = { wm = 1.5, verified_at = \"2026-06-01\", \
-             override_acknowledges_cost_risk = true }\n",
-        );
+             override_acknowledges_cost_risk = true }\n";
+        let doc = doc_of(src);
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert(
             "openai-compat:grok-*".to_string(),
@@ -1053,12 +1166,21 @@ mod tests {
         );
 
         // Act
-        let outcome = migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path).expect("migrate");
+        let plan = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("plan");
 
-        // Assert: overlay carries the migrated cell.
-        assert_eq!(outcome.cells_migrated, 1);
-        let overlay = catalog_overlay::load(&overlay_path).expect("load overlay");
-        let cell = overlay
+        // Assert: planning is PURE -- the overlay file was not created.
+        assert!(
+            !overlay_path.exists(),
+            "planning must not write the overlay"
+        );
+        assert_eq!(plan.from, 1);
+        assert_eq!(plan.to, 3);
+        assert_eq!(plan.write_kind, WriteKind::ConfigAndOverlay);
+
+        // Assert: the overlay candidate carries the migrated cell.
+        let ow = plan.overlay_candidate.as_ref().expect("overlay candidate");
+        assert_eq!(ow.base_revision, 0);
+        let cell = ow
             .cells
             .get("openai-compat:grok-*")
             .and_then(Option::as_ref)
@@ -1067,47 +1189,45 @@ mod tests {
         assert_eq!(cell.verified_at, "2026-06-01");
         assert_eq!(cell.wm, Some(1.5));
 
-        // Assert: config.toml rewritten -- version = 2, [cache_pricing]
-        // gone, comments and unrelated content preserved.
-        let rewritten = std::fs::read_to_string(&cfg_path).unwrap();
-        assert!(rewritten.contains("version = 2"), "rewritten: {rewritten}");
+        // Assert: the config candidate is v3, [cache_pricing] gone, comments
+        // and unrelated content preserved, and it re-parses as a v3 Config.
+        let candidate = plan.config_candidate.as_ref().expect("config candidate");
+        assert!(candidate.contains("version = 3"), "candidate: {candidate}");
         assert!(
-            !rewritten.contains("cache_pricing"),
-            "rewritten: {rewritten}"
+            !candidate.contains("cache_pricing"),
+            "candidate: {candidate}"
         );
         assert!(
-            rewritten.contains("# operator note: grok override below"),
-            "rewritten: {rewritten}"
+            candidate.contains("# operator note: grok override below"),
+            "candidate: {candidate}"
         );
         assert!(
-            rewritten.contains("host = \"127.0.0.1\" # loopback only"),
-            "rewritten: {rewritten}"
+            candidate.contains("host = \"127.0.0.1\" # loopback only"),
+            "candidate: {candidate}"
         );
-
-        // Assert: the rewritten file re-parses cleanly as a v2 Config.
-        let reparsed: crate::config::Config = toml::from_str(&rewritten).expect("reparse");
-        assert_eq!(reparsed.version, 2);
+        let reparsed: crate::config::Config = toml::from_str(candidate).expect("reparse");
+        assert_eq!(reparsed.version, 3);
         assert!(reparsed.cache_pricing.is_empty());
     }
 
     #[test]
-    fn migrate_no_op_cache_pricing_still_bumps_version() {
+    fn plan_v1_no_cache_pricing_is_config_only_and_still_bumps_version() {
         // Arrange: a v1 config with no [cache_pricing] at all.
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(dir.path(), "[server]\nhost = \"127.0.0.1\"\n");
+        let doc = doc_of("[server]\nhost = \"127.0.0.1\"\n");
 
         // Act
-        let outcome =
-            migrate_v1_to_v2(&BTreeMap::new(), &cfg_path, &overlay_path).expect("migrate");
+        let plan = plan_migration(&doc, 1, &BTreeMap::new(), &overlay_path).expect("plan");
 
-        // Assert: nothing to migrate, but the version stamp still bumps so
-        // this file is never re-migrated.
-        assert_eq!(outcome.cells_migrated, 0);
-        assert!(!overlay_path.exists(), "no cells -> no overlay write");
+        // Assert: nothing to fold -> config-only, no overlay candidate, but
+        // the config candidate still stamps the version forward.
+        assert_eq!(plan.write_kind, WriteKind::ConfigOnly);
+        assert!(plan.overlay_candidate.is_none());
+        assert!(!overlay_path.exists());
         let reparsed: crate::config::Config =
-            toml::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
-        assert_eq!(reparsed.version, 2);
+            toml::from_str(plan.config_candidate.as_ref().unwrap()).unwrap();
+        assert_eq!(reparsed.version, 3);
     }
 
     /// `[cache_pricing]` written in the TABLE form (`[cache_pricing."key"]`
@@ -1116,15 +1236,14 @@ mod tests {
     /// actually emits for a `BTreeMap<String, T>` field, so it is the
     /// realistic on-disk shape for an operator-edited or `config show`-saved
     /// file. Also covers MULTIPLE selectors and other unrelated tables
-    /// interleaved around `[cache_pricing]`, so `doc.remove("cache_pricing")`
-    /// must drop the whole subtree without disturbing `[providers.foo]`.
+    /// interleaved around `[cache_pricing]`, so the fold must drop the whole
+    /// subtree without disturbing `[providers.foo]`.
     #[test]
-    fn migrate_rewrite_handles_table_form_cache_pricing_with_multiple_entries() {
+    fn plan_v1_table_form_cache_pricing_with_multiple_entries() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
+        let doc = doc_of(
             "[server]\n\
              host = \"127.0.0.1\"\n\
              \n\
@@ -1151,82 +1270,79 @@ mod tests {
         );
 
         // Act
-        let outcome = migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path).expect("migrate");
+        let plan = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("plan");
 
-        // Assert: both selectors migrated, [providers.foo] survives intact,
-        // and the rewritten file re-parses as a clean v2 Config.
-        assert_eq!(outcome.cells_migrated, 2);
-        let rewritten = std::fs::read_to_string(&cfg_path).unwrap();
+        // Assert: both selectors in the overlay candidate, [providers.foo]
+        // survives in the config candidate, and the candidate re-parses.
+        let ow = plan.overlay_candidate.as_ref().expect("overlay candidate");
+        assert!(ow.cells.contains_key("openai-compat:grok-*"));
+        assert!(ow.cells.contains_key("openai-compat:mistral-*"));
+
+        let candidate = plan.config_candidate.as_ref().expect("config candidate");
         assert!(
-            !rewritten.contains("cache_pricing"),
-            "rewritten: {rewritten}"
+            !candidate.contains("cache_pricing"),
+            "candidate: {candidate}"
         );
         assert!(
-            rewritten.contains("[providers.foo]"),
-            "rewritten: {rewritten}"
+            candidate.contains("[providers.foo]"),
+            "candidate: {candidate}"
         );
-
-        let reparsed: crate::config::Config = toml::from_str(&rewritten).expect("reparse");
-        assert_eq!(reparsed.version, 2);
+        let reparsed: crate::config::Config = toml::from_str(candidate).expect("reparse");
+        assert_eq!(reparsed.version, 3);
         assert!(reparsed.cache_pricing.is_empty());
         assert!(reparsed.providers.contains_key("foo"));
-
-        let overlay = catalog_overlay::load(&overlay_path).unwrap();
-        assert!(overlay.cells.contains_key("openai-compat:grok-*"));
-        assert!(overlay.cells.contains_key("openai-compat:mistral-*"));
     }
 
     // -----------------------------------------------------------------------
-    // Idempotence: simulate a crash between phase 1 (overlay written) and
-    // phase 2 (config.toml not yet rewritten) by running the SAME
-    // migration twice against the SAME still-v1 config.toml.
+    // Idempotence: after the overlay half of a v1 migration has committed but
+    // config.toml is still v1 (a crash between the two commit phases), a
+    // re-plan against the SAME still-v1 doc plans NO overlay write (the cell
+    // already matches) and just the config stamp -- so the rerun completes
+    // cleanly without duplicating or conflicting.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn migrate_rerun_after_crash_between_phases_completes_cleanly() {
+    fn plan_v1_rerun_after_overlay_committed_plans_no_overlay_write() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
+        let doc = doc_of(
             "[server]\nhost = \"127.0.0.1\"\n\n[cache_pricing]\n\"openai-compat:grok-*\" = { \
              wm = 1.5 }\n",
         );
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert("openai-compat:grok-*".to_string(), override_with_wm(1.5));
 
-        // Act: first run completes both phases.
-        migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path).expect("first run");
+        // First plan + commit the overlay half only (config.toml still v1).
+        let first = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("first plan");
+        commit_overlay(&first, &overlay_path);
         let overlay_after_first = catalog_overlay::load(&overlay_path).expect("load");
 
-        // Simulate "crash between phases": config.toml still names the
-        // ALREADY-migrated data (phase 2 already ran for real above, but
-        // the caller re-invokes with the same cache_pricing map it read
-        // before phase 2 rewrote the file -- exactly what happens on a
-        // process restart between phase 1 committing and phase 2's
-        // rename landing).
-        let outcome = migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path)
-            .expect("idempotent rerun must not conflict");
+        // Act: re-plan against the SAME still-v1 doc.
+        let second = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("rerun plan");
 
-        // Assert: no dupes, no conflict, same overlay content (revision
-        // unchanged -- the second run recognized the existing cell as an
-        // exact value match and wrote nothing new).
-        assert_eq!(outcome.cells_migrated, 1);
+        // Assert: the rerun plans NO overlay write (the cell already matches),
+        // only the config stamp -- and the on-disk overlay is unchanged.
+        assert!(
+            second.overlay_candidate.is_none(),
+            "an already-folded cell must not re-plan an overlay write"
+        );
+        assert_eq!(second.write_kind, WriteKind::ConfigOnly);
+        commit_overlay(&second, &overlay_path);
         let overlay_after_second = catalog_overlay::load(&overlay_path).expect("load");
         assert_eq!(overlay_after_second.revision, overlay_after_first.revision);
         assert_eq!(overlay_after_second.cells, overlay_after_first.cells);
     }
 
     #[test]
-    fn migrate_idempotent_rerun_survives_a_verified_at_fallback_date_change() {
-        // Arrange: an override with NO explicit verified_at -- the
-        // migrator stamps "today". Prove a rerun (which recomputes "today"
-        // again, possibly a different day in a real crash-restart) is
-        // still recognized as the same candidate, not a conflict.
+    fn plan_v1_idempotent_rerun_survives_a_verified_at_fallback_date_change() {
+        // Arrange: an override with NO explicit verified_at -- the planner
+        // stamps "today". Prove a rerun (which recomputes "today" again,
+        // possibly a different day in a real crash-restart) is still
+        // recognized as the same candidate, not a conflict.
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
+        let doc = doc_of(
             "[server]\nhost = \"127.0.0.1\"\n\n[cache_pricing]\n\"openai-compat:grok-*\" = { \
              min_prefix_tokens = 1024 }\n",
         );
@@ -1238,11 +1354,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path).expect("first run");
+        let first = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("first plan");
+        commit_overlay(&first, &overlay_path);
 
-        // Act: manually age the stored verified_at, mimicking a rerun on
-        // a later calendar day whose freshly-computed "today" would
-        // differ from what got stored the first time.
+        // Manually age the stored verified_at, mimicking a rerun on a later
+        // calendar day whose freshly-computed "today" would differ.
         let mut overlay = catalog_overlay::load(&overlay_path).expect("load");
         let expected_revision = overlay.revision;
         if let Some(Some(cell)) = overlay.cells.get_mut("openai-compat:grok-*") {
@@ -1251,19 +1367,23 @@ mod tests {
         catalog_overlay::save(&overlay_path, expected_revision, overlay.cells.clone())
             .expect("re-save with aged date");
 
-        // Assert: rerunning does not conflict despite the stored
+        // Act / Assert: re-planning does not conflict despite the stored
         // verified_at no longer matching what "today" would produce now.
-        migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path)
+        let rerun = plan_migration(&doc, 1, &cache_pricing, &overlay_path)
             .expect("rerun must not conflict on a verified_at-only difference");
+        assert!(
+            rerun.overlay_candidate.is_none(),
+            "a verified_at-only difference is not a change"
+        );
     }
 
     // -----------------------------------------------------------------------
-    // Conflict: an existing overlay cell with a DIFFERENT value fails
-    // closed and writes nothing (overlay untouched, config.toml untouched).
+    // Conflict: an existing overlay cell with a DIFFERENT value fails the
+    // PLAN (before any write), leaving the overlay byte-untouched.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn migrate_conflict_with_different_existing_overlay_value_writes_nothing() {
+    fn plan_v1_conflict_with_different_existing_overlay_value_fails_closed() {
         // Arrange: the overlay already carries a DIFFERENT wm for this
         // selector (e.g. hand-edited, or from an unrelated prior write).
         let dir = tempfile::tempdir().unwrap();
@@ -1285,27 +1405,27 @@ mod tests {
         catalog_overlay::save(&overlay_path, 0, existing).expect("seed overlay");
         let overlay_before = std::fs::read(&overlay_path).unwrap();
 
-        let cfg_path = write_config(
-            dir.path(),
+        let doc = doc_of(
             "[server]\nhost = \"127.0.0.1\"\n\n[cache_pricing]\n\"openai-compat:grok-*\" = { \
              wm = 1.5 }\n",
         );
-        let cfg_before = std::fs::read(&cfg_path).unwrap();
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert("openai-compat:grok-*".to_string(), override_with_wm(1.5));
 
         // Act
-        let err = migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path)
-            .expect_err("conflicting value must fail closed");
+        let err = plan_migration(&doc, 1, &cache_pricing, &overlay_path)
+            .expect_err("conflicting value must fail the plan");
 
-        // Assert: nothing written on either side.
-        assert!(matches!(err, MigrationError::Conflict(_)), "err: {err}");
+        // Assert: a plan-time conflict, and the overlay is byte-untouched.
+        assert!(
+            matches!(err, MigrateError::V1ToV2(MigrationError::Conflict(_))),
+            "err: {err}"
+        );
         assert_eq!(std::fs::read(&overlay_path).unwrap(), overlay_before);
-        assert_eq!(std::fs::read(&cfg_path).unwrap(), cfg_before);
     }
 
     #[test]
-    fn migrate_conflict_with_disabled_existing_cell_writes_nothing() {
+    fn plan_v1_conflict_with_disabled_existing_cell_fails_closed() {
         // Arrange: the overlay explicitly disables this selector (JSON
         // null) -- an operator's deliberate choice the migrator must not
         // silently overwrite with a value.
@@ -1315,17 +1435,17 @@ mod tests {
         existing.insert("openai-compat:grok-*".to_string(), None);
         catalog_overlay::save(&overlay_path, 0, existing).expect("seed overlay");
 
-        let cfg_path = write_config(
-            dir.path(),
-            "[cache_pricing]\n\"openai-compat:grok-*\" = { wm = 1.5 }\n",
-        );
+        let doc = doc_of("[cache_pricing]\n\"openai-compat:grok-*\" = { wm = 1.5 }\n");
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert("openai-compat:grok-*".to_string(), override_with_wm(1.5));
 
         // Act / Assert
-        let err = migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path)
+        let err = plan_migration(&doc, 1, &cache_pricing, &overlay_path)
             .expect_err("a disabled existing cell must conflict, not be overwritten");
-        assert!(matches!(err, MigrationError::Conflict(_)), "err: {err}");
+        assert!(
+            matches!(err, MigrateError::V1ToV2(MigrationError::Conflict(_))),
+            "err: {err}"
+        );
 
         let overlay = catalog_overlay::load(&overlay_path).unwrap();
         assert_eq!(
@@ -1336,19 +1456,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Invalid input fails closed before anything is written.
+    // Invalid input fails the plan before anything is written.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn migrate_invalid_override_fails_closed_and_writes_nothing() {
+    fn plan_v1_invalid_override_fails_closed() {
         // Arrange: rm <= 0.0 is unconditionally rejected by
         // CachePricingOverride::validate.
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
-            "[cache_pricing]\n\"openai-compat:grok-*\" = { rm = 0.0 }\n",
-        );
+        let doc = doc_of("[cache_pricing]\n\"openai-compat:grok-*\" = { rm = 0.0 }\n");
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert(
             "openai-compat:grok-*".to_string(),
@@ -1359,40 +1476,37 @@ mod tests {
         );
 
         // Act
-        let err = migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path)
+        let err = plan_migration(&doc, 1, &cache_pricing, &overlay_path)
             .expect_err("degenerate rm must fail closed");
 
         // Assert
         assert!(
-            matches!(err, MigrationError::InvalidOverride { .. }),
+            matches!(
+                err,
+                MigrateError::V1ToV2(MigrationError::InvalidOverride { .. })
+            ),
             "err: {err}"
         );
         assert!(!overlay_path.exists(), "nothing should have been written");
-        assert!(
-            std::fs::read_to_string(&cfg_path)
-                .unwrap()
-                .contains("cache_pricing"),
-            "config.toml must be untouched on failure"
-        );
     }
 
     #[test]
-    fn migrate_malformed_selector_key_fails_closed() {
+    fn plan_v1_malformed_selector_key_fails_closed() {
         // Arrange: a selector missing the required `:` separator.
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
-            "[cache_pricing]\n\"no-colon-here\" = { wm = 1.5 }\n",
-        );
+        let doc = doc_of("[cache_pricing]\n\"no-colon-here\" = { wm = 1.5 }\n");
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert("no-colon-here".to_string(), override_with_wm(1.5));
 
         // Act / Assert
-        let err = migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path)
+        let err = plan_migration(&doc, 1, &cache_pricing, &overlay_path)
             .expect_err("malformed selector must fail closed");
         assert!(
-            matches!(err, MigrationError::InvalidSelector { .. }),
+            matches!(
+                err,
+                MigrateError::V1ToV2(MigrationError::InvalidSelector { .. })
+            ),
             "err: {err}"
         );
         assert!(!overlay_path.exists());
@@ -1400,16 +1514,16 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // A verify-only entry (no value fields, only verified_at) still lands
-    // in the overlay -- the provenance/staleness stamp the old sidecar
-    // used to carry moves forward, not just economics overrides.
+    // in the overlay candidate -- the provenance/staleness stamp the old
+    // sidecar used to carry moves forward, not just economics overrides.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn migrate_verify_only_entry_lands_as_a_provenance_only_overlay_cell() {
+    fn plan_v1_verify_only_entry_lands_as_a_provenance_only_overlay_cell() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(dir.path(), "[server]\nhost = \"127.0.0.1\"\n");
+        let doc = doc_of("[server]\nhost = \"127.0.0.1\"\n");
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert(
             "openai-compat:grok-*".to_string(),
@@ -1420,11 +1534,11 @@ mod tests {
         );
 
         // Act
-        migrate_v1_to_v2(&cache_pricing, &cfg_path, &overlay_path).expect("migrate");
+        let plan = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("plan");
 
         // Assert
-        let overlay = catalog_overlay::load(&overlay_path).unwrap();
-        let cell = overlay
+        let ow = plan.overlay_candidate.as_ref().expect("overlay candidate");
+        let cell = ow
             .cells
             .get("openai-compat:grok-*")
             .and_then(Option::as_ref)
@@ -1462,21 +1576,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // rewrite_config_to_v2 stamps the LITERAL 2, not the current-version
+    // apply_v1_to_v2_doc stamps the LITERAL 2, not the current-version
     // const -- pinned so a later bump of CURRENT_CONFIG_VERSION cannot make
     // the v1->v2 rung over-stamp a version it did not migrate to.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn rewrite_config_to_v2_stamps_the_literal_2_not_the_const() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = write_config(dir.path(), "version = 1\n[server]\nhost = \"127.0.0.1\"\n");
+    fn apply_v1_to_v2_doc_stamps_the_literal_2_and_drops_cache_pricing() {
+        let mut doc = doc_of(
+            "version = 1\n[server]\nhost = \"127.0.0.1\"\n\n[cache_pricing]\n\
+             \"openai-compat:grok-*\" = { wm = 1.5 }\n",
+        );
 
-        rewrite_config_to_v2(&cfg_path).expect("rewrite");
+        apply_v1_to_v2_doc(&mut doc);
 
-        let text = std::fs::read_to_string(&cfg_path).unwrap();
-        let doc = text.parse::<DocumentMut>().unwrap();
         assert_eq!(doc["version"].as_integer(), Some(2));
+        assert!(!doc.to_string().contains("cache_pricing"));
     }
 
     // -----------------------------------------------------------------------
@@ -1713,29 +1828,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // migrate_to_current ladder. These deliberately assert LITERAL target
+    // plan_migration ladder. These deliberately assert LITERAL target
     // versions, never CURRENT_CONFIG_VERSION, so they hold under both the
-    // pre- and post- const-bump tree state.
+    // pre- and post- const-bump tree state. Planning is PURE: no test here
+    // observes a disk write from plan_migration.
     // -----------------------------------------------------------------------
 
-    fn v1_inputs<'a>(
-        cache_pricing: &'a BTreeMap<String, CachePricingOverride>,
-        config_path: &'a Path,
-        overlay_path: &'a Path,
-    ) -> V1Migration<'a> {
-        V1Migration {
-            cache_pricing,
-            config_path,
-            overlay_path,
-        }
-    }
-
     #[test]
-    fn ladder_v1_doc_chains_to_3_folding_cache_pricing_and_dropping_lists() {
+    fn plan_v1_doc_chains_to_3_folding_cache_pricing_and_dropping_lists() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
+        let doc = doc_of(
             "version = 1\n\n\
              [cache_pricing]\n\
              \"openai-compat:grok-*\" = { wm = 1.5, override_acknowledges_cost_risk = true }\n\
@@ -1747,100 +1850,98 @@ mod tests {
         let mut cache_pricing = BTreeMap::new();
         cache_pricing.insert("openai-compat:grok-*".to_string(), override_with_wm(1.5));
 
-        let mut doc = std::fs::read_to_string(&cfg_path)
-            .unwrap()
-            .parse::<DocumentMut>()
-            .unwrap();
-        let v1 = v1_inputs(&cache_pricing, &cfg_path, &overlay_path);
-
-        let steps = migrate_to_current(&mut doc, 1, &v1).expect("v1 chains to 3");
-        assert_eq!(steps.len(), 2);
+        let plan = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("v1 chains to 3");
+        assert_eq!(plan.from, 1);
+        assert_eq!(plan.to, 3);
+        assert_eq!(plan.write_kind, WriteKind::ConfigAndOverlay);
+        assert_eq!(plan.steps.len(), 2);
         assert_eq!(
-            steps[0],
+            plan.steps[0],
             StepOutcome {
                 from_version: 1,
                 to_version: 2
             }
         );
         assert_eq!(
-            steps[1],
+            plan.steps[1],
             StepOutcome {
                 from_version: 2,
                 to_version: 3
             }
         );
 
-        // In-memory doc is fully migrated to v3, cache_pricing folded away,
-        // retry list dropped.
-        let out = doc.to_string();
-        assert_eq!(doc["version"].as_integer(), Some(3), "{out}");
+        // Config candidate is fully migrated to v3, cache_pricing folded away,
+        // retry list dropped -- and the overlay candidate carries the cell.
+        let out = plan.config_candidate.as_ref().expect("candidate");
+        assert!(out.contains("version = 3"), "{out}");
         assert!(!out.contains("cache_pricing"), "{out}");
         assert!(!out.contains("retry_allowlist"), "{out}");
+        assert!(
+            plan.overlay_candidate
+                .as_ref()
+                .expect("overlay candidate")
+                .cells
+                .contains_key("openai-compat:grok-*")
+        );
 
-        // The v1->v2 rung folded the override into the overlay.
-        let overlay = catalog_overlay::load(&overlay_path).unwrap();
-        assert!(overlay.cells.contains_key("openai-compat:grok-*"));
-
-        // On-disk file is at v2 (the v1->v2 rung's own commit); the caller
-        // owns the final v3 commit.
-        let on_disk = std::fs::read_to_string(&cfg_path)
-            .unwrap()
-            .parse::<DocumentMut>()
-            .unwrap();
-        assert_eq!(on_disk["version"].as_integer(), Some(2));
+        // Planning is pure: the overlay file was not created.
+        assert!(
+            !overlay_path.exists(),
+            "planning must not write the overlay"
+        );
     }
 
     #[test]
-    fn ladder_v2_doc_migrates_to_3_without_touching_disk() {
+    fn plan_v2_doc_migrates_to_3_config_only() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(dir.path(), "version = 2\n[retry]\nretry_allowlist = []\n");
-        let before = std::fs::read(&cfg_path).unwrap();
+        let doc = doc_of("version = 2\n[retry]\nretry_allowlist = []\n");
 
-        let mut doc = "version = 2\n[retry]\nretry_allowlist = []\n"
-            .parse::<DocumentMut>()
-            .unwrap();
-        let cache_pricing = BTreeMap::new();
-        let v1 = v1_inputs(&cache_pricing, &cfg_path, &overlay_path);
-
-        let steps = migrate_to_current(&mut doc, 2, &v1).expect("v2 -> 3");
+        let plan = plan_migration(&doc, 2, &BTreeMap::new(), &overlay_path).expect("v2 -> 3");
         assert_eq!(
-            steps,
+            plan.steps,
             vec![StepOutcome {
                 from_version: 2,
                 to_version: 3
             }]
         );
-        assert_eq!(doc["version"].as_integer(), Some(3));
-        // Pure transform: config.toml on disk untouched.
-        assert_eq!(std::fs::read(&cfg_path).unwrap(), before);
+        assert_eq!(plan.write_kind, WriteKind::ConfigOnly);
+        assert!(plan.overlay_candidate.is_none());
+        let out = plan.config_candidate.as_ref().expect("candidate");
+        assert!(out.contains("version = 3"), "{out}");
     }
 
     #[test]
-    fn ladder_already_latest_doc_is_a_no_op() {
+    fn plan_already_latest_doc_is_a_no_change() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(dir.path(), "version = 3\n");
-        let mut doc = "version = 3\n".parse::<DocumentMut>().unwrap();
-        let cache_pricing = BTreeMap::new();
-        let v1 = v1_inputs(&cache_pricing, &cfg_path, &overlay_path);
+        let doc = doc_of("version = 3\n");
 
-        let steps = migrate_to_current(&mut doc, LATEST_MIGRATION_VERSION, &v1).expect("no-op");
-        assert!(steps.is_empty());
-        assert_eq!(doc["version"].as_integer(), Some(3));
+        let plan = plan_migration(
+            &doc,
+            LATEST_MIGRATION_VERSION,
+            &BTreeMap::new(),
+            &overlay_path,
+        )
+        .expect("no-op");
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.write_kind, WriteKind::NoChange);
+        assert!(plan.config_candidate.is_none());
     }
 
     #[test]
-    fn ladder_future_version_is_too_new() {
+    fn plan_future_version_is_too_new() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(dir.path(), "version = 9\n");
-        let mut doc = "version = 9\n".parse::<DocumentMut>().unwrap();
-        let cache_pricing = BTreeMap::new();
-        let v1 = v1_inputs(&cache_pricing, &cfg_path, &overlay_path);
+        let doc = doc_of("version = 9\n");
 
-        let err = migrate_to_current(&mut doc, LATEST_MIGRATION_VERSION + 1, &v1)
-            .expect_err("future version is too new");
+        let err = plan_migration(
+            &doc,
+            LATEST_MIGRATION_VERSION + 1,
+            &BTreeMap::new(),
+            &overlay_path,
+        )
+        .expect_err("future version is too new");
         assert!(
             matches!(err, MigrateError::VersionTooNew { found, supported }
                 if found == LATEST_MIGRATION_VERSION + 1 && supported == LATEST_MIGRATION_VERSION),
@@ -1849,23 +1950,30 @@ mod tests {
     }
 
     #[test]
-    fn ladder_v2_doc_with_behavior_bearing_list_refuses_without_disk_write() {
+    fn plan_v2_doc_with_behavior_bearing_list_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
-            "version = 2\n[retry]\nretry_allowlist = [503]\n",
-        );
-        let before = std::fs::read(&cfg_path).unwrap();
-        let mut doc = "version = 2\n[retry]\nretry_allowlist = [503]\n"
-            .parse::<DocumentMut>()
-            .unwrap();
-        let cache_pricing = BTreeMap::new();
-        let v1 = v1_inputs(&cache_pricing, &cfg_path, &overlay_path);
+        let doc = doc_of("version = 2\n[retry]\nretry_allowlist = [503]\n");
 
-        let err = migrate_to_current(&mut doc, 2, &v1).expect_err("behavior-bearing list refuses");
+        let err = plan_migration(&doc, 2, &BTreeMap::new(), &overlay_path)
+            .expect_err("behavior-bearing list refuses");
         assert!(matches!(err, MigrateError::Refused(_)), "err: {err}");
-        assert_eq!(std::fs::read(&cfg_path).unwrap(), before);
+    }
+
+    #[test]
+    fn apply_config_transforms_chains_v1_to_v3_on_the_document() {
+        let mut doc = doc_of(
+            "version = 1\n\n[cache_pricing]\n\"openai-compat:grok-*\" = { wm = 1.5 }\n\n\
+             [retry]\nretry_allowlist = []\n",
+        );
+
+        let steps = apply_config_transforms(&mut doc, 1).expect("chains");
+
+        assert_eq!(steps.len(), 2);
+        let out = doc.to_string();
+        assert!(out.contains("version = 3"), "{out}");
+        assert!(!out.contains("cache_pricing"), "{out}");
+        assert!(!out.contains("retry_allowlist"), "{out}");
     }
 
     // -----------------------------------------------------------------------
@@ -2076,46 +2184,47 @@ unsupported_features = [\"computer_use\"]\n";
     // -----------------------------------------------------------------------
 
     #[test]
-    fn ladder_v3_with_legacy_fields_records_a_same_version_step_no_disk_write() {
+    fn plan_v3_with_legacy_fields_records_a_same_version_step_config_only() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(dir.path(), V3_PROVIDER_MODEL);
-        let before = std::fs::read(&cfg_path).unwrap();
-        let mut doc = V3_PROVIDER_MODEL.parse::<DocumentMut>().unwrap();
-        let cache_pricing = BTreeMap::new();
-        let v1 = v1_inputs(&cache_pricing, &cfg_path, &overlay_path);
+        let doc = doc_of(V3_PROVIDER_MODEL);
 
-        let steps =
-            migrate_to_current(&mut doc, LATEST_MIGRATION_VERSION, &v1).expect("v3 normalizes");
+        let plan = plan_migration(
+            &doc,
+            LATEST_MIGRATION_VERSION,
+            &BTreeMap::new(),
+            &overlay_path,
+        )
+        .expect("v3 normalizes");
         assert_eq!(
-            steps,
+            plan.steps,
             vec![StepOutcome {
                 from_version: 3,
                 to_version: 3
             }]
         );
-        // Pure transform: config.toml on disk untouched (the caller commits).
-        assert_eq!(std::fs::read(&cfg_path).unwrap(), before);
+        assert_eq!(plan.from, 3);
+        assert_eq!(plan.to, 3);
+        assert_eq!(plan.write_kind, WriteKind::ConfigOnly);
+        assert!(plan.overlay_candidate.is_none());
+        // The candidate folds the legacy keys away.
+        let out = plan.config_candidate.as_ref().expect("candidate");
+        assert!(!out.contains("unsupported_features"), "{out}");
     }
 
     #[test]
-    fn ladder_v3_egress_allowlist_refuses_without_disk_write() {
+    fn plan_v3_egress_allowlist_refuses() {
         let dir = tempfile::tempdir().unwrap();
         let overlay_path = dir.path().join("catalog_overlay.json");
-        let cfg_path = write_config(
-            dir.path(),
-            "version = 3\n[bedrock]\nallowed_body_fields = [\"messages\"]\n",
-        );
-        let before = std::fs::read(&cfg_path).unwrap();
-        let mut doc = "version = 3\n[bedrock]\nallowed_body_fields = [\"messages\"]\n"
-            .parse::<DocumentMut>()
-            .unwrap();
-        let cache_pricing = BTreeMap::new();
-        let v1 = v1_inputs(&cache_pricing, &cfg_path, &overlay_path);
+        let doc = doc_of("version = 3\n[bedrock]\nallowed_body_fields = [\"messages\"]\n");
 
-        let err = migrate_to_current(&mut doc, LATEST_MIGRATION_VERSION, &v1)
-            .expect_err("egress allowlist refuses");
+        let err = plan_migration(
+            &doc,
+            LATEST_MIGRATION_VERSION,
+            &BTreeMap::new(),
+            &overlay_path,
+        )
+        .expect_err("egress allowlist refuses");
         assert!(matches!(err, MigrateError::Refused(_)), "err: {err}");
-        assert_eq!(std::fs::read(&cfg_path).unwrap(), before);
     }
 }
