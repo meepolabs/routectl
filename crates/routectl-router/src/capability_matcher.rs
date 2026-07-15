@@ -13,15 +13,23 @@
 //!   [`FailureClass::FeatureUnsupported`]. For openai-compat, the class
 //!   carries an `error.code` TOKEN (`unsupported_parameter`, ...), which is
 //!   NOT a capability key; the field that actually names the offending
-//!   capability is `error.param`, so this arm extracts and canonicalizes
-//!   `/error/param` (the same `strip_date_suffix` + `normalize_capability_key`
-//!   pipeline the request side applies). A rejection whose `param` is absent
-//!   yields `None` -- the loop never learns a capability the upstream did not
-//!   name -- EXCEPT the small closed set of paramless rejections that still
-//!   name a correct target-level route-away (a geo/region block), for which
-//!   the code token itself is the canonical key. For other providers
-//!   (Bedrock, as its token table grows) the class carries a field path and
-//!   is normalized directly. One observation is trustworthy.
+//!   capability is `error.param` -- a WIRE param name (`response_format`,
+//!   ...), which is not itself the request-capability key either. So this
+//!   arm maps `/error/param` onto the canonical request-capability namespace
+//!   through a CLOSED set: an explicit translation table
+//!   ([`OPENAI_PARAM_TRANSLATIONS`], e.g. `response_format` ->
+//!   `structured_output`) for wire params that name a capability under a
+//!   different key than the request side, plus a passthrough for a param
+//!   that -- after `strip_date_suffix` + `normalize_capability_key` -- is
+//!   ALREADY a well-known capability key (a typed built-in tool an upstream
+//!   rejects by `type`). A param outside that closed set, or an absent
+//!   `param`, yields `None` -- the loop never learns a capability the request
+//!   side cannot look up under the same key -- EXCEPT the small closed set of
+//!   paramless rejections that still name a correct target-level route-away
+//!   (a geo/region block), for which the code token itself is the canonical
+//!   key. For other providers (Bedrock, as its token table grows) the class
+//!   carries a field path and is normalized directly. One observation is
+//!   trustworthy.
 //! - INFERRED: a generic [`FailureClass::BadRequest`] whose free-text
 //!   `error.message` names a capability only in prose. Matched by
 //!   whole-phrase equality (case-insensitive) against a small per-provider
@@ -32,7 +40,9 @@
 //! Every other class, provider, or malformed body yields `None` -- the
 //! resolver never manufactures a false positive.
 
-use routectl_core::capability::{SignalTier, normalize_capability_key};
+use routectl_core::capability::{
+    STRUCTURED_OUTPUT, SignalTier, WELL_KNOWN_CAPABILITY_KEYS, normalize_capability_key,
+};
 use routectl_core::error::Error;
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 
@@ -42,6 +52,22 @@ use crate::feature_keys::strip_date_suffix;
 /// `FeatureUnsupported` class carries an `error.code` token rather than a
 /// capability, so the resolver reads `/error/param` instead.
 const OPENAI_COMPAT_KIND: &str = "openai-compat";
+
+/// Closed-set translation of an openai-compat `error.param` WIRE param name
+/// onto the canonical request-capability key the request side derives and
+/// the act side looks up. openai names the offending field by its wire key
+/// (`response_format` for constrained decoding), which the request side keys
+/// under a DIFFERENT canonical name (`structured_output`); without this
+/// mapping a learned negative keyed on the raw wire param would never meet
+/// the request-derived key, so the loop would never route away.
+///
+/// EXTENSION POINT: add a `(wire_param, canonical_key)` row here when a new
+/// provider body surface must map onto an existing canonical capability. A
+/// param whose canonicalized form is ALREADY a well-known capability key
+/// (a typed built-in tool an upstream rejects by `type`) passes through
+/// without a row; every other param yields `None` (no-learn), keeping the
+/// set closed.
+const OPENAI_PARAM_TRANSLATIONS: &[(&str, &str)] = &[("response_format", STRUCTURED_OUTPUT)];
 
 /// openai-compat `error.code` tokens whose rejection carries no
 /// `/error/param` yet still names a correct route-away: a geo/region block
@@ -114,19 +140,14 @@ fn resolve_self_identifying(
     ))
 }
 
-/// openai-compat: canonicalize `/error/param` through the same
-/// `strip_date_suffix` + `normalize_capability_key` pipeline the request
-/// side uses, so the learned key lands in the `derive_feature_keys`
-/// namespace. A missing param yields `None` unless the code token is a
-/// paramless route-away.
+/// openai-compat: map `/error/param` onto the canonical request-capability
+/// namespace through the closed set (an explicit translation row, then a
+/// well-known tool-type passthrough), so a learned key lands where the
+/// request side derives it. A missing param yields `None` unless the code
+/// token is a paramless route-away.
 fn resolve_openai_param(err: &Error, upstream_token: &str) -> Option<(FeatureKey, SignalTier)> {
-    if let Some(param) = openai_error_param(err) {
-        let canonical =
-            normalize_capability_key(strip_date_suffix(param.trim()), OPENAI_COMPAT_KIND);
-        if canonical.is_empty() {
-            return None;
-        }
-        return Some((canonical, SignalTier::SelfIdentifying));
+    if let Some(param) = upstream_error_field(err, "param") {
+        return resolve_openai_param_surface(param.trim());
     }
     if OPENAI_PARAMLESS_ROUTE_AWAY.contains(&upstream_token) {
         return Some((upstream_token.to_string(), SignalTier::SelfIdentifying));
@@ -134,29 +155,34 @@ fn resolve_openai_param(err: &Error, upstream_token: &str) -> Option<(FeatureKey
     None
 }
 
-/// Extract `error.param` from an [`Error::Upstream`] body. Mirrors
-/// [`upstream_error_message`]: the same size cap and the same
-/// missing-field / non-string / non-JSON guards, all yielding `None`.
-fn openai_error_param(err: &Error) -> Option<String> {
-    let Error::Upstream { body, .. } = err else {
-        return None;
-    };
-    if body.len() > MAX_INFERRED_BODY_BYTES {
-        return None;
+/// Resolve a raw openai `error.param` surface against the closed set: an
+/// explicit translation row first, then a well-known tool-type passthrough
+/// (canonicalized via `strip_date_suffix` + `normalize_capability_key`),
+/// else `None`. The set is closed so an arbitrary rejected wire param never
+/// learns a key the act side cannot look up.
+fn resolve_openai_param_surface(param: &str) -> Option<(FeatureKey, SignalTier)> {
+    // Share one date-stripped input across both closed-set paths so a dated
+    // variant of a translated surface (`response_format_20250305`) still
+    // resolves rather than silently falling through to no-learn.
+    let base = strip_date_suffix(param);
+    if let Some((_, canonical)) = OPENAI_PARAM_TRANSLATIONS
+        .iter()
+        .find(|(surface, _)| *surface == base)
+    {
+        return Some(((*canonical).to_string(), SignalTier::SelfIdentifying));
     }
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    value
-        .get("error")?
-        .get("param")?
-        .as_str()
-        .map(str::to_string)
+    let canonical = normalize_capability_key(base, OPENAI_COMPAT_KIND);
+    if WELL_KNOWN_CAPABILITY_KEYS.contains(&canonical.as_str()) {
+        return Some((canonical, SignalTier::SelfIdentifying));
+    }
+    None
 }
 
 /// Whole-phrase match of the upstream `error.message` against the
 /// provider's inferred table.
 fn match_inferred(provider_kind: &str, err: &Error) -> Option<(FeatureKey, SignalTier)> {
     let table = inferred_table_for(provider_kind)?;
-    let message = upstream_error_message(err)?;
+    let message = upstream_error_field(err, "message")?;
     let needle = message.trim();
     let matched = table
         .iter()
@@ -173,29 +199,26 @@ fn inferred_table_for(provider_kind: &str) -> Option<&'static [InferredPhrase]> 
     }
 }
 
-/// Ceiling on the upstream error body we JSON-parse for inferred matching.
-/// A malicious upstream must not be able to force repeated large-JSON parses
-/// on the routing path; a body over this cap skips inferred matching.
-const MAX_INFERRED_BODY_BYTES: usize = 64 * 1024;
+/// Ceiling on the upstream error body we JSON-parse to extract a field.
+/// Guards BOTH the self-identifying `error.param` read and the inferred
+/// `error.message` read: a malicious upstream must not be able to force
+/// repeated large-JSON parses on the routing path; a body over this cap is
+/// not parsed and yields `None`.
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
-/// Extract `error.message` from an [`Error::Upstream`] body. The envelope
-/// nests the message at `error.message`; any other error variant or body
-/// shape (non-JSON, missing field, non-string message) yields `None`.
-/// A body larger than [`MAX_INFERRED_BODY_BYTES`] is not parsed and yields
-/// `None`.
-fn upstream_error_message(err: &Error) -> Option<String> {
+/// Extract `error.<field>` (a string) from an [`Error::Upstream`] body.
+/// Shared by the self-identifying `param` read and the inferred `message`
+/// read. Any non-upstream error variant, an over-cap body, a non-JSON body,
+/// a missing field, or a non-string value yields `None`.
+fn upstream_error_field(err: &Error, field: &str) -> Option<String> {
     let Error::Upstream { body, .. } = err else {
         return None;
     };
-    if body.len() > MAX_INFERRED_BODY_BYTES {
+    if body.len() > MAX_ERROR_BODY_BYTES {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    value
-        .get("error")?
-        .get("message")?
-        .as_str()
-        .map(str::to_string)
+    value.get("error")?.get(field)?.as_str().map(str::to_string)
 }
 
 #[cfg(test)]
@@ -252,14 +275,15 @@ mod tests {
     }
 
     #[test]
-    fn openai_resolves_error_param_not_the_code_token() {
+    fn openai_resolves_tool_type_param_via_passthrough() {
         // The classifier lifts the `error.code` token into FeatureUnsupported,
         // but the code token is NOT a capability -- the resolver must return
-        // the canonicalized `/error/param` (date suffix stripped) instead.
+        // the canonicalized `/error/param` when it names a well-known
+        // tool-type capability (a typed built-in an upstream rejects by type),
+        // date suffix stripped.
         for (code, param, canonical) in [
             ("unsupported_parameter", "web_search_20250305", "web_search"),
             ("unsupported_value", "computer_use", "computer_use"),
-            ("unsupported_parameter", "reasoning", "reasoning"),
         ] {
             // Arrange
             let body = openai_unsupported_body(code, param);
@@ -275,6 +299,71 @@ mod tests {
                 Some((canonical.to_string(), SignalTier::SelfIdentifying)),
                 "code {code} param {param}"
             );
+        }
+    }
+
+    #[test]
+    fn openai_translates_response_format_to_structured_output() {
+        // openai names constrained decoding by its wire param
+        // (`response_format`); the request side keys the same capability as
+        // `structured_output`. The closed-set translation table maps the two
+        // so a learned negative meets the request-derived key.
+        let body = openai_unsupported_body("unsupported_parameter", "response_format");
+        let err = upstream(
+            400,
+            &body,
+            Some("invalid_request_error"),
+            Some("unsupported_parameter"),
+        );
+        let classified = classify(&err, Some("openai-compat"));
+
+        let got = resolve_requested_capability("openai-compat", &err, &classified);
+
+        assert_eq!(
+            got,
+            Some(("structured_output".to_string(), SignalTier::SelfIdentifying))
+        );
+    }
+
+    #[test]
+    fn openai_translates_dated_variant_of_a_translated_param() {
+        // A dated variant of a translated wire surface is date-stripped
+        // BEFORE the translation lookup, so it still resolves rather than
+        // falling through the closed set to no-learn.
+        let body = openai_unsupported_body("unsupported_parameter", "response_format_20250305");
+        let err = upstream(
+            400,
+            &body,
+            Some("invalid_request_error"),
+            Some("unsupported_parameter"),
+        );
+        let classified = classify(&err, Some("openai-compat"));
+
+        let got = resolve_requested_capability("openai-compat", &err, &classified);
+
+        assert_eq!(
+            got,
+            Some(("structured_output".to_string(), SignalTier::SelfIdentifying))
+        );
+    }
+
+    #[test]
+    fn openai_param_outside_the_closed_set_does_not_learn() {
+        // A param that is neither a translation-table wire surface nor a
+        // well-known tool-type key names a capability the request side cannot
+        // look up under the same key -- the closed set yields None (no-learn),
+        // so an arbitrary rejected body param never poisons routing.
+        for param in ["reasoning", "temperature", "max_tokens", "seed", "stop"] {
+            let body = openai_unsupported_body("unsupported_parameter", param);
+            let err = upstream(
+                400,
+                &body,
+                Some("invalid_request_error"),
+                Some("unsupported_parameter"),
+            );
+            let classified = classify(&err, Some("openai-compat"));
+            let got = resolve_requested_capability("openai-compat", &err, &classified);
+            assert_eq!(got, None, "param {param}");
         }
     }
 
