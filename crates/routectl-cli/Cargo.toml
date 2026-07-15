@@ -113,6 +113,11 @@ serial_test = "3"
 # temp usage DB via raw SQL. Test-only; the release binary never links it.
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 routectl-testkit.workspace = true
+# The config-migrate tests race config.toml through the SAME advisory
+# write lock the config writer holds (config_write::edit_config_toml), so
+# a test can gate run_at's config-phase re-read on an out-of-band write.
+# Test-only; the release binary reaches the lock via routectl-router.
+fd-lock = "4"
 # Used by the file-watch / SIGHUP integration tests
 # (`tests/hot_reload.rs`) to deliver SIGHUP into the running test
 # process. Confined to `cfg(unix)` test paths.

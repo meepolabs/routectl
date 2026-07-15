@@ -1445,6 +1445,127 @@ default = \"gpt\"
     }
 
     // -----------------------------------------------------------------
+    // The SAME live mid-commit conflict, driven end-to-end through the
+    // PUBLIC `run_at` entry point rather than `commit_plan` directly, so
+    // the audit event `run_at` emits is asserted (not just the failure it
+    // hands the caller). A background racer holds config.toml's advisory
+    // write lock -- the very lock `edit_config_toml` acquires -- so
+    // `run_at`'s config-phase re-read blocks until the file is raced out
+    // from under it. Ordering is deterministic with no timing guesses:
+    //   * `run_at` reads its snapshot, then folds the overlay, then reaches
+    //     the (locked) config write -- so the overlay fold appearing on disk
+    //     is a happens-before edge proving the snapshot was already captured
+    //     pristine; the racer waits for that edge before touching config.toml.
+    //   * the racer writes config.toml while STILL holding the lock and only
+    //     then releases, so `run_at`'s re-read (which must first acquire the
+    //     lock) observes the raced bytes and conflicts.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn run_at_config_conflict_after_overlay_audits_incomplete_and_resumes() {
+        use std::sync::mpsc;
+
+        let f = fixture(V1_WITH_CACHE_PRICING);
+        let pristine = std::fs::read(&f.config).unwrap();
+        // A byte-distinct but still-valid rewrite: it re-parses fine, yet the
+        // config writer's byte-for-byte base check treats it as a conflict.
+        let raced = String::from_utf8(pristine.clone())
+            .unwrap()
+            .replacen("port = 8787", "port = 8788", 1)
+            .into_bytes();
+
+        // The config writer locks a `<path>.lock` sibling; mirror that path.
+        let mut lock_name = f.config.clone().into_os_string();
+        lock_name.push(".lock");
+        let lock_path = std::path::PathBuf::from(lock_name);
+
+        let overlay_path = f.overlay.clone();
+        let config_path = f.config.clone();
+        let raced_bytes = raced.clone();
+        let (locked_tx, locked_rx) = mpsc::channel();
+
+        let racer = std::thread::spawn(move || {
+            let lock_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("open config lock file");
+            let mut rw = fd_lock::RwLock::new(lock_file);
+            let _guard = rw.write().expect("hold config write lock");
+
+            // Lock held: `run_at` may start. It cannot pass the config phase.
+            locked_tx.send(()).expect("signal lock held");
+
+            // Wait for the overlay fold to land -- the happens-before edge that
+            // proves `run_at` already read its (pristine) snapshot.
+            let mut folded = false;
+            for _ in 0..500 {
+                if routectl_router::load_catalog_overlay(&overlay_path)
+                    .is_ok_and(|overlay| overlay.cells.contains_key("openai-compat:grok-*"))
+                {
+                    folded = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(folded, "the overlay fold must land before the config phase");
+
+            std::fs::write(&config_path, &raced_bytes).expect("race config.toml");
+            // `_guard` drops here, releasing the lock so `run_at`'s config
+            // re-read acquires it, sees the raced bytes, and conflicts.
+        });
+
+        locked_rx.recv().expect("racer acquired the config lock");
+
+        let mut outcome = None;
+        let events = routectl_testkit::capture_events(|| {
+            outcome = Some(run_at(&f.config, &f.overlay, false, true));
+        });
+        racer.join().expect("racer thread");
+
+        // (b) the user-facing error is the resumable message, never a false
+        // "nothing was written".
+        let err = outcome
+            .expect("run_at ran")
+            .expect_err("a config conflict after the overlay lands must fail");
+        assert!(
+            err.to_string().contains("rerun `config migrate`"),
+            "the resumable message must never claim nothing was written, got: {err}"
+        );
+
+        // (a) the AUDIT event `run_at` emitted records `incomplete`.
+        let audit = events
+            .iter()
+            .find(|e| e.field("verb") == Some("migrate"))
+            .expect("a migrate audit event");
+        assert_eq!(audit.field("outcome"), Some("incomplete"));
+
+        // (c) the overlay retains the committed fold ...
+        let overlay = routectl_router::load_catalog_overlay(&f.overlay).expect("overlay loads");
+        assert!(
+            overlay.cells.contains_key("openai-compat:grok-*"),
+            "the overlay fold must remain committed after the config conflict"
+        );
+        // ... and the racing writer's config bytes were not clobbered.
+        assert_eq!(
+            std::fs::read(&f.config).unwrap(),
+            raced,
+            "a config conflict must leave the concurrent write in place"
+        );
+
+        // (d) a rerun completes: the overlay fold is now an idempotent no-op
+        // and config.toml is stamped forward to v3.
+        let result = run_at(&f.config, &f.overlay, false, true).expect("rerun completes");
+        assert_eq!(result, MigrateResult::Migrated { from_version: 1 });
+        let text = read(&f.config);
+        assert!(text.contains("version = 3"), "{text}");
+        assert!(!text.contains("cache_pricing"), "{text}");
+        gate(&text).expect("the completed config must pass the gate");
+    }
+
+    // -----------------------------------------------------------------
     // A config-phase conflict with NO overlay write (a ConfigOnly plan)
     // audits `conflict` -- labelled by the ConfigWriteError variant, not
     // the old hardcoded value.

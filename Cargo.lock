@@ -2630,6 +2630,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "fd-lock",
  "futures",
  "http 1.4.2",
  "http-body 1.0.1",
