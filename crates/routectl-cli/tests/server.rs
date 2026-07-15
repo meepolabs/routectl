@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig};
+use routectl_router::{
+    AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerAuth, ServerConfig,
+};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -966,4 +968,124 @@ async fn anthropic_inference_paths_are_all_served_by_build_axum_router() {
              ANTHROPIC_INFERENCE_PATHS has drifted from the routes routectl actually serves"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Status subtree wiring: auth-exemption + host-allowlist scoping (ui.f1.10).
+// ---------------------------------------------------------------------------
+
+/// A config whose ingress `/v1/*` surface requires a listener token, so the
+/// auth-exemption of `/status*` is observable against a live auth wall.
+fn config_with_listener_auth(token: &str) -> Arc<Config> {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", common::file_ref("test-key")),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+
+    Arc::new(Config {
+        server: ServerConfig {
+            auth: Some(ServerAuth {
+                tokens: vec![common::file_ref(token)],
+            }),
+            ..ServerConfig::default()
+        },
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    })
+}
+
+const STATUS_PATHS: &[&str] = &[
+    "/status",
+    "/status/usage",
+    "/status/health",
+    "/status/config",
+    "/status/doctor",
+];
+
+#[tokio::test]
+async fn status_subtree_is_auth_exempt_while_v1_still_requires_a_token() {
+    let base = helpers::spawn_test_server(config_with_listener_auth("secret-token")).await;
+    let client = reqwest::Client::new();
+
+    // Every /status path is reachable WITHOUT a token even though auth is on.
+    for path in STATUS_PATHS {
+        let resp = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "{path} must be reachable without a token (status is auth-exempt)"
+        );
+    }
+
+    // A /v1 route still rejects an unauthenticated request.
+    let resp = client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "/v1/* must still require a token when auth is configured"
+    );
+}
+
+#[tokio::test]
+async fn host_allowlist_rejects_status_but_not_v1() {
+    let base = helpers::spawn_test_server(openai_compat_config(
+        "http://127.0.0.1:1",
+        "provider1",
+        "my-alias",
+    ))
+    .await;
+    let client = reqwest::Client::new();
+
+    // A disallowed Host to a status path is rejected by the subtree-only guard.
+    let resp = client
+        .get(format!("{base}/status/health"))
+        .header(reqwest::header::HOST, "evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "a disallowed Host to /status must be rejected"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden_host");
+
+    // The SAME disallowed Host to a /v1 route is NOT rejected by this layer
+    // (the proxy lane does not carry the host allowlist).
+    let resp = client
+        .get(format!("{base}/v1/models"))
+        .header(reqwest::header::HOST, "evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        403,
+        "the host allowlist must not apply to /v1/*"
+    );
+
+    // The default (loopback) Host is allowed on the status subtree.
+    let resp = client
+        .get(format!("{base}/status/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "loopback Host must be allowed on /status"
+    );
 }

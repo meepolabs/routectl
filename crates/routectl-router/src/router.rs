@@ -35,7 +35,7 @@ use crate::context_trim::{
 use crate::cost_gate::break_even_k;
 use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
-use crate::runtime_state::{GateDecision, ProviderState};
+use crate::runtime_state::{CircuitPhase, GateDecision, ProviderGateStatus, ProviderState};
 
 /// Auth-reserved header names. Dispatch-layer compose WARN-drops any
 /// `header_extras` entry matching one of these so an operator-typed
@@ -913,6 +913,29 @@ impl DispatchTarget {
     }
 }
 
+/// One dispatch target's read-only health for the status surface: a
+/// non-pooled model (one entry keyed by nickname) or a single seat of a
+/// pooled model (one entry per seat, keyed by the seat's `state_key`).
+/// The wire mapping is owned by the status module downstream; this is an
+/// internal read shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteTargetStatus {
+    /// Key into the runtime-state map: the bare nickname for a non-pooled
+    /// model or the default seat, `"{nickname}#{label}"` for a labeled seat.
+    pub state_key: String,
+    /// The model entry's `[models]` table key.
+    pub nickname: String,
+    /// The provider's `[providers]` table key.
+    pub provider_name: String,
+    /// Wire value of the `model` field this target dispatches to.
+    pub upstream: String,
+    /// Seat label: `None` for a non-pooled model or the default seat,
+    /// `Some(label)` for a labeled seat of a pooled model.
+    pub seat_label: Option<String>,
+    /// Non-mutating gate health for this target.
+    pub gate: ProviderGateStatus,
+}
+
 impl Router {
     pub fn new(config: Arc<Config>) -> Self {
         let mut state = BTreeMap::new();
@@ -1353,6 +1376,73 @@ impl Router {
         self.state
             .get(state_key)
             .map(|s| s.lock().capacity_snapshot(now))
+    }
+
+    /// Non-mutating gate health for the state slot keyed by `state_key`.
+    /// Fails safe when no slot exists: reports a circuit-Open,
+    /// not-dispatchable gate rather than panicking, so a status view of a
+    /// target with no runtime state treats it as unavailable. Like
+    /// `capacity_snapshot_for`, this must never go through the
+    /// `try_dispatch`-based `breaker_open_for` anti-pattern, which would
+    /// claim a half-open probe slot just to read.
+    fn gate_status_for(&self, state_key: &str, now: Instant) -> ProviderGateStatus {
+        self.state.get(state_key).map_or(
+            ProviderGateStatus {
+                rpm_available: None,
+                circuit: CircuitPhase::Open,
+                half_open_probe_in_flight: false,
+            },
+            |s| s.lock().gate_status(now),
+        )
+    }
+
+    /// Read-only health of every dispatch target, for the status surface.
+    /// Iterates the resolved-model table and emits one [`RouteTargetStatus`]
+    /// per dispatch target: one entry per seat for a pooled (seat-backed)
+    /// model, one entry keyed by the nickname for a non-pooled model. Each
+    /// entry's gate is read via the `&self`-borrow `gate_status_for`, which
+    /// never claims a half-open probe slot; a target with no state slot
+    /// fails safe to circuit-Open rather than panicking.
+    pub fn status_targets(&self, now: Instant) -> Vec<RouteTargetStatus> {
+        let mut out = Vec::new();
+        for model in self.resolved_models.values() {
+            match model.seats.as_ref() {
+                Some(seats) => {
+                    for seat in seats.iter() {
+                        out.push(RouteTargetStatus {
+                            state_key: seat.state_key.clone(),
+                            nickname: model.nickname.clone(),
+                            provider_name: model.provider_name.clone(),
+                            upstream: model.upstream.clone(),
+                            seat_label: seat.label.clone(),
+                            gate: self.gate_status_for(&seat.state_key, now),
+                        });
+                    }
+                }
+                None => {
+                    out.push(RouteTargetStatus {
+                        state_key: model.nickname.clone(),
+                        nickname: model.nickname.clone(),
+                        provider_name: model.provider_name.clone(),
+                        upstream: model.upstream.clone(),
+                        seat_label: None,
+                        gate: self.gate_status_for(&model.nickname, now),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Read-only snapshot of the learned-capability registry: every resident
+    /// per-(target, feature) negative in the fixed contract shape. `&self`
+    /// delegate over the private `learned_capabilities` registry so the
+    /// status surface can surface learned negatives without reaching into
+    /// the field.
+    pub fn learned_capability_snapshot(
+        &self,
+    ) -> Vec<crate::learned_capability::LearnedRegistryEntry> {
+        self.learned_capabilities.snapshot()
     }
 
     /// v0.6.0 alias-table lookup. Precedence: exact match -> longest
@@ -8502,6 +8592,177 @@ mod resolved_models_tests {
         // their own slot.
         assert!(router.state.contains_key("alpha"));
         assert!(router.state.contains_key("beta"));
+    }
+
+    #[tokio::test]
+    async fn status_targets_one_entry_per_nickname_for_non_pooled() {
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "p-test".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_with_resolved(vec![
+            ("alpha", "p-shared", "u1", p.clone()),
+            ("beta", "p-shared", "u2", p.clone()),
+        ]);
+        let targets = router.status_targets(Instant::now());
+        assert_eq!(targets.len(), 2, "one entry per non-pooled nickname");
+        let alpha = targets
+            .iter()
+            .find(|t| t.nickname == "alpha")
+            .expect("alpha present");
+        assert_eq!(alpha.state_key, "alpha");
+        assert_eq!(alpha.provider_name, "p-shared");
+        assert_eq!(alpha.upstream, "u1");
+        assert_eq!(alpha.seat_label, None);
+        // A fresh, unconfigured gate reads Closed with no probe in flight.
+        assert_eq!(alpha.gate.circuit, CircuitPhase::Closed);
+        assert!(!alpha.gate.half_open_probe_in_flight);
+    }
+
+    #[tokio::test]
+    async fn status_targets_one_entry_per_seat_for_pooled() {
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "oauth-pool".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_with_pooled_model(
+            "opus",
+            "anthropic-oauth",
+            "claude-opus-4-7-wire",
+            p.clone(),
+            &["seat-a", "seat-b"],
+            None,
+        );
+        let targets = router.status_targets(Instant::now());
+        assert_eq!(targets.len(), 2, "one entry per seat of a pooled model");
+        let mut keys: Vec<&str> = targets.iter().map(|t| t.state_key.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["opus#seat-a", "opus#seat-b"]);
+        for t in &targets {
+            assert_eq!(t.nickname, "opus");
+            assert_eq!(t.provider_name, "anthropic-oauth");
+            assert_eq!(t.upstream, "claude-opus-4-7-wire");
+            assert!(t.seat_label.is_some(), "seat entries carry a label");
+        }
+    }
+
+    #[tokio::test]
+    async fn status_targets_missing_state_slot_fails_safe_open() {
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "p-test".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut router = router_with_resolved(vec![("gamma", "p-shared", "u1", p.clone())]);
+        // Drop the state slot: the resolved-model entry survives but has no
+        // runtime gate. status_targets must not panic and must fail safe.
+        router.state.remove("gamma");
+        let targets = router.status_targets(Instant::now());
+        assert_eq!(targets.len(), 1);
+        let gamma = &targets[0];
+        assert_eq!(gamma.state_key, "gamma");
+        assert_eq!(
+            gamma.gate.circuit,
+            CircuitPhase::Open,
+            "a target with no state slot fails safe to Open",
+        );
+        assert!(!gamma.gate.half_open_probe_in_flight);
+        assert_eq!(gamma.gate.rpm_available, None);
+    }
+
+    #[tokio::test]
+    async fn learned_capability_snapshot_surfaces_negatives() {
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "p-test".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_with_resolved(vec![("alpha", "openai-compat", "u1", p.clone())]);
+        assert!(
+            router.learned_capability_snapshot().is_empty(),
+            "fresh registry surfaces no negatives",
+        );
+        router.learned_capabilities.observe(
+            "alpha",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            Instant::now(),
+        );
+        let snap = router.learned_capability_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].state_key, "alpha");
+        assert_eq!(snap[0].feature_key, "web_search");
+        assert_eq!(snap[0].signal_tier, SignalTier::SelfIdentifying);
+    }
+
+    #[tokio::test]
+    async fn status_targets_does_not_claim_half_open_probe_slot() {
+        // THE non-perturbation guard, at the router seam. Drive one seat to
+        // HalfOpenReady, hammer status_targets (serially AND concurrently),
+        // and assert the read never claims the probe slot: every entry stays
+        // HalfOpenReady with half_open_probe_in_flight == false. Only THEN
+        // does a real try_dispatch claim the probe.
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "oauth-pool".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let router = Arc::new(router_with_pooled_model(
+            "opus",
+            "anthropic-oauth",
+            "claude-opus-4-7-wire",
+            p.clone(),
+            &["seat-a", "seat-b"],
+            None,
+        ));
+
+        // Park seat-a's breaker; compute an instant past its cooldown so the
+        // gate reads HalfOpenReady without any probe in flight.
+        let t0 = Instant::now();
+        assert!(
+            router.force_open_breaker("opus#seat-a", Duration::from_millis(500)),
+            "seat-a must own a state slot",
+        );
+        let t_ready = t0 + Duration::from_millis(600);
+
+        let seat_a_ready = |targets: &[RouteTargetStatus]| {
+            let seat = targets
+                .iter()
+                .find(|t| t.state_key == "opus#seat-a")
+                .expect("seat-a present");
+            assert_eq!(seat.gate.circuit, CircuitPhase::HalfOpenReady);
+            assert!(!seat.gate.half_open_probe_in_flight);
+        };
+
+        // Serial hammering.
+        for _ in 0..100 {
+            seat_a_ready(&router.status_targets(t_ready));
+        }
+
+        // Concurrent hammering.
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let r = Arc::clone(&router);
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        let targets = r.status_targets(t_ready);
+                        let seat = targets
+                            .iter()
+                            .find(|t| t.state_key == "opus#seat-a")
+                            .expect("seat-a present");
+                        assert_eq!(seat.gate.circuit, CircuitPhase::HalfOpenReady);
+                        assert!(!seat.gate.half_open_probe_in_flight);
+                    }
+                });
+            }
+        });
+
+        // The reads never perturbed the slot: a real dispatch still gets the
+        // probe and claims it.
+        let slot = router.state.get("opus#seat-a").expect("slot present");
+        assert_eq!(slot.lock().try_dispatch(t_ready), GateDecision::Allow);
+        assert!(
+            slot.lock().half_open_probe_in_flight(),
+            "the real dispatch claimed the probe slot the reads left untouched",
+        );
     }
 
     #[tokio::test]
