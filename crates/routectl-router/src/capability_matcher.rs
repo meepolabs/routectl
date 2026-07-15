@@ -235,17 +235,38 @@ fn upstream_error_field(err: &Error, field: &str) -> Option<String> {
     value.get("error")?.get(field)?.as_str().map(str::to_string)
 }
 
+/// Upper bound on a param token surfaced verbatim in an operator log. A
+/// canonical capability param (`web_search`, `response_format`, ...) is far
+/// shorter; this cap only bounds an adversarial or buggy upstream.
+const MAX_PARAM_TOKEN_LEN: usize = 64;
+
+/// True if `param` is safe to surface verbatim in an operator log: a
+/// non-empty, bounded, single-token ASCII string with no whitespace or
+/// control bytes (`is_ascii_graphic` is the printable ASCII range excluding
+/// space). Any canonical capability param the closed-set resolver accepts is
+/// token-shaped by construction, so this gate re-admits every legitimate
+/// value while dropping log-forging content (newlines, control bytes) and
+/// oversized blobs.
+fn is_safe_param_token(param: &str) -> bool {
+    !param.is_empty()
+        && param.len() <= MAX_PARAM_TOKEN_LEN
+        && param.bytes().all(|b| b.is_ascii_graphic())
+}
+
 /// The upstream `error.param` string, for observability enrichment on the
-/// learn event. Shares the same over-cap / non-JSON / missing-field guard as
-/// the resolver's read; carries the capability the upstream named, never a
-/// request body / message / prompt.
+/// learn event -- emitted ONLY when [`is_safe_param_token`] holds. Shares the
+/// same over-cap / non-JSON / missing-field guard as the resolver's read;
+/// carries the capability the upstream named, never a request body / message
+/// / prompt. An unsafe (oversized, whitespace/control-laden, or empty) param
+/// yields `None` so the log boundary never trusts the raw upstream field.
 pub(crate) fn upstream_param(err: &Error) -> Option<String> {
-    upstream_error_field(err, "param")
+    upstream_error_field(err, "param").filter(|param| is_safe_param_token(param))
 }
 
 #[cfg(test)]
 mod tests {
     use super::resolve_requested_capability;
+    use super::upstream_param;
     use routectl_core::capability::SignalTier;
     use routectl_core::error::Error;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify};
@@ -659,5 +680,47 @@ mod tests {
             &cf(FailureClass::BadRequest),
         );
         assert_eq!(got, None);
+    }
+
+    // --- upstream_param log-boundary sanitization ---
+
+    #[test]
+    fn upstream_param_emits_a_token_shaped_value() {
+        let err = upstream(
+            400,
+            &openai_unsupported_body("unsupported_parameter", "web_search"),
+            None,
+            None,
+        );
+        assert_eq!(upstream_param(&err).as_deref(), Some("web_search"));
+    }
+
+    #[test]
+    fn upstream_param_drops_oversized_value() {
+        let param = "a".repeat(65);
+        let err = upstream(
+            400,
+            &openai_unsupported_body("unsupported_parameter", &param),
+            None,
+            None,
+        );
+        assert_eq!(upstream_param(&err), None);
+    }
+
+    #[test]
+    fn upstream_param_drops_control_and_whitespace_values() {
+        for param in ["web search", "web_search\n", "\tinject", "line\r\nbreak"] {
+            let err = upstream(
+                400,
+                &openai_unsupported_body("unsupported_parameter", param),
+                None,
+                None,
+            );
+            assert_eq!(
+                upstream_param(&err),
+                None,
+                "param {param:?} must be dropped"
+            );
+        }
     }
 }

@@ -13,7 +13,7 @@ use rusqlite::Connection;
 /// One `capability_learn_events` row (see `schema::CREATE_CAPABILITY_LEARN_EVENTS_TABLE`).
 ///
 /// Plain types only -- no dependency on the router / core capability
-/// types. `feature_key` is expected already NORMALIZED by the producer;
+/// types. `capability_key` is expected already NORMALIZED by the producer;
 /// `signal_tier` is one of `"self-identifying"` or `"inferred"` (the DDL
 /// CHECK enforces the closed set). `remapped` is always false by
 /// construction but persisted so a replayer can filter defensively.
@@ -26,7 +26,7 @@ pub struct CapabilityLearnEvent {
     /// The breaker's nickname-or-provider-fallback target key.
     pub state_key: String,
     /// The NORMALIZED capability key.
-    pub feature_key: String,
+    pub capability_key: String,
     /// The provider kind that rejected the capability.
     pub provider_kind: String,
     /// Producer tier: `"self-identifying"` or `"inferred"`.
@@ -56,7 +56,7 @@ pub fn insert_learn_event(
         rusqlite::params![
             e.ts,
             e.state_key,
-            e.feature_key,
+            e.capability_key,
             e.provider_kind,
             e.signal_tier,
             i64::from(e.observations),
@@ -72,7 +72,7 @@ pub fn insert_learn_event(
 /// the params list above.
 const INSERT_SQL: &str = "\
 INSERT INTO capability_learn_events (
-    ts, state_key, feature_key, provider_kind, signal_tier,
+    ts, state_key, capability_key, provider_kind, signal_tier,
     observations, upstream_status, remapped, request_features
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
