@@ -27,8 +27,8 @@
 //!      here via [`ManagedSecretStore::ref_path`] -- no bytes written yet.
 //!   3. Serialize the entry to a standard `toml_edit` table. If a provider
 //!      of the same name already exists, a byte-identical (normalized) block
-//!      is an idempotent NO-OP; a different block is refused unless `--force`
-//!      is given.
+//!      is an idempotent NO-OP; a different block is refused unless
+//!      `--overwrite` is given.
 //!   4. Gate the candidate through the SAME shared gate the reload path runs
 //!      ([`super::edit_pipeline::gate`]); any failure renders and writes
 //!      nothing.
@@ -85,7 +85,7 @@ pub struct ProviderAddArgs {
     pub secret_ref: Option<String>,
     pub api_key_stdin: bool,
     pub credential_source: Option<String>,
-    pub force: bool,
+    pub overwrite: bool,
     pub yes: bool,
 }
 
@@ -184,7 +184,7 @@ impl PendingSecret {
 
 /// Outcome of a completed [`run`], for the caller and for tests. Refusals
 /// (unknown kind, missing credential, gate rejection, conflict without
-/// `--force`, write conflict) surface as `Err` instead.
+/// `--overwrite`, write conflict) surface as `Err` instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddResult {
     /// The provider block was written (added or overwritten).
@@ -254,10 +254,10 @@ pub async fn run_with_io(
             println!("provider `{name}` is already configured identically; nothing written.");
             return Ok(AddResult::NoChange);
         }
-        if !args.force {
+        if !args.overwrite {
             return Err(Error::Config(format!(
                 "provider `{name}` already exists with different settings; \
-                 pass `--force` to overwrite it"
+                 pass `--overwrite` to overwrite it"
             )));
         }
     }
@@ -670,7 +670,7 @@ fn parse_document(text: &str) -> Result<DocumentMut> {
 /// Insert `block` at `[providers.<name>]`, descending into (or creating) the
 /// `providers` table via `as_table_like_mut` so existing providers' comments
 /// and ordering survive. A same-name insert replaces the whole block
-/// (`--force` overwrite). Deterministic given the same input document (the
+/// (`--overwrite`). Deterministic given the same input document (the
 /// write closure relies on this).
 fn insert_provider_block(doc: &mut DocumentMut, name: &str, block: Table) -> Result<()> {
     let root = doc.as_table_mut();
@@ -752,7 +752,7 @@ default = \"gpt\"
             secret_ref: None,
             api_key_stdin: false,
             credential_source: None,
-            force: false,
+            overwrite: false,
             yes: true,
         }
     }
@@ -965,12 +965,12 @@ default = \"gpt\"
     }
 
     // -----------------------------------------------------------------
-    // Existing name, different block: refused without --force, overwrites
+    // Existing name, different block: refused without --overwrite, overwrites
     // with it.
     // -----------------------------------------------------------------
 
     #[tokio::test]
-    async fn different_block_on_existing_name_is_refused_without_force() {
+    async fn different_block_on_existing_name_is_refused_without_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), V3_BASE);
         let before = std::fs::read(&path).unwrap();
@@ -983,21 +983,21 @@ default = \"gpt\"
         let err = run(&path, a)
             .await
             .expect_err("must refuse a conflicting overwrite");
-        assert!(err.to_string().contains("--force"), "err: {err}");
+        assert!(err.to_string().contains("--overwrite"), "err: {err}");
         assert_eq!(std::fs::read(&path).unwrap(), before, "must not write");
     }
 
     #[tokio::test]
-    async fn force_overwrites_an_existing_block() {
+    async fn overwrite_replaces_an_existing_block() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), V3_BASE);
 
         let mut a = args("openai-compat", "fast");
         a.base_url = Some("https://elsewhere.example/v1".to_string());
         a.secret_ref = Some("file:///abs/key".to_string());
-        a.force = true;
+        a.overwrite = true;
 
-        let result = run(&path, a).await.expect("force overwrite");
+        let result = run(&path, a).await.expect("overwrite");
         assert_eq!(result, AddResult::Written);
 
         let config = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1006,8 +1006,8 @@ default = \"gpt\"
     }
 
     #[tokio::test]
-    async fn force_overwrite_still_passes_through_the_confirm_gate() {
-        // `--force` clears the existing-block refusal but NOT the
+    async fn overwrite_still_passes_through_the_confirm_gate() {
+        // `--overwrite` clears the existing-block refusal but NOT the
         // high-consequence confirmation: with yes=false and an EOF stdin the
         // overwrite is declined and the original block is left byte-identical.
         let dir = tempfile::tempdir().unwrap();
@@ -1017,7 +1017,7 @@ default = \"gpt\"
         let mut a = args("openai-compat", "fast");
         a.base_url = Some("https://elsewhere.example/v1".to_string());
         a.secret_ref = Some("file:///abs/key".to_string());
-        a.force = true;
+        a.overwrite = true;
         a.yes = false;
 
         let result = run(&path, a).await.expect("declining is not an error");

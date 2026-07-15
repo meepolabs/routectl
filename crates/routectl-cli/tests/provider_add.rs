@@ -164,7 +164,7 @@ fn base_args(kind: &str, name: &str) -> ProviderAddArgs {
         secret_ref: None,
         api_key_stdin: false,
         credential_source: None,
-        force: false,
+        overwrite: false,
         yes: true,
     }
 }
@@ -353,7 +353,7 @@ fn every_provider_add_input_is_expressible_as_a_flag() {
         "--secret-ref",
         "--api-key-stdin",
         "--credential-source",
-        "--force",
+        "--overwrite",
         "--yes",
     ] {
         assert!(help.contains(flag), "help must document {flag}:\n{help}");

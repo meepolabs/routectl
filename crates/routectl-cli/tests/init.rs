@@ -238,7 +238,7 @@ fn oauth_add_args(name: &str) -> ProviderAddArgs {
         secret_ref: None,
         api_key_stdin: false,
         credential_source: None,
-        force: false,
+        overwrite: false,
         yes: true,
     }
 }
