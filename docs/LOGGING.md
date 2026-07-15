@@ -550,11 +550,19 @@ routectl's learned-capability subsystem (see CONFIGURATION.md,
 as it learns, re-probes, clears, and strips per-target capability
 negatives, plus two config-layer events for operator override hygiene.
 Every event carries a stable `event` discriminator so alerts pin on that
-field, never on the human message string. All fields are display-safe
-discriminants -- capability TOKENS, session/target keys, and counts only.
-Never a request body, prompt content, or secret.
+field, never on the human message string. The events share one unified
+field vocabulary: `event` names the kind, `state_key` names the dispatch
+target's session/target key, and `capability_key` carries the normalized
+capability token. All fields are display-safe discriminants -- capability
+TOKENS, session/target keys, and counts only. Never a request body,
+prompt content, or secret.
 
-**Revision:** field vocabulary last changed in 0.9.0. Renaming or
+**Revision:** field vocabulary last changed in 0.9.0 (the capability
+event vocabulary was unified on `event` / `state_key` / `capability_key`;
+the tail-demotion event was renamed to `route_away` with INFO/WARN
+levels; the `learn` event gained the `provider_kind` / `upstream_status`
+/ `upstream_code` / `upstream_param` enrichment fields; `clear`,
+`expire_probe`, and `count_tokens` were added). Renaming or
 removing any field below, or changing an `outcome` / `signal_tier` /
 `event` token, is a breaking change to this contract and updates this
 note. Adding a new field to an existing event is allowed without
@@ -578,7 +586,8 @@ Summary (grep the `event` field to isolate a kind):
 | `clear` | INFO | `routectl_router::learned_capability` | `learned-capability negative cleared by successful re-probe` |
 | `expire_probe` | INFO | `routectl_router::learned_capability` | `lapsed learned negative admitted for its single re-probe` |
 | `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
-| `d17_tail` | WARN | `routectl_router::router` | `alias chain survives only via the de-prioritized learned tail; ...` |
+| `route_away` | INFO / WARN | `routectl_router::router` | `learned-capability negative de-prioritized this target to the tail` (INFO) / `... routed this target away; request survives only via the de-prioritized learned tail` (WARN) |
+| `count_tokens` | INFO | `routectl_router::router` | `count_tokens seat terminal; resilience class policy applied` |
 | `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; clearing learned-capability registry` |
 | `strip` | WARN | `routectl_router::router` | `capability_strip_decision` |
 | `suppression` | WARN | `routectl_router::router` | `force_supported override contradicted: masked capability still rejected upstream` |
@@ -589,20 +598,29 @@ Summary (grep the `event` field to isolate a kind):
 
 Emitted once per request per `(state_key, capability_key)` when an
 upstream rejection teaches routectl a new (or reconfirming) capability
-negative.
+negative. `capability_key` is the CANONICAL capability the shared
+resolver attributed the fault to (e.g. `web_search`, `structured_output`)
+-- not the raw upstream `error.code` token, which is carried separately as
+`upstream_code` for observability.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `event` | string | Always `learn`. |
 | `state_key` | string | The dispatch target's session/target key. |
-| `capability_key` | string | The normalized capability token learned unsupported. |
+| `capability_key` | string | The normalized canonical capability token learned unsupported. |
+| `provider_kind` | string | The target provider's egress kind (`anthropic-api`, `openai-compat`, ...). |
+| `upstream_status` | integer | The upstream HTTP status that carried the rejection (`400` or `422`). |
+| `upstream_code` | string | The upstream `error.code` token, or empty when the upstream sent none. |
+| `upstream_param` | string | The upstream `error.param` value -- PRESENT ONLY when the sanitizer deemed it safe to log verbatim (bounded, single-token, no whitespace/control bytes); the field is OMITTED entirely otherwise, so an adversarial or oversized `error.param` never reaches the log. |
 | `signal_tier` | string | `self-identifying` or `inferred` -- how the negative was classified. |
 | `observations` | integer | How many times this negative has been observed (>= 1). |
 | `acting` | bool | `true` once the entry is acting (routes away / strips); `false` while still pending. |
 
 ```
 WARN routectl_router::router event=learn state_key=m1
-  capability_key=unsupported_parameter signal_tier=self-identifying
+  capability_key=structured_output provider_kind=openai-compat
+  upstream_status=400 upstream_code=unsupported_parameter
+  upstream_param=response_format signal_tier=self-identifying
   observations=1 acting=true "learned-capability negative observed"
 ```
 
@@ -659,23 +677,66 @@ WARN routectl_router::learned_capability event=evict state_key=n
   "learned-capability registry at capacity; evicted oldest entry"
 ```
 
-### `d17_tail` (WARN)
+### `route_away` (INFO / WARN)
 
-Emitted when an alias chain survives only via the de-prioritized learned
-tail and routectl attempts that tail as a route-away floor rather than
-returning `NotImplemented`.
+Emitted once per learned-tail demotion when an acting capability negative
+de-prioritizes a target. The LEVEL distinguishes the two outcomes:
+
+- **INFO** when a supported alternative still fronts the chain -- the
+  learned negative simply moved this target to the tail.
+- **WARN** when the chain survives ONLY via the de-prioritized learned
+  tail (every other target was filtered out), so the request rides the
+  route-away floor. This is the level to alert on: it is the moment a
+  learned negative -- possibly a mislearn -- actually changes which target
+  serves traffic.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `event` | string | Always `d17_tail`. |
-| `alias` | string | The alias whose chain collapsed to the learned tail. |
-| `features` | string | The requested feature keys, comma-joined. |
-| `tail_len` | integer | How many de-prioritized targets remain in the tail. |
+| `event` | string | Always `route_away`. |
+| `state_key` | string | The demoted target's session/target key. |
+| `capability_key` | string | The normalized capability token that routed the target away. |
 
 ```
-WARN routectl_router::router event=d17_tail alias=alias features=web_search
-  tail_len=1 "alias chain survives only via the de-prioritized learned
-  tail; attempting learned-negative targets as a route-away floor"
+INFO routectl_router::router event=route_away state_key=front
+  capability_key=web_search
+  "learned-capability negative de-prioritized this target to the tail"
+
+WARN routectl_router::router event=route_away state_key=only
+  capability_key=web_search
+  "learned-capability negative routed this target away; request survives
+   only via the de-prioritized learned tail"
+```
+
+### `count_tokens` (INFO)
+
+Emitted once when a `count_tokens` seat reaches its class/remap/debit
+settle point -- an upstream health error (rate-limit / server / timeout /
+network / overload) that the token-count path surfaces as terminal (it
+never falls back on health). The messages path emits a class-decision
+event at every error arm; the token-count path was otherwise silent, so
+this event makes a `count_tokens` breaker debit or park triageable. A
+clean count (the happy path) and a capability walk (a wire-501 that
+advances to the next capable seat) do NOT emit it. Safe dimensions only
+-- never a body or prompt.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event` | string | Always `count_tokens`. |
+| `state_key` | string | The seat's session/target key. |
+| `provider` | string | The provider name the seat dispatched to. |
+| `status` | integer | The upstream HTTP status, or `0` for a transport/non-upstream error. |
+| `upstream_type` | string | The upstream error `type` token, or empty. |
+| `upstream_code` | string | The upstream error `code` token, or empty. |
+| `effective_class` | string | The failure class after any operator remap (`rate_limited`, `server_error`, `timeout`, `network_error`, `overloaded`, `bad_request`, `unknown`, ...). |
+| `matched_by` | string | How the native class was decided (`variant`, `status`, `upstream_type`). |
+| `remapped` | bool | `true` when an operator per-provider status remap replaced the native class. |
+| `debit` | bool | `true` when the class debited the seat's circuit breaker (or parked it on a rate-limit reset hint); `false` when the slot was released without a health debit. |
+
+```
+INFO routectl_router::router event=count_tokens state_key=haiku
+  provider=prov status=500 upstream_type= upstream_code=
+  effective_class=server_error matched_by=status remapped=false debit=true
+  "count_tokens seat terminal; resilience class policy applied"
 ```
 
 ### `invalidation` (WARN)
