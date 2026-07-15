@@ -222,8 +222,8 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// user_version` to 8, and update the human-readable `meta.schema_version`
 /// row. All in one transaction so a crash mid-step rolls back rather than
 /// landing a column-without-version state. Existing rows survive with every
-/// new column NULL. This step only plumbs the columns -- lossy-trim.f1.06
-/// computes and stamps their values.
+/// new column NULL. This step only plumbs the columns -- the near-lossless
+/// recorder pass computes and stamps their values.
 ///
 /// On a FRESH DB the v0 -> v1 step created `requests` from the current schema,
 /// which already carries every column. The loop still enters this arm

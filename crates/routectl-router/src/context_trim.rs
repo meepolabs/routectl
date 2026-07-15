@@ -365,10 +365,10 @@ fn serialized_len<T: serde::Serialize>(value: &T) -> u64 {
 /// takes precedence over `path` when both are present.
 const PATH_KEYS: [&str; 2] = ["file_path", "path"];
 
-/// Result of the near-lossless mark pass -- the M1 measurement contract.
+/// Result of the near-lossless mark pass -- the measurement contract.
 ///
 /// A pure, structured summary of the dedup + supersession heuristics over one
-/// request window. The recorder (lossy-trim.f1.06) maps these fields straight
+/// request window. The recorder maps these fields straight
 /// onto `DispatchMeta`: `dedup_tokens -> would_trim_dedup_tokens`,
 /// `supersession_tokens -> would_trim_supersession_tokens`,
 /// `path_units -> would_trim_path_units`,
@@ -485,8 +485,9 @@ fn near_lossless_unit(part: &ContentPart) -> Option<(&Value, ScanUnitKind<'_>)> 
 
 /// Extract a file path from a `ToolUse.input` value using ONLY the
 /// conservative [`PATH_KEYS`] set. Returns a borrow into `input` (no per-unit
-/// heap allocation -- the pass runs on the dispatch hot path once f1.06 wires
-/// it in). Fail-closed: a non-object input, a missing key, a non-string value,
+/// heap allocation -- the pass runs on the dispatch hot path once the
+/// recorder wires it in). Fail-closed: a non-object input, a missing key, a
+/// non-string value,
 /// or an empty string all yield `None` (no path -> a paired result cannot be
 /// superseded). Fixed order: `file_path` takes precedence over `path`.
 fn extract_path(input: &Value) -> Option<&str> {

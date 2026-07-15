@@ -231,8 +231,8 @@ struct RouterMetrics {
     /// `carry_over_learned_from`.
     invalidations_total: AtomicU64,
     /// Requests whose chain survived only via the de-prioritized learned
-    /// tail (D17 soft-drop). Bumped by the dispatch path when the tail is
-    /// entered (later D17 wiring).
+    /// tail (soft-drop). Bumped by the dispatch path when the tail is
+    /// entered.
     d17_tail_total: AtomicU64,
     /// Capabilities stripped in place at a dispatch path (the interceptor
     /// returned `Stripped`). Bumped once per successful strip run, not per
@@ -337,7 +337,7 @@ impl RouterMetrics {
         self.probe_failures_total.load(Ordering::Relaxed)
     }
 
-    /// Read the cumulative D17 learned-tail entry count.
+    /// Read the cumulative learned-tail entry count.
     /// Test-only read surface today; ungate with the metrics snapshot.
     #[cfg(test)]
     fn d17_tail_total(&self) -> u64 {
@@ -761,7 +761,7 @@ enum StripDecision {
     StrictReject(Error),
     /// The post-strip check found a strip-created hazard; the request was
     /// restored to its pre-strip bytes. Do not dispatch it -- route away
-    /// for this attempt as the f1 route-away verdict would.
+    /// for this attempt as an ordinary route-away verdict would.
     RouteAway(Error),
 }
 
@@ -1045,7 +1045,8 @@ impl Router {
                 .unwrap_or_default();
             // A pooled model (Some seats) gets one state slot per seat,
             // each keyed by the seat's `state_key`, so the breaker + RPM
-            // bucket are per-seat (R7/R8/R12 + D1 park apply per seat).
+            // bucket are per-seat (probe fast-fail, retry caps, and the
+            // reset park all apply per seat).
             // The default seat keys as the bare nickname, so the slot
             // below covers it; this loop adds the labeled-seat slots.
             // A non-pooled model (None seats) only gets the nickname slot.
@@ -1570,7 +1571,7 @@ impl Router {
     /// Append one dispatch target per seat of a pooled model, in the
     /// request's resolved seat order. Each target carries the seat's own
     /// provider, `state_key`, and `auth_secret_ref` so the breaker, RPM
-    /// gate, retry caps, probe fast-fail, and D1 `Retry-After` park all
+    /// gate, retry caps, probe fast-fail, and the `Retry-After` park all
     /// apply per seat; every other dispatch knob is shared from the model.
     fn push_seat_targets(
         &self,
@@ -2342,7 +2343,7 @@ impl Router {
             // over the per-attempt canonical clone goes here, ordered by
             // data-dependency. A strict-mode refusal returns the 400 for
             // this attempt; a rolled-back post-strip hazard routes away
-            // (advance the chain as an f1 route-away would).
+            // (advance the chain as an ordinary route-away would).
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => return Err(err),
@@ -2667,7 +2668,7 @@ impl Router {
                                 // a threshold-gated debit, so an exhausted seat
                                 // is skipped until it actually resets. The
                                 // in-loop re-gate then diverts to fallback /
-                                // fail. Probes never park (R7), and a small
+                                // fail. Probes never park, and a small
                                 // reset is honored as an in-loop sleep (below),
                                 // so only the large non-probe case parks here.
                                 Some(h) if !is_probe && h > INLOOP_RETRY_AFTER_CAP => {
@@ -2734,10 +2735,10 @@ impl Router {
                             // loop-top sleep waits at least the reset before
                             // re-probing the SAME provider. Only when we were
                             // already going to retry here (can_retry_here is
-                            // unchanged -- R12), only for a reset within the
+                            // unchanged), only for a reset within the
                             // in-loop cap (a larger reset parked the provider
                             // above instead of blocking this thread), and never
-                            // for a probe (R7).
+                            // for a probe.
                             if let Some(h) = reset_hint
                                 && !is_probe
                                 && h <= INLOOP_RETRY_AFTER_CAP
@@ -3530,7 +3531,7 @@ impl Router {
                         // in-loop sleep), so a reset hint only sizes the
                         // breaker park. A non-probe reset parks the provider
                         // for the honored, clamped duration; a probe never
-                        // parks (R7) and a no-hint error keeps the
+                        // parks and a no-hint error keeps the
                         // threshold-gated debit.
                         let reset_hint = rate_limit_reset_hint(&e, &policy);
                         // The DEBIT keys off the failure CLASS, not the
@@ -8862,7 +8863,7 @@ mod resolved_models_tests {
         }
     }
 
-    // ---- Learned-capability act path (D17 soft-drop + probe admission) ----
+    // ---- Learned-capability act path (soft-drop + probe admission) ----
 
     fn learned_provider_config() -> Arc<Config> {
         let mut config = Config::default();
@@ -13178,10 +13179,11 @@ mod forwarded_auth_terminal_tests {
     #[tokio::test]
     async fn complete_forwarded_bearer_present_but_target_is_own_credential_still_refreshes_and_falls_back()
      {
-        // Coexistence regression (f3 decision doc): a MITM-marked request
+        // Coexistence regression: a MITM-marked request
         // (a captured forwarded bearer IS present) whose alias resolves
         // to an OWN-credential Anthropic provider must retry/fall back
-        // EXACTLY as pre-f3 -- the floating bearer is never consumed by
+        // EXACTLY as before the per-target passthrough gate -- the floating
+        // bearer is never consumed by
         // an own-creds target, and the terminal bypass never wrongly
         // fires just because a bearer happens to be present on the
         // request. Same router as the plain-request regression above;
@@ -14120,7 +14122,7 @@ mod circuit_breaker_slot_release_tests {
     }
 
     /// A probe (max_tokens <= probe_max_tokens) that 429s with a reset hint
-    /// fast-fails (R7): NO retry, NO fallback, NO breaker debit, NO park.
+    /// fast-fails: NO retry, NO fallback, NO breaker debit, NO park.
     #[tokio::test]
     async fn probe_with_retry_after_does_not_park() {
         // Arrange: a probe-shaped request, a large reset that would park a
@@ -14147,13 +14149,13 @@ mod circuit_breaker_slot_release_tests {
         );
         assert!(
             !breaker_open_at(&router, t0),
-            "a probe reset must NOT park the provider (R7)",
+            "a probe reset must NOT park the provider",
         );
     }
 
     /// A reset on a NON-fallbackable error (a 400 whose class is pinned
     /// non-fallbackable) does not force a retry or a park: the error
-    /// terminates exactly as today (R12 -- the reset never changes a
+    /// terminates exactly as today (the reset never changes a
     /// fallback/retry decision).
     #[tokio::test]
     async fn non_fallbackable_error_with_retry_after_still_terminates() {
@@ -14198,7 +14200,7 @@ mod circuit_breaker_slot_release_tests {
         );
         assert!(
             !breaker_open_at(&router, t0),
-            "a non-fallbackable error must not park the provider (R12)",
+            "a non-fallbackable error must not park the provider",
         );
     }
 
@@ -16510,12 +16512,13 @@ mod context_reduction_dispatch_tests {
 
 #[cfg(test)]
 mod forwarded_coexistence_tests {
-    //! f3 dissolves the f2 whole-chain forwarded-passthrough gate
-    //! (`enforce_forwarded_anthropic_target` / `target_is_anthropic_egress`
+    //! The per-provider passthrough model dissolves the earlier whole-chain
+    //! forwarded-passthrough gate (`enforce_forwarded_anthropic_target` /
+    //! `target_is_anthropic_egress`
     //! / `FORWARDED_EGRESS_KIND`, deleted): `credential_source = "forwarded"`
     //! is now a PER-PROVIDER config, not a request-global mode switch, so
     //! an alias routes exactly like any other -- no whole-chain refusal, no
-    //! steering. These tests cover what f3 enforces in its place:
+    //! steering. These tests cover what replaces it:
     //!
     //! - A request carrying a captured forwarded bearer no longer bends
     //!   routing: an alias to an OWN-credential provider (any kind, mixed
@@ -16523,13 +16526,14 @@ mod forwarded_coexistence_tests {
     //!   and is never refused up front.
     //! - A forwarded-CREDENTIAL target (an `anthropic-api` provider with
     //!   `credential_source = "forwarded"`) with NO captured bearer
-    //!   refuses cleanly BEFORE egress -- the compensating guard f3 pairs
+    //!   refuses cleanly BEFORE egress -- the compensating guard paired
     //!   with the gate deletion -- and the guard is per-target, so a
     //!   chain that never reaches that target is unaffected.
     //!
     //! The broader "still refreshes and falls back" coexistence
     //! regression -- a MITM-marked request routed to an OWN-credential
-    //! Anthropic provider behaves exactly pre-f3, and the floating bearer
+    //! Anthropic provider behaves exactly as before the change, and the
+    //! floating bearer
     //! is never consumed by it -- lives in `forwarded_auth_terminal_tests`,
     //! next to the terminal-bypass mocks it reuses.
     use super::*;
@@ -16687,8 +16691,9 @@ mod forwarded_coexistence_tests {
     #[tokio::test]
     async fn complete_forwarded_bearer_present_mixed_chain_own_first_entry_dispatches_normally() {
         // Chain [own-anthropic, openai-compat], request carries a
-        // captured bearer. f2's whole-chain gate would have refused this
-        // up front because entry 1 is non-Anthropic; f3 routes purely by
+        // captured bearer. The earlier whole-chain gate would have refused
+        // this up front because entry 1 is non-Anthropic; routing is now
+        // purely by
         // alias -- the first entry succeeds and the second is never
         // reached.
         let (router, counters) = build_router(vec![
@@ -19441,7 +19446,7 @@ mod capability_override_filter_tests {
         assert_eq!(FilterSource::Override.as_str(), "override");
 
         // The sole target hard-drops, so the chain filters to empty and
-        // surfaces D17's NotImplemented (501) -- byte-identical to a legacy
+        // surfaces the learned-tail NotImplemented (501) -- byte-identical to a legacy
         // static list emptying the chain.
         let mut chain_admissions = Vec::new();
         match router.filter_chain_by_features(
@@ -19598,7 +19603,7 @@ mod capability_override_filter_tests {
         // learned negative on `advisor` would otherwise strip in place.
         // Override RouteAway is consulted first, so it hard-drops (returns
         // the override label) ahead of the learned strip decision -- and the
-        // non-overridden `advisor` cell keeps its f2 strip behavior when
+        // non-overridden `advisor` cell keeps its strip-in-place behavior when
         // web_search is absent.
         let router = override_router_from_toml(&format!(
             "{OVERRIDE_PROVIDER_P}\
@@ -19631,7 +19636,7 @@ mod capability_override_filter_tests {
         assert!(strip_keys.is_empty(), "a hard-drop leaves strip_keys empty");
 
         // Without web_search, the non-overridden advisor cell still strips
-        // in place (f2 behavior unchanged): None with the advisor key.
+        // in place (behavior unchanged): None with the advisor key.
         let mut advisor_admissions = Vec::new();
         let mut advisor_strip = Vec::new();
         assert_eq!(
@@ -19652,7 +19657,7 @@ mod capability_override_filter_tests {
     /// `unsupported_features`, a per-model `unsupported_features`, and the
     /// `[bedrock]` egress allowlists `allowed_betas` / `allowed_body_fields`
     /// -- inert for routing but present so the whole legacy surface coexists)
-    /// must route away with the SAME `FilterSource` labels the pre-f3 raw
+    /// must route away with the SAME `FilterSource` labels the earlier raw
     /// static-list scan produced: a provider-scoped drop reports
     /// `ProviderStatic` (`"provider"`) and a model-scoped drop reports
     /// `ModelStatic` (`"model"`). Absolute expected labels, not a diff
@@ -19709,7 +19714,7 @@ mod capability_override_filter_tests {
         assert_eq!(FilterSource::ModelStatic.as_str(), "model");
 
         // A request touching no listed feature passes through: no route-away,
-        // no probe admission, no strip -- byte-identical to the pre-f3
+        // no probe admission, no strip -- byte-identical to the legacy
         // no-match path.
         let mut clean_admissions = Vec::new();
         let mut clean_strip = Vec::new();

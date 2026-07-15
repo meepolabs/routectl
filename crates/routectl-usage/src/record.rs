@@ -167,40 +167,42 @@ pub struct UsageRecord {
     pub would_trim_shadow_misfire: Option<i64>,
     /// Non-mutating near-lossless attribution: freed tokens attributed to
     /// the dedup heuristic for this request's would-cut candidate. Plumbing
-    /// only -- this field is always `None` until lossy-trim.f1.06 computes
-    /// it. Recording only.
+    /// only -- this field is always `None` until the near-lossless recorder
+    /// pass computes it. Recording only.
     pub would_trim_dedup_tokens: Option<u64>,
     /// Non-mutating near-lossless attribution: freed tokens attributed to
     /// the supersession heuristic for this request's would-cut candidate.
-    /// Plumbing only -- this field is always `None` until lossy-trim.f1.06
-    /// computes it. Recording only.
+    /// Plumbing only -- this field is always `None` until the near-lossless
+    /// recorder pass computes it. Recording only.
     pub would_trim_supersession_tokens: Option<u64>,
     /// Non-mutating path-extractability count-pair: the denominator (total
     /// path units considered). Paired with `would_trim_path_extractable` so
     /// the extractability rate is reconstructable offline via SUM/SUM
     /// rather than pre-averaged per row. Plumbing only -- always `None`
-    /// until lossy-trim.f1.06 computes it. Recording only.
+    /// until the near-lossless recorder pass computes it. Recording only.
     pub would_trim_path_units: Option<u64>,
     /// Non-mutating path-extractability count-pair: the numerator (path
     /// units that were extractable). See `would_trim_path_units`. Plumbing
-    /// only -- always `None` until lossy-trim.f1.06 computes it. Recording
-    /// only.
+    /// only -- always `None` until the near-lossless recorder pass computes
+    /// it. Recording only.
     pub would_trim_path_extractable: Option<u64>,
-    /// Recorder-version marker: `None` on pre-M1 rows and on rows where the
-    /// near-lossless pass did not run; stamped by the M1 recorder
-    /// (lossy-trim.f1.06) on every trigger-clearing row. Lets reporting
-    /// filter to non-NULL rows so aggregates never mix baseline vs M1
-    /// semantics. Plumbing only -- always `None` until f1.06 stamps it.
+    /// Recorder-version marker: `None` on baseline rows and on rows where
+    /// the near-lossless pass did not run; stamped by the near-lossless
+    /// recorder on every trigger-clearing row. Lets reporting filter to
+    /// non-NULL rows so aggregates never mix baseline vs near-lossless
+    /// semantics. Plumbing only -- always `None` until that pass stamps it.
     pub would_trim_recorder_version: Option<i64>,
     /// Capped raw-marks JSON blob: per-mark ordering captured for a future
-    /// M3 sweep, bounded to a byte cap (see `writer::capped_raw_marks_text`)
-    /// so the stored JSON is always valid. Plumbing only -- always `None`
-    /// until lossy-trim.f1.06 computes it. Recording only.
+    /// raw-marks sweep, bounded to a byte cap (see
+    /// `writer::capped_raw_marks_text`) so the stored JSON is always valid.
+    /// Plumbing only -- always `None` until the near-lossless recorder pass
+    /// computes it. Recording only.
     pub would_trim_raw_marks: Option<Value>,
     /// Non-mutating context-fraction advisory: `estimate_total_tokens /
     /// max_context_tokens` from the resolved pricing row. `None` when the
     /// context window is unknown (fail-closed). Plumbing only -- always
-    /// `None` until lossy-trim.f1.06 computes it. Recording only.
+    /// `None` until the near-lossless recorder pass computes it. Recording
+    /// only.
     pub would_trim_context_fraction: Option<f64>,
 
     // TIMING

@@ -90,7 +90,7 @@ impl Default for CatalogOverlay {
 }
 
 /// Provenance of an overlay cell: an imported legacy stamp/override
-/// (migration) versus an operator-authored one (f2 verbs).
+/// (migration) versus an operator-authored one (import/user verbs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlaySource {
@@ -228,8 +228,8 @@ pub fn load(path: &Path) -> Result<CatalogOverlay, OverlayError> {
 /// I/O error) propagates from [`load`] unchanged -- a caller cannot write
 /// blind over a file it could not validate.
 ///
-/// f1: only the migrator calls this. f2 adds import/user verbs on the same
-/// function.
+/// Today only the migrator calls this; the import/user verbs share the
+/// same function.
 pub fn save(
     path: &Path,
     expected_revision: u64,

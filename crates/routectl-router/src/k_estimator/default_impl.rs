@@ -16,7 +16,7 @@
 //! single long contiguous session is `n` observations, not one -- which is
 //! what fixes v1's starvation of few-long-contiguous sessions.
 //!
-//! [`wilson_bound`] is the isolated, swappable, validation-gated core (D15):
+//! [`wilson_bound`] is the isolated, swappable, validation-gated core:
 //! a pure free function with its own tests, tuned against real ledger data by
 //! the calibration harness. `Z_WILSON`, `P_CLAMP`, and `CALIBRATED_MIN_TRIALS`
 //! are PROVISIONAL, harness-tunable values, not a public contract.
@@ -160,7 +160,7 @@ fn hazard_estimate(successes: u32, n: u32) -> (f64, f64, f64, Confidence) {
 
 /// One-sided Wilson score bound on a Bernoulli success probability.
 ///
-/// This is the swappable, validation-gated core (D15): closed-form, no
+/// This is the swappable, validation-gated core: closed-form, no
 /// dependency, and -- unlike the Wald interval -- its LOWER bound is strictly
 /// below 1.0 at any finite `n` even when `successes == trials`, so `E[K]`
 /// built on it never goes infinite.

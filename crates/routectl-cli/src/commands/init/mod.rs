@@ -3,7 +3,7 @@
 //! seam (a superset of [`AddIo`], so ONE fake drives every step), the
 //! [`InitArgs`] flag surface, the leaf data types passed between steps
 //! ([`Offer`], [`OfferSource`], [`ModelWiring`]), and the single-sourced
-//! next-steps renderer f3's doctor path reuses.
+//! next-steps renderer the doctor path reuses.
 //!
 //! The clap `Cmd::Init` arm and the `run`/`run_with_io` orchestration land in
 //! a later step; a dispatch arm may not point at an unimplemented run, so the
@@ -138,10 +138,10 @@ pub struct ModelWiring {
 }
 
 /// The exact command that starts the local server; single-sourced so the
-/// wizard's closing hint and f3's doctor path can never print it differently.
+/// wizard's closing hint and the doctor path can never print it differently.
 pub const SERVE_COMMAND: &str = "routectl serve";
 
-/// The run-doctor hint the wizard's next-steps block and f3's doctor path
+/// The run-doctor hint the wizard's next-steps block and the doctor path
 /// both surface.
 pub const DOCTOR_NEXT_HINT: &str =
     "run `routectl doctor` to verify providers, credentials, and routing";
@@ -721,7 +721,7 @@ async fn gather_probes() -> Vec<(&'static str, LocalProbe)> {
     }
 }
 
-/// Wrap a post-ack failure with the f1-style explicit recovery message: the
+/// Wrap a post-ack failure with an explicit recovery message: the
 /// on-disk config is valid, any providers/credentials already written persist
 /// and are reused on re-run (ref paths are deterministic), so re-running init
 /// completes the setup. No rollback engine, no secret auto-delete.

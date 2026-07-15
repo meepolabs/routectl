@@ -966,7 +966,7 @@ fn default_usage_db_path() -> PathBuf {
 #[serde(rename_all = "lowercase")]
 pub enum CredentialSource {
     /// Authenticate to the upstream with routectl's own managed
-    /// credential (f1 behavior).
+    /// credential (the default behavior).
     #[default]
     Own,
     /// Relay the client's inbound credential to the upstream untouched.
@@ -981,7 +981,7 @@ pub enum CredentialSource {
 /// convention -- `Config::mitm == None` keeps zero proxy startup and
 /// zero behavior change.
 ///
-/// Transport-only (the f1 shape): this block carries no credential
+/// Transport-only (the original shape): this block carries no credential
 /// knob. Which credential a forwarded egress uses is a per-provider
 /// choice (`ProviderEntry::AnthropicApi.credential_source`) -- see
 /// `preflight_legacy_mitm_credential_source` for the pre-parse check
@@ -5102,7 +5102,7 @@ listen_prot = 9443
         );
     }
 
-    /// Acceptance: a transport-only `[mitm]` block -- the f1 shape, no
+    /// Acceptance: a transport-only `[mitm]` block -- the original shape, no
     /// credential knob -- still validates cleanly via the full config
     /// boundary (not a bare-struct construction).
     #[test]
