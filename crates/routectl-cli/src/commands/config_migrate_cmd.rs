@@ -21,8 +21,8 @@
 //!      -- it needs no acknowledgement (nothing is written) and no temp copy
 //!      (planning never touched the real files).
 //!   5. Acknowledge EVERY real write (a version bump OR a same-version v3
-//!      normalization): interactive `y`, or `--force` non-interactively; a
-//!      non-interactive run without `--force` refuses. The acknowledgement runs
+//!      normalization): interactive `y`, or `--yes` non-interactively; a
+//!      non-interactive run without `--yes` refuses. The acknowledgement runs
 //!      AFTER the gate (only a valid migration is worth prompting for) and
 //!      BEFORE any write.
 //!   6. Commit in two phases: the overlay FIRST (revision-checked, idempotent),
@@ -90,12 +90,12 @@ enum CommitError {
 }
 
 /// Run the migrate pipeline against the default config + overlay paths.
-pub fn run(config_path: &Path, dry_run: bool, force: bool) -> Result<MigrateResult> {
+pub fn run(config_path: &Path, dry_run: bool, yes: bool) -> Result<MigrateResult> {
     run_at(
         config_path,
         &routectl_router::overlay_default_path(),
         dry_run,
-        force,
+        yes,
     )
 }
 
@@ -105,7 +105,7 @@ pub fn run_at(
     config_path: &Path,
     overlay_path: &Path,
     dry_run: bool,
-    force: bool,
+    yes: bool,
 ) -> Result<MigrateResult> {
     let snapshot = std::fs::read(config_path).map_err(|e| {
         Error::Config(format!(
@@ -194,7 +194,7 @@ pub fn run_at(
     // Acknowledge EVERY real write (a version bump OR a same-version v3
     // normalization), now that the candidate is known valid and a write is
     // known to be pending. A declined prompt leaves both files byte-identical.
-    if !confirm_migration(from_version, to_version, force) {
+    if !confirm_migration(from_version, to_version, yes) {
         println!("aborted; nothing further written.");
         audit_event(
             config_path,
@@ -202,7 +202,7 @@ pub fn run_at(
             to_version,
             false,
             false,
-            force,
+            yes,
             "aborted",
             None,
         );
@@ -220,8 +220,8 @@ pub fn run_at(
             from_version,
             to_version,
             false,
-            !force,
-            force,
+            !yes,
+            yes,
             failure.outcome,
             None,
         );
@@ -233,8 +233,8 @@ pub fn run_at(
         from_version,
         to_version,
         false,
-        !force,
-        force,
+        !yes,
+        yes,
         "written",
         None,
     );
@@ -542,12 +542,12 @@ fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, remo
     println!("dry-run: nothing was written.");
 }
 
-/// Acknowledge the schema change before the write lock. `--force` bypasses the
-/// prompt; a non-interactive run without `--force` reads EOF and refuses.
+/// Acknowledge the schema change before the write lock. `--yes` bypasses the
+/// prompt; a non-interactive run without `--yes` reads EOF and refuses.
 /// Never called while the write lock is held. Called for EVERY real write,
 /// including a same-version v3 normalization (`from_version == to_version`).
-fn confirm_migration(from_version: u32, to_version: u32, force: bool) -> bool {
-    if force {
+fn confirm_migration(from_version: u32, to_version: u32, yes: bool) -> bool {
+    if yes {
         return true;
     }
     use std::io::Write as _;
@@ -706,14 +706,14 @@ default = \"gpt\"
     }
 
     // -----------------------------------------------------------------
-    // Ack matrix: --force writes; non-interactive without --force refuses;
+    // Ack matrix: --yes writes; non-interactive without --yes refuses;
     // dry-run needs neither.
     // -----------------------------------------------------------------
 
     #[test]
-    fn force_migrates_v2_to_v3_and_the_result_revalidates() {
+    fn yes_migrates_v2_to_v3_and_the_result_revalidates() {
         let f = fixture(V2_CLEAN);
-        let result = run_at(&f.config, &f.overlay, false, true).expect("force migrate");
+        let result = run_at(&f.config, &f.overlay, false, true).expect("yes migrate");
         assert_eq!(result, MigrateResult::Migrated { from_version: 2 });
 
         let text = read(&f.config);
@@ -727,7 +727,7 @@ default = \"gpt\"
     }
 
     #[test]
-    fn non_interactive_without_force_refuses_with_nothing_written() {
+    fn non_interactive_without_yes_refuses_with_nothing_written() {
         let f = fixture(V2_CLEAN);
         let before = std::fs::read(&f.config).unwrap();
 
@@ -743,7 +743,7 @@ default = \"gpt\"
     }
 
     #[test]
-    fn v1_non_interactive_without_force_refuses_before_any_mutation() {
+    fn v1_non_interactive_without_yes_refuses_before_any_mutation() {
         // A v1 file's migration mutates disk INSIDE the ladder (the v1 rung
         // rewrites config.toml to v2 and folds the overlay). Authorization
         // runs before the ladder, so a declined non-interactive run (EOF)
@@ -1173,7 +1173,7 @@ default = \"gpt\"
     }
 
     // -----------------------------------------------------------------
-    // f02: a v1 file that hits a v2->v3 refusal DURING planning leaves BOTH
+    // A v1 file that hits a v2->v3 refusal DURING planning leaves BOTH
     // config.toml AND the overlay byte-untouched. The old impure ladder wrote
     // the overlay and stamped config.toml to v2 BEFORE the refusal, then
     // printed a false "nothing was written"; the pure planner refuses first.
@@ -1241,13 +1241,13 @@ default = \"gpt\"
     }
 
     // -----------------------------------------------------------------
-    // f20: a same-version v3 normalization is a REAL write and must be
+    // A same-version v3 normalization is a REAL write and must be
     // prompt/force-gated like any other, and its audit must reflect the true
     // acknowledgement (never a synthesized acknowledged=true).
     // -----------------------------------------------------------------
 
     #[test]
-    fn v3_normalize_non_interactive_without_force_aborts_byte_identical() {
+    fn v3_normalize_non_interactive_without_yes_aborts_byte_identical() {
         // stdin is not a TTY under the test harness: read_line hits EOF, so
         // the normalize prompt is declined and nothing is written.
         let f = fixture(V3_WITH_LEGACY);
@@ -1265,8 +1265,8 @@ default = \"gpt\"
 
     #[test]
     fn v3_normalize_forced_audit_records_acknowledged_false_not_synthesized() {
-        // A forced normalize was authorized by --force, NOT by an interactive
-        // acknowledgement, so `acknowledged` must be false -- the f20 defect
+        // A forced normalize was authorized by --yes, NOT by an interactive
+        // acknowledgement, so `acknowledged` must be false -- the defect
         // was a synthesized acknowledged=true on this exact path.
         let f = fixture(V3_WITH_LEGACY);
         let events = routectl_testkit::capture_events(|| {
@@ -1281,7 +1281,7 @@ default = \"gpt\"
         assert_eq!(
             audit.field("acknowledged"),
             Some("false"),
-            "a --force normalize must not synthesize acknowledged=true"
+            "a --yes normalize must not synthesize acknowledged=true"
         );
     }
 
@@ -1293,7 +1293,7 @@ default = \"gpt\"
     fn aborted_audit_event_names_aborted() {
         let f = fixture(V2_CLEAN);
         let events = routectl_testkit::capture_events(|| {
-            // Non-interactive without --force declines at the prompt.
+            // Non-interactive without --yes declines at the prompt.
             let _ = run_at(&f.config, &f.overlay, false, false);
         });
         let audit = events

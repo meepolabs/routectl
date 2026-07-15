@@ -184,7 +184,7 @@ fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
         secret_ref: None,
         api_key_stdin: false,
         credential_source,
-        force: false,
+        overwrite: false,
         yes: true,
     }
 }
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn every_arg_omits_base_url_secret_ref_stdin_and_force() {
+    fn every_arg_omits_base_url_secret_ref_stdin_and_overwrite() {
         let offers = vec![offer("p", "openai-compat", OfferSource::Env)];
         let a = answers(offers.clone(), &[("p", "gpt-4o")], Some("p"));
 
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(args.base_url, None);
         assert_eq!(args.secret_ref, None);
         assert!(!args.api_key_stdin);
-        assert!(!args.force);
+        assert!(!args.overwrite);
         assert_eq!(args.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
     }
 
@@ -506,7 +506,7 @@ mod tests {
             assert_eq!(x.secret_ref, y.secret_ref);
             assert_eq!(x.api_key_stdin, y.api_key_stdin);
             assert_eq!(x.credential_source, y.credential_source);
-            assert_eq!(x.force, y.force);
+            assert_eq!(x.overwrite, y.overwrite);
             assert_eq!(x.yes, y.yes);
         }
         assert_eq!(first.models, second.models);
