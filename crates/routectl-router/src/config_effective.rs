@@ -1,17 +1,24 @@
 //! Pure, provenance-annotated derivation of the effective config view that
 //! backs `config show --effective`.
 //!
-//! Only two surfaces have more than one layer competing for a value, so only
+//! Three surfaces have more than one layer competing for a value, so only
 //! those carry provenance: a model's catalog cell (the compiled-in baked
-//! table vs an operator overlay) and a retry class's policy (the baked class
-//! default vs a `[retry.classes.<class>]` leaf). Every other config field is
-//! trivially the value in `config.toml`; annotating it would be noise.
+//! table vs an operator overlay), a retry class's policy (the baked class
+//! default vs a `[retry.classes.<class>]` leaf), and a capability cell (the
+//! config-derived override layer, tagged with the source that set it). Every
+//! other config field is trivially the value in `config.toml`; annotating it
+//! would be noise.
 //!
 //! The derivation is a PURE function over `(&Config, &CatalogOverlay)`. It
 //! runs the SAME `(provider_kind, upstream)` catalog lookups the router's
 //! chain-build merge runs, so an operator inspecting the view sees exactly the
 //! cells dispatch prices against -- with no secret resolution, no provider
 //! construction, and no network.
+//!
+//! The capability layer carries only the config-derived override cells (the
+//! same read-model the routing filter consults). Learned-capability negatives
+//! are in-memory runtime state on a live router, not config, so they are out
+//! of scope for this pure view.
 
 use routectl_core::failure_class::FailureClass;
 
@@ -19,6 +26,7 @@ use crate::catalog::{EffectiveRow, lookup_baked_with_overrides, lookup_overlay_c
 use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ConfigFailureClass;
 use crate::config::{Config, ProviderEntry};
+use crate::override_registry::{OverrideRegistry, OverrideRow};
 
 /// The catalog cell a single `[models.X]` entry resolves to, tagged with the
 /// `(provider_kind, upstream)` selector it was looked up under.
@@ -67,6 +75,12 @@ pub struct EffectiveView {
     pub models: Vec<ModelCell>,
     /// One entry per operator-nameable failure class, in a stable order.
     pub classes: Vec<ClassPolicyCell>,
+    /// One entry per config-derived capability-override cell, in a stable
+    /// `(target_spec, capability_key)` order. Empty when the config carries
+    /// no capability overrides. Learned-capability negatives are runtime
+    /// state on a live router, not config, so they are not part of this
+    /// pure view.
+    pub capabilities: Vec<OverrideRow>,
 }
 
 /// Every operator-nameable failure class, in a stable render order.
@@ -133,7 +147,18 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
         })
         .collect();
 
-    EffectiveView { models, classes }
+    let mut capabilities = OverrideRegistry::build(config).snapshot();
+    capabilities.sort_by(|a, b| {
+        a.target_spec
+            .cmp(&b.target_spec)
+            .then_with(|| a.capability_key.cmp(&b.capability_key))
+    });
+
+    EffectiveView {
+        models,
+        classes,
+        capabilities,
+    }
 }
 
 #[cfg(test)]
@@ -151,6 +176,7 @@ mod tests {
     use crate::class_policy::ClassPolicy;
     use crate::config::Config;
     use crate::factory::apply_catalog_overlay;
+    use crate::override_registry::{OverrideProvenance, OverrideVerdict};
     use crate::resolved::ResolvedModel;
 
     struct StubProvider {
@@ -321,6 +347,43 @@ upstream = "claude-opus-4-8"
 
         // Every class is represented exactly once.
         assert_eq!(view.classes.len(), ALL_CONFIG_CLASSES.len());
+    }
+
+    #[test]
+    fn seeded_override_appears_as_capability_cell_with_override_source() {
+        // Arrange: an operator capability override force-marks web_search
+        // unsupported for the opus model's provider.
+        let mut config = config_with_opus_model();
+        config.capability.overrides.insert(
+            "anthropic".to_string(),
+            crate::config::OverrideEntry {
+                unsupported: vec!["web_search".to_string()],
+                force_supported: Vec::new(),
+            },
+        );
+
+        // Act
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+
+        // Assert: the capability layer carries the cell, tagged with the
+        // Override provenance (the "override" token of the routing filter's
+        // source contract) and the route-away verdict.
+        let cell = view
+            .capabilities
+            .iter()
+            .find(|c| c.target_spec == "anthropic" && c.capability_key == "web_search")
+            .expect("seeded override must surface as a capability cell");
+        assert_eq!(cell.verdict, OverrideVerdict::RouteAway);
+        assert_eq!(cell.provenance, OverrideProvenance::Override);
+    }
+
+    #[test]
+    fn capability_layer_empty_when_no_overrides() {
+        // A config with no capability overrides yields an empty capability
+        // layer -- rendered empty, never an error.
+        let config = config_with_opus_model();
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        assert!(view.capabilities.is_empty());
     }
 
     #[test]
