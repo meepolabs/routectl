@@ -319,7 +319,7 @@ enum ConfigCmd {
     /// `retry_denylist` keys. A config whose retry lists carry behavior that
     /// cannot be folded losslessly is refused with hand-edit guidance and
     /// nothing is written. The write requires acknowledgement -- an
-    /// interactive `y`, or `--force` when non-interactive.
+    /// interactive `y`, or `--yes` when non-interactive.
     Migrate {
         /// Render the exact rewritten candidate plus a change summary without
         /// writing anything (needs no acknowledgement).
@@ -328,6 +328,9 @@ enum ConfigCmd {
         /// Acknowledge the schema break without an interactive prompt
         /// (required to migrate in a non-interactive run).
         #[arg(long)]
+        yes: bool,
+        /// Deprecated alias for `--yes`, kept for one release; prefer `--yes`.
+        #[arg(long, hide = true)]
         force: bool,
     },
 }
@@ -335,7 +338,7 @@ enum ConfigCmd {
 #[derive(Debug, Subcommand)]
 enum ProviderCmd {
     /// Add a provider block to `config.toml` (or overwrite one with
-    /// `--force`). The credential is given by reference only.
+    /// `--overwrite`). The credential is given by reference only.
     Add {
         /// Provider kind. `openai-compat` (requires `--base-url`),
         /// `anthropic-api` (base URL defaults to api.anthropic.com; pair
@@ -376,7 +379,7 @@ enum ProviderCmd {
         /// Overwrite an existing provider of the same name (still prompts
         /// for the egress-defining confirmation unless `--yes`).
         #[arg(long)]
-        force: bool,
+        overwrite: bool,
         /// Skip the high-consequence confirmation prompt.
         #[arg(long)]
         yes: bool,
@@ -639,9 +642,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
-            ConfigCmd::Migrate { dry_run, force } => {
+            ConfigCmd::Migrate {
+                dry_run,
+                yes,
+                force,
+            } => {
                 let config_path = resolve_config_path(cli.config.as_deref());
-                if let Err(e) = commands::config_migrate_cmd::run(&config_path, dry_run, force) {
+                if force {
+                    eprintln!(
+                        "warning: `--force` is deprecated for `config migrate`; use `--yes`."
+                    );
+                }
+                if let Err(e) =
+                    commands::config_migrate_cmd::run(&config_path, dry_run, yes || force)
+                {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
@@ -674,7 +688,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 secret_ref,
                 api_key_stdin,
                 credential_source,
-                force,
+                overwrite,
                 yes,
             } => {
                 let config_path = resolve_config_path(cli.config.as_deref());
@@ -686,7 +700,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     secret_ref,
                     api_key_stdin,
                     credential_source,
-                    force,
+                    overwrite,
                     yes,
                 };
                 if let Err(e) = commands::provider_add::run(&config_path, args).await {
@@ -1070,6 +1084,84 @@ mod tests {
         assert!(
             Cli::try_parse_from(["routectl", "init", "--scaffold", "--forwarded"]).is_err(),
             "--scaffold with --forwarded must be rejected"
+        );
+    }
+
+    /// `config migrate` speaks the unified skip-confirm dialect: `--yes` is the
+    /// canonical acknowledgement, and the deprecated `--force` still parses to
+    /// the same variant (kept one release; hidden from help).
+    #[test]
+    fn migrate_accepts_yes_and_the_deprecated_force_alias() {
+        let cli = Cli::parse_from(["routectl", "config", "migrate", "--yes"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Config {
+                action: ConfigCmd::Migrate {
+                    dry_run: false,
+                    yes: true,
+                    force: false,
+                }
+            }
+        ));
+
+        let cli = Cli::parse_from(["routectl", "config", "migrate", "--force"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Config {
+                action: ConfigCmd::Migrate {
+                    dry_run: false,
+                    yes: false,
+                    force: true,
+                }
+            }
+        ));
+    }
+
+    /// `provider add` overwrite is spelled `--overwrite`; the old `--force`
+    /// spelling no longer parses on this command.
+    #[test]
+    fn provider_add_overwrite_parses_and_force_is_rejected() {
+        let cli = Cli::parse_from([
+            "routectl",
+            "provider",
+            "add",
+            "--kind",
+            "openai-compat",
+            "--name",
+            "x",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--secret-ref",
+            "file:///abs/key",
+            "--overwrite",
+        ]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Provider {
+                action: ProviderCmd::Add {
+                    overwrite: true,
+                    ..
+                }
+            }
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "routectl",
+                "provider",
+                "add",
+                "--kind",
+                "openai-compat",
+                "--name",
+                "x",
+                "--base-url",
+                "http://127.0.0.1:1",
+                "--secret-ref",
+                "file:///abs/key",
+                "--force",
+            ])
+            .is_err(),
+            "provider add no longer accepts --force"
         );
     }
 }

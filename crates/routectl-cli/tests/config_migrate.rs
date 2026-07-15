@@ -88,7 +88,7 @@ async fn boot_and_await_health(config: Arc<routectl_router::Config>) -> String {
     panic!("server did not become healthy in time");
 }
 
-/// Migrate `body` in a temp dir with `--force`, returning the migrated config
+/// Migrate `body` in a temp dir with `--yes`, returning the migrated config
 /// text and the (parsed) Config ready to boot.
 fn migrate_temp(body: &str, expected_from: u32) -> (tempfile::TempDir, routectl_router::Config) {
     let dir = tempfile::tempdir().unwrap();
@@ -127,4 +127,39 @@ async fn serve_boots_on_a_migrated_v1_config() {
 
     let resp = reqwest::get(format!("{base}/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+/// The deprecated `--force` alias still skips the confirmation and migrates,
+/// exercising the real CLI's `yes || force` normalization plus its deprecation
+/// notice -- the one-release compatibility promise the canonical `--yes` swap
+/// must not break.
+#[test]
+fn migrate_force_alias_still_skips_confirmation_and_warns() {
+    let bin = env!("CARGO_BIN_EXE_routectl");
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, V2_CONFIG).unwrap();
+
+    let out = std::process::Command::new(bin)
+        .args(["config", "migrate", "--force"])
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("run `config migrate --force`");
+
+    assert!(
+        out.status.success(),
+        "the deprecated alias must still migrate: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("deprecated") && stderr.contains("--yes"),
+        "the alias must warn and point at --yes:\n{stderr}"
+    );
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        text.contains("version = 3"),
+        "the alias must skip the confirm and write v3: {text}"
+    );
 }
