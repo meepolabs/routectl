@@ -8,6 +8,8 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod common;
+
 /// RAII guard for `std::env::{set,remove}_var` mutations within tests.
 /// Restores the original value (or absence) on `Drop`, so a panicking
 /// `assert!` cannot leak modified env into sibling tests. Pair every
@@ -39,7 +41,7 @@ fn config_with(server_url: &str) -> Config {
     let mut providers = BTreeMap::new();
     providers.insert(
         "mock".into(),
-        ProviderEntry::openai_compat(format!("{server_url}/v1"), "literal:test-key"),
+        ProviderEntry::openai_compat(format!("{server_url}/v1"), common::file_ref("test-key")),
     );
     let mut models = BTreeMap::new();
     models.insert("fast-mini".into(), ModelEntry::new("mock", "gpt-4o-mini"));
@@ -114,7 +116,7 @@ async fn config_check_passes_for_valid_config() {
     };
     config.providers.insert(
         "mock".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc"),
+        ProviderEntry::openai_compat("http://127.0.0.1:9", common::file_ref("abc")),
     );
     config
         .models
@@ -166,7 +168,7 @@ fn bare_config() -> Config {
 fn add_mock_provider(config: &mut Config) {
     config.providers.insert(
         "mock".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc"),
+        ProviderEntry::openai_compat("http://127.0.0.1:9", common::file_ref("abc")),
     );
 }
 

@@ -2803,7 +2803,10 @@ mod build_resolved_models_tests {
     async fn non_bedrock_models_share_one_arc_per_provider() {
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![
                 ("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5")),
                 ("sonnet", ModelEntry::new("anthropic", "claude-sonnet-4-6")),
@@ -2826,7 +2829,10 @@ mod build_resolved_models_tests {
     async fn disabled_models_are_skipped() {
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![
                 ("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5")),
                 (
@@ -2916,7 +2922,7 @@ mod build_resolved_models_tests {
             region: "us-east-1".to_string(),
             api_shape: BedrockApiShapeConfig::default(),
             creds: BedrockCredsConfig::BearerKey {
-                key_ref: "literal:unused".to_string(),
+                key_ref: crate::test_secret::file_ref("unused"),
             },
             user_agent: None,
             header_extras: BTreeMap::new(),
@@ -2969,7 +2975,10 @@ mod build_resolved_models_tests {
             "context-1m-2025-08-07,prompt-cache-1h".to_string(),
         );
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![(
                 "opus",
                 ModelEntry::new("anthropic", "claude-opus-4-7").with_header_extras(headers),
@@ -2990,7 +2999,10 @@ mod build_resolved_models_tests {
     async fn stream_first_byte_timeout_ms_propagates_from_model_entry() {
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![(
                 "opus",
                 ModelEntry::new("anthropic", "claude-opus-4-7")
@@ -3012,7 +3024,10 @@ mod build_resolved_models_tests {
         // field None, never propagate Some(0).
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![(
                 "opus",
                 ModelEntry {
@@ -3039,7 +3054,10 @@ mod build_resolved_models_tests {
         // unset sentinel (0), never call the setter.
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![(
                 "opus",
                 ModelEntry {
@@ -3064,7 +3082,10 @@ mod build_resolved_models_tests {
         // Non-zero values set the field; absent values leave it unset.
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![
                 (
                     "set",
@@ -3093,7 +3114,10 @@ mod build_resolved_models_tests {
         // resolved model with default values (empty maps, None).
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
         );
         let (models, _) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
@@ -3301,7 +3325,10 @@ mod build_resolved_models_tests {
             labels: vec![None, Some("seat-b".into())],
         });
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
         );
         let (models, _) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
@@ -3320,7 +3347,10 @@ mod build_resolved_models_tests {
     async fn apply_catalog_overlay_stamps_baked_row_when_no_overlay_cell_matches() {
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
         );
         let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
@@ -3342,7 +3372,10 @@ mod build_resolved_models_tests {
     async fn apply_catalog_overlay_overrides_a_baked_field() {
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
         );
         let (models, _) = build_resolved_models(&cfg, store, BuildOptions::default())
@@ -3382,7 +3415,10 @@ mod build_resolved_models_tests {
     async fn apply_catalog_overlay_null_cell_disables_the_target() {
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
         let cfg = config_with_models(
-            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
             vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
         );
         let (models, _) = build_resolved_models(&cfg, store, BuildOptions::default())
@@ -3949,7 +3985,7 @@ mod openai_responses_account_id_tests {
         // one even when the store has a (different) stored account id.
         let (_dir, store) = oauth_store_with_codex(Some("acct-from-jwt")).await;
 
-        let override_ref = Some("literal:acct-operator-override".to_string());
+        let override_ref = Some(crate::test_secret::file_ref("acct-operator-override"));
         let derived =
             resolve_responses_account_id(&store, "oauth://codex", &override_ref, "codex-pro")
                 .await

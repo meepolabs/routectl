@@ -359,7 +359,8 @@ enum ProviderCmd {
         #[arg(long = "api-key-env", group = "secret_source")]
         api_key_env: Option<String>,
         /// A secret reference written verbatim to `api_key_ref`
-        /// (`env://VAR`, `file:///abs/key`, `literal:...`, `oauth://...`).
+        /// (`env://VAR`, `file:///abs/key`, `oauth://...`). `literal:` refs
+        /// are rejected; use `--api-key-stdin`, the hidden prompt, or `env://`.
         #[arg(long = "secret-ref", group = "secret_source")]
         secret_ref: Option<String>,
         /// Read the API key from stdin (pipe it in), capturing it to the

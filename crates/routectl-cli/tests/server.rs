@@ -77,7 +77,7 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
     let mut providers = BTreeMap::new();
     providers.insert(
         provider_name.to_string(),
-        ProviderEntry::openai_compat(upstream_base, "literal:test-key"),
+        ProviderEntry::openai_compat(upstream_base, common::file_ref("test-key")),
     );
 
     let mut models = BTreeMap::new();
@@ -103,11 +103,11 @@ fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "first".to_string(),
-        ProviderEntry::openai_compat(first_base, "literal:test-key"),
+        ProviderEntry::openai_compat(first_base, common::file_ref("test-key")),
     );
     providers.insert(
         "second".to_string(),
-        ProviderEntry::openai_compat(second_base, "literal:test-key"),
+        ProviderEntry::openai_compat(second_base, common::file_ref("test-key")),
     );
 
     let mut models = BTreeMap::new();
@@ -211,7 +211,7 @@ async fn models_includes_alias_keys_and_nicknames() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", common::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("fast-model".into(), ModelEntry::new("p", "gpt-4o"));
@@ -496,7 +496,7 @@ async fn chat_completions_unknown_model_routes_to_default_alias() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "mock-provider".to_string(),
-        ProviderEntry::openai_compat(upstream.uri(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream.uri(), common::file_ref("test-key")),
     );
     let mut models = BTreeMap::new();
     models.insert(
@@ -752,7 +752,7 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
     );
     providers.insert(
         "working".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:2", "literal:test"),
+        ProviderEntry::openai_compat("http://127.0.0.1:2", common::file_ref("test")),
     );
     let mut models = BTreeMap::new();
     // Only define a model on `working`; `broken` is unused.
@@ -860,7 +860,7 @@ async fn x_routectl_alias_header_overrides_model_on_chat_completions() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "mock-oc".to_string(),
-        ProviderEntry::openai_compat(upstream.uri(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream.uri(), common::file_ref("test-key")),
     );
 
     let mut models = BTreeMap::new();

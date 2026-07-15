@@ -38,7 +38,7 @@ fn deepseek_alias_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "deepseek".into(),
-        ProviderEntry::openai_compat(format!("{upstream_base}/v1"), "literal:test"),
+        ProviderEntry::openai_compat(format!("{upstream_base}/v1"), common::file_ref("test")),
     );
     let mut models = BTreeMap::new();
     models.insert(

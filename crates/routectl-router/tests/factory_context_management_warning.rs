@@ -21,6 +21,8 @@ use routectl_router::{
 };
 use routectl_testkit::{CapturedEvent, with_capture};
 
+mod common;
+
 /// Build a single-model `Config` whose anthropic-api provider has the
 /// given `context_management` flag and whose model carries the given
 /// `history_reasoning`.
@@ -28,7 +30,7 @@ fn anthropic_api_config(
     context_management: bool,
     history_reasoning: Option<HistoryReasoning>,
 ) -> Config {
-    let mut entry = ProviderEntry::anthropic_api("literal:sk-test");
+    let mut entry = ProviderEntry::anthropic_api(common::file_ref("sk-test"));
     if let ProviderEntry::AnthropicApi {
         context_management: ref mut cm,
         ..
@@ -179,7 +181,7 @@ async fn non_anthropic_api_kind_is_silent() {
     let mut providers: BTreeMap<String, ProviderEntry> = BTreeMap::new();
     providers.insert(
         "host".into(),
-        ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-test"),
+        ProviderEntry::openai_compat("https://example.com/v1", common::file_ref("sk-test")),
     );
     let mut model = ModelEntry::new("host", "some-model");
     // history_reasoning != Preserve so a buggy guard would trip.

@@ -1390,7 +1390,7 @@ async fn dispatch_err_with_attempts_maps_to_upstream_error() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
@@ -1463,7 +1463,8 @@ async fn dispatch_err_gate_blocked_maps_to_gate_blocked() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k").with_runtime(runtime),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k"))
+            .with_runtime(runtime),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
@@ -1520,7 +1521,7 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
@@ -1624,7 +1625,7 @@ async fn k_recording_router_and_meta() -> (
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".to_string(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", crate::test_secret::file_ref("k")),
     );
     let mut models = BTreeMap::new();
     models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));

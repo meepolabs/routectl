@@ -60,22 +60,30 @@ fn parse_file_dot_relative_path_is_error() {
 }
 
 #[test]
-fn parse_literal_valid() {
-    let r = SecretRef::parse("literal:hello-world").unwrap();
-    assert_eq!(r, SecretRef::Literal("hello-world".into()));
+fn parse_literal_is_rejected_with_safe_path_steer() {
+    // `literal:` is rejected at parse: it is the one scheme that puts the
+    // plaintext key on argv and persists it inline in config. The error
+    // must steer to the safe paths and must not echo the key value.
+    let err = SecretRef::parse("literal:hello-world").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("hello-world"),
+        "rejection must not echo the key value: {msg}"
+    );
+    assert!(
+        msg.contains("--api-key-stdin") && msg.contains("prompt") && msg.contains("env://"),
+        "rejection must name the safe paths: {msg}"
+    );
 }
 
 #[test]
 fn parse_literal_empty_value_is_rejected() {
-    // An empty `literal:` value is rejected at parse time: a `literal:`
-    // that resolves to "" could otherwise silently stand in for a real
-    // secret (e.g. an empty listener token disabling auth). Mirrors the
-    // env:// / file:// empty-guard style.
+    // An empty `literal:` is rejected too -- same steer, no separate
+    // "empty value" acceptance path.
     let err = SecretRef::parse("literal:").unwrap_err();
-    let msg = err.to_string();
     assert!(
-        msg.contains("literal:") && msg.contains("empty"),
-        "error must name the empty literal: {msg}"
+        err.to_string().contains("--api-key-stdin"),
+        "empty literal must be rejected with the safe-path steer: {err}"
     );
 }
 
@@ -153,20 +161,36 @@ async fn env_get_missing_is_error() {
     assert!(err.to_string().contains("not set"));
 }
 
-// --- MemoryStore: literal path ---
+// --- MemoryStore: literal path is refused ---
 
 #[tokio::test]
-async fn literal_get_returns_inline_value() {
+async fn literal_get_is_rejected() {
+    // Defense in depth: even a programmatically-constructed
+    // `SecretRef::Literal` (parse can never produce one) is refused at
+    // resolve, with the same safe-path steer and no value echo.
     let store = MemoryStore::new();
     let r = SecretRef::Literal("my-secret".into());
-    assert_eq!(store.get(&r).await.unwrap(), "my-secret");
+    let err = store.get(&r).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("my-secret"),
+        "rejection must not echo the key value: {msg}"
+    );
+    assert!(
+        msg.contains("--api-key-stdin") && msg.contains("env://"),
+        "rejection must name the safe paths: {msg}"
+    );
 }
 
 #[tokio::test]
-async fn literal_empty_returns_empty_string() {
+async fn literal_empty_is_rejected() {
     let store = MemoryStore::new();
     let r = SecretRef::Literal(String::new());
-    assert_eq!(store.get(&r).await.unwrap(), "");
+    let err = store.get(&r).await.unwrap_err();
+    assert!(
+        err.to_string().contains("--api-key-stdin"),
+        "empty literal must be refused at resolve: {err}"
+    );
 }
 
 // --- MemoryStore: file path ---

@@ -72,7 +72,7 @@ fn responses_proxy_config(upstream_base: &str, auth_tokens: Option<Vec<String>>)
     let mut providers = BTreeMap::new();
     providers.insert(
         "openai-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
+        ProviderEntry::openai_compat(upstream_base.to_string(), common::file_ref("test-key")),
     );
 
     let mut models = BTreeMap::new();
@@ -239,7 +239,7 @@ async fn auth_accepts_x_api_key() {
     let upstream = MockServer::start().await;
     mount_upstream(&upstream).await;
 
-    let config = responses_proxy_config(&upstream.uri(), Some(vec!["literal:sk-test".into()]));
+    let config = responses_proxy_config(&upstream.uri(), Some(vec![common::file_ref("sk-test")]));
     let base = helpers::spawn(config).await;
 
     let resp = reqwest::Client::new()
@@ -261,7 +261,10 @@ async fn auth_accepts_x_api_key() {
 
 #[tokio::test]
 async fn auth_rejects_bogus_token() {
-    let config = responses_proxy_config("http://127.0.0.1:1", Some(vec!["literal:sk-test".into()]));
+    let config = responses_proxy_config(
+        "http://127.0.0.1:1",
+        Some(vec![common::file_ref("sk-test")]),
+    );
     let base = helpers::spawn(config).await;
 
     let resp = reqwest::Client::new()

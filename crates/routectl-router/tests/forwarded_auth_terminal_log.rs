@@ -27,6 +27,8 @@ use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider};
 use routectl_router::{AliasValue, Config, ProviderEntry, ResolvedModel, Router};
 use routectl_testkit::{CapturedEvent, with_capture};
 
+mod common;
+
 /// The forwarded token. Distinctive so any leak into a log field, the
 /// log message, or the client error is unmistakable.
 const FORWARDED_TOKEN: &str = "sk-ant-oat01-FORWARDED-SECRET-must-never-surface";
@@ -80,7 +82,7 @@ fn router_with_anthropic_target() -> Router {
     // default retry policy adds no delay here.
     config.providers.insert(
         "p-anthropic".to_string(),
-        ProviderEntry::anthropic_api("literal:k")
+        ProviderEntry::anthropic_api(common::file_ref("k"))
             .with_credential_source(routectl_router::config::CredentialSource::Forwarded),
     );
     config.aliases.insert(

@@ -18,9 +18,14 @@ pub enum SecretRef {
     /// (mode 600 / 400). Compatible with sops, age, doppler-cli,
     /// vault-agent, or any tool that drops a token into a file.
     File(PathBuf),
-    /// `literal:hunter2` -> inline plaintext. Useful in tests and
-    /// for placeholders like `literal:not-needed` (llama.cpp). Avoid
-    /// for real secrets in version-controlled config.
+    /// `literal:hunter2` -> inline plaintext. REJECTED at parse and at
+    /// resolve: it is the one scheme that puts the plaintext key on argv
+    /// (visible in `ps` and shell history) AND persists it inline in
+    /// config, defeating the refs-only secret model. The variant is
+    /// retained so a programmatically-constructed value still redacts via
+    /// `Display`/`Debug`, but it can never be produced from a URI nor
+    /// resolved to a value. Use `--api-key-stdin`, the hidden prompt, or
+    /// `env://VAR` instead.
     Literal(String),
     /// `oauth://<provider>` -> token resolved from the routectl-managed
     /// OAuth credentials store. Provider must have been logged in via
@@ -58,11 +63,13 @@ impl SecretRef {
             }
             return Ok(Self::File(path));
         }
-        if let Some(lit) = uri.strip_prefix("literal:") {
-            if lit.is_empty() {
-                return Err(Error::Auth("literal: URI has an empty value".into()));
-            }
-            return Ok(Self::Literal(lit.to_string()));
+        if uri.strip_prefix("literal:").is_some() {
+            // Rejected at parse so BOTH `--secret-ref literal:...` and a
+            // hand-written `api_key_ref = "literal:..."` fail. The error
+            // never echoes the value (it is secret material that reaches
+            // operator-facing stdout via `config check`) -- it only names
+            // the safe alternatives.
+            return Err(literal_rejected());
         }
         if let Some(rest) = uri.strip_prefix("oauth://") {
             // Split on the FIRST `#`: text before is the provider, text
@@ -97,15 +104,29 @@ impl SecretRef {
         // value itself. The expected-scheme list stays for the operator.
         match scheme_token(uri) {
             Some(scheme) => Err(Error::Auth(format!(
-                "unrecognized secret URI scheme `{scheme}` (expected env://, file://, literal:, or oauth://)"
+                "unrecognized secret URI scheme `{scheme}` (expected env://, file://, or oauth://)"
             ))),
             None => Err(Error::Auth(
                 "unrecognized secret URI scheme: no recognized scheme prefix \
-                 (expected env://, file://, literal:, or oauth://)"
+                 (expected env://, file://, or oauth://)"
                     .into(),
             )),
         }
     }
+}
+
+/// The rejection error for a `literal:` secret ref, shared by parse and by
+/// resolve so both boundaries speak with one voice. Names the safe
+/// key-setting paths and NEVER echoes the key value.
+pub(crate) fn literal_rejected() -> Error {
+    Error::Auth(
+        "literal: secret refs are not accepted -- an inline key lands on argv \
+         (visible in `ps` and shell history) and is persisted in plaintext in \
+         config. Set the key a safe way instead: pipe it with `--api-key-stdin`, \
+         enter it at the hidden interactive prompt, or reference an environment \
+         variable with `env://VAR`."
+            .into(),
+    )
 }
 
 /// Extract the scheme-shaped prefix of `uri` -- the text before the
@@ -321,26 +342,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_literal() {
-        // Arrange / Act
-        let err = SecretRef::parse("literal:").unwrap_err();
-
-        // Assert: the error names the scheme and the empty value, mirroring
-        // the env:// / file:// empty-guard style.
+    fn rejects_literal_naming_safe_paths() {
+        // A `literal:` ref is rejected at parse. The error must name the
+        // safe key-setting paths and must NOT echo the key value.
+        let err = SecretRef::parse("literal:hunter2").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("literal:") && msg.contains("empty"),
-            "error must name the empty literal: {msg}"
+            !msg.contains("hunter2"),
+            "rejection must not echo the key value: {msg}"
+        );
+        assert!(
+            msg.contains("--api-key-stdin") && msg.contains("prompt") && msg.contains("env://"),
+            "rejection must name --api-key-stdin, the hidden prompt, and env://: {msg}"
         );
     }
 
     #[test]
-    fn parses_non_empty_literal() {
-        // Arrange / Act
-        let sr = SecretRef::parse("literal:hunter2").unwrap();
-
-        // Assert: a non-empty literal still round-trips to Literal.
-        assert_eq!(sr, SecretRef::Literal("hunter2".into()));
+    fn rejects_empty_literal_too() {
+        // Even an empty `literal:` is rejected with the same steer, never
+        // an "empty value" acceptance path.
+        let err = SecretRef::parse("literal:").unwrap_err();
+        assert!(
+            err.to_string().contains("--api-key-stdin"),
+            "empty literal must be rejected with the safe-path steer: {err}"
+        );
     }
 
     #[test]

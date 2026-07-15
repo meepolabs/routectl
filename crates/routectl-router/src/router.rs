@@ -19807,8 +19807,8 @@ mod strip_wire_egress_tests {
         let mut providers = BTreeMap::new();
         let mut models = BTreeMap::new();
         for u in upstreams {
-            let mut entry =
-                ProviderEntry::anthropic_api("literal:test-key").with_base_url(&u.base_url);
+            let mut entry = ProviderEntry::anthropic_api(crate::test_secret::file_ref("test-key"))
+                .with_base_url(&u.base_url);
             if let Some(beta) = u.pinned_beta {
                 let mut headers = BTreeMap::new();
                 headers.insert("anthropic-beta".to_string(), beta.to_string());

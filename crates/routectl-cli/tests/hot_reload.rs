@@ -36,6 +36,7 @@ const RELOAD_WAIT_CEILING: Duration = Duration::from_secs(30);
 /// upstream base is bogus (port 1) -- tests assert on `/v1/models`
 /// and `/health`, which never dispatch upstream.
 fn config_text_with_alias(alias: &str) -> String {
+    let key_ref = common::file_ref("test-key");
     format!(
         r#"
 version = 3
@@ -47,7 +48,7 @@ strict_translation = false
 [providers.fast]
 kind = "openai-compat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "literal:test-key"
+api_key_ref = "{key_ref}"
 
 [models.gpt-4o]
 provider = "fast"
@@ -284,6 +285,7 @@ async fn invalid_toml_keeps_old_config() {
 /// valid TOML -- the rejection is semantic, caught by the startup
 /// validators `load_effective_config` runs after parsing.
 fn config_text_with_reserved_class_override(alias: &str) -> String {
+    let key_ref = common::file_ref("test-key");
     format!(
         r#"
 version = 3
@@ -298,7 +300,7 @@ retry = 1
 [providers.fast]
 kind = "openai-compat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "literal:test-key"
+api_key_ref = "{key_ref}"
 
 [models.gpt-4o]
 provider = "fast"
@@ -378,6 +380,7 @@ async fn feature_unsupported_class_override_rejected_old_router_stays_live() {
 /// enhancer (`routectl_router::parse_config`) appends a `did you mean
 /// `port`?` hint to serde's `unknown field` message.
 fn config_text_with_unknown_server_field(alias: &str) -> String {
+    let key_ref = common::file_ref("test-key");
     format!(
         r#"
 version = 3
@@ -390,7 +393,7 @@ prt = 8080
 [providers.fast]
 kind = "openai-compat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "literal:test-key"
+api_key_ref = "{key_ref}"
 
 [models.gpt-4o]
 provider = "fast"
@@ -771,6 +774,7 @@ default = "claude"
 /// backoff/jitter keeps a same-provider retry loop from adding latency
 /// the test would otherwise have to sleep through.
 fn config_text_with_rate_limited_cap(upstream_uri: &str, retry_cap: u32) -> String {
+    let key_ref = common::file_ref("test-key");
     format!(
         r#"
 version = 3
@@ -789,7 +793,7 @@ retry = {retry_cap}
 [providers.up]
 kind = "anthropic-api"
 base_url = "{upstream_uri}"
-api_key_ref = "literal:test-key"
+api_key_ref = "{key_ref}"
 
 [models.claude]
 provider = "up"
@@ -842,6 +846,7 @@ async fn same_provider_dispatch_count(
 /// this in place through the shared write primitive; the running server's
 /// file watcher then hot-reloads the atomic rename.
 fn v3_config_with_alias(alias: &str) -> String {
+    let key_ref = common::file_ref("test-key");
     format!(
         r#"version = 3
 
@@ -853,7 +858,7 @@ strict_translation = false
 [providers.fast]
 kind = "openai-compat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "literal:test-key"
+api_key_ref = "{key_ref}"
 
 [models.gpt-4o]
 provider = "fast"
