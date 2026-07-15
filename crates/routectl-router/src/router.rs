@@ -1845,6 +1845,7 @@ impl Router {
         // chain order.
         let mut supported: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
         let mut tail: Vec<DispatchTarget> = Vec::new();
+        let mut route_aways: Vec<(String, String)> = Vec::new();
         for mut target in chain {
             let mut strip_keys: Vec<String> = Vec::new();
             match self.unsupported_feature_for_target(
@@ -1864,22 +1865,20 @@ impl Router {
                     supported.push(target);
                 }
                 Some((feature, FilterSource::Learned)) => {
-                    tracing::debug!(
-                        provider = %target.provider_name,
-                        model = %target.nickname.as_deref().unwrap_or(""),
-                        feature = %feature,
-                        source = %FilterSource::Learned.as_str(),
-                        "target de-prioritized to tail: learned-capability negative",
-                    );
+                    // The route_away event is deferred until the final chain
+                    // shape is known: its level distinguishes "an alternative
+                    // remains" (INFO) from "the request survives only on the
+                    // learned tail" (WARN).
+                    route_aways.push((target.state_key.clone(), feature));
                     tail.push(target);
                 }
                 Some((feature, source)) => {
                     tracing::debug!(
                         provider = %target.provider_name,
                         model = %target.nickname.as_deref().unwrap_or(""),
-                        feature = %feature,
+                        capability_key = %feature,
                         source = %source.as_str(),
-                        "target skipped: feature in unsupported_features list",
+                        "target skipped: capability in unsupported_features list",
                     );
                 }
             }
@@ -1899,18 +1898,32 @@ impl Router {
                 format!("no provider in chain supports features: {feature_list}"),
             ));
         }
-        // A chain alive SOLELY via the learned tail proceeds into route-
-        // away-with-floor territory: WARN and count the D17 tail entry.
-        if supported.is_empty() {
+        // Route-away observability: each learned-tail demotion emits one
+        // route_away event. INFO while a supported alternative remains; WARN
+        // when the chain survives ONLY via the de-prioritized learned tail
+        // (the route-away floor). Capability TOKEN + state_key only -- never a
+        // request body.
+        let tail_only = supported.is_empty();
+        if tail_only {
             self.metrics.incr_d17_tail();
-            tracing::warn!(
-                event = "d17_tail",
-                alias = %alias,
-                features = %features.join(", "),
-                tail_len = tail.len(),
-                "alias chain survives only via the de-prioritized learned tail; \
-                 attempting learned-negative targets as a route-away floor",
-            );
+        }
+        for (state_key, capability_key) in route_aways {
+            if tail_only {
+                tracing::warn!(
+                    event = "route_away",
+                    state_key = %state_key,
+                    capability_key = %capability_key,
+                    "learned-capability negative routed this target away; request \
+                     survives only via the de-prioritized learned tail",
+                );
+            } else {
+                tracing::info!(
+                    event = "route_away",
+                    state_key = %state_key,
+                    capability_key = %capability_key,
+                    "learned-capability negative de-prioritized this target to the tail",
+                );
+            }
         }
         supported.extend(tail);
         Ok(supported)
@@ -3709,6 +3722,7 @@ impl Router {
         }
         let Error::Upstream {
             status: status @ (400 | 422),
+            upstream_code,
             ..
         } = err
         else {
@@ -3801,10 +3815,15 @@ impl Router {
             .find(|entry| entry.state_key == state_key && entry.feature_key == feature_key)
             .map_or(0, |entry| entry.observations);
 
+        let upstream_param = crate::capability_matcher::upstream_param(err);
         tracing::warn!(
             event = "learn",
             state_key = %state_key,
             capability_key = %feature_key,
+            provider_kind,
+            upstream_status,
+            upstream_code = upstream_code.as_deref().unwrap_or(""),
+            upstream_param = upstream_param.as_deref().unwrap_or(""),
             signal_tier = tier.as_str(),
             observations,
             acting,
@@ -8846,9 +8865,12 @@ mod resolved_models_tests {
         );
         let features = vec!["web_search".to_string()];
 
-        let out = router
-            .filter_chain_by_features(vec![front, back], &features, "alias", &mut Vec::new())
-            .expect("a supported survivor keeps the chain non-empty");
+        let mut out = Vec::new();
+        let events = routectl_testkit::capture_events(|| {
+            out = router
+                .filter_chain_by_features(vec![front, back], &features, "alias", &mut Vec::new())
+                .expect("a supported survivor keeps the chain non-empty");
+        });
 
         // Result = [supported...] ++ [learned tail]: back survives up front,
         // the learned-negative "front" is de-prioritized to the tail.
@@ -8858,6 +8880,21 @@ mod resolved_models_tests {
             router.metrics.d17_tail_total(),
             0,
             "a supported survivor is not a tail-only entry",
+        );
+        // A healthy alternative remains, so the demotion emits route_away at
+        // INFO (not WARN) carrying the unified state_key / capability_key.
+        let info = events
+            .iter()
+            .find(|e| e.field("event") == Some("route_away"))
+            .expect("a tail demotion must emit a route_away event");
+        assert_eq!(info.level, tracing::Level::INFO);
+        assert_eq!(info.field("state_key"), Some("front"));
+        assert_eq!(info.field("capability_key"), Some("web_search"));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.field("event") == Some("route_away") && e.level == tracing::Level::WARN),
+            "a surviving alternative must not raise route_away to WARN",
         );
     }
 
@@ -8915,10 +8952,9 @@ mod resolved_models_tests {
             .iter()
             .find(|e| e.level == tracing::Level::WARN)
             .expect("entering the learned tail must WARN");
-        assert_eq!(warn.field("event"), Some("d17_tail"));
-        assert_eq!(warn.field("alias"), Some("alias"));
-        assert_eq!(warn.field("features"), Some("web_search"));
-        assert_eq!(warn.field("tail_len"), Some("1"));
+        assert_eq!(warn.field("event"), Some("route_away"));
+        assert_eq!(warn.field("state_key"), Some("only"));
+        assert_eq!(warn.field("capability_key"), Some("web_search"));
     }
 
     #[test]
@@ -18108,6 +18144,10 @@ kind = "anthropic-api"
         assert_eq!(warn.field("event"), Some("learn"));
         assert_eq!(warn.field("state_key"), Some("m1"));
         assert_eq!(warn.field("capability_key"), Some("web_search"));
+        assert_eq!(warn.field("provider_kind"), Some("openai-compat"));
+        assert_eq!(warn.field("upstream_status"), Some("400"));
+        assert_eq!(warn.field("upstream_code"), Some("unsupported_parameter"));
+        assert_eq!(warn.field("upstream_param"), Some("web_search"));
         assert_eq!(warn.field("signal_tier"), Some("self-identifying"));
         assert_eq!(warn.field("observations"), Some("1"));
         assert_eq!(warn.field("acting"), Some("true"));
