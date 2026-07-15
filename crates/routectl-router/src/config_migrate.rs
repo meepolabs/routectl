@@ -58,19 +58,28 @@ pub struct OverlayWrite {
     pub cells: BTreeMap<String, Option<OverlayCell>>,
 }
 
-/// Which on-disk files a [`MigrationPlan`] will touch when committed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which on-disk files a [`MigrationPlan`] will touch when committed, and
+/// the payloads each write needs. Folding the config text and the overlay
+/// write INTO the variants makes the illegal states unrepresentable -- a
+/// `ConfigOnly`/`ConfigAndOverlay` plan always carries its config text, and
+/// only a `ConfigAndOverlay` plan carries an overlay write -- so the caller
+/// never has to `.expect()` a cross-field invariant the type did not
+/// enforce.
+#[derive(Debug, Clone, PartialEq)]
 pub enum WriteKind {
     /// The file is already current with nothing to fold; committing is a
     /// no-op and writes nothing.
     NoChange,
     /// Only `config.toml` changes (a v2 -> v3 rung, or a v3 -> v3
     /// normalization, or a v1 file whose overlay fold is an idempotent
-    /// no-op because the cells already match).
-    ConfigOnly,
+    /// no-op because the cells already match). Carries the fully-migrated
+    /// config text to commit.
+    ConfigOnly(String),
     /// Both `catalog_overlay.json` and `config.toml` change (a v1 file
-    /// whose `[cache_pricing]` fold adds or edits an overlay cell).
-    ConfigAndOverlay,
+    /// whose `[cache_pricing]` fold adds or edits an overlay cell). Carries
+    /// the fully-migrated config text and the pending overlay write to
+    /// commit FIRST.
+    ConfigAndOverlay(String, OverlayWrite),
 }
 
 /// The fully-computed result of the PURE planning phase: everything the
@@ -82,25 +91,43 @@ pub enum WriteKind {
 /// validation check the migrator owns has already passed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MigrationPlan {
-    /// The fully-migrated `config.toml` text to commit LAST. `None` only
-    /// when [`WriteKind::NoChange`] (nothing to write).
-    pub config_candidate: Option<String>,
-    /// The overlay write to commit FIRST, or `None` when the migration
-    /// touches no overlay cell (every non-v1 file, and a v1 file whose
-    /// fold is an idempotent no-op).
-    pub overlay_candidate: Option<OverlayWrite>,
     /// The raw on-disk version the plan migrates from.
     pub from: u32,
     /// The version the committed `config.toml` will stamp (equal to `from`
     /// for a same-version v3 normalization).
     pub to: u32,
-    /// Which files the commit will touch.
+    /// Which files the commit will touch, and the payloads (config text,
+    /// pending overlay write) it will write.
     pub write_kind: WriteKind,
     /// Human-readable descriptions of the keys this migration removes, for
     /// a dry-run change summary. Derived purely from the original document.
     pub removed_keys: Vec<String>,
     /// The per-rung outcomes, in ladder order.
     pub steps: Vec<StepOutcome>,
+}
+
+impl MigrationPlan {
+    /// The fully-migrated `config.toml` text to commit, or `None` for a
+    /// [`WriteKind::NoChange`] plan. A read-model over [`Self::write_kind`]
+    /// -- it cannot represent the illegal "candidate present but nothing to
+    /// write" state the old separate field could.
+    #[must_use]
+    pub fn config_candidate(&self) -> Option<&str> {
+        match &self.write_kind {
+            WriteKind::NoChange => None,
+            WriteKind::ConfigOnly(text) | WriteKind::ConfigAndOverlay(text, _) => Some(text),
+        }
+    }
+
+    /// The pending overlay write, present only for a
+    /// [`WriteKind::ConfigAndOverlay`] plan.
+    #[must_use]
+    pub const fn overlay_candidate(&self) -> Option<&OverlayWrite> {
+        match &self.write_kind {
+            WriteKind::ConfigAndOverlay(_, ow) => Some(ow),
+            _ => None,
+        }
+    }
 }
 
 /// Errors from the v1 overlay fold in [`plan_v1_overlay`]. Every variant
@@ -1010,17 +1037,15 @@ pub fn plan_migration(
     let removed_keys = collect_removed_keys(base_doc, raw_version);
     let to = steps.last().map_or(raw_version, |s| s.to_version);
 
-    let (config_candidate, write_kind) = if steps.is_empty() {
-        (None, WriteKind::NoChange)
-    } else if overlay_candidate.is_some() {
-        (Some(doc.to_string()), WriteKind::ConfigAndOverlay)
+    let write_kind = if steps.is_empty() {
+        WriteKind::NoChange
+    } else if let Some(ow) = overlay_candidate {
+        WriteKind::ConfigAndOverlay(doc.to_string(), ow)
     } else {
-        (Some(doc.to_string()), WriteKind::ConfigOnly)
+        WriteKind::ConfigOnly(doc.to_string())
     };
 
     Ok(MigrationPlan {
-        config_candidate,
-        overlay_candidate,
         from: raw_version,
         to,
         write_kind,
@@ -1103,7 +1128,7 @@ mod tests {
     /// Commit a plan's overlay candidate the way the caller's commit does,
     /// so a test can assert the on-disk overlay after a would-be migration.
     fn commit_overlay(plan: &MigrationPlan, overlay_path: &Path) {
-        if let Some(ow) = &plan.overlay_candidate {
+        if let Some(ow) = plan.overlay_candidate() {
             catalog_overlay::save(overlay_path, ow.base_revision, ow.cells.clone())
                 .expect("overlay save");
         }
@@ -1175,10 +1200,10 @@ mod tests {
         );
         assert_eq!(plan.from, 1);
         assert_eq!(plan.to, 3);
-        assert_eq!(plan.write_kind, WriteKind::ConfigAndOverlay);
+        assert!(matches!(plan.write_kind, WriteKind::ConfigAndOverlay(..)));
 
         // Assert: the overlay candidate carries the migrated cell.
-        let ow = plan.overlay_candidate.as_ref().expect("overlay candidate");
+        let ow = plan.overlay_candidate().expect("overlay candidate");
         assert_eq!(ow.base_revision, 0);
         let cell = ow
             .cells
@@ -1191,7 +1216,7 @@ mod tests {
 
         // Assert: the config candidate is v3, [cache_pricing] gone, comments
         // and unrelated content preserved, and it re-parses as a v3 Config.
-        let candidate = plan.config_candidate.as_ref().expect("config candidate");
+        let candidate = plan.config_candidate().expect("config candidate");
         assert!(candidate.contains("version = 3"), "candidate: {candidate}");
         assert!(
             !candidate.contains("cache_pricing"),
@@ -1222,11 +1247,11 @@ mod tests {
 
         // Assert: nothing to fold -> config-only, no overlay candidate, but
         // the config candidate still stamps the version forward.
-        assert_eq!(plan.write_kind, WriteKind::ConfigOnly);
-        assert!(plan.overlay_candidate.is_none());
+        assert!(matches!(plan.write_kind, WriteKind::ConfigOnly(_)));
+        assert!(plan.overlay_candidate().is_none());
         assert!(!overlay_path.exists());
         let reparsed: crate::config::Config =
-            toml::from_str(plan.config_candidate.as_ref().unwrap()).unwrap();
+            toml::from_str(plan.config_candidate().unwrap()).unwrap();
         assert_eq!(reparsed.version, 3);
     }
 
@@ -1274,11 +1299,11 @@ mod tests {
 
         // Assert: both selectors in the overlay candidate, [providers.foo]
         // survives in the config candidate, and the candidate re-parses.
-        let ow = plan.overlay_candidate.as_ref().expect("overlay candidate");
+        let ow = plan.overlay_candidate().expect("overlay candidate");
         assert!(ow.cells.contains_key("openai-compat:grok-*"));
         assert!(ow.cells.contains_key("openai-compat:mistral-*"));
 
-        let candidate = plan.config_candidate.as_ref().expect("config candidate");
+        let candidate = plan.config_candidate().expect("config candidate");
         assert!(
             !candidate.contains("cache_pricing"),
             "candidate: {candidate}"
@@ -1324,10 +1349,10 @@ mod tests {
         // Assert: the rerun plans NO overlay write (the cell already matches),
         // only the config stamp -- and the on-disk overlay is unchanged.
         assert!(
-            second.overlay_candidate.is_none(),
+            second.overlay_candidate().is_none(),
             "an already-folded cell must not re-plan an overlay write"
         );
-        assert_eq!(second.write_kind, WriteKind::ConfigOnly);
+        assert!(matches!(second.write_kind, WriteKind::ConfigOnly(_)));
         commit_overlay(&second, &overlay_path);
         let overlay_after_second = catalog_overlay::load(&overlay_path).expect("load");
         assert_eq!(overlay_after_second.revision, overlay_after_first.revision);
@@ -1372,7 +1397,7 @@ mod tests {
         let rerun = plan_migration(&doc, 1, &cache_pricing, &overlay_path)
             .expect("rerun must not conflict on a verified_at-only difference");
         assert!(
-            rerun.overlay_candidate.is_none(),
+            rerun.overlay_candidate().is_none(),
             "a verified_at-only difference is not a change"
         );
     }
@@ -1537,7 +1562,7 @@ mod tests {
         let plan = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("plan");
 
         // Assert
-        let ow = plan.overlay_candidate.as_ref().expect("overlay candidate");
+        let ow = plan.overlay_candidate().expect("overlay candidate");
         let cell = ow
             .cells
             .get("openai-compat:grok-*")
@@ -1853,7 +1878,7 @@ mod tests {
         let plan = plan_migration(&doc, 1, &cache_pricing, &overlay_path).expect("v1 chains to 3");
         assert_eq!(plan.from, 1);
         assert_eq!(plan.to, 3);
-        assert_eq!(plan.write_kind, WriteKind::ConfigAndOverlay);
+        assert!(matches!(plan.write_kind, WriteKind::ConfigAndOverlay(..)));
         assert_eq!(plan.steps.len(), 2);
         assert_eq!(
             plan.steps[0],
@@ -1872,13 +1897,12 @@ mod tests {
 
         // Config candidate is fully migrated to v3, cache_pricing folded away,
         // retry list dropped -- and the overlay candidate carries the cell.
-        let out = plan.config_candidate.as_ref().expect("candidate");
+        let out = plan.config_candidate().expect("candidate");
         assert!(out.contains("version = 3"), "{out}");
         assert!(!out.contains("cache_pricing"), "{out}");
         assert!(!out.contains("retry_allowlist"), "{out}");
         assert!(
-            plan.overlay_candidate
-                .as_ref()
+            plan.overlay_candidate()
                 .expect("overlay candidate")
                 .cells
                 .contains_key("openai-compat:grok-*")
@@ -1905,9 +1929,9 @@ mod tests {
                 to_version: 3
             }]
         );
-        assert_eq!(plan.write_kind, WriteKind::ConfigOnly);
-        assert!(plan.overlay_candidate.is_none());
-        let out = plan.config_candidate.as_ref().expect("candidate");
+        assert!(matches!(plan.write_kind, WriteKind::ConfigOnly(_)));
+        assert!(plan.overlay_candidate().is_none());
+        let out = plan.config_candidate().expect("candidate");
         assert!(out.contains("version = 3"), "{out}");
     }
 
@@ -1926,7 +1950,7 @@ mod tests {
         .expect("no-op");
         assert!(plan.steps.is_empty());
         assert_eq!(plan.write_kind, WriteKind::NoChange);
-        assert!(plan.config_candidate.is_none());
+        assert!(plan.config_candidate().is_none());
     }
 
     #[test]
@@ -2205,10 +2229,10 @@ unsupported_features = [\"computer_use\"]\n";
         );
         assert_eq!(plan.from, 3);
         assert_eq!(plan.to, 3);
-        assert_eq!(plan.write_kind, WriteKind::ConfigOnly);
-        assert!(plan.overlay_candidate.is_none());
+        assert!(matches!(plan.write_kind, WriteKind::ConfigOnly(_)));
+        assert!(plan.overlay_candidate().is_none());
         // The candidate folds the legacy keys away.
-        let out = plan.config_candidate.as_ref().expect("candidate");
+        let out = plan.config_candidate().expect("candidate");
         assert!(!out.contains("unsupported_features"), "{out}");
     }
 
