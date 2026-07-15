@@ -399,6 +399,61 @@ async fn wizard_and_yes_paths_produce_a_byte_identical_config() {
 }
 
 // ---------------------------------------------------------------------
+// Empty-offer credential capture: a credential-less fresh machine no longer
+// dead-ends at the missing-route error. The api-key branch drives `provider
+// add`'s existing hidden prompt end to end (XDG scoped, so the managed secret
+// store writes inside the tempdir), captures a `file://`-backed credential,
+// and reaches a routed config -- the branch's real orchestration path, not
+// just its planned args.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+#[serial_test::serial]
+async fn empty_offer_api_key_capture_wires_a_file_backed_provider() {
+    let xdg = scope_xdg();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    let stub = StubInitIo {
+        credential_capture: CredentialCapture::ApiKey,
+        is_tty: true,
+        prompt_value: "sk-ant-not-a-real-key".to_string(),
+        offer_selection: vec![0],
+        model_id: Some(MODEL_ID.to_string()),
+        default_route: Some("anthropic".to_string()),
+        ..Default::default()
+    };
+    init::run_with_io(&path, init_args(false, false, None, false), &stub)
+        .await
+        .expect("the empty-offer api-key capture writes a routed config");
+
+    assert_eq!(
+        *stub.prompt_hidden_calls.lock().unwrap(),
+        1,
+        "the credential is captured through the existing hidden prompt",
+    );
+    assert_eq!(
+        *stub.login_calls.lock().unwrap(),
+        0,
+        "the api-key branch runs no oauth login",
+    );
+    assert_eq!(
+        xdg.secret_file_count(),
+        1,
+        "exactly one managed secret is written to the scoped store",
+    );
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(count_provider_block(&text, "anthropic"), 1, "{text}");
+    assert!(
+        text.contains("file://"),
+        "the captured key lands as a managed file ref: {text}",
+    );
+    let store: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    assert_config_boots(&text, "anthropic", store).await;
+}
+
+// ---------------------------------------------------------------------
 // Multi-offer boundary: with two detected offers (an oauth login and the
 // forwarded lane), the wizard wires them in a deterministic order and two
 // independent runs produce a byte-identical config -- the command-boundary
