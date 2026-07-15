@@ -1,21 +1,24 @@
 //! End-to-end learned-capability loop, driven at the router level against
 //! wiremock upstreams with REAL upstream error envelopes.
 //!
-//! The behavior this suite proves: an openai-compat upstream rejects a
-//! capability the request NATURALLY carries -- a built-in tool whose `type`
-//! names the capability -- with a byte-accurate 400 whose `/error/param`
-//! names that same capability. The router resolves the param to its
-//! canonical key (`web_search`), learns the negative under that key, and the
-//! chain filter routes away from the rejecting target on subsequent matching
-//! requests. This is the non-synthetic proof: the request carries
-//! `web_search`, the upstream names `web_search`, and the two meet through
-//! the shared resolver -- no forged tool-type that doubles as the error code.
+//! The headline behavior this suite proves: an openai-compat upstream rejects
+//! a capability the request NATURALLY carries AND that actually survives
+//! egress onto the wire -- a structured-output request whose
+//! `output_config.format` the egress lifts to a top-level `response_format`
+//! field -- with a byte-accurate 400 whose `/error/param` names that same
+//! wire field. The router translates the rejected param to its canonical key
+//! (`structured_output`), learns the negative under that key, and the chain
+//! filter routes away from the rejecting target on subsequent matching
+//! requests. A wire-body assertion on the OUTBOUND request confirms the
+//! rejected surface actually crossed the wire -- the guard against a
+//! synthetic proof where the rejected capability was dropped at egress and a
+//! real upstream could never have rejected it.
 //!
 //! The loop is observed through the PUBLIC router surface only:
 //! `Dispatched.meta.learned_capabilities` (the per-request learn events),
 //! `Dispatched.meta.served_provider`, the dispatch result, and wiremock
-//! per-server hit counts. Each upstream gets its own `MockServer`, so a
-//! hit count is exactly that target's dial count.
+//! per-server hit counts + captured request bodies. Each upstream gets its
+//! own `MockServer`, so a hit count is exactly that target's dial count.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,13 +47,19 @@ const WEB_SEARCH: &str = "web_search";
 /// independent learned negatives.
 const COMPUTER_USE: &str = "computer_use";
 
-/// A byte-accurate openai-compat `unsupported_parameter` 400. The request
-/// carries a `web_search_20250305` built-in tool; the upstream rejects with
-/// `/error/param` naming exactly that field. `param` and the request's
-/// tool `type` both reduce to `web_search` through the shared resolver's
-/// `strip_date_suffix` + normalization, so the learned key meets the
-/// request-derived key.
-const OPENAI_UNSUPPORTED_PARAMETER_400: &str = r#"{"error":{"message":"Unsupported parameter: 'web_search_20250305' is not supported with this model.","type":"invalid_request_error","param":"web_search_20250305","code":"unsupported_parameter"}}"#;
+/// The canonical constrained-decoding capability key. A structured-output
+/// request derives this key; the openai wire param is `response_format`, and
+/// the resolver's closed-set translation table maps the two.
+const STRUCTURED_OUTPUT: &str = "structured_output";
+
+/// A byte-accurate openai-compat `unsupported_parameter` 400 whose
+/// `/error/param` is `response_format` -- the top-level wire field the
+/// openai-compat egress emits for a structured-output request. This is the
+/// surface that SURVIVES egress: a real upstream can genuinely reject it,
+/// unlike a built-in tool the egress drops before the wire. The resolver
+/// translates `response_format` onto the canonical `structured_output` key
+/// the request side derives from `output_config.format`.
+const OPENAI_UNSUPPORTED_RESPONSE_FORMAT_400: &str = r#"{"error":{"message":"Unsupported parameter: 'response_format' is not supported with this model.","type":"invalid_request_error","param":"response_format","code":"unsupported_parameter"}}"#;
 
 /// A wiremock responder that walks a fixed sequence of `(status, body)`
 /// steps across successive calls, repeating the last step once the
@@ -117,6 +126,15 @@ async fn hits(server: &MockServer) -> usize {
         .received_requests()
         .await
         .map_or(0, |reqs| reqs.len())
+}
+
+/// The parsed JSON body of the most recent request this upstream received.
+/// Used to assert on the OUTBOUND wire: what routectl actually sent, not
+/// what the request carried before egress.
+async fn last_request_body(server: &MockServer) -> Value {
+    let reqs = server.received_requests().await.expect("received requests");
+    let last = reqs.last().expect("at least one request received");
+    serde_json::from_slice(&last.body).expect("outbound request body is JSON")
 }
 
 /// One chain member: a `[models.<nickname>]` pointed at a
@@ -233,6 +251,31 @@ fn req_with_features(alias: &str, features: &[&str]) -> ChatRequest {
     }
 }
 
+/// A request against `alias` carrying an Anthropic-shape structured-output
+/// `output_config.format`. `derive_feature_keys` yields `[structured_output]`,
+/// and the openai-compat egress lifts the format to a top-level
+/// `response_format` on the wire body -- so the capability the upstream
+/// rejects by `error.param="response_format"` actually crosses the wire.
+fn req_with_structured_output(alias: &str) -> ChatRequest {
+    ChatRequest {
+        model: alias.to_string(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        provider_extras: Some(json!({
+            "output_config": { "format": {"type": "json_object"} }
+        })),
+        ..Default::default()
+    }
+}
+
 /// An openai-compat 400 whose `/error/param` is `param`; the classifier
 /// lifts the `unsupported_parameter` code to `FeatureUnsupported` and the
 /// resolver reads `param` as the real capability.
@@ -285,18 +328,24 @@ async fn complete_with(
 }
 
 // ---------------------------------------------------------------------------
-// The real-envelope route-away proof. Replaces the forged-tool-type
-// test whose request carried the error code as a tool type.
+// The headline real-envelope route-away proof. The rejected capability
+// (`structured_output` -> `response_format` on the wire) SURVIVES egress, so
+// this is a scenario a real openai-compat upstream can genuinely produce -- a
+// wire-body assertion guards against the synthetic failure mode where the
+// rejected surface was dropped before the wire.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn real_envelope_400_learns_and_routes_away() {
+async fn real_envelope_response_format_400_learns_structured_output_and_routes_away() {
     // A serves a byte-accurate captured openai `unsupported_parameter` 400
-    // whose `/error/param` is `web_search_20250305`; the request carries a
-    // `web_search_20250305` built-in tool. Both reduce to `web_search`, so
-    // the router learns the negative under the canonical key and routes away
-    // from A on the next matching request. B always succeeds.
-    let a = raw_upstream_server(400, OPENAI_UNSUPPORTED_PARAMETER_400).await;
+    // whose `/error/param` is `response_format`. The request carries
+    // `provider_extras.output_config.format`, so `derive_feature_keys` yields
+    // `structured_output` AND the openai-compat egress lifts the format to a
+    // top-level `response_format` that actually crosses the wire. The resolver
+    // translates the rejected param onto `structured_output`; both sides meet
+    // on that canonical key and the router learns the negative and routes away
+    // from A. B always succeeds.
+    let a = raw_upstream_server(400, OPENAI_UNSUPPORTED_RESPONSE_FORMAT_400).await;
     let b = upstream_server(vec![(200, ok_body())]).await;
     let router = build_router(
         vec![
@@ -309,10 +358,15 @@ async fn real_envelope_400_learns_and_routes_away() {
     )
     .await;
 
-    // Request 1: A rejects the capability the request carries, the router
-    // learns it (self-identifying) under the CANONICAL key, and the chain
-    // falls back to B.
-    let d1 = complete_with(&router, "chain", &["web_search_20250305"]).await;
+    // Request 1: A rejects the structured-output surface it received, the
+    // router learns it (self-identifying) under the CANONICAL key, and the
+    // chain falls back to B.
+    let d1 = router
+        .complete_with_options(
+            req_with_structured_output("chain"),
+            RouterOptions::default(),
+        )
+        .await;
     assert!(
         d1.result.is_ok(),
         "request 1 should fall back to B: {:?}",
@@ -326,20 +380,44 @@ async fn real_envelope_400_learns_and_routes_away() {
     );
     let ev = &d1.meta.learned_capabilities[0];
     assert_eq!(
-        ev.feature_key, WEB_SEARCH,
-        "the learned key is the canonical capability, not the error.code token",
+        ev.feature_key, STRUCTURED_OUTPUT,
+        "the learned key is the canonical capability, not the raw wire param",
     );
     assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
     assert_eq!(ev.upstream_status, 400);
     assert_eq!(ev.observations, 1);
     assert!(!ev.remapped);
+    assert!(
+        ev.request_features.iter().any(|f| f == STRUCTURED_OUTPUT),
+        "the request naturally derives the learned capability",
+    );
     assert_eq!(hits(&a).await, 1);
     assert_eq!(hits(&b).await, 1);
 
-    // Request 2: A is now an acting learned negative for `web_search` -> the
-    // chain filter de-prioritizes it to the tail. B serves first and A is
-    // never re-dialed.
-    let d2 = complete_with(&router, "chain", &["web_search_20250305"]).await;
+    // WIRE GUARD: the surface the upstream rejected (`response_format`) was
+    // actually present on the OUTBOUND body A received, and the Anthropic-shape
+    // `output_config` did not leak. This is the guard against the synthetic
+    // failure mode -- a capability dropped at egress that a real upstream could
+    // never have rejected.
+    let sent = last_request_body(&a).await;
+    assert!(
+        sent.get("response_format").is_some(),
+        "the rejected surface must have crossed the wire; body = {sent}",
+    );
+    assert!(
+        sent.get("output_config").is_none(),
+        "the Anthropic-shape output_config must not leak onto the openai wire; body = {sent}",
+    );
+
+    // Request 2: A is now an acting learned negative for `structured_output`
+    // (an essential -> RouteAway) -> the chain filter de-prioritizes it to the
+    // tail. B serves first and A is never re-dialed.
+    let d2 = router
+        .complete_with_options(
+            req_with_structured_output("chain"),
+            RouterOptions::default(),
+        )
+        .await;
     assert!(d2.result.is_ok());
     assert_eq!(d2.meta.served_provider.as_deref(), Some("prov_b"));
     assert!(
