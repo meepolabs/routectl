@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<!--
+  routectl status dashboard: a single self-contained, read-only document
+  (inline CSS + JS, zero external network dependencies). It POLLS the
+  GET /status aggregate and renders four panels; it never mutates.
+
+  Co-versioning contract: this page ships in the SAME binary as the
+  /status endpoints it polls, so the panel shapes it is built against
+  cannot skew from what the server emits -- there is no client/server
+  version negotiation, and the per-panel schema_version check below is a
+  cheap graceful-degrade guard, not negotiation. If this document is ever
+  served SEPARATELY from those endpoints (a CDN, a split asset bundle),
+  the co-versioning guarantee breaks and real version negotiation must be
+  added before that split ships.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>routectl status</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --fg: #1b1b1b;
+      --muted: #666;
+      --border: #d0d0d0;
+      --panel-bg: #fafafa;
+    }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 1.5rem;
+      color: var(--fg);
+      line-height: 1.4;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    h1 {
+      font-size: 1.25rem;
+      margin: 0;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .windowsel button {
+      font: inherit;
+      padding: 0.25rem 0.6rem;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: #1b1b1b;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .windowsel button.active {
+      background: #1b1b1b;
+      color: #fff;
+      border-color: #1b1b1b;
+    }
+    .windowsel button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .clock {
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .banner {
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+      font-size: 0.85rem;
+    }
+    .banner--warn { background: #fbeecb; color: #7a5b00; border: 1px solid #e6cf87; }
+    .banner--error { background: #f5d0d0; color: #7a1414; border: 1px solid #e0a0a0; }
+    .banner--terminal { background: #e6e0f0; color: #3a2a5a; border: 1px solid #b8a8d8; }
+    .panels {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1rem;
+    }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-bg);
+      padding: 1rem;
+    }
+    .panel h2 {
+      font-size: 1rem;
+      margin: 0 0 0.25rem;
+    }
+    .panel h3 {
+      font-size: 0.8rem;
+      margin: 0.6rem 0 0.2rem;
+      color: var(--muted);
+    }
+    .panel-status {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-bottom: 0.4rem;
+      min-height: 1em;
+    }
+    .panel-body {
+      font-size: 0.85rem;
+      overflow-x: auto;
+    }
+    .panel--stale .panel-body { opacity: 0.4; }
+    .panel--dead .panel-body { opacity: 0.5; }
+    .unavailable-msg { color: #7a1414; font-size: 0.85rem; }
+    .meta { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.3rem; }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 0.8rem;
+      margin-bottom: 0.5rem;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    th { background: rgba(0, 0, 0, 0.04); }
+    /*
+      Value-domain tokens are rendered as their RAW wire string and styled
+      by a class keyed on the EXACT per-field string (three casings:
+      snake_case, PascalCase, kebab-case -- never normalized). `.tok` is the
+      default fallback, so a newly-added or unknown token renders as
+      readable neutral text rather than crashing or hiding.
+    */
+    .tok {
+      display: inline-block;
+      padding: 0 0.4em;
+      border-radius: 0.5em;
+      font-size: 0.8em;
+      background: #e8e8e8;
+      color: #222;
+    }
+    .circuit-closed, .reach-reachable, .status-Pass { background: #d7f0d7; color: #155724; }
+    .circuit-open, .reach-degraded, .status-Fail { background: #f5d0d0; color: #7a1414; }
+    .circuit-half_open_ready, .status-Warn { background: #fbeecb; color: #7a5b00; }
+    .verdict-route-away { background: #f5d0d0; color: #7a1414; }
+    .verdict-force-supported { background: #d7e6f5; color: #123a5a; }
+    .tier-self-identifying { background: #d7e6f5; color: #123a5a; }
+    .tier-inferred { background: #eee2d0; color: #5a3a12; }
+    .prov-provider, .prov-model { background: #e6e0f0; color: #3a2a5a; }
+    .prov-override { background: #f0e0e6; color: #5a2a3a; }
+    .prov-learned { background: #e0f0ea; color: #155040; }
+    .src-baked { background: #e0e8f0; color: #1b1b1b; }
+    .src-import { background: #e8e0f0; color: #1b1b1b; }
+    .src-user { background: #d7f0d7; color: #155724; }
+    .src-disabled { background: #eee; color: #777; }
+    .src-missing { background: #f5d0d0; color: #7a1414; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>routectl status</h1>
+    <div class="controls">
+      <div class="windowsel" id="windowsel" role="group" aria-label="Usage window">
+        <button type="button" data-window="today">Today</button>
+        <button type="button" data-window="week">Week</button>
+        <button type="button" data-window="month">Month</button>
+        <button type="button" data-window="all">All</button>
+      </div>
+      <div class="clock" id="clock"></div>
+    </div>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+  <main class="panels">
+    <section class="panel" id="panel-usage">
+      <h2>Usage</h2>
+      <div class="panel-status" id="status-usage"></div>
+      <div class="panel-body" id="body-usage">Loading...</div>
+    </section>
+    <section class="panel" id="panel-health">
+      <h2>Health</h2>
+      <div class="panel-status" id="status-health"></div>
+      <div class="panel-body" id="body-health">Loading...</div>
+    </section>
+    <section class="panel" id="panel-config">
+      <h2>Config</h2>
+      <div class="panel-status" id="status-config"></div>
+      <div class="panel-body" id="body-config">Loading...</div>
+    </section>
+    <section class="panel" id="panel-doctor">
+      <h2>Doctor</h2>
+      <div class="panel-status" id="status-doctor"></div>
+      <div class="panel-body" id="body-doctor">Loading...</div>
+    </section>
+  </main>
+
+  <script>
+  'use strict';
+  (function () {
+    // Per-panel wire versions this page was built against. See the
+    // co-versioning note in the document head: same-binary, so a mismatch
+    // should never occur in practice; the check is a graceful-degrade
+    // guard, not version negotiation.
+    var EXPECTED = { usage: 1, health: 1, config: 1, doctor: 2 };
+    var PANELS = ['usage', 'health', 'config', 'doctor'];
+
+    var BASE_MS = 5000;              // steady cadence
+    var BACKOFF_MS = [10000, 20000, 30000]; // transport-failure backoff, 30s cap
+    var TIMEOUT_MS = 2000;           // per-fetch AbortController budget
+    var SKEW_TOLERANCE_SEC = 2;      // future as_of within this is not clock skew
+
+    var selectedWindow = 'today';
+    var terminal = false;            // set on 403; stops the loop permanently
+    var running = false;             // one aggregate round in flight at a time
+    var timer = null;
+    var backoffIndex = -1;           // -1 = base cadence; 0..n = BACKOFF_MS index
+    var lastSuccess = null;          // wall time of the last good aggregate round
+    var windowCtrl = null;           // single-flights the extra usage window fetch
+
+    var el = function (id) { return document.getElementById(id); };
+
+    // ---- transport -------------------------------------------------------
+
+    // GET a status URL under a 2s abort budget. Returns a tagged outcome:
+    // ok(json) | overloaded (503) | forbidden (403) | timeout (abort) |
+    // network (refused / other error / non-2xx). No request body, no
+    // mutating verb -- fetch defaults to GET and none is set.
+    function fetchStatus(url, ctrl) {
+      var timeout = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
+      return fetch(url, { signal: ctrl.signal, cache: 'no-store' }).then(function (resp) {
+        if (resp.status === 403) { return { kind: 'forbidden' }; }
+        if (resp.status === 503) { return { kind: 'overloaded' }; }
+        if (!resp.ok) { return { kind: 'network' }; }
+        return resp.json().then(function (json) { return { kind: 'ok', json: json }; });
+      }).catch(function (err) {
+        return { kind: (err && err.name === 'AbortError') ? 'timeout' : 'network' };
+      }).then(function (out) {
+        clearTimeout(timeout);
+        return out;
+      });
+    }
+
+    // The extra usage window fetch, single-flighted: a newer window
+    // selection aborts the previous one so a late response never repaints
+    // newer state, and at most one window fetch coexists with the one
+    // aggregate fetch (at most 2 in flight, only while non-today).
+    function fetchWindow(w) {
+      if (windowCtrl) { windowCtrl.abort(); }
+      var ctrl = new AbortController();
+      windowCtrl = ctrl;
+      return fetchStatus('/status/usage?window=' + encodeURIComponent(w), ctrl).then(function (r) {
+        if (windowCtrl === ctrl) { windowCtrl = null; }
+        return r;
+      });
+    }
+
+    // ---- poll loop -------------------------------------------------------
+
+    function tick() {
+      if (terminal || running) { return; }
+      running = true;
+      runRound().then(function (res) {
+        running = false;
+        if (res && res.terminal) { return; }
+        scheduleNext(!!(res && res.ok));
+      }).catch(function () {
+        // A bug in rendering must not wedge the loop; treat as a failed
+        // round and keep polling with backoff.
+        running = false;
+        scheduleNext(false);
+      });
+    }
+
+    function scheduleNext(ok) {
+      if (terminal) { return; }
+      backoffIndex = ok ? -1 : Math.min(backoffIndex + 1, BACKOFF_MS.length - 1);
+      var delay = backoffIndex < 0 ? BASE_MS : BACKOFF_MS[backoffIndex];
+      updateClock(delay, backoffIndex >= 0);
+      clearTimeout(timer);
+      timer = setTimeout(tick, delay);
+    }
+
+    // Immediately kick a fresh aggregate round (used when the operator
+    // returns to Today). Respects the single-in-flight guard.
+    function kickRefresh() {
+      if (terminal || running) { return; }
+      clearTimeout(timer);
+      tick();
+    }
+
+    function runRound() {
+      var w = selectedWindow;
+      var aggCtrl = new AbortController();
+      var aggPromise = fetchStatus('/status', aggCtrl);
+      var winPromise = (w !== 'today') ? fetchWindow(w) : null;
+
+      return aggPromise.then(function (agg) {
+        if (agg.kind === 'forbidden') {
+          return drain(winPromise).then(function () { enterTerminal(); return { terminal: true }; });
+        }
+        if (agg.kind !== 'ok') {
+          markTransport(agg.kind);
+          return drain(winPromise).then(function () { return { ok: false }; });
+        }
+
+        // Aggregate is live. Siblings always render from it; the usage
+        // panel renders from the aggregate ONLY while Today is selected --
+        // otherwise the window fetch owns it (single render path, no drift).
+        renderPanel('health', getPanel(agg.json, 'health'));
+        renderPanel('config', getPanel(agg.json, 'config'));
+        renderPanel('doctor', getPanel(agg.json, 'doctor'));
+        if (w === 'today' && selectedWindow === 'today') {
+          renderPanel('usage', getPanel(agg.json, 'usage'));
+        }
+        lastSuccess = new Date();
+        clearBanner();
+
+        if (!winPromise) { return { ok: true }; }
+        return winPromise.then(function (win) { return applyWindowResult(win, w); });
+      });
+    }
+
+    function drain(p) { return p ? p.then(function () {}) : Promise.resolve(); }
+
+    // Apply a window-fetch outcome to the usage panel and report whether the
+    // round succeeded. The window fetch SHARES the loop's backoff: a transport
+    // failure (503 / network / timeout) returns { ok: false } so the caller
+    // backs off exactly like an aggregate transport failure. A per-panel
+    // `unavailable` arrives over HTTP 200 as kind 'ok' and is handled by
+    // renderPanel below, so it renders without backing off.
+    function applyWindowResult(win, w) {
+      if (win.kind === 'forbidden') { enterTerminal(); return { terminal: true }; }
+      if (win.kind === 'ok') {
+        if (selectedWindow === w) { renderPanel('usage', win.json); }
+        return { ok: true };
+      }
+      if (selectedWindow === w) { muteUsageOnly(win.kind); }
+      return { ok: false };
+    }
+
+    // ---- window selector -------------------------------------------------
+
+    function onWindowChange(w) {
+      if (terminal || w === selectedWindow) { return; }
+      selectedWindow = w;
+      updateSelectorUI();
+      if (w === 'today') {
+        kickRefresh();
+      } else {
+        // Fire the window fetch immediately, not only on the next tick. It
+        // feeds the SAME backoff/scheduleNext path as a poll round, so a
+        // window transport failure here backs the loop off just as a failed
+        // aggregate round would; tick()'s outer .catch() has no reach here,
+        // so this chain carries its own error boundary.
+        fetchWindow(w).then(function (win) {
+          var res = applyWindowResult(win, w);
+          if (res.terminal) { return; }
+          scheduleNext(!!res.ok);
+        }).catch(function () {
+          scheduleNext(false);
+        });
+      }
+    }
+
+    // ---- render dispatch -------------------------------------------------
+
+    // The single render path shared by the poll loop and any future push
+    // (a push event would be the same per-panel shape keyed by panel name).
+    function renderPanel(name, env) {
+      var panel = el('panel-' + name);
+      var status = el('status-' + name);
+      var body = el('body-' + name);
+      panel.classList.remove('panel--ok', 'panel--unavailable', 'panel--stale', 'panel--dead');
+
+      if (!env) {
+        return renderUnavailable(name, 'missing_panel', 'panel absent from response');
+      }
+      if (env.schema_version !== EXPECTED[name]) {
+        return renderUnavailable(name, 'incompatible',
+          'schema ' + env.schema_version + ' != expected ' + EXPECTED[name]);
+      }
+      if (env.unavailable) {
+        return renderUnavailable(name, env.unavailable, null);
+      }
+
+      panel.classList.add('panel--ok');
+      status.textContent = formatAsOf(env.as_of);
+      body.replaceChildren(BUILDERS[name](env.data || {}));
+    }
+
+    function renderUnavailable(name, code, extra) {
+      var panel = el('panel-' + name);
+      var status = el('status-' + name);
+      var body = el('body-' + name);
+      panel.classList.remove('panel--ok', 'panel--stale', 'panel--dead');
+      panel.classList.add('panel--unavailable');
+      status.textContent = '';
+      var div = document.createElement('div');
+      div.className = 'unavailable-msg';
+      div.textContent = 'unavailable: ' + code + (extra ? ' (' + extra + ')' : '');
+      body.replaceChildren(div);
+    }
+
+    function getPanel(agg, name) {
+      return (agg && agg.panels) ? agg.panels[name] : undefined;
+    }
+
+    // as_of age. If as_of is in the future beyond a small tolerance, clamp
+    // and label clock skew rather than showing a negative age.
+    function formatAsOf(asOf) {
+      if (!asOf) { return ''; }
+      var then = new Date(asOf);
+      if (isNaN(then.getTime())) { return 'as of ' + asOf; }
+      var ageSec = Math.round((Date.now() - then.getTime()) / 1000);
+      if (ageSec < -SKEW_TOLERANCE_SEC) {
+        return 'as of ' + asOf + ' (clock skew: source clock ahead)';
+      }
+      if (ageSec < 0) { ageSec = 0; }
+      return 'as of ' + asOf + ' (' + ageSec + ' s ago)';
+    }
+
+    // ---- transport-failure presentation ---------------------------------
+
+    // A failed refresh must NEVER leave last-good numbers rendered as
+    // current. 503 marks every panel visibly stale (muted last-known values
+    // plus a "last success" note); a network/timeout failure clears the
+    // numbers to an explicit no-current-data state.
+    function markTransport(kind) {
+      var mode = (kind === 'overloaded') ? 'stale' : 'dead';
+      PANELS.forEach(function (n) { markPanelTransport(n, mode); });
+      if (kind === 'overloaded') {
+        setBanner('warn', 'status overloaded: showing last known values, backing off');
+      } else if (kind === 'timeout') {
+        setBanner('error', 'status request timed out, backing off');
+      } else {
+        setBanner('error', 'daemon unreachable, backing off');
+      }
+    }
+
+    function muteUsageOnly(kind) {
+      markPanelTransport('usage', (kind === 'overloaded') ? 'stale' : 'dead');
+    }
+
+    function markPanelTransport(name, mode) {
+      var panel = el('panel-' + name);
+      var status = el('status-' + name);
+      var body = el('body-' + name);
+      panel.classList.remove('panel--ok', 'panel--unavailable', 'panel--stale', 'panel--dead');
+      var note = lastSuccess
+        ? 'last success at ' + lastSuccess.toLocaleTimeString()
+        : 'no successful poll yet';
+      if (mode === 'stale') {
+        panel.classList.add('panel--stale');
+        status.textContent = 'stale: ' + note;
+      } else {
+        panel.classList.add('panel--dead');
+        status.textContent = 'no current data: ' + note;
+        var div = document.createElement('div');
+        div.className = 'unavailable-msg';
+        div.textContent = 'unavailable (transport failure)';
+        body.replaceChildren(div);
+      }
+    }
+
+    function enterTerminal() {
+      terminal = true;
+      clearTimeout(timer);
+      setBanner('terminal',
+        'This dashboard must be opened via the loopback or bound address ' +
+        '(for example http://127.0.0.1:8787). Polling has stopped.');
+      PANELS.forEach(function (n) { markPanelTransport(n, 'dead'); });
+      updateSelectorUI();
+    }
+
+    function setBanner(kind, text) {
+      var b = el('banner');
+      b.hidden = false;
+      b.textContent = text;
+      b.className = 'banner banner--' + kind;
+    }
+
+    function clearBanner() {
+      var b = el('banner');
+      b.hidden = true;
+      b.textContent = '';
+      b.className = 'banner';
+    }
+
+    // ---- DOM table helpers (textContent only, never innerHTML) -----------
+
+    function table(headers) {
+      var t = document.createElement('table');
+      var thead = document.createElement('thead');
+      var hr = document.createElement('tr');
+      headers.forEach(function (h) {
+        var th = document.createElement('th');
+        th.textContent = h;
+        hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      t.appendChild(thead);
+      var tb = document.createElement('tbody');
+      t.appendChild(tb);
+      return { t: t, tb: tb };
+    }
+
+    function row(tb, cells) {
+      var tr = document.createElement('tr');
+      cells.forEach(function (c) {
+        var td = document.createElement('td');
+        if (c instanceof Node) {
+          td.appendChild(c);
+        } else {
+          td.textContent = (c === null || c === undefined) ? '-' : String(c);
+        }
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    }
+
+    // Value-domain token cell: raw wire string as textContent, styled by a
+    // class keyed on the exact string. `prefix + '-' + raw` plus the `.tok`
+    // fallback, so an unknown token stays readable and unstyled.
+    function tok(prefix, raw) {
+      var span = document.createElement('span');
+      span.className = 'tok ' + prefix + '-' + raw;
+      span.textContent = (raw === null || raw === undefined) ? '-' : String(raw);
+      return span;
+    }
+
+    function subhead(container, text) {
+      var h = document.createElement('h3');
+      h.textContent = text;
+      container.appendChild(h);
+    }
+
+    function none() {
+      var d = document.createElement('div');
+      d.className = 'meta';
+      d.textContent = '(none)';
+      return d;
+    }
+
+    function fmtMs(ms) {
+      if (ms === null || ms === undefined) { return '-'; }
+      var d = new Date(ms);
+      return isNaN(d.getTime()) ? String(ms) : d.toISOString();
+    }
+
+    // ---- four panel-specific builders ------------------------------------
+
+    function buildUsage(d) {
+      var c = document.createElement('div');
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = 'window: ' + d.window + '  (' + fmtMs(d.from_ms) + ' to ' + fmtMs(d.to_ms) + ')';
+      c.appendChild(meta);
+
+      subhead(c, 'Totals');
+      var to = d.totals || {};
+      var tt = table(['requests', 'ok', 'errors', 'input', 'output', 'reasoning', 'cache read billed', 'tool calls']);
+      row(tt.tb, [to.requests, to.ok, to.errors, to.input_tokens, to.output_tokens,
+        to.reasoning_tokens, to.cache_read_billed, to.server_tool_calls]);
+      c.appendChild(tt.t);
+
+      subhead(c, 'Groups');
+      var groups = d.groups || [];
+      if (!groups.length) {
+        c.appendChild(none());
+      } else {
+        var gt = table(['alias', 'provider', 'model', 'upstream', 'req', 'ok', 'err', 'in', 'out',
+          'reasoning', 'cr peak', 'cr billed', 'cw 5m', 'cw 1h', 'tools', 'streams', 'disc']);
+        groups.forEach(function (g) {
+          row(gt.tb, [g.alias, g.provider, g.model, g.upstream, g.requests, g.ok, g.errors,
+            g.input_tokens, g.output_tokens, g.reasoning_tokens, g.cache_read_peak, g.cache_read_billed,
+            g.cache_write_5m, g.cache_write_1h, g.server_tool_calls, g.stream_count, g.client_disconnect_total]);
+        });
+        c.appendChild(gt.t);
+      }
+
+      if (d.quota) {
+        subhead(c, 'Quota');
+        var q = d.quota;
+        var qt = table(['window start', 'claim', 'status', 'overage', 'utilization', 'overage util', 'reset']);
+        row(qt.tb, [fmtMs(q.ts_start_ms), q.claim, q.status, q.overage_status, q.utilization, q.overage_utilization, fmtMs(q.reset_ms)]);
+        c.appendChild(qt.t);
+      }
+
+      subhead(c, 'Would-trim');
+      var wt = d.would_trim || {};
+      var wtt = table(['candidates', 'trim tokens', 'met', 'unmet', 'cold', 'unpriced']);
+      row(wtt.tb, [wt.candidate_requests, wt.would_trim_tokens, wt.verdict_met,
+        wt.verdict_unmet, wt.verdict_cold, wt.verdict_unpriced]);
+      c.appendChild(wtt.t);
+
+      return c;
+    }
+
+    function buildHealth(d) {
+      var c = document.createElement('div');
+      subhead(c, 'Targets');
+      var targets = d.targets || [];
+      if (!targets.length) {
+        c.appendChild(none());
+      } else {
+        var t = table(['state key', 'nickname', 'provider', 'upstream', 'seat', 'circuit', 'rpm avail', 'probe in flight']);
+        targets.forEach(function (x) {
+          row(t.tb, [x.state_key, x.nickname, x.provider_name, x.upstream, x.seat_label,
+            tok('circuit', x.circuit), x.rpm_available, String(x.half_open_probe_in_flight)]);
+        });
+        c.appendChild(t.t);
+      }
+
+      subhead(c, 'Learned negatives');
+      var ln = d.learned_negatives || [];
+      if (!ln.length) {
+        c.appendChild(none());
+      } else {
+        var lt = table(['state key', 'capability', 'signal tier', 'observations']);
+        ln.forEach(function (x) {
+          row(lt.tb, [x.state_key, x.capability_key, tok('tier', x.signal_tier), x.observations]);
+        });
+        c.appendChild(lt.t);
+      }
+      return c;
+    }
+
+    function buildConfig(d) {
+      var c = document.createElement('div');
+      subhead(c, 'Models');
+      var models = d.models || [];
+      if (!models.length) {
+        c.appendChild(none());
+      } else {
+        var mt = table(['nickname', 'provider', 'kind', 'upstream', 'source', 'verified', 'wm', 'rm', 'max ctx']);
+        models.forEach(function (m) {
+          var e = m.economics || {};
+          row(mt.tb, [m.nickname, m.provider, m.provider_kind, m.upstream,
+            tok('src', m.source), m.verified_at, e.wm, e.rm, e.max_context_tokens]);
+        });
+        c.appendChild(mt.t);
+      }
+
+      subhead(c, 'Classes');
+      var classes = d.classes || [];
+      if (!classes.length) {
+        c.appendChild(none());
+      } else {
+        var ct = table(['class', 'retry cap', 'fallback', 'source']);
+        classes.forEach(function (x) {
+          row(ct.tb, [x.class, x.retry_cap, String(x.fallback), x.source]);
+        });
+        c.appendChild(ct.t);
+      }
+
+      subhead(c, 'Capabilities');
+      var caps = d.capabilities || [];
+      if (!caps.length) {
+        c.appendChild(none());
+      } else {
+        var pt = table(['target', 'capability', 'verdict', 'provenance']);
+        caps.forEach(function (x) {
+          row(pt.tb, [x.target_spec, x.capability_key, tok('verdict', x.verdict), tok('prov', x.provenance)]);
+        });
+        c.appendChild(pt.t);
+      }
+
+      subhead(c, 'Activation');
+      var act = d.activation || [];
+      if (!act.length) {
+        c.appendChild(none());
+      } else {
+        var at = table(['provider', 'kind', 'status', 'reason', 'referenced']);
+        act.forEach(function (x) {
+          row(at.tb, [x.provider_id, x.provider_kind, x.status, x.reason, String(x.referenced_by_aliases)]);
+        });
+        c.appendChild(at.t);
+      }
+      return c;
+    }
+
+    function buildDoctor(d) {
+      var c = document.createElement('div');
+      var report = d.report || {};
+
+      subhead(c, 'Findings');
+      var findings = report.findings || [];
+      if (!findings.length) {
+        c.appendChild(none());
+      } else {
+        var ft = table(['section', 'name', 'status', 'detail', 'remediation']);
+        findings.forEach(function (f) {
+          row(ft.tb, [f.section, f.name, tok('status', f.status), f.detail, f.remediation]);
+        });
+        c.appendChild(ft.t);
+      }
+
+      var wt = report.panels && report.panels.would_trim;
+      if (wt) {
+        subhead(c, 'Would-trim');
+        var wtt = table(['candidates', 'trim tokens', 'met', 'unmet', 'cold', 'unpriced']);
+        row(wtt.tb, [wt.candidate_requests, wt.would_trim_tokens, wt.verdict_met,
+          wt.verdict_unmet, wt.verdict_cold, wt.verdict_unpriced]);
+        c.appendChild(wtt.t);
+      }
+
+      subhead(c, 'Reachability');
+      var reach = d.reachability || [];
+      if (!reach.length) {
+        c.appendChild(none());
+      } else {
+        var rt = table(['state key', 'reachability']);
+        reach.forEach(function (x) {
+          row(rt.tb, [x.state_key, tok('reach', x.reachability)]);
+        });
+        c.appendChild(rt.t);
+      }
+      return c;
+    }
+
+    var BUILDERS = {
+      usage: buildUsage,
+      health: buildHealth,
+      config: buildConfig,
+      doctor: buildDoctor
+    };
+
+    // ---- chrome ----------------------------------------------------------
+
+    function updateClock(delayMs, backingOff) {
+      var txt = 'next update in ' + Math.round(delayMs / 1000) + ' s';
+      if (backingOff) { txt += ' (backing off)'; }
+      el('clock').textContent = txt;
+    }
+
+    function updateSelectorUI() {
+      var buttons = el('windowsel').querySelectorAll('button');
+      Array.prototype.forEach.call(buttons, function (b) {
+        b.classList.toggle('active', b.getAttribute('data-window') === selectedWindow);
+        b.disabled = terminal;
+      });
+    }
+
+    function initSelector() {
+      var buttons = el('windowsel').querySelectorAll('button');
+      Array.prototype.forEach.call(buttons, function (b) {
+        b.addEventListener('click', function () { onWindowChange(b.getAttribute('data-window')); });
+      });
+      updateSelectorUI();
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+      initSelector();
+      tick();
+    });
+  })();
+  </script>
+</body>
+</html>
