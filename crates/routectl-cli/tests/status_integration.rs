@@ -300,3 +300,34 @@ async fn usage_db_unavailable_end_to_end_returns_unavailable_not_500() {
         "an unavailable panel carries no data: {body}"
     );
 }
+
+/// The dashboard shell is served at `GET /` as HTML with a no-store cache
+/// directive: a browser never caches the shell (the panel data it polls is
+/// always live). Test obligations 1-3.
+#[tokio::test]
+async fn page_get_returns_html_shell_with_no_store() {
+    let base = spawn(breaker_config("http://127.0.0.1:1")).await;
+    let client = reqwest::Client::new();
+
+    let resp = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "GET / must serve the dashboard shell");
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/html; charset=utf-8"),
+        "the page must be served as UTF-8 HTML"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "the page response must carry Cache-Control: no-store"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<html"),
+        "GET / must return the embedded HTML document"
+    );
+}

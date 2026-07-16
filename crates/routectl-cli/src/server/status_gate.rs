@@ -411,6 +411,80 @@ mod tests {
         }
     }
 
+    /// Deterministic guard for the page-off-budget wiring: the dashboard page
+    /// (`GET /`) is merged ALONGSIDE the load-shed-gated JSON subtree but
+    /// OUTSIDE `apply_overload_layers`, so it never consumes the shared JSON
+    /// shed budget. Built exactly as production wires it -- the saturable JSON
+    /// stand-in under the overload layers, the REAL `page_router()` merged in
+    /// off-budget. With the JSON cap held fully saturated by parked requests,
+    /// the page route must still answer 200 while an extra JSON request sheds
+    /// 503; the barrier makes this a race-free assertion rather than the soft
+    /// probabilistic burst it replaces.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn page_route_proceeds_while_json_status_saturated() {
+        use crate::handlers::status::page_router;
+
+        let state = HoldState {
+            arrived: Arc::new(AtomicUsize::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        };
+        // The JSON subtree carries the overload layers; the page route is
+        // merged in WITHOUT them, mirroring production's off-budget page lane.
+        let json_subtree = apply_overload_layers(
+            axum::Router::new()
+                .route("/hold", get(hold_handler))
+                .with_state(state.clone()),
+        );
+        let app = json_subtree.merge(page_router());
+
+        // Saturate the JSON cap with parked requests, each holding a permit.
+        let mut handles = Vec::new();
+        for _ in 0..STATUS_MAX_INFLIGHT {
+            let app = app.clone();
+            handles.push(tokio::spawn(
+                async move { app.oneshot(get_request()).await },
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.arrived.load(Ordering::SeqCst) < STATUS_MAX_INFLIGHT {
+            assert!(
+                Instant::now() < deadline,
+                "JSON handlers never reached in-flight"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // Confirm the JSON cap is genuinely saturated: an extra JSON request
+        // sheds the fixed 503.
+        let shed = app.clone().oneshot(get_request()).await.unwrap();
+        assert_eq!(
+            shed.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "JSON subtree must shed while its cap is saturated"
+        );
+
+        // The page route is NOT gated by the JSON shed layers: it proceeds.
+        let page_req = HttpRequest::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let page = app.clone().oneshot(page_req).await.unwrap();
+        assert_eq!(
+            page.status(),
+            StatusCode::OK,
+            "GET / must not be shed by the JSON status cap"
+        );
+
+        // Release the parked JSON requests; they complete cleanly (the held
+        // permits were real, not a fluke of ordering).
+        state.release.add_permits(STATUS_MAX_INFLIGHT);
+        for handle in handles {
+            let resp = handle.await.unwrap().unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
     #[test]
     fn should_log_shed_samples_first_and_every_nth() {
         assert!(should_log_shed(1), "the first shed always logs");
