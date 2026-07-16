@@ -972,15 +972,25 @@ fn build_axum_router(
     //      burst sheds as a 503 instead of contending with the proxy.
     // `with_state` erases `Router<Arc<StatusState>>` to `Router<()>` so it
     // merges into the state-erased `versioned` router below.
+    //
+    // The dashboard page (`GET /`, stateless `Router<()>`) is merged in
+    // ALONGSIDE the JSON routes but OUTSIDE `apply_overload_layers`: it shares
+    // the host guard + auth-exemption, yet does NOT consume the JSON shed
+    // budget. A zero-I/O `&'static str` response cannot stall or hold a permit,
+    // and keeping it off that budget means an overload sheds status DATA while
+    // the operator's incident window (the shell) still loads.
     let status_state = crate::handlers::status::StatusState::from_app(&state, config_path);
     let status_allowlist = status_gate::StatusHostAllowlist::new(bound);
-    let status = status_gate::apply_overload_layers(
+    let status_json = status_gate::apply_overload_layers(
         crate::handlers::status::status_router().with_state(Arc::new(status_state)),
-    )
-    .layer(axum::middleware::from_fn_with_state(
-        status_allowlist,
-        status_gate::host_guard,
-    ));
+    );
+    let status_page = crate::handlers::status::page_router();
+    let status = status_json
+        .merge(status_page)
+        .layer(axum::middleware::from_fn_with_state(
+            status_allowlist,
+            status_gate::host_guard,
+        ));
 
     versioned
         .merge(status)

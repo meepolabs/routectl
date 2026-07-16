@@ -16,6 +16,7 @@
 mod config;
 mod doctor;
 mod health;
+mod page;
 mod router_view;
 mod types;
 mod usage;
@@ -34,6 +35,8 @@ use routectl_router::ActivationState;
 use serde::Serialize;
 
 pub use types::{Panel, PanelError, now_utc_rfc3339, vocabulary};
+
+pub use page::page_router;
 
 use crate::server::AppState;
 use router_view::StatusRouterHandle;
@@ -405,6 +408,7 @@ mod tests {
 
         let scans: &[(&str, &str, &[String])] = &[
             ("mod.rs", include_str!("mod.rs"), &panel_forbidden),
+            ("page.rs", include_str!("page.rs"), &panel_forbidden),
             ("types.rs", include_str!("types.rs"), &panel_forbidden),
             ("usage.rs", include_str!("usage.rs"), &panel_forbidden),
             ("health.rs", include_str!("health.rs"), &panel_forbidden),

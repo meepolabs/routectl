@@ -1025,6 +1025,15 @@ async fn status_subtree_is_auth_exempt_while_v1_still_requires_a_token() {
         );
     }
 
+    // The dashboard shell at `GET /` shares the status surface's auth-exemption
+    // (public-like-/health): served token-less even with auth configured.
+    let resp = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "GET / (dashboard shell) must be reachable without a token"
+    );
+
     // A /v1 route still rejects an unauthenticated request.
     let resp = client
         .get(format!("{base}/v1/models"))
@@ -1088,4 +1097,25 @@ async fn host_allowlist_rejects_status_but_not_v1() {
         200,
         "loopback Host must be allowed on /status"
     );
+
+    // The dashboard shell at `GET /` inherits the SAME host allowlist as the
+    // JSON: an off-allowlist Host is turned away at page load, while `/v1/*`
+    // (which never carries the guard) is unaffected, and the default loopback
+    // Host serves the shell.
+    let resp = client
+        .get(format!("{base}/"))
+        .header(reqwest::header::HOST, "evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "a disallowed Host to GET / must be rejected"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden_host");
+
+    let resp = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "loopback Host must be allowed on GET /");
 }
