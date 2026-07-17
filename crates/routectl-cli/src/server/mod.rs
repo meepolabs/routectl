@@ -2194,7 +2194,7 @@ mod tests {
 
     /// Write a `credentials.json` carrying one record per seat key in
     /// `seats` (each `(key, access_token)`) using the same JSON shape +
-    /// 0o600 hygiene the production `file_io::save` emits, so
+    /// 0o600 hygiene the production credentials writer emits, so
     /// `OAuthStore::open` / `reload_from_disk` accept it. Keys are the raw
     /// credentials-map keys: a bare provider (`anthropic`) for the default
     /// seat, `provider#label` for a labeled seat.

@@ -34,7 +34,7 @@ use rand::TryRng;
 use rand::rngs::SysRng;
 use url::Url;
 
-use crate::oauth::providers::{AuthParams, OAuthFlow, truncate};
+use crate::oauth::providers::{AuthParams, OAuthFlow, refresh_classify, truncate};
 use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
@@ -371,7 +371,7 @@ fn check_status_error(
     }
     let invalid_grant_status =
         status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED;
-    if is_refresh && invalid_grant_status && is_invalid_grant(body) {
+    if is_refresh && invalid_grant_status && refresh_classify::is_invalid_grant(body) {
         return Err(OAuthError::RefreshExpired("xai".into()));
     }
     Err(if is_refresh {
@@ -384,16 +384,6 @@ fn check_status_error(
             truncate(body, 500)
         ))
     })
-}
-
-/// True if the token-endpoint error body's `error` field is
-/// `invalid_grant` -- xAI's terminal signal for a dead refresh token.
-fn is_invalid_grant(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-        .as_deref()
-        == Some("invalid_grant")
 }
 
 /// Parse the JSON body into the internal `Resp` shape. Flow-aware so a

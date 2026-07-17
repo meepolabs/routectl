@@ -6,8 +6,31 @@
 //! and the `on_auth_failure -> refresh + persist` hook. The refresh
 //! body POSTs through the per-provider `OAuthFlow::refresh_token`,
 //! double-checks under a per-provider mutex so concurrent callers do
-//! not stampede the token endpoint, and persists atomically via
-//! `file_io::save` (write-temp + fsync + rename).
+//! not stampede the token endpoint, and persists every mutation through
+//! `file_io::update_under_lock`: take the in-process write guard, re-read
+//! the disk-fresh state under a cross-process advisory lock, merge the
+//! one-seat change, atomic-write, then commit the returned merged file to
+//! the cache. Re-reading under the lock is what stops a stale cache from
+//! clobbering a seat a sibling `routectl` process wrote concurrently.
+//!
+//! # Start-and-degrade (deliberate runtime contract)
+//!
+//! A long-running `serve` MUST NOT fail startup, nor drop its oauth arm
+//! for the whole process, just because `credentials.json` is corrupt,
+//! wrong-schema, or wrong-perms. `open_or_degraded` therefore ALWAYS
+//! constructs a store on a resolvable path: on a load failure it records
+//! the true (sanitized, path-free, value-free) cause in `load_error` and
+//! keeps the store PRESENT with an empty in-memory cache. Every request
+//! then surfaces that cause instead of a misleading "not logged in", and
+//! every write is refused (a store that could not READ the file must never
+//! OVERWRITE it -- that would lose a schema-mismatched or momentarily
+//! unreadable file). The operator fixes the file, the existing file-watch
+//! reload runs `reload_from_disk`, a clean load clears `load_error`, and
+//! the store is live again -- with no restart. Only the genuine
+//! no-config-dir case (neither `HOME` nor `XDG_CONFIG_HOME` set) drops the
+//! arm, via `open_default_degradable` returning `OpenOutcome::NoConfigDir`.
+//! The CLI login/whoami/refresh/logout path keeps using the fail-fast
+//! `open`/`open_default`, which hard-fail on a broken file by design.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -62,6 +85,25 @@ pub enum LocalProbe {
     StoreUnavailable,
 }
 
+/// Outcome of [`OAuthStore::open_default_degradable`]. A resolvable
+/// config path ALWAYS yields `Present` (the store may be degraded -- see
+/// [`OAuthStore::open_or_degraded`]); only a genuinely absent config
+/// directory (neither `HOME` nor `XDG_CONFIG_HOME` set) yields
+/// `NoConfigDir`, the one case where `serve` drops the oauth arm.
+///
+/// Deliberately NOT a typed open-error enum: a degraded store keeps its
+/// cause as a sanitized string inside the handle, so this outcome has
+/// exactly two branches (a store to wire up, or no config dir at all).
+pub enum OpenOutcome {
+    /// A store handle to wire into the composite. Live on a clean or
+    /// missing file; degraded (present-but-erroring) on a broken one.
+    Present(OAuthStore),
+    /// No config directory could be located (no `HOME`, no
+    /// `XDG_CONFIG_HOME`). The composite drops the oauth arm silently --
+    /// configs that only use `env://` / `file://` / `literal:` still run.
+    NoConfigDir,
+}
+
 /// Routectl-managed OAuth credentials store. Cheap to clone; the
 /// inner state is `Arc`-shared so multiple `Provider` instances can
 /// share one store (and one per-provider refresh single-flight gate).
@@ -73,6 +115,17 @@ pub struct OAuthStore {
 struct Inner {
     path: PathBuf,
     file: RwLock<CredentialsFile>,
+    /// Sanitized degrade cause, `Some` when this store was opened over a
+    /// credentials file that failed to load (`open_or_degraded`). While
+    /// `Some`, every request surfaces this cause instead of resolving and
+    /// every write is refused (never overwrite a file we could not read).
+    /// A successful `reload_from_disk` clears it back to `None`. Path-free
+    /// and value-free by construction (see `sanitize_open_error`). Guarded
+    /// by a `std::sync::RwLock`: the critical section is a tiny
+    /// `Option<String>` clone/set that never crosses an await, so a sync
+    /// lock is the right primitive and keeps it off the tokio file lock's
+    /// ordering entirely.
+    load_error: std::sync::RwLock<Option<String>>,
     /// HTTP client used by login + refresh. Pooled so repeated POSTs
     /// reuse one TCP connection. `connect_timeout` short-circuits
     /// hung-during-DNS situations; the overall `timeout` keeps a slow
@@ -133,36 +186,20 @@ impl OAuthStore {
 
     /// Open the store at `path`, loading any existing credentials. A
     /// missing file yields an empty in-memory store -- first run is
-    /// not an error.
+    /// not an error. Any OTHER load failure (corrupt / wrong-schema /
+    /// wrong-perms / io) hard-fails: this is the fail-fast path the CLI
+    /// login/whoami/refresh/logout commands want. `serve` uses
+    /// `open_or_degraded` instead so a broken file degrades rather than
+    /// crashing the daemon.
     pub async fn open(path: impl Into<PathBuf>) -> OAuthResult<Self> {
         let path: PathBuf = path.into();
         let cf = file_io::load(&path).await?;
-        // Disable redirect-following: the refresh POST carries the
-        // long-lived refresh token in the body, and a 307/308 from
-        // the IdP would replay that POST to the redirect target.
-        // Treat any 3xx from the token endpoint as an upstream
-        // failure rather than silently re-sending the secret.
-        //
-        // The client is identity-neutral transport: connect/total
-        // timeouts plus no-redirect. Per-provider identity (the codex
-        // originator/residency/User-Agent, or the Anthropic
-        // claude-cli User-Agent) is stamped per-request inside each
-        // `OAuthFlow`, so one provider's fingerprint never leaks onto
-        // another provider's token endpoint.
-        let http = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(
-                Self::HTTP_CONNECT_TIMEOUT_SECS,
-            ))
-            .timeout(std::time::Duration::from_secs(
-                Self::HTTP_TOTAL_TIMEOUT_SECS,
-            ))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| OAuthError::Internal(format!("reqwest client: {e}")))?;
+        let http = Self::build_http_client()?;
         Ok(Self {
             inner: Arc::new(Inner {
                 path,
                 file: RwLock::new(cf),
+                load_error: std::sync::RwLock::new(None),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
@@ -172,11 +209,80 @@ impl OAuthStore {
         })
     }
 
+    /// Open the store at `path` WITHOUT ever failing on a load error --
+    /// the start-and-degrade path used by `serve`. A clean file (or a
+    /// missing one, first run) yields a live store. A corrupt /
+    /// wrong-schema / wrong-perms / io load failure yields a DEGRADED
+    /// store: an empty in-memory cache plus the true (sanitized) cause in
+    /// `load_error`. A degraded store surfaces that cause at request time
+    /// and refuses writes, and recovers on the next successful
+    /// `reload_from_disk` -- all without a restart (see the module doc).
+    pub async fn open_or_degraded(path: impl Into<PathBuf>) -> OAuthResult<Self> {
+        let path: PathBuf = path.into();
+        let (cf, load_error) = match file_io::load(&path).await {
+            Ok(cf) => (cf, None),
+            Err(e) => (CredentialsFile::empty(), Some(sanitize_open_error(&e))),
+        };
+        let http = Self::build_http_client()?;
+        Ok(Self {
+            inner: Arc::new(Inner {
+                path,
+                file: RwLock::new(cf),
+                load_error: std::sync::RwLock::new(load_error),
+                http,
+                refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
+                reload_gen: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                refresh_flow: None,
+            }),
+        })
+    }
+
+    /// Build the shared OAuth transport client.
+    ///
+    /// Disable redirect-following: the refresh POST carries the
+    /// long-lived refresh token in the body, and a 307/308 from
+    /// the IdP would replay that POST to the redirect target.
+    /// Treat any 3xx from the token endpoint as an upstream
+    /// failure rather than silently re-sending the secret.
+    ///
+    /// The client is identity-neutral transport: connect/total
+    /// timeouts plus no-redirect. Per-provider identity (the codex
+    /// originator/residency/User-Agent, or the Anthropic
+    /// claude-cli User-Agent) is stamped per-request inside each
+    /// `OAuthFlow`, so one provider's fingerprint never leaks onto
+    /// another provider's token endpoint.
+    fn build_http_client() -> OAuthResult<reqwest::Client> {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(
+                Self::HTTP_CONNECT_TIMEOUT_SECS,
+            ))
+            .timeout(std::time::Duration::from_secs(
+                Self::HTTP_TOTAL_TIMEOUT_SECS,
+            ))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| OAuthError::Internal(format!("reqwest client: {e}")))
+    }
+
     /// Open with the default path
     /// (`$XDG_CONFIG_HOME/routectl/credentials.json`).
     pub async fn open_default() -> OAuthResult<Self> {
         let path = file_io::default_path()?;
         Self::open(path).await
+    }
+
+    /// Open the default-path store for a long-running `serve`, NEVER
+    /// failing startup on a broken credentials file. A resolvable path
+    /// ALWAYS yields `Present` (the store may be degraded -- see
+    /// `open_or_degraded`); only a genuinely absent config directory
+    /// (neither `HOME` nor `XDG_CONFIG_HOME` set) yields `NoConfigDir`,
+    /// the one case where the composite drops the oauth arm entirely.
+    pub async fn open_default_degradable() -> OAuthResult<OpenOutcome> {
+        let Ok(path) = file_io::default_path() else {
+            return Ok(OpenOutcome::NoConfigDir);
+        };
+        Ok(OpenOutcome::Present(Self::open_or_degraded(path).await?))
     }
 
     /// Where the credentials live on disk. Useful for `routectl
@@ -191,9 +297,29 @@ impl OAuthStore {
         &self.inner.http
     }
 
+    /// The sanitized degrade cause when this store was opened over a
+    /// credentials file that failed to load, else `None`. `Some` gates
+    /// every read (surfaces the cause) and every write (refuses to
+    /// overwrite an unreadable file); cleared by a successful
+    /// `reload_from_disk`.
+    fn load_error_cause(&self) -> Option<String> {
+        self.inner
+            .load_error
+            .read()
+            .expect("load_error lock poisoned")
+            .clone()
+    }
+
     /// Read a record without expiry checking. Internal use only --
     /// the public `get()` enforces near-expiry semantics.
     async fn read_record(&self, provider: &str) -> OAuthResult<TokenRecord> {
+        // A degraded store (broken credentials file at open) surfaces the
+        // true cause here rather than a misleading `NotLoggedIn`: the file
+        // could not be read, so "no credentials for X" would send the
+        // operator down the wrong path.
+        if let Some(cause) = self.load_error_cause() {
+            return Err(OAuthError::Degraded(cause));
+        }
         let guard = self.inner.file.read().await;
         guard
             .get(provider)
@@ -260,47 +386,104 @@ impl OAuthStore {
     /// exists for `provider` -- the Gemini provider must be logged in
     /// before a project id can be cached.
     pub async fn set_cloud_project_id(&self, provider: &str, project_id: &str) -> OAuthResult<()> {
+        // A degraded store must never overwrite a file it could not read
+        // (a schema-mismatched or momentarily unreadable file would be
+        // lost). Refuse before the lock helper and surface the cause.
+        if let Some(cause) = self.load_error_cause() {
+            return Err(OAuthError::Degraded(cause));
+        }
         let mut guard = self.inner.file.write().await;
-        let mut rec = guard
-            .get(provider)
-            .cloned()
-            .ok_or_else(|| OAuthError::NotLoggedIn(provider.to_string()))?;
-        rec.cloud_project_id = Some(project_id.to_string());
-        let mut staged = guard.clone();
-        staged.upsert(provider, rec);
-        file_io::save(&self.inner.path, &staged).await?;
-        *guard = staged;
+        let provider = provider.to_string();
+        let project_id = project_id.to_string();
+        let (merged, found) = file_io::update_under_lock(&self.inner.path, {
+            let provider = provider.clone();
+            move |cf| match cf.get(&provider).cloned() {
+                Some(mut rec) => {
+                    rec.cloud_project_id = Some(project_id);
+                    cf.upsert(&provider, rec);
+                    file_io::Mutation {
+                        directive: file_io::WriteDirective::Write,
+                        report: true,
+                    }
+                }
+                // Absent from the disk-fresh state (never logged in, or a
+                // sibling logged out): do not create a seat -- report it so
+                // the caller surfaces NotLoggedIn.
+                None => file_io::Mutation {
+                    directive: file_io::WriteDirective::Skip,
+                    report: false,
+                },
+            }
+        })
+        .await?;
+        // Commit the merged disk-fresh state to the cache even on the
+        // not-found path: a sibling's logout observed on disk must clear
+        // the stale in-memory seat immediately, not at the next reload.
+        *guard = merged;
+        if !found {
+            return Err(OAuthError::NotLoggedIn(provider));
+        }
         Ok(())
     }
 
-    /// Persist a token record atomically. Disk write happens FIRST,
-    /// off a clone of the current in-memory state; the in-memory cache
-    /// only commits on a successful save. This way a failed disk write
-    /// (full FS, EIO, permissions glitch) leaves both halves consistent
-    /// rather than diverging into "memory says new token, disk still
-    /// has the old one".
+    /// Persist a token record. Takes the in-process write guard first, then
+    /// merges the one-seat upsert onto the disk-fresh state under the
+    /// cross-process advisory lock (`file_io::update_under_lock`), and
+    /// commits the returned merged file to the in-memory cache. Re-reading
+    /// under the lock is what stops a stale cache from clobbering a seat a
+    /// sibling process wrote concurrently; a failed disk write leaves both
+    /// halves consistent (the cache is committed only after the write
+    /// succeeds). Login upserts UNCONDITIONALLY -- it is the one mutation
+    /// that establishes a seat regardless of the prior on-disk state.
     pub(crate) async fn write_record(&self, provider: &str, rec: TokenRecord) -> OAuthResult<()> {
+        // A degraded store must never overwrite a file it could not read.
+        // Refuse before the lock helper and surface the cause.
+        if let Some(cause) = self.load_error_cause() {
+            return Err(OAuthError::Degraded(cause));
+        }
         let mut guard = self.inner.file.write().await;
-        let mut staged = guard.clone();
-        staged.upsert(provider, rec);
-        file_io::save(&self.inner.path, &staged).await?;
-        *guard = staged;
+        let provider = provider.to_string();
+        let (merged, ()) = file_io::update_under_lock(&self.inner.path, move |cf| {
+            cf.upsert(&provider, rec);
+            file_io::Mutation {
+                directive: file_io::WriteDirective::Write,
+                report: (),
+            }
+        })
+        .await?;
+        *guard = merged;
         Ok(())
     }
 
     /// Remove a provider's tokens (used by `routectl logout`). Same
-    /// disk-first ordering as `write_record`: stage the removal,
-    /// persist, then commit to memory only on `Ok(())`.
+    /// re-read-under-lock merge as `write_record`: the removal targets the
+    /// DISK-FRESH state, so a sibling seat written since the cache loaded
+    /// survives. Reports whether the seat was present in the disk-fresh
+    /// state (`Ok(false)` when absent, preserving first-time-logout
+    /// semantics), and writes nothing when there was nothing to remove.
     pub(crate) async fn remove_provider(&self, provider: &str) -> OAuthResult<bool> {
-        let mut guard = self.inner.file.write().await;
-        if !guard.providers.contains_key(provider) {
-            return Ok(false);
+        // A degraded store must never overwrite a file it could not read.
+        // Refuse before the lock helper and surface the cause.
+        if let Some(cause) = self.load_error_cause() {
+            return Err(OAuthError::Degraded(cause));
         }
-        let mut staged = guard.clone();
-        staged.remove(provider);
-        file_io::save(&self.inner.path, &staged).await?;
-        *guard = staged;
-        Ok(true)
+        let mut guard = self.inner.file.write().await;
+        let provider = provider.to_string();
+        let (merged, was_present) = file_io::update_under_lock(&self.inner.path, move |cf| {
+            let was_present = cf.remove(&provider).is_some();
+            let directive = if was_present {
+                file_io::WriteDirective::Write
+            } else {
+                file_io::WriteDirective::Skip
+            };
+            file_io::Mutation {
+                directive,
+                report: was_present,
+            }
+        })
+        .await?;
+        *guard = merged;
+        Ok(was_present)
     }
 
     /// Snapshot the set of credential (seat) keys currently in the
@@ -428,6 +611,18 @@ impl OAuthStore {
         let cf = file_io::load(&self.inner.path).await?;
         let mut guard = self.inner.file.write().await;
         *guard = cf;
+        // A successful load clears any degrade marker: the file is
+        // readable again, so the next request resolves normally instead of
+        // surfacing the stale cause. This is the ENTIRE recovery mechanism
+        // for a degraded store -- the arm stays `Some`, the file-watch
+        // reload fires this on an operator fix, and the store is live again
+        // without a restart. A FAILED load returns early above and leaves
+        // both the cache and this marker untouched (stays degraded).
+        *self
+            .inner
+            .load_error
+            .write()
+            .expect("load_error lock poisoned") = None;
         // Bump the reload generation counter while the write lock is held.
         // Any concurrent `refresh_under_lock` that snapshots the counter
         // before this line and then checks it again (under its own write
@@ -570,16 +765,47 @@ impl OAuthStore {
                     .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(seat.to_string())))?;
                 return Ok(reloaded);
             }
-            // No reload raced us: commit the refresh result disk-first.
-            // Disk-first ordering: save before committing to memory so a
-            // failed save leaves both halves consistent (same invariant
-            // as `write_record`).
-            let mut staged = wguard.clone();
-            staged.upsert(seat, new_rec.clone());
-            file_io::save(&self.inner.path, &staged)
-                .await
-                .map_err(Error::from)?;
-            *wguard = staged;
+            // No intra-process reload raced us: commit under the
+            // cross-process advisory lock, merging the one-seat rotation
+            // onto the disk-fresh state so a sibling seat survives (the
+            // `reload_gen` guard above covers the intra-process reload race;
+            // this lock covers the cross-process merge -- they are
+            // complementary). NO-RESURRECT: if the seat is absent from the
+            // disk-fresh state (a sibling logged it out mid-refresh), that
+            // logout is authoritative -- discard the refresh result rather
+            // than re-adding the seat. Only login (`write_record`) upserts
+            // unconditionally.
+            // A degraded store must never commit over a file it could not
+            // read. Defensive: every refresh enters through `read_record`
+            // (which already gates a degraded store out before the network
+            // POST), and `load_error` is only ever set at open and cleared
+            // at reload -- so this guard is a belt-and-braces boundary at
+            // the actual write site rather than a reachable path today.
+            if let Some(cause) = self.load_error_cause() {
+                return Err(Error::from(OAuthError::Degraded(cause)));
+            }
+            let seat_owned = seat.to_string();
+            let new_rec_for_commit = new_rec.clone();
+            let (merged, seat_present) = file_io::update_under_lock(&self.inner.path, move |cf| {
+                if cf.get(&seat_owned).is_some() {
+                    cf.upsert(&seat_owned, new_rec_for_commit);
+                    file_io::Mutation {
+                        directive: file_io::WriteDirective::Write,
+                        report: true,
+                    }
+                } else {
+                    file_io::Mutation {
+                        directive: file_io::WriteDirective::Skip,
+                        report: false,
+                    }
+                }
+            })
+            .await
+            .map_err(Error::from)?;
+            *wguard = merged;
+            if !seat_present {
+                return Err(Error::from(OAuthError::NotLoggedIn(seat.to_string())));
+            }
         }
         Ok(new_rec)
     }
@@ -596,6 +822,37 @@ impl OAuthStore {
             providers::lookup(provider).map_err(Error::from)?;
         Ok(flow)
     }
+}
+
+/// Map an OAuth-store LOAD failure to the path-free, value-free cause a
+/// degraded store surfaces at request time. Only the failure CLASS (plus
+/// the store basename and, for a schema mismatch, the version numbers)
+/// survives -- never a variant's raw `Display`, which interpolates the
+/// operator's home-directory path (`open <path>: ...`) or the on-disk
+/// permission bits. Mirrors the request-time taxonomy in
+/// `doctor::sanitize_store_open_error`, and appends the reload hint: a
+/// degraded store recovers the moment the file is fixed, without a
+/// restart. The `_` arm is itself a class message (not a passthrough), so
+/// a future path-bearing `OAuthError` variant fails safe.
+fn sanitize_open_error(err: &OAuthError) -> String {
+    const STORE_BASENAME: &str = "credentials.json";
+    const RELOAD_HINT: &str = "fix the file and it reloads without restart";
+    let class = match err {
+        OAuthError::SchemaMismatch {
+            found, expected, ..
+        } => format!(
+            "credentials store schema is v{found}; this binary expects v{expected}; \
+             upgrade routectl or delete {STORE_BASENAME} and re-run `routectl login`"
+        ),
+        OAuthError::CorruptedFile { .. } => {
+            format!("oauth credentials file ({STORE_BASENAME}) is corrupted")
+        }
+        OAuthError::Io(_) => {
+            format!("oauth credentials file ({STORE_BASENAME}) could not be read")
+        }
+        _ => format!("oauth credentials store ({STORE_BASENAME}) could not be opened"),
+    };
+    format!("{class}; {RELOAD_HINT}")
 }
 
 #[async_trait]
@@ -1011,6 +1268,7 @@ mod tests {
             inner: Arc::new(Inner {
                 path,
                 file: RwLock::new(cf),
+                load_error: std::sync::RwLock::new(None),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
@@ -1580,6 +1838,7 @@ mod tests {
             inner: Arc::new(Inner {
                 path: bad_path,
                 file: RwLock::new(CredentialsFile::empty()),
+                load_error: std::sync::RwLock::new(None),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
@@ -2629,6 +2888,587 @@ mod tests {
             flow.call_count(),
             0,
             "probe_local must never touch the refresh flow"
+        );
+    }
+
+    // ---- cross-process re-read-under-lock merge ----
+    //
+    // Two `OAuthStore::open` handles on ONE credentials file model the
+    // daemon and a `routectl login`/`refresh`/`logout` CLI process writing
+    // the same file. A handle whose in-memory cache is stale must NOT erase
+    // a seat a sibling wrote since the cache loaded: every mutation re-reads
+    // the disk-fresh state under the advisory lock and merges its single-seat
+    // change onto it, rather than atomic-renaming a whole-file clone of the
+    // stale cache.
+
+    #[tokio::test]
+    async fn stale_handle_write_preserves_sibling_seat() {
+        // Arrange: two handles open on one empty file. Handle 1's cache is
+        // captured empty and never reloaded, so it is stale after handle 2
+        // writes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let handle1 = OAuthStore::open(&path).await.unwrap();
+        let handle2 = OAuthStore::open(&path).await.unwrap();
+
+        // Act: sibling writes seat B; then the stale handle writes seat A.
+        handle2
+            .write_record("anthropic#seat-b", rec_named("tok-b", unix_now() + 3600))
+            .await
+            .unwrap();
+        handle1
+            .write_record("anthropic", rec_named("tok-a", unix_now() + 3600))
+            .await
+            .unwrap();
+
+        // Assert: the on-disk file carries BOTH seats. Pre-fix, handle 1's
+        // whole-file clone of its stale (empty) cache clobbers seat B.
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        let listed: BTreeMap<String, TokenRecord> = reopened.list().await.into_iter().collect();
+        assert_eq!(
+            listed["anthropic#seat-b"].access_token.expose(),
+            "tok-b",
+            "sibling seat B must survive the stale-handle write"
+        );
+        assert_eq!(
+            listed["anthropic"].access_token.expose(),
+            "tok-a",
+            "seat A must be written"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_does_not_clobber_sibling_seat() {
+        // Arrange: seed seat A so the stale handle's cache holds it; two
+        // handles open on it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_named("tok-a", unix_now() + 3600))
+            .await
+            .unwrap();
+        drop(seed);
+        let handle1 = OAuthStore::open(&path).await.unwrap();
+        let handle2 = OAuthStore::open(&path).await.unwrap();
+
+        // Act: sibling writes seat B; the stale handle removes seat A.
+        handle2
+            .write_record("anthropic#seat-b", rec_named("tok-b", unix_now() + 3600))
+            .await
+            .unwrap();
+        let removed = handle1.remove_provider("anthropic").await.unwrap();
+
+        // Assert: seat A removed, sibling seat B preserved.
+        assert!(removed, "seat A was present in the disk-fresh state");
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        let listed: BTreeMap<String, TokenRecord> = reopened.list().await.into_iter().collect();
+        assert!(
+            !listed.contains_key("anthropic"),
+            "seat A must be removed from disk"
+        );
+        assert_eq!(
+            listed["anthropic#seat-b"].access_token.expose(),
+            "tok-b",
+            "sibling seat B must survive the removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_absent_seat_reports_false_against_disk_fresh_state() {
+        // A logout of a seat absent from the disk-fresh state reports
+        // Ok(false) and writes nothing (preserving the remove-absent
+        // semantics against the re-read state, not the stale cache).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        let removed = store.remove_provider("anthropic").await.unwrap();
+        assert!(!removed, "removing an absent seat reports no removal");
+    }
+
+    #[tokio::test]
+    async fn set_project_id_does_not_clobber_sibling_seat() {
+        // Arrange: seed seat A; two handles.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_named("tok-a", unix_now() + 3600))
+            .await
+            .unwrap();
+        drop(seed);
+        let handle1 = OAuthStore::open(&path).await.unwrap();
+        let handle2 = OAuthStore::open(&path).await.unwrap();
+
+        // Act: sibling writes seat B; the stale handle sets a project id on
+        // seat A.
+        handle2
+            .write_record("anthropic#seat-b", rec_named("tok-b", unix_now() + 3600))
+            .await
+            .unwrap();
+        handle1
+            .set_cloud_project_id("anthropic", "projects/foo")
+            .await
+            .unwrap();
+
+        // Assert: seat A carries the project id, sibling seat B preserved.
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        let listed: BTreeMap<String, TokenRecord> = reopened.list().await.into_iter().collect();
+        assert_eq!(
+            listed["anthropic"].cloud_project_id.as_deref(),
+            Some("projects/foo"),
+            "seat A's project id must be written"
+        );
+        assert_eq!(
+            listed["anthropic#seat-b"].access_token.expose(),
+            "tok-b",
+            "sibling seat B must survive set_cloud_project_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_project_id_clears_stale_seat_when_sibling_logged_out() {
+        // Arrange: seed seat A with a project id on disk, then open a handle
+        // whose cache holds it. A sibling logs the seat OUT on disk out of
+        // band, leaving the first handle's cache stale.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        seed.set_cloud_project_id("anthropic", "projects/original")
+            .await
+            .unwrap();
+        drop(seed);
+        let stale = OAuthStore::open(&path).await.unwrap();
+        let sibling = OAuthStore::open(&path).await.unwrap();
+        sibling.logout("anthropic").await.unwrap();
+        drop(sibling);
+
+        // Precondition: the stale handle's cache still holds seat A -- the
+        // sibling logout has not yet been observed through this handle.
+        assert_eq!(
+            stale.peek_cloud_project_id("anthropic").await.as_deref(),
+            Some("projects/original"),
+            "stale cache must still hold the seat before the not-found merge"
+        );
+
+        // Act: set a project id through the stale handle. The re-read under
+        // the lock sees the disk-fresh (empty) state and reports not-found.
+        let result = stale
+            .set_cloud_project_id("anthropic", "projects/new")
+            .await;
+
+        // Assert: the call surfaces NotLoggedIn AND the stale seat is cleared
+        // from the in-memory cache immediately -- a subsequent read through
+        // the same handle no longer sees it (not deferred to a reload).
+        assert!(
+            matches!(result, Err(OAuthError::NotLoggedIn(_))),
+            "setting a project id on a sibling-logged-out seat must return NotLoggedIn"
+        );
+        assert!(
+            stale.read_record("anthropic").await.is_err(),
+            "the stale seat must be cleared from the cache on the not-found path"
+        );
+        assert!(
+            stale.peek_cloud_project_id("anthropic").await.is_none(),
+            "a subsequent read through the same handle must not see the stale seat"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_commit_does_not_clobber_sibling_seat() {
+        // Arrange: seed seat A near-expiry so a `get` triggers a refresh;
+        // open a handle with the fake flow (cache holds only seat A).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_at(unix_now() + 10))
+            .await
+            .unwrap();
+        drop(seed);
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+            "tok-a-refreshed".into(),
+        )));
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        // A sibling writes seat B to disk out of band, after the flow-backed
+        // handle's cache loaded.
+        let sibling = OAuthStore::open(&path).await.unwrap();
+        sibling
+            .write_record("anthropic#seat-b", rec_named("tok-b", unix_now() + 3600))
+            .await
+            .unwrap();
+        drop(sibling);
+
+        // Act: trigger seat A's refresh through the near-expiry get path.
+        let tok = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(tok, "tok-a-refreshed");
+        assert_eq!(flow.call_count(), 1, "exactly one refresh fired");
+
+        // Assert: the refresh commit merged onto the disk-fresh state, so the
+        // sibling seat survives alongside the rotated seat A.
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        let listed: BTreeMap<String, TokenRecord> = reopened.list().await.into_iter().collect();
+        assert_eq!(
+            listed["anthropic"].access_token.expose(),
+            "tok-a-refreshed",
+            "seat A must carry the refreshed token"
+        );
+        assert_eq!(
+            listed["anthropic#seat-b"].access_token.expose(),
+            "tok-b",
+            "sibling seat B must survive the refresh commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_resurrect_logged_out_seat() {
+        // Arrange: seed a seat, then open a flow-backed handle whose cache
+        // still holds it. A sibling logs the seat OUT on disk before the
+        // handle's refresh commits.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        drop(seed);
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+            "tok-refreshed".into(),
+        )));
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        // Sibling logs the seat out on disk out of band.
+        let sibling = OAuthStore::open(&path).await.unwrap();
+        assert!(sibling.logout("anthropic").await.unwrap());
+        drop(sibling);
+
+        // Act: force a refresh from the stale handle. The POST runs, but the
+        // commit re-reads the disk-fresh state (seat gone).
+        let result = store.force_refresh("anthropic", None).await;
+
+        // Assert: the sibling logout is authoritative -- the refresh must NOT
+        // re-add the seat, and the operation surfaces the logged-out state.
+        assert!(
+            result.is_err(),
+            "refresh against a logged-out seat must not succeed"
+        );
+        assert_eq!(
+            flow.call_count(),
+            1,
+            "the refresh POST ran but its result was discarded"
+        );
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        assert!(
+            reopened.list().await.is_empty(),
+            "a logged-out seat must not be resurrected on disk"
+        );
+    }
+
+    // ---- start-and-degrade + hot-reload recovery ----
+    //
+    // `serve` opens the credentials store through `open_or_degraded`: a
+    // broken file (corrupt / wrong-schema / wrong-perms) does NOT fail
+    // startup and does NOT drop the oauth arm. The store is kept present
+    // but degraded -- every read surfaces the TRUE sanitized cause (not a
+    // misleading "not logged in" or the no-config-dir HOME/XDG string) and
+    // every write is refused (never overwrite a file we could not read).
+    // The operator fixes the file, `reload_from_disk` clears the marker,
+    // and the store is live again with no restart.
+
+    fn oauth_ref(provider: &str) -> SecretRef {
+        SecretRef::OAuth {
+            provider: provider.to_string(),
+            label: None,
+        }
+    }
+
+    /// Write raw bytes to a credentials path with owner-only `0600` perms
+    /// on Unix, so the file passes the loader's permission hygiene and the
+    /// degrade under test is the JSON/schema failure, not the perms check.
+    fn write_creds_0600(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn degraded_store_surfaces_perms_cause_not_missing_home() {
+        use std::os::unix::fs::PermissionsExt;
+        // Arrange: a valid-JSON credentials file with world-readable 0644
+        // perms -- the loader refuses it (the file holds refresh tokens).
+        let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let path = dir.path().join("credentials.json");
+        std::fs::write(&path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // Act: the serve start-and-degrade path always constructs a store.
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+        let msg = store
+            .get(&oauth_ref("anthropic"))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        // Assert: the true perms class, NOT the misleading HOME/XDG string,
+        // and path-free / perms-value-free.
+        assert!(
+            msg.contains("could not be read"),
+            "expected the perms class, got: {msg}"
+        );
+        assert!(
+            !msg.contains("HOME") && !msg.contains("XDG"),
+            "a degraded perms cause must not surface the no-config-dir string: {msg}"
+        );
+        assert!(
+            !msg.contains(&dir_str) && !msg.contains("644"),
+            "the cause must be path-free and perms-value-free: {msg}"
+        );
+        assert!(
+            msg.contains("reloads without restart"),
+            "expected the recovery hint, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn degraded_store_surfaces_corrupt_cause() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let path = dir.path().join("credentials.json");
+        write_creds_0600(&path, b"<<corrupt-json>>");
+
+        // Act
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+        let msg = store
+            .get(&oauth_ref("anthropic"))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        // Assert
+        assert!(
+            msg.contains("corrupted"),
+            "expected the corrupt class, got: {msg}"
+        );
+        assert!(
+            !msg.contains("HOME") && !msg.contains("XDG"),
+            "must not surface the no-config-dir string: {msg}"
+        );
+        assert!(
+            !msg.contains(&dir_str),
+            "the cause must be path-free: {msg}"
+        );
+        assert!(
+            msg.contains("reloads without restart"),
+            "expected the recovery hint, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn degraded_store_surfaces_schema_mismatch_cause() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let path = dir.path().join("credentials.json");
+        write_creds_0600(&path, br#"{"schema_version":99,"providers":{}}"#);
+
+        // Act
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+        let msg = store
+            .get(&oauth_ref("anthropic"))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        // Assert: the schema class carries the version numbers (permitted)
+        // and the re-login guidance, but no filesystem path.
+        assert!(
+            msg.contains("schema is v99"),
+            "expected the found version, got: {msg}"
+        );
+        assert!(
+            msg.contains("expects v1"),
+            "expected the wanted version, got: {msg}"
+        );
+        assert!(
+            msg.contains("routectl login"),
+            "expected the re-login guidance, got: {msg}"
+        );
+        assert!(
+            !msg.contains(&dir_str),
+            "the cause must be path-free: {msg}"
+        );
+        assert!(
+            msg.contains("reloads without restart"),
+            "expected the recovery hint, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn degraded_store_refuses_all_writes_and_preserves_file() {
+        // Arrange: a corrupt file the store could not read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        write_creds_0600(&path, b"<<corrupt-json>>");
+        let before = std::fs::read(&path).unwrap();
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+
+        // Act / Assert: every mutation is refused with the degrade cause --
+        // a store that could not READ the file must never OVERWRITE it.
+        assert!(
+            matches!(
+                store
+                    .write_record("anthropic", rec_at(unix_now() + 3600))
+                    .await,
+                Err(OAuthError::Degraded(_))
+            ),
+            "write_record must be refused on a degraded store"
+        );
+        assert!(
+            matches!(
+                store.remove_provider("anthropic").await,
+                Err(OAuthError::Degraded(_))
+            ),
+            "remove_provider must be refused on a degraded store"
+        );
+        assert!(
+            matches!(
+                store.set_cloud_project_id("anthropic", "projects/x").await,
+                Err(OAuthError::Degraded(_))
+            ),
+            "set_cloud_project_id must be refused on a degraded store"
+        );
+
+        // The unreadable file must be byte-identical -- no clobber.
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a degraded store must not overwrite the file it could not read"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_file_hot_reloads_without_restart() {
+        // Arrange: a corrupt file -> degraded store.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        write_creds_0600(&path, b"<<corrupt-json>>");
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+        // Degraded before the fix: the request errors.
+        assert!(
+            store.get(&oauth_ref("anthropic")).await.is_err(),
+            "a degraded store must error before the file is fixed"
+        );
+
+        // Act: the operator fixes the file with a valid, fresh (not
+        // near-expiry, so no network refresh) seat, then the existing
+        // reload path runs -- exactly what the file-watch coordinator does.
+        let valid = serde_json::json!({
+            "schema_version": 1,
+            "providers": {
+                "anthropic": {
+                    "access_token": "tok-recovered",
+                    "refresh_token": "rtok",
+                    "token_type": "Bearer",
+                    "expires_at_unix": unix_now() + 3600,
+                    "scopes": ["user:inference"],
+                    "obtained_at_unix": unix_now()
+                }
+            }
+        });
+        write_creds_0600(&path, &serde_json::to_vec_pretty(&valid).unwrap());
+        store.reload_from_disk().await.unwrap();
+
+        // Assert: recovered WITHOUT a restart -- the same handle resolves.
+        let tok = store.get(&oauth_ref("anthropic")).await.unwrap();
+        assert_eq!(tok, "tok-recovered");
+    }
+
+    #[tokio::test]
+    async fn open_or_degraded_missing_file_is_not_degraded() {
+        // A missing file is first-run, NOT a degrade: the request surfaces
+        // the normal NotLoggedIn guidance, not a degrade cause.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+
+        let msg = store
+            .get(&oauth_ref("anthropic"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("no credentials"),
+            "first-run must be NotLoggedIn, got: {msg}"
+        );
+        assert!(
+            !msg.contains("reloads without restart"),
+            "a missing file is not a degrade: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_or_degraded_valid_file_resolves_like_open() {
+        // A clean file loads live: reads resolve exactly as `open` would.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_named("tok-live", unix_now() + 3600))
+            .await
+            .unwrap();
+        drop(seed);
+
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+        let tok = store.get(&oauth_ref("anthropic")).await.unwrap();
+        assert_eq!(tok, "tok-live");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn open_default_degradable_yields_no_config_dir_without_home_or_xdg() {
+        // Arrange: neither HOME nor XDG_CONFIG_HOME set -- the one case
+        // that drops the oauth arm entirely.
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_home = std::env::var_os("HOME");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("HOME");
+        }
+
+        // Act
+        let outcome = OAuthStore::open_default_degradable().await;
+
+        // Restore env BEFORE asserting so a failure cannot leak into
+        // sibling serial tests.
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe {
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        // Assert
+        assert!(
+            matches!(outcome.unwrap(), OpenOutcome::NoConfigDir),
+            "no HOME/XDG must yield NoConfigDir, not a degraded Present store"
         );
     }
 }

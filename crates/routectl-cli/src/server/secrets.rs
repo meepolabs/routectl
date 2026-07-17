@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use routectl_auth::{MemoryStore, OAuthStore, SecretRef, SecretStore};
+use routectl_auth::{MemoryStore, OAuthStore, OpenOutcome, SecretRef, SecretStore};
 use routectl_core::Result;
 
 /// Composite resolver wired by `routectl serve` / `test` / `config`.
@@ -34,19 +34,36 @@ pub struct CompositeStore {
 
 impl CompositeStore {
     /// Build a CompositeStore at the default credentials path
-    /// (`$XDG_CONFIG_HOME/routectl/credentials.json`). If neither
-    /// `HOME` nor `XDG_CONFIG_HOME` is set the OAuth arm is dropped
-    /// (with a `tracing::warn!`) and only the MemoryStore arm is wired
-    /// up. Configs that don't use `oauth://` refs continue to work;
-    /// configs that do will surface a clear `Error::Auth` at request
-    /// time.
+    /// (`$XDG_CONFIG_HOME/routectl/credentials.json`). Start-and-degrade:
+    /// a corrupt / wrong-schema / wrong-perms `credentials.json` does NOT
+    /// fail startup and does NOT drop the OAuth arm -- the arm stays
+    /// present but degraded (`OAuthStore::open_or_degraded`), so
+    /// `oauth://` refs surface the true sanitized cause at request time
+    /// and recover the moment the operator fixes the file (the file-watch
+    /// reload clears the degrade marker; no restart). ONLY the genuine
+    /// no-config-dir case (neither `HOME` nor `XDG_CONFIG_HOME` set) drops
+    /// the arm (`OpenOutcome::NoConfigDir`), with a `tracing::warn!`:
+    /// configs that don't use `oauth://` refs continue to work; configs
+    /// that do surface a clear `Error::Auth` at request time.
     pub async fn open_default() -> Result<Self> {
-        match OAuthStore::open_default().await {
-            Ok(oauth) => Ok(Self::with_oauth(MemoryStore::new(), oauth)),
+        match OAuthStore::open_default_degradable().await {
+            Ok(OpenOutcome::Present(oauth)) => Ok(Self::with_oauth(MemoryStore::new(), oauth)),
+            Ok(OpenOutcome::NoConfigDir) => {
+                tracing::warn!(
+                    "OAuth credentials store unavailable (no HOME/XDG); \
+                     oauth:// refs will fail to resolve"
+                );
+                Ok(Self::without_oauth(MemoryStore::new()))
+            }
+            // `open_default_degradable` folds load failures into a degraded
+            // Present store, so an Err here is an unexpected construction
+            // failure (e.g. the HTTP client could not be built). Keep the
+            // no-oauth fallback so serve still starts.
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "OAuth credentials store unavailable; oauth:// refs will fail to resolve"
+                    "OAuth credentials store could not be constructed; \
+                     oauth:// refs will fail to resolve"
                 );
                 Ok(Self::without_oauth(MemoryStore::new()))
             }
@@ -523,6 +540,15 @@ mod tests {
             unsafe { std::env::remove_var(key) };
             Self { key, prev }
         }
+
+        fn set(key: &'static str, val: &std::ffi::OsStr) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: every EnvGuard caller is #[serial_test::serial], so no
+            // concurrent thread reads or writes this process's environment
+            // while set_var runs.
+            unsafe { std::env::set_var(key, val) };
+            Self { key, prev }
+        }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
@@ -685,5 +711,72 @@ mod tests {
 
         // Assert: the value persisted and reads back via the composite.
         assert_eq!(got.as_deref(), Some("projects/round-trip"));
+    }
+
+    /// Start-and-degrade at the composite seam: a corrupt `credentials.json`
+    /// under `$XDG_CONFIG_HOME` must NOT drop the oauth arm. `open_default`
+    /// succeeds with the arm PRESENT-but-degraded, so `file://` refs keep
+    /// resolving through the memory arm while `oauth://` refs surface the
+    /// TRUE sanitized cause (corrupt), not the no-config-dir HOME/XDG string
+    /// and not "OAuth store unavailable". Pins the `OpenOutcome::Present`
+    /// mapping and the request-time taxonomy through the real composite.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn degraded_composite_serves_file_but_oauth_carries_true_cause() {
+        // Arrange: XDG points at a temp dir whose credentials.json is
+        // corrupt; a file:// secret lives alongside.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path().as_os_str());
+        let creds = dir.path().join("routectl").join("credentials.json");
+        std::fs::create_dir_all(creds.parent().unwrap()).unwrap();
+        std::fs::write(&creds, b"<<corrupt-json>>").unwrap();
+        let secret_path = dir.path().join("secret-key");
+        std::fs::write(&secret_path, "sk-from-file\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        // Act: the serve start-and-degrade path must SUCCEED on a broken
+        // credentials file.
+        let store = CompositeStore::open_default()
+            .await
+            .expect("serve must start on a broken credentials file");
+
+        // Assert: file:// still resolves through the memory arm.
+        let file_val = store
+            .get(&SecretRef::File(secret_path))
+            .await
+            .expect("file:// must still serve while the oauth arm is degraded");
+        assert_eq!(file_val, "sk-from-file");
+
+        // oauth:// carries the TRUE cause -- present-but-degraded, not
+        // dropped, not the no-config-dir string.
+        let msg = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("corrupted"),
+            "expected the corrupt class, got: {msg}"
+        );
+        assert!(
+            !msg.contains("HOME") && !msg.contains("XDG"),
+            "must not surface the no-config-dir string: {msg}"
+        );
+        assert!(
+            !msg.contains("OAuth store unavailable"),
+            "the arm must be present-but-degraded, not dropped: {msg}"
+        );
+        assert!(
+            msg.contains("reloads without restart"),
+            "expected the recovery hint, got: {msg}"
+        );
     }
 }

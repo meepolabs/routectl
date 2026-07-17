@@ -1,4 +1,4 @@
-pub(crate) mod atomic_write;
+pub mod atomic_write;
 pub mod memory_store;
 #[cfg(feature = "oauth")]
 pub mod oauth;
@@ -15,5 +15,6 @@ pub use store::SecretStore;
 
 #[cfg(feature = "oauth")]
 pub use oauth::{
-    LocalProbe, LoginOptions, OAuthError, OAuthStore, OAuthStoreProjectCache, SecretToken,
+    LocalProbe, LoginOptions, OAuthError, OAuthStore, OAuthStoreProjectCache, OpenOutcome,
+    SecretToken,
 };

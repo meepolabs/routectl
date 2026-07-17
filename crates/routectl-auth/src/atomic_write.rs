@@ -14,7 +14,11 @@
 //! a crash/power loss until the directory itself is flushed -- without
 //! the parent fsync a crash right after this returns can roll the
 //! directory entry back to the pre-rename file even though the temp
-//! file's own contents were already on stable storage.
+//! file's own contents were already on stable storage. Whether a
+//! parent-fsync failure is fatal is a per-caller choice expressed via
+//! [`FsyncPolicy`]: secret writers demand [`FsyncPolicy::Strict`], while
+//! non-secret consumers may accept the weaker [`FsyncPolicy::BestEffort`]
+//! guarantee.
 
 // This writer stays unconditional (not behind the `oauth` feature)
 // because the crate-wide secret-capture primitive consumes it on every
@@ -22,6 +26,37 @@
 // only when `oauth` is enabled.
 
 use std::path::Path;
+
+/// How a parent-directory fsync failure is treated after the rename.
+///
+/// The temp-file fsync and the atomic rename are always fatal; this
+/// policy governs ONLY the final parent-directory fsync (step 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsyncPolicy {
+    /// A parent-directory fsync failure is fatal and returns `Err`. Until
+    /// the directory entry is flushed the rename is not durable across a
+    /// crash, so secret-file writers demand it.
+    Strict,
+    /// A parent-directory fsync failure is swallowed. The rename already
+    /// succeeded and the file contents were fsynced; the caller accepts
+    /// the weaker crash-durability guarantee.
+    BestEffort,
+}
+
+/// Atomically write `bytes` to `path` as an owner-only (`0o600`) file,
+/// treating a parent-directory fsync failure as fatal
+/// ([`FsyncPolicy::Strict`]).
+///
+/// This is the strict entry point used by secret-file writers. Callers
+/// that need best-effort parent-fsync semantics call
+/// [`write_0600_atomic_with_policy`] with [`FsyncPolicy::BestEffort`].
+///
+/// Returns a human-readable error string on failure; callers map it to
+/// their own error type. On any error nothing is persisted at `path`
+/// (the temp file is cleaned up by its `Drop`).
+pub fn write_0600_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_0600_atomic_with_policy(path, bytes, FsyncPolicy::Strict)
+}
 
 /// Atomically write `bytes` to `path` as an owner-only (`0o600`) file.
 ///
@@ -33,12 +68,18 @@ use std::path::Path;
 ///   3. Write the bytes and fsync the temp file.
 ///   4. Atomically rename the temp file over `path`.
 ///   5. Re-chmod `path` to `0o600` as defense-in-depth.
-///   6. Fsync the parent directory so the rename is durable.
+///   6. Fsync the parent directory so the rename is durable -- fatal
+///      under [`FsyncPolicy::Strict`], swallowed under
+///      [`FsyncPolicy::BestEffort`].
 ///
 /// Returns a human-readable error string on failure; callers map it to
 /// their own error type. On any error nothing is persisted at `path`
 /// (the temp file is cleaned up by its `Drop`).
-pub fn write_0600_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_0600_atomic_with_policy(
+    path: &Path,
+    bytes: &[u8],
+    fsync_policy: FsyncPolicy,
+) -> Result<(), String> {
     use std::io::Write as _;
 
     let parent = path
@@ -75,9 +116,15 @@ pub fn write_0600_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 
-    std::fs::File::open(parent)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| format!("fsync parent {}: {e}", parent.display()))?;
+    let parent_fsync = std::fs::File::open(parent).and_then(|d| d.sync_all());
+    match fsync_policy {
+        FsyncPolicy::Strict => {
+            parent_fsync.map_err(|e| format!("fsync parent {}: {e}", parent.display()))?;
+        }
+        FsyncPolicy::BestEffort => {
+            let _ = parent_fsync;
+        }
+    }
 
     Ok(())
 }
@@ -85,7 +132,7 @@ pub fn write_0600_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// Create `dir` (and ancestors) if absent and force `0o700`. Idempotent:
 /// re-asserting the mode on every save self-heals a directory the
 /// operator chmodded wider by accident.
-fn ensure_dir_0700(dir: &Path) -> Result<(), String> {
+pub fn ensure_dir_0700(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all {}: {e}", dir.display()))?;
     #[cfg(unix)]
     {
@@ -169,6 +216,18 @@ mod tests {
 
         let dir_mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "parent must be 0700, got {dir_mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn best_effort_policy_still_writes_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        write_0600_atomic_with_policy(&path, b"payload", FsyncPolicy::BestEffort).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "file must be 0600, got {file_mode:o}");
     }
 
     #[cfg(unix)]

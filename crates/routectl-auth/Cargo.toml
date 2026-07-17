@@ -24,6 +24,7 @@ oauth = [
     "dep:subtle",
     "dep:zeroize",
     "dep:webbrowser",
+    "dep:fd-lock",
 ]
 
 [dependencies]
@@ -50,6 +51,11 @@ rand = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 webbrowser = { version = "1", optional = true }
+# Cross-process advisory file lock for the credentials.json read-modify-write
+# critical section (`oauth::file_io::update_under_lock`). Version 4 matches
+# the routectl-router / routectl-cli config-write lock. Gated behind `oauth`
+# so the lean build does not pull it in.
+fd-lock = { version = "4", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -551,7 +551,7 @@ impl Drop for EnvGuard {
 }
 
 /// Atomic-rename write of `credentials.json` matching the production
-/// flow in `routectl-auth/src/oauth/file_io.rs::save`: write a tempfile
+/// flow in `routectl-auth/src/oauth/file_io.rs::update_under_lock`: write a tempfile
 /// in the same parent dir, set 0o600 perms, rename onto the target.
 /// `OAuthStore::open` enforces 0o600 hygiene on Unix; without it the
 /// reload-from-disk path rejects the file.
@@ -980,5 +980,304 @@ async fn retry_classes_cap_change_applies_after_reload() {
     assert_eq!(
         observed, 2,
         "raised retry.classes.rate-limited cap did not apply within 5s after reload"
+    );
+}
+
+// -----------------------------------------------------------------
+// Start-and-degrade on a broken credentials.json + hot-reload recovery
+// -----------------------------------------------------------------
+
+/// Seed a structurally-corrupt `credentials.json` at 0o600 under the XDG
+/// creds path. `OAuthStore::open_or_degraded` brings the oauth arm up
+/// PRESENT-but-DEGRADED (start-and-degrade) rather than failing serve
+/// startup or dropping the arm. 0o600 keeps the ONLY defect the
+/// unparseable content -- not a world-readable perms rejection -- so the
+/// recovery signal is unambiguous. Written before serve starts so the
+/// store observes it as broken at open time (a missing file would open
+/// clean).
+fn write_corrupt_credentials(creds_path: &Path) {
+    let parent = creds_path.parent().expect("creds path has parent");
+    std::fs::create_dir_all(parent).expect("mkdir creds parent");
+    std::fs::write(creds_path, b"{ this is not valid credentials json <<<")
+        .expect("write corrupt creds");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(creds_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600");
+    }
+}
+
+/// A minimal Anthropic Messages success body whose single text block is
+/// `text` -- lets a mock upstream tag which credential path it served.
+fn anthropic_ok_body(text: &str) -> Value {
+    json!({
+        "id": "msg_ok",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "model": "claude-sonnet-4-6",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    })
+}
+
+/// POST one non-streaming `/v1/messages` routed by `model` (an alias) and
+/// return the `(status, parsed-body)` pair. A non-JSON body yields
+/// `Value::Null` so callers poll on rather than panic.
+async fn post_message(
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+) -> (reqwest::StatusCode, Value) {
+    let body = json!({
+        "model": model,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let resp = client
+        .post(format!("{base_url}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .expect("post /v1/messages");
+    let status = resp.status();
+    let payload: Value = resp.json().await.unwrap_or(Value::Null);
+    (status, payload)
+}
+
+/// The client-observable signature of a credential-resolution failure:
+/// HTTP 503 plus the generic sanitized message. The TRUE cause is logged
+/// server-side at ERROR (`auth error suppressed in HTTP response`), but
+/// that log fires on a spawned server task that thread-local tracing
+/// capture cannot see -- so the client body is the reliable observable.
+fn is_credential_resolution_failure(status: reqwest::StatusCode, body: &Value) -> bool {
+    status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("server-side credential resolution failed"))
+}
+
+/// Poll the `oauth://`-backed alias until it is OBSERVABLY degraded
+/// (credential-resolution failure) or `max_wait` elapses. Establishing the
+/// degraded steady state BEFORE the recovery write is the first half of the
+/// watcher-arming guard: it proves the test is asserting a real transition,
+/// not a state that was already recovered.
+async fn wait_for_degraded_oauth(
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    max_wait: Duration,
+) -> bool {
+    let deadline = Instant::now() + max_wait;
+    while Instant::now() < deadline {
+        let (status, body) = post_message(client, base_url, model).await;
+        if is_credential_resolution_failure(status, &body) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// Poll the `oauth://`-backed alias for recovery (a 200 carrying
+/// `recovered_marker`) while periodically re-issuing an atomic rewrite of a
+/// VALID `credentials.json` at `creds_path`, until recovery is observed
+/// (true) or `max_wait` elapses (false).
+///
+/// The credentials file-watch arms asynchronously on notify's background
+/// thread AFTER serve is already answering `/health` (see
+/// `poll_alias_with_restimulus` for the full mechanism), so a single
+/// recovery write can race ahead of the armed watch and be dropped with no
+/// fs-event re-delivery. Re-writing the SAME token each interval is
+/// idempotent for the assertion -- `OAuthStore::reload_from_disk` resolves
+/// the identical bearer regardless of how many times the record is
+/// re-read -- so a re-delivered event is a harmless cache refresh and the
+/// first event the armed watch actually sees clears the degrade marker.
+async fn wait_for_oauth_recovery_with_restimulus(
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    creds_path: &Path,
+    access_token: &str,
+    recovered_marker: &str,
+    max_wait: Duration,
+) -> bool {
+    let deadline = Instant::now() + max_wait;
+    write_credentials_atomic(creds_path, access_token);
+    let mut last_write = Instant::now();
+    while Instant::now() < deadline {
+        let (status, body) = post_message(client, base_url, model).await;
+        if status.is_success() && body["content"][0]["text"] == recovered_marker {
+            return true;
+        }
+        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
+            write_credentials_atomic(creds_path, access_token);
+            last_write = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// Feature-boundary smoke, automated: `serve` must START despite a broken
+/// `credentials.json` (start-and-degrade), keep serving `file://`-backed
+/// aliases while the `oauth://` arm is degraded, and RECOVER the oauth arm
+/// when a valid credentials file is written -- all in the SAME running
+/// daemon, no restart. The automated analogue of the manual runtime smoke
+/// this surface already passed.
+///
+/// True-cause observability: the sanitized cause of the oauth failure is
+/// logged server-side at ERROR, but that log fires on a spawned server task
+/// and thread-local tracing capture does not reach spawned tasks -- so the
+/// reliable observable is the CLIENT body (`is_credential_resolution_failure`:
+/// 503 + the generic `server-side credential resolution failed`). The test
+/// asserts the generic client message AND that serve stays up (health +
+/// file:// alias keep serving), which is the full observable contract for
+/// start-and-degrade.
+///
+/// Watcher-arming race guard (two halves): the initial degraded state is
+/// OBSERVED first (`wait_for_degraded_oauth`) BEFORE the recovery write, so
+/// a lost first event cannot make the test claim a recovery it never
+/// triggered; and the recovery write is re-issued on an interval
+/// (`wait_for_oauth_recovery_with_restimulus`, idempotent) with a generous
+/// ceiling, so an event dropped before the credentials watch armed is
+/// re-delivered many times before the ceiling expires.
+///
+/// `serial_test::serial` is non-negotiable: this test mutates
+/// `XDG_CONFIG_HOME` and any sibling test reading the env in parallel would
+/// see the modified value.
+#[tokio::test]
+#[serial_test::serial]
+async fn serve_starts_degraded_on_broken_credentials_then_hot_reloads_recovery() {
+    // Arrange: isolated XDG holding a CORRUPT credentials.json.
+    let xdg = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+    let creds_path = xdg.path().join("routectl").join("credentials.json");
+    write_corrupt_credentials(&creds_path);
+
+    // Mock upstream: one matcher per credential path. The file:// static
+    // key stamps `x-api-key`; the recovered oauth seat stamps
+    // `authorization: Bearer`. Distinct bodies so the test can tell which
+    // credential path the upstream actually served.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock_path("/v1/messages"))
+        .and(header("x-api-key", "file-secret-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_ok_body("file-ok")))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(wiremock_path("/v1/messages"))
+        .and(header("authorization", "Bearer recovered-access-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(anthropic_ok_body("oauth-recovered")),
+        )
+        .mount(&mock)
+        .await;
+
+    // Two anthropic-api providers sharing the mock upstream: one resolves
+    // via oauth://anthropic (degraded at boot), one via a file:// static
+    // key (unaffected). The oauth base_url never dispatches while degraded.
+    let file_key_ref = common::file_ref("file-secret-key");
+    let config_text = format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[providers.anthropic_oauth]
+kind = "anthropic-api"
+base_url = "{uri}"
+api_key_ref = "oauth://anthropic"
+auth_kind = "oauth-bearer"
+
+[providers.static_file]
+kind = "anthropic-api"
+base_url = "{uri}"
+api_key_ref = "{file_key_ref}"
+
+[models.claude_oauth]
+provider = "anthropic_oauth"
+upstream = "claude-sonnet-4-6"
+
+[models.claude_file]
+provider = "static_file"
+upstream = "claude-sonnet-4-6"
+
+[aliases]
+oauthalias = "claude_oauth"
+filealias = "claude_file"
+"#,
+        uri = mock.uri(),
+    );
+
+    // Act: serve must COME UP despite the broken credentials file. The
+    // daemon runs on an in-process tokio task, so its PID is the test
+    // process throughout -- captured here to pin the no-restart invariant.
+    let pid_before = std::process::id();
+    let (base_url, _config_dir) = spawn_server_with_config_text(&config_text).await;
+    let client = reqwest::Client::new();
+
+    // Assert (a): health answers -- serve started, start-and-degrade.
+    let health = client
+        .get(format!("{base_url}/health"))
+        .send()
+        .await
+        .expect("get /health");
+    assert!(
+        health.status().is_success(),
+        "serve must answer /health despite a broken credentials.json, got {}",
+        health.status()
+    );
+
+    // Assert (b): the oauth:// alias is OBSERVABLY degraded -- 503 + the
+    // generic credential-resolution message. Polled so the degraded steady
+    // state is confirmed BEFORE the recovery write is issued.
+    assert!(
+        wait_for_degraded_oauth(&client, &base_url, "oauthalias", Duration::from_secs(5)).await,
+        "oauth:// alias must fail credential resolution while credentials.json is broken"
+    );
+
+    // Assert (c): the file:// alias still resolves its secret and reaches
+    // upstream -- file:// is unaffected while the oauth arm is degraded.
+    let (file_status, file_body) = post_message(&client, &base_url, "filealias").await;
+    assert!(
+        file_status.is_success(),
+        "file:// alias must serve while oauth is degraded, got {file_status}: {file_body}"
+    );
+    assert_eq!(
+        file_body["content"][0]["text"], "file-ok",
+        "file:// alias must reach upstream with its resolved secret: {file_body}"
+    );
+
+    // Act 2 + Assert (recovery): write a VALID credentials.json atomically
+    // (fresh anthropic seat) and poll for recovery. The write is re-issued
+    // on an interval to defeat the async watcher-arming race; recovery is a
+    // 200 carrying the oauth mock's marker (proof the recovered bearer was
+    // resolved AND sent upstream), never a restart.
+    assert!(
+        wait_for_oauth_recovery_with_restimulus(
+            &client,
+            &base_url,
+            "oauthalias",
+            &creds_path,
+            "recovered-access-token",
+            "oauth-recovered",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "oauth:// alias did not recover within {RELOAD_WAIT_CEILING:?} after a valid credentials.json was written"
+    );
+
+    // The recovery happened in the SAME process: the daemon was never
+    // re-execed. In-process spawn makes this structural; the assert pins it
+    // so a future harness change to a subprocess model cannot quietly break
+    // the no-restart contract.
+    assert_eq!(
+        std::process::id(),
+        pid_before,
+        "credentials recovery must happen in the same daemon process, no restart"
     );
 }

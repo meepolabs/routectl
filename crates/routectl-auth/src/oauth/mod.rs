@@ -37,7 +37,7 @@ pub mod types;
 pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
-pub use store::{LocalProbe, OAuthStore};
+pub use store::{LocalProbe, OAuthStore, OpenOutcome};
 pub use types::{
     AccountInfo, CredentialsFile, SCHEMA_VERSION, SecretToken, TokenRecord, seat_key, unix_now,
 };
@@ -79,6 +79,18 @@ pub enum OAuthError {
 
     #[error("oauth credentials file at {path} is corrupted: {detail}")]
     CorruptedFile { path: String, detail: String },
+
+    /// A `serve`-owned store opened over a credentials file that failed to
+    /// load is kept PRESENT but degraded: every request and every write
+    /// surfaces this pre-sanitized cause (path-free, value-free, built at
+    /// open time by `store::sanitize_open_error`) instead of resolving or
+    /// overwriting the unreadable file. `Display` is the cause verbatim so
+    /// the operator sees the true failure class plus the
+    /// reloads-without-restart hint. Cleared when the file is fixed and
+    /// `reload_from_disk` succeeds. Start-and-degrade is a deliberate
+    /// runtime contract -- see `oauth::store`.
+    #[error("{0}")]
+    Degraded(String),
 
     #[error("oauth flow timed out; re-run `routectl login {0}`")]
     LoginTimeout(String),
