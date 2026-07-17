@@ -33,9 +33,9 @@
 //! next `CATALOG_VERSION` change from whichever snapshot won).
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use routectl_auth::atomic_write::{FsyncPolicy, write_0600_atomic_with_policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -247,108 +247,22 @@ fn load(path: &Path) -> Result<Option<CatalogState>, CatalogStateError> {
     Ok(Some(state))
 }
 
-/// Persist `state` atomically: temp file in `path`'s parent directory,
-/// `0o600`, `fsync`, `rename`, re-`0o600`, then `fsync` the parent
-/// directory. No revision check -- see the module doc.
+/// Persist `state` atomically as an owner-only (`0o600`) file via the
+/// shared secret-file writer. Parent-directory fsync stays BEST-EFFORT:
+/// this state file is a rebuildable cache, so a parent-fsync error must
+/// not fail the save. No revision check -- see the module doc.
 fn save(path: &Path, state: &CatalogState) -> Result<(), CatalogStateError> {
-    ensure_dir(path)?;
-    let tmp = write_to_temp(path, state)?;
-    atomic_rename(tmp, path)
-}
-
-/// Ensure the parent directory exists with `0o700` perms on Unix.
-/// Idempotent and self-healing if the operator loosened the dir's mode.
-fn ensure_dir(path: &Path) -> Result<(), CatalogStateError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(parent).map_err(|e| CatalogStateError::Io {
-        path: parent.display().to_string(),
-        reason: format!("create_dir_all: {e}"),
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
-    Ok(())
-}
-
-/// Serialize `state`, write it to a temp file in `path`'s parent
-/// directory, `chmod 0o600` BEFORE writing, and `fsync` before
-/// returning the still-open temp file for the caller to rename.
-fn write_to_temp(
-    path: &Path,
-    state: &CatalogState,
-) -> Result<tempfile::NamedTempFile, CatalogStateError> {
     let display = path.display().to_string();
-    let parent = path.parent().ok_or_else(|| CatalogStateError::Io {
-        path: display.clone(),
-        reason: "path has no parent directory".to_string(),
-    })?;
-
     let json = serde_json::to_vec_pretty(state).map_err(|e| CatalogStateError::Io {
         path: display.clone(),
         reason: format!("serialize: {e}"),
     })?;
-
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".catalog_state.tmp.")
-        .suffix(".json")
-        .tempfile_in(parent)
-        .map_err(|e| CatalogStateError::Io {
-            path: parent.display().to_string(),
-            reason: format!("tempfile: {e}"),
-        })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tmp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| CatalogStateError::Io {
-                path: display.clone(),
-                reason: format!("chmod tempfile: {e}"),
-            })?;
-    }
-
-    tmp.write_all(&json).map_err(|e| CatalogStateError::Io {
-        path: display.clone(),
-        reason: format!("write tempfile: {e}"),
-    })?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| CatalogStateError::Io {
-            path: display.clone(),
-            reason: format!("fsync tempfile: {e}"),
-        })?;
-
-    Ok(tmp)
-}
-
-/// Persist the temp file onto `path` via `rename` (atomic on POSIX
-/// within one filesystem), re-set `0o600` as defense-in-depth, then
-/// `fsync` the parent directory: `rename` is atomic for concurrent
-/// readers, but is not durable across a crash/power loss until the
-/// directory entry pointing at the new inode is flushed too.
-fn atomic_rename(tmp: tempfile::NamedTempFile, path: &Path) -> Result<(), CatalogStateError> {
-    let display = path.display().to_string();
-    let parent = path.parent().map(Path::to_path_buf);
-    tmp.persist(path).map_err(|e| CatalogStateError::Io {
-        path: display.clone(),
-        reason: format!("rename: {e}"),
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    if let Some(parent) = parent
-        && let Ok(dir) = std::fs::File::open(&parent)
-    {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+    write_0600_atomic_with_policy(path, &json, FsyncPolicy::BestEffort).map_err(|reason| {
+        CatalogStateError::Io {
+            path: display,
+            reason,
+        }
+    })
 }
 
 /// Compute the current baked row for every in-use `(provider_kind,

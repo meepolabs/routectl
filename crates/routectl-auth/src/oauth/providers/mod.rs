@@ -13,6 +13,7 @@
 pub mod anthropic;
 pub mod antigravity;
 pub mod codex;
+mod refresh_classify;
 pub mod xai;
 
 use async_trait::async_trait;

@@ -2597,6 +2597,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "fd-lock",
  "http 1.4.2",
  "rand 0.10.2",
  "reqwest",

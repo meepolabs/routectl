@@ -180,6 +180,17 @@ impl PendingSecret {
     const fn is_side_effect(&self) -> bool {
         !matches!(self, Self::None)
     }
+
+    /// Whether this pending action rewrites a managed secret file. A fresh
+    /// file capture always rewrites it: the `file://` ref is derived from the
+    /// provider name, not the value, so the serialized block can be
+    /// byte-identical while the on-disk secret rotates. An identical-block
+    /// re-add must therefore NOT short-circuit for a file capture (that would
+    /// silently discard the new key); every other pending kind keeps the
+    /// idempotent no-op.
+    const fn rewrites_secret(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
 }
 
 /// Outcome of a completed [`run`], for the caller and for tests. Refusals
@@ -193,7 +204,19 @@ pub enum AddResult {
     NoChange,
     /// The high-consequence confirmation was declined.
     Aborted,
+    /// A fresh credential was captured and the managed secret file was
+    /// rewritten, but the serialized config block was byte-identical, so
+    /// `config.toml` itself was left unchanged. A managed `file://` ref is
+    /// derived from the provider NAME rather than the value, so rotating the
+    /// key produces the same block -- the secret still rotates.
+    Rotated,
 }
+
+/// Operator-facing line printed when a file-backed credential is rotated but
+/// the config block is byte-identical (so `config.toml` is not rewritten).
+/// This exact text is an operator-scriptable contract, pinned by a test:
+/// downstream tooling may match on it, so it must not drift silently.
+const ROTATED_MESSAGE: &str = "credential rotated; config unchanged";
 
 /// Run the `provider add` pipeline against `config_path` with the
 /// production I/O seams ([`RealAddIo`]). Thin wrapper over
@@ -250,15 +273,30 @@ pub async fn run_with_io(
 
     if let Some(existing) = prev.providers.get(name) {
         let existing_norm = provider_table(existing)?.to_string();
-        if existing_norm == new_block_norm {
+        let identical = existing_norm == new_block_norm;
+        // A fresh file capture rotates the managed secret even when the
+        // serialized block is byte-identical, so it must NOT take the
+        // identical-block no-op (that silently discards the new key). Every
+        // other pending kind keeps the idempotent re-init no-op.
+        if identical && !pending.rewrites_secret() {
             println!("provider `{name}` is already configured identically; nothing written.");
             return Ok(AddResult::NoChange);
         }
         if !args.overwrite {
-            return Err(Error::Config(format!(
-                "provider `{name}` already exists with different settings; \
-                 pass `--overwrite` to overwrite it"
-            )));
+            let hint = if identical {
+                // A file capture over an identical block: the config would
+                // not change, but the credential rotates -- still an explicit
+                // opt-in.
+                format!(
+                    "provider `{name}` already exists; pass `--overwrite` to rotate its credential"
+                )
+            } else {
+                format!(
+                    "provider `{name}` already exists with different settings; \
+                     pass `--overwrite` to overwrite it"
+                )
+            };
+            return Err(Error::Config(hint));
         }
     }
 
@@ -304,6 +342,24 @@ pub async fn run_with_io(
     };
 
     if outcome == EditOutcome::Unchanged {
+        if did_side_effect {
+            // The config block was byte-identical, so config.toml was not
+            // rewritten -- but a fresh capture already rotated the managed
+            // secret. Report the rotation truthfully (never "nothing written"
+            // after a side effect) and audit it: the credential class only,
+            // never the value or the full ref string.
+            println!("{ROTATED_MESSAGE}");
+            tracing::info!(
+                surface = "cli",
+                verb = "provider-add",
+                name,
+                kind,
+                credential_source = cred_class,
+                config_changed = false,
+                "credential rotated",
+            );
+            return Ok(AddResult::Rotated);
+        }
         println!("provider `{name}` already present; nothing written.");
         return Ok(AddResult::NoChange);
     }
@@ -1903,6 +1959,303 @@ default = \"no-such-model\"
             "the swapped symlink target must never receive the secret"
         );
         unset_env("XDG_CONFIG_HOME");
+    }
+
+    // -----------------------------------------------------------------
+    // File-backed credential rotation: a fresh piped key on an existing
+    // provider rewrites the managed secret even though the config block
+    // (a name-derived `file://` ref) is byte-identical. Non-file pendings
+    // keep their idempotent no-op.
+    // -----------------------------------------------------------------
+
+    /// Add a file-backed provider named `grok` with `value` as its piped key,
+    /// asserting the initial add wrote. Returns the config bytes on disk after
+    /// the add so a later rotation can prove config.toml is untouched.
+    async fn seed_file_backed_grok(path: &std::path::Path, value: &str) -> Vec<u8> {
+        let mut a = args("openai-compat", "grok");
+        a.base_url = Some("https://api.x.example/v1".to_string());
+        a.api_key_stdin = true;
+        let io = FakeIo {
+            stdin_value: format!("{value}\n"),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_with_io(path, a, &io).await.expect("initial add"),
+            AddResult::Written
+        );
+        std::fs::read(path).unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn fresh_piped_key_rewrites_secret_and_reports_rotated() {
+        // Arrange: an existing file-backed provider whose managed secret holds
+        // the original key.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), V3_BASE);
+        let xdg = tempfile::tempdir().unwrap();
+        let secrets = scoped_secret_dir(xdg.path());
+        let config_before = seed_file_backed_grok(&path, "original-key-not-real").await;
+        assert_eq!(
+            std::fs::read_to_string(secrets.join("grok")).unwrap(),
+            "original-key-not-real"
+        );
+
+        // Act: re-add the SAME provider with a NEW piped key + --overwrite. The
+        // block normalizes byte-identically (the ref is name-derived), so
+        // config.toml is untouched -- but the managed secret must rotate.
+        let mut rotate = args("openai-compat", "grok");
+        rotate.base_url = Some("https://api.x.example/v1".to_string());
+        rotate.api_key_stdin = true;
+        rotate.overwrite = true;
+        let io = FakeIo {
+            stdin_value: "rotated-key-not-real\n".to_string(),
+            ..Default::default()
+        };
+        let result = run_with_io(&path, rotate, &io)
+            .await
+            .expect("rotation must succeed");
+
+        // Assert: the outcome is Rotated, the secret now holds the NEW value at
+        // 0600, and config.toml is byte-identical to before the rotation.
+        assert_eq!(result, AddResult::Rotated);
+        assert_eq!(
+            std::fs::read_to_string(secrets.join("grok")).unwrap(),
+            "rotated-key-not-real",
+            "the managed secret file must hold the rotated value"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            config_before,
+            "a rotation must leave config.toml byte-identical"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(secrets.join("grok"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "the rotated secret must stay 0600");
+        }
+        unset_env("XDG_CONFIG_HOME");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn fresh_piped_key_on_existing_provider_requires_overwrite() {
+        // Arrange: an existing file-backed provider.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), V3_BASE);
+        let xdg = tempfile::tempdir().unwrap();
+        let secrets = scoped_secret_dir(xdg.path());
+        let config_before = seed_file_backed_grok(&path, "original-key-not-real").await;
+
+        // Act: a fresh capture WITHOUT --overwrite on the existing provider.
+        let mut rotate = args("openai-compat", "grok");
+        rotate.base_url = Some("https://api.x.example/v1".to_string());
+        rotate.api_key_stdin = true;
+        let io = FakeIo {
+            stdin_value: "would-rotate-not-real\n".to_string(),
+            ..Default::default()
+        };
+        let err = run_with_io(&path, rotate, &io)
+            .await
+            .expect_err("a fresh capture on an existing provider must require --overwrite");
+
+        // Assert: the error names the flag; the secret and config are untouched.
+        assert!(err.to_string().contains("--overwrite"), "err: {err}");
+        assert_eq!(
+            std::fs::read_to_string(secrets.join("grok")).unwrap(),
+            "original-key-not-real",
+            "a refused rotation must not touch the existing secret"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            config_before,
+            "a refused rotation must not write config"
+        );
+        unset_env("XDG_CONFIG_HOME");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn env_ref_identical_re_add_stays_no_change() {
+        // A non-file pending (env ref) that normalizes to the identical block
+        // stays an idempotent no-op: the rotation change must not regress
+        // re-init safety for flag-driven refs.
+        let key = "ROUTECTL_PROVIDER_ADD_IDEMPOTENT_ENV";
+        set_env(key, "present-value-not-real");
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), V3_BASE);
+
+        let mut first = args("anthropic-api", "claude");
+        first.api_key_env = Some(key.to_string());
+        assert_eq!(
+            run(&path, first).await.expect("first add"),
+            AddResult::Written
+        );
+        let after_first = std::fs::read(&path).unwrap();
+
+        let mut second = args("anthropic-api", "claude");
+        second.api_key_env = Some(key.to_string());
+        assert_eq!(
+            run(&path, second).await.expect("re-add"),
+            AddResult::NoChange,
+            "an identical env-ref re-add stays a no-op"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            after_first,
+            "an identical env-ref re-add must leave config byte-identical"
+        );
+        unset_env(key);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn rotation_secret_write_failure_leaves_old_secret_intact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Arrange: an existing file-backed provider whose secret holds a known
+        // value.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), V3_BASE);
+        let xdg = tempfile::tempdir().unwrap();
+        let secrets = scoped_secret_dir(xdg.path());
+        let config_before = seed_file_backed_grok(&path, "durable-old-key-not-real").await;
+
+        // Make the store directory read-only so a fresh capture cannot write.
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // If this environment can still create files in a 0500 dir (e.g. as
+        // root), the capture would not fail -- restore perms and skip rather
+        // than assert a guarantee the environment does not provide.
+        if std::fs::File::create(secrets.join(".probe")).is_ok() {
+            let _ = std::fs::remove_file(secrets.join(".probe"));
+            std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
+            unset_env("XDG_CONFIG_HOME");
+            return;
+        }
+
+        // Act: attempt a rotation with --overwrite; the capture write must fail.
+        let mut rotate = args("openai-compat", "grok");
+        rotate.base_url = Some("https://api.x.example/v1".to_string());
+        rotate.api_key_stdin = true;
+        rotate.overwrite = true;
+        let io = FakeIo {
+            stdin_value: "never-lands-not-real\n".to_string(),
+            ..Default::default()
+        };
+        let result = run_with_io(&path, rotate, &io).await;
+
+        // Restore perms before asserting so the tempdir can be read/cleaned.
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Assert: the rotation errors, the OLD secret is intact, and config is
+        // untouched -- a failed rotation never destroys the live credential.
+        assert!(
+            result.is_err(),
+            "an unwritable store must fail the rotation"
+        );
+        assert_eq!(
+            std::fs::read_to_string(secrets.join("grok")).unwrap(),
+            "durable-old-key-not-real",
+            "a failed rotation must leave the old secret intact"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            config_before,
+            "a failed rotation must not write config"
+        );
+        unset_env("XDG_CONFIG_HOME");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn rotation_emits_one_audit_event_config_unchanged_without_value_or_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), V3_BASE);
+        let xdg = tempfile::tempdir().unwrap();
+        let secrets = scoped_secret_dir(xdg.path());
+        let secret_value = "rotation-audit-secret-not-real";
+        // Seed the existing provider OUTSIDE the capture so only the rotation's
+        // event is observed.
+        seed_file_backed_grok(&path, "seed-key-not-real").await;
+
+        let (_res, events) = routectl_testkit::with_capture(async {
+            let mut rotate = args("openai-compat", "grok");
+            rotate.base_url = Some("https://api.x.example/v1".to_string());
+            rotate.api_key_stdin = true;
+            rotate.overwrite = true;
+            let io = FakeIo {
+                stdin_value: secret_value.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(
+                run_with_io(&path, rotate, &io).await.expect("rotation"),
+                AddResult::Rotated
+            );
+        })
+        .await;
+
+        let audit: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.field("surface") == Some("cli") && e.field("verb") == Some("provider-add")
+            })
+            .collect();
+        assert_eq!(audit.len(), 1, "exactly one rotation audit event expected");
+
+        let event = audit[0];
+        assert_eq!(event.field("name"), Some("grok"));
+        assert_eq!(event.field("kind"), Some("openai-compat"));
+        assert_eq!(
+            event.field("credential_source"),
+            Some("file"),
+            "a rotation captures a managed file secret"
+        );
+        assert_eq!(
+            event.field("config_changed"),
+            Some("false"),
+            "a rotation leaves config.toml unchanged"
+        );
+        assert!(
+            event.field("value").is_none(),
+            "the value must never be audited"
+        );
+        assert!(
+            event.field("api_key_ref").is_none(),
+            "the full ref must never be audited"
+        );
+        // The captured value must not leak into any event's message or fields.
+        for e in &events {
+            assert!(
+                !e.message.contains(secret_value),
+                "secret leaked into a message: {}",
+                e.message
+            );
+            for (k, v) in &e.fields {
+                assert!(
+                    !v.contains(secret_value),
+                    "secret leaked into field `{k}`: {v}"
+                );
+            }
+        }
+        // Sanity: the secret really did rotate on disk.
+        assert_eq!(
+            std::fs::read_to_string(secrets.join("grok")).unwrap(),
+            secret_value
+        );
+        unset_env("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn rotation_reports_the_pinned_operator_message() {
+        // The rotation line is an operator-scriptable contract: pin the exact
+        // literal so a downstream `grep` never breaks silently.
+        assert_eq!(ROTATED_MESSAGE, "credential rotated; config unchanged");
     }
 
     fn restore_env(key: &str, prev: Option<String>) {

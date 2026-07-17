@@ -44,9 +44,9 @@
 //! sequence, so two truly concurrent callers serialize instead of racing.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use routectl_auth::atomic_write::{FsyncPolicy, ensure_dir_0700, write_0600_atomic_with_policy};
 use serde::{Deserialize, Serialize};
 
 /// Overlay schema version this build understands. [`load`] fails closed
@@ -374,115 +374,37 @@ fn changed_selectors(
     changed.into_iter().map(str::to_string).collect()
 }
 
-/// Top-level write driver: ensure the parent directory, write to a temp
-/// file in the same directory, then atomically rename onto `path`. Mirrors
-/// `oauth::file_io::save_blocking`'s three-step shape.
-fn write_atomic(path: &Path, overlay: &CatalogOverlay) -> Result<(), OverlayError> {
-    ensure_dir(path)?;
-    let tmp = write_to_temp(path, overlay)?;
-    atomic_rename(tmp, path)
-}
-
-/// Ensure the parent directory exists with `0o700` perms on Unix.
-/// Idempotent and self-healing if the operator loosened the dir's mode.
+/// Ensure the parent directory of `path` exists with `0o700` before the
+/// sibling lock file is created there. The atomic write itself re-asserts
+/// this, but the lock file is opened before the write runs, so the
+/// directory has to exist first. Delegates to the shared secret-dir helper.
 fn ensure_dir(path: &Path) -> Result<(), OverlayError> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    std::fs::create_dir_all(parent).map_err(|e| OverlayError::Io {
+    ensure_dir_0700(parent).map_err(|reason| OverlayError::Io {
         path: parent.display().to_string(),
-        reason: format!("create_dir_all: {e}"),
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Best-effort: the file itself still gets 0o600 below, so a
-        // stripped dir bit is not a security failure on its own.
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
-    Ok(())
+        reason,
+    })
 }
 
-/// Serialize `overlay`, write it to a temp file in `path`'s parent
-/// directory, `chmod 0o600` BEFORE writing (so a partial write is never
-/// wider than the final permissions), and `fsync` before returning the
-/// still-open temp file for the caller to rename.
-fn write_to_temp(
-    path: &Path,
-    overlay: &CatalogOverlay,
-) -> Result<tempfile::NamedTempFile, OverlayError> {
+/// Serialize `overlay` and persist it atomically as an owner-only
+/// (`0o600`) file via the shared secret-file writer. Parent-directory
+/// fsync stays BEST-EFFORT here: this overlay is a rebuildable operator
+/// cache, not a secret whose loss on crash must fail the save, so a
+/// parent-fsync error is swallowed rather than surfaced.
+fn write_atomic(path: &Path, overlay: &CatalogOverlay) -> Result<(), OverlayError> {
     let display = path.display().to_string();
-    let parent = path.parent().ok_or_else(|| OverlayError::Io {
-        path: display.clone(),
-        reason: "path has no parent directory".to_string(),
-    })?;
-
     let json = serde_json::to_vec_pretty(overlay).map_err(|e| OverlayError::Io {
         path: display.clone(),
         reason: format!("serialize: {e}"),
     })?;
-
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".catalog_overlay.tmp.")
-        .suffix(".json")
-        .tempfile_in(parent)
-        .map_err(|e| OverlayError::Io {
-            path: parent.display().to_string(),
-            reason: format!("tempfile: {e}"),
-        })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tmp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| OverlayError::Io {
-                path: display.clone(),
-                reason: format!("chmod tempfile: {e}"),
-            })?;
-    }
-
-    tmp.write_all(&json).map_err(|e| OverlayError::Io {
-        path: display.clone(),
-        reason: format!("write tempfile: {e}"),
-    })?;
-    tmp.as_file().sync_all().map_err(|e| OverlayError::Io {
-        path: display.clone(),
-        reason: format!("fsync tempfile: {e}"),
-    })?;
-
-    Ok(tmp)
-}
-
-/// Persist the temp file onto `path` via `rename` (atomic on POSIX within
-/// one filesystem), then re-set `0o600` as defense-in-depth in case a
-/// paranoid umask stripped bits during the rename.
-///
-/// Also `fsync`s the PARENT DIRECTORY after the rename: `rename` is atomic
-/// for concurrent readers, but the rename itself is not durable across a
-/// crash/power loss until the directory entry pointing at the new inode is
-/// flushed too -- without this, a crash right after this call returns can
-/// roll the directory entry back to the pre-rename file even though the
-/// temp file's own contents were already fsynced. Mirrors
-/// `crate::config_migrate::write_config_atomic`'s same fix.
-fn atomic_rename(tmp: tempfile::NamedTempFile, path: &Path) -> Result<(), OverlayError> {
-    let display = path.display().to_string();
-    let parent = path.parent().map(Path::to_path_buf);
-    tmp.persist(path).map_err(|e| OverlayError::Io {
-        path: display.clone(),
-        reason: format!("rename: {e}"),
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    if let Some(parent) = parent
-        && let Ok(dir) = std::fs::File::open(&parent)
-    {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+    write_0600_atomic_with_policy(path, &json, FsyncPolicy::BestEffort).map_err(|reason| {
+        OverlayError::Io {
+            path: display,
+            reason,
+        }
+    })
 }
 
 #[cfg(test)]
