@@ -1011,30 +1011,88 @@ const STATUS_PATHS: &[&str] = &[
 ];
 
 #[tokio::test]
-async fn status_subtree_is_auth_exempt_while_v1_still_requires_a_token() {
+async fn status_subtree_requires_auth_when_tokens_configured() {
     let base = helpers::spawn_test_server(config_with_listener_auth("secret-token")).await;
     let client = reqwest::Client::new();
 
-    // Every /status path is reachable WITHOUT a token even though auth is on.
+    // Every /status path is gated behind the SAME token layer as /v1 once
+    // listener auth is configured: rejected without a token, served with one
+    // (via either accepted header form).
     for path in STATUS_PATHS {
         let resp = client.get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(
             resp.status(),
+            401,
+            "{path} must require a token when listener auth is configured"
+        );
+
+        let resp = client
+            .get(format!("{base}{path}"))
+            .header("x-api-key", "secret-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
             200,
-            "{path} must be reachable without a token (status is auth-exempt)"
+            "{path} must be reachable with a valid x-api-key token"
+        );
+
+        let resp = client
+            .get(format!("{base}{path}"))
+            .header("Authorization", "Bearer secret-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "{path} must be reachable with a valid Bearer token"
         );
     }
 
-    // The dashboard shell at `GET /` shares the status surface's auth-exemption
-    // (public-like-/health): served token-less even with auth configured.
+    // The dashboard shell at `GET /` shares the status surface's auth gate:
+    // rejected token-less, served with a valid token.
     let resp = client.get(format!("{base}/")).send().await.unwrap();
     assert_eq!(
         resp.status(),
+        401,
+        "GET / (dashboard shell) must require a token when auth is configured"
+    );
+    let resp = client
+        .get(format!("{base}/"))
+        .header("x-api-key", "secret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
         200,
-        "GET / (dashboard shell) must be reachable without a token"
+        "GET / must be reachable with a valid x-api-key token"
+    );
+    let resp = client
+        .get(format!("{base}/"))
+        .header("Authorization", "Bearer secret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "GET / must be reachable with a valid Bearer token"
     );
 
-    // A /v1 route still rejects an unauthenticated request.
+    // `/health` stays public even with listener auth configured: liveness
+    // probes must not need a token.
+    let resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "/health must stay public when listener auth is configured"
+    );
+
+    // A /v1 route still rejects an unauthenticated request and serves an
+    // authenticated one.
     let resp = client
         .get(format!("{base}/v1/models"))
         .send()
@@ -1044,6 +1102,63 @@ async fn status_subtree_is_auth_exempt_while_v1_still_requires_a_token() {
         resp.status(),
         401,
         "/v1/* must still require a token when auth is configured"
+    );
+    let resp = client
+        .get(format!("{base}/v1/models"))
+        .header("x-api-key", "secret-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "/v1/* must be reachable with a valid token"
+    );
+}
+
+#[tokio::test]
+async fn status_subtree_is_open_on_token_less_loopback() {
+    // Token-less loopback dev path: no auth is mounted, so /status and the
+    // dashboard shell stay reachable with no token.
+    let base = helpers::spawn_test_server(openai_compat_config(
+        "http://127.0.0.1:1",
+        "provider1",
+        "my-alias",
+    ))
+    .await;
+    let client = reqwest::Client::new();
+
+    for path in STATUS_PATHS {
+        let resp = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "{path} must be reachable token-less on a loopback bind with no tokens"
+        );
+    }
+
+    let resp = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "GET / must be reachable token-less on a loopback bind with no tokens"
+    );
+}
+
+#[tokio::test]
+async fn serve_refuses_non_loopback_bind_without_tokens() {
+    // Pins the startup invariant that `status_requires_auth`'s non-loopback
+    // clause relies on: a public bind with no tokens is refused outright.
+    let config = common::isolate_usage_db(openai_compat_config(
+        "http://127.0.0.1:1",
+        "provider1",
+        "my-alias",
+    ));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let result = routectl_cli::server::serve_on_listener(config, listener, None).await;
+    assert!(
+        result.is_err(),
+        "serve must refuse a non-loopback bind when no tokens are configured"
     );
 }
 

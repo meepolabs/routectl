@@ -36,8 +36,10 @@ pub const STATUS_MAX_INFLIGHT: usize = 4;
 const GATE_SCHEMA_VERSION: u32 = 1;
 
 /// Resolved `Host` allowlist for the status subtree: the loopback literals
-/// plus the exact address routectl actually bound. Cheap to clone (an `Arc`),
-/// as the axum middleware state machinery clones it per request.
+/// plus the exact address routectl actually bound. Under a wildcard bind
+/// (`0.0.0.0` / `::`) it degrades to a bound-port check (see [`Self::allows`]).
+/// Cheap to clone (an `Arc`), as the axum middleware state machinery clones it
+/// per request.
 #[derive(Clone)]
 pub struct StatusHostAllowlist {
     inner: Arc<AllowlistInner>,
@@ -49,6 +51,11 @@ struct AllowlistInner {
     bind_host: String,
     /// The bound `host:port`, e.g. `127.0.0.1:8080`.
     bind_host_port: String,
+    /// The bound port, matched on its own under a wildcard bind.
+    bind_port: u16,
+    /// Whether the bind address is unspecified (`0.0.0.0` / `::`), which no
+    /// client-supplied `Host` can name literally.
+    is_wildcard: bool,
 }
 
 impl StatusHostAllowlist {
@@ -60,15 +67,27 @@ impl StatusHostAllowlist {
             inner: Arc::new(AllowlistInner {
                 bind_host: bound.ip().to_string(),
                 bind_host_port: bound.to_string(),
+                bind_port: bound.port(),
+                is_wildcard: bound.ip().is_unspecified(),
             }),
         }
     }
 
     /// A `Host` value is allowed when it is a loopback literal (with or
-    /// without a port) or the exact address routectl bound.
+    /// without a port). Otherwise: under a wildcard bind (`0.0.0.0` / `::`) no
+    /// client can name the unspecified address literally, so the guard
+    /// degrades to a PORT check -- a Host is allowed iff its parsed port equals
+    /// the bound port (a portless Host fails closed). This weaker anti-rebinding
+    /// posture is acceptable because token auth now sits ABOVE this guard: the
+    /// port check keeps a deliberate public bind reachable while the token, not
+    /// the `Host`, carries the real access decision. Under a concrete
+    /// (non-wildcard) bind the exact bound address is required, unchanged.
     fn allows(&self, host: &str) -> bool {
         if is_loopback_authority(host) {
             return true;
+        }
+        if self.inner.is_wildcard {
+            return port_of(host) == Some(self.inner.bind_port);
         }
         host == self.inner.bind_host || host == self.inner.bind_host_port
     }
@@ -87,8 +106,40 @@ fn split_host_port(authority: &str) -> &str {
         };
     }
     match authority.rsplit_once(':') {
+        // An unbracketed head that still carries a colon marks a bare
+        // (multi-colon) IPv6 literal like `::1` or `2001:db8::10`, not a
+        // `host:port` -- return it whole so the loopback check sees the real
+        // address rather than a trailing group mistaken for a port.
+        Some((host, _)) if host.contains(':') => authority,
         Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
         _ => authority,
+    }
+}
+
+/// Parse the `:port` suffix of an HTTP `Host` authority, mirroring
+/// [`split_host_port`]'s IPv6-bracket + numeric-suffix handling: a bracketed
+/// IPv6 literal reads the port after the closing `]`; a bare `host:port` reads
+/// the digits after the final colon. Returns `None` when the authority carries
+/// no port (or a non-numeric / out-of-range one), so a portless Host fails
+/// closed under a wildcard bind.
+fn port_of(authority: &str) -> Option<u16> {
+    let after_host = if let Some(rest) = authority.strip_prefix('[') {
+        let close = rest.find(']')?;
+        &rest[close + 1..]
+    } else {
+        authority
+    };
+    match after_host.rsplit_once(':') {
+        // An unbracketed head that still carries a colon marks a bare
+        // (multi-colon) IPv6 literal like `2001:db8::10` -- it has no port, so
+        // its trailing group must not be parsed as one. Bracketed authorities
+        // never reach this arm with a colon in the head (the head after `]` is
+        // empty), so the guard scopes to the bare-IPv6 case.
+        Some((head, _)) if head.contains(':') => None,
+        Some((_, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            port.parse().ok()
+        }
+        _ => None,
     }
 }
 
@@ -99,10 +150,21 @@ fn is_loopback_authority(authority: &str) -> bool {
     is_loopback(split_host_port(authority))
 }
 
+/// Process-wide count of `/status*` requests rejected by the host guard for a
+/// disallowed `Host`. A rejected request never reaches a panel handler, so -
+/// like the shed counter - this is the only place a wrong-Host 403 is
+/// observable.
+static HOST_403_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Reject a request whose `Host` names an endpoint outside the allowlist
 /// (anti-DNS-rebinding). A missing `Host` is permitted: the rebinding vector
 /// is a browser sending an attacker-controlled hostname, which always carries
 /// one. Applied ONLY to the status subtree -- `/v1/*` never sees it.
+///
+/// A rejection is counted and logged SAMPLED (1st + every Nth, reusing the
+/// shed sampler) at warn, so an operator can tell a wrong-`Host` rejection
+/// apart from a bad-token one. Only the running total is logged, never the
+/// `Host` value itself (it is attacker-controlled).
 pub async fn host_guard(
     State(allowlist): State<StatusHostAllowlist>,
     req: Request,
@@ -113,7 +175,17 @@ pub async fn host_guard(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok());
     match host {
-        Some(host) if !allowlist.allows(host) => forbidden_host(),
+        Some(host) if !allowlist.allows(host) => {
+            let host_403_total = HOST_403_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if should_log_shed(host_403_total) {
+                tracing::warn!(
+                    target: SHED_TARGET,
+                    host_403_total,
+                    "status surface rejected a request with a disallowed Host header",
+                );
+            }
+            forbidden_host()
+        }
         _ => next.run(req).await,
     }
 }
@@ -254,12 +326,89 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_ipv4_bind_matches_on_port_only() {
+        let al = allowlist("0.0.0.0:8080");
+        // A wildcard bind is reachable from any client whose Host names the
+        // bound port; the unspecified address itself matches nothing useful.
+        assert!(al.allows("192.168.1.5:8080"));
+        assert!(!al.allows("192.168.1.5:9999"));
+        // A Host with no port fails closed under a wildcard bind.
+        assert!(!al.allows("192.168.1.5"));
+    }
+
+    #[test]
+    fn wildcard_ipv6_bind_matches_on_port_only() {
+        let al = allowlist("[::]:8080");
+        assert!(al.allows("[fe80::1]:8080"));
+        assert!(!al.allows("[fe80::1]:9999"));
+    }
+
+    #[test]
+    fn loopback_literals_pass_under_wildcard_bind() {
+        let al = allowlist("0.0.0.0:8080");
+        for host in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(
+                al.allows(host),
+                "loopback host must be allowed under a wildcard bind: {host}"
+            );
+        }
+    }
+
+    #[test]
     fn split_host_port_handles_ipv6_and_bare_hosts() {
         assert_eq!(split_host_port("[::1]:8787"), "::1");
         assert_eq!(split_host_port("[::1]"), "::1");
         assert_eq!(split_host_port("127.0.0.1:8787"), "127.0.0.1");
         assert_eq!(split_host_port("localhost"), "localhost");
         assert_eq!(split_host_port("example.com"), "example.com");
+        // A bare (unbracketed) multi-colon IPv6 literal has no port: its
+        // trailing group must not be stripped. `::1` must survive whole so the
+        // loopback check recognizes it.
+        assert_eq!(split_host_port("::1"), "::1");
+        assert_eq!(split_host_port("2001:db8::10"), "2001:db8::10");
+    }
+
+    #[test]
+    fn port_of_handles_ipv6_and_bare_hosts() {
+        assert_eq!(port_of("[::1]:8787"), Some(8787));
+        assert_eq!(port_of("[::1]"), None);
+        assert_eq!(port_of("[fe80::1]:8080"), Some(8080));
+        assert_eq!(port_of("127.0.0.1:8787"), Some(8787));
+        assert_eq!(port_of("127.0.0.1"), None);
+        assert_eq!(port_of("localhost:8080"), Some(8080));
+        assert_eq!(port_of("example.com"), None);
+        // Out-of-range ports do not parse as u16 -> fail closed.
+        assert_eq!(port_of("example.com:99999"), None);
+        // A bare (unbracketed) multi-colon IPv6 literal carries no port; its
+        // final group must not be read as one.
+        assert_eq!(port_of("2001:db8::10"), None);
+        assert_eq!(port_of("::1"), None);
+    }
+
+    #[test]
+    fn bare_ipv6_is_not_allowed_by_port_only_wildcard_match() {
+        // Under a wildcard bind, the port-only degradation must NOT be fooled
+        // by a bare IPv6 authority whose trailing group equals the bound port.
+        // `2001:db8::10` is a non-loopback host with no port, so it fails the
+        // loopback check AND the port check -> rejected.
+        let al = allowlist("[::]:10");
+        assert!(!al.allows("2001:db8::10"));
+    }
+
+    #[test]
+    fn bare_ipv6_loopback_is_recognized() {
+        // A bare `::1` (no brackets, no port) is loopback and must be allowed
+        // regardless of the bind.
+        assert!(is_loopback_authority("::1"));
+        let al = allowlist("0.0.0.0:8080");
+        assert!(al.allows("::1"));
     }
 
     #[derive(Clone)]
@@ -530,6 +679,59 @@ mod tests {
             assert!(
                 line.contains("status surface overloaded"),
                 "unexpected shed line: {line}"
+            );
+        }
+    }
+
+    /// The host guard counts every disallowed-`Host` 403 but logs SAMPLED, and
+    /// never logs the raw (attacker-controlled) `Host` value -- only the fixed
+    /// message + running total. Driven on the default current-thread runtime so
+    /// the thread-local capture sees the warn emitted inline by the middleware.
+    #[tokio::test]
+    async fn host_guard_403_is_sampled_and_never_leaks_host() {
+        use axum::middleware::from_fn_with_state;
+        use routectl_testkit::capture_lines;
+
+        let al = allowlist("192.168.1.5:8080");
+        let app = axum::Router::new()
+            .route("/status", get(|| async { StatusCode::OK }))
+            .layer(from_fn_with_state(al, host_guard));
+
+        let secret_host = "evil-LEAKED.example.com:8080";
+        let fired = SHED_LOG_SAMPLE_N * 3;
+        let ((), lines) = capture_lines(async {
+            for _ in 0..fired {
+                let req = HttpRequest::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .header(header::HOST, secret_host)
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            }
+        })
+        .await;
+
+        // A window of 3N rejections yields a handful of sampled lines, never
+        // one per rejection.
+        assert!(
+            !lines.is_empty(),
+            "at least one sampled host-403 line expected"
+        );
+        assert!(
+            (lines.len() as u64) < fired,
+            "host-403 log must be sampled: {} lines for {fired} rejections",
+            lines.len()
+        );
+        for line in &lines {
+            assert!(
+                !line.contains("LEAKED") && !line.contains("evil-"),
+                "host-403 log leaked the raw Host: {line}"
+            );
+            assert!(
+                line.contains("disallowed Host header"),
+                "unexpected host-403 line: {line}"
             );
         }
     }

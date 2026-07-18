@@ -261,11 +261,11 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
     let panel = guard_panel(SCHEMA_VERSION, codes::CONFIG_UNAVAILABLE, move || {
         let overlay = match load_overlay_default() {
             Ok(overlay) => overlay,
-            Err(err) => return Ok(unavailable_from_overlay_error(&err)),
+            Err(err) => return unavailable_from_overlay_error(&err),
         };
         let effective = view.effective_view(&overlay);
         let dto = build_panel(effective, &activation);
-        Ok(Panel::available(SCHEMA_VERSION, as_of, dto))
+        Panel::available(SCHEMA_VERSION, as_of, dto)
     })
     .await;
     state.observability.config.record(&panel);

@@ -293,6 +293,24 @@ pub struct AnthropicApiProvider {
     last_representative_claim: std::sync::Mutex<Option<String>>,
 }
 
+/// FORWARDING TRANSPARENCY CONTRACT
+///
+/// On the forwarded (pure-proxy) leg -- `forwarded_leg(req) == true`, the
+/// three-way pin of `use_forwarded_bearer` + a captured bearer + the
+/// api.anthropic.com host -- the egress is a BYTE-TRANSPARENT forwarder of the
+/// client's request. The following body/header mutations MUST NOT run on that
+/// leg, so the client's real bytes and fingerprint reach Anthropic verbatim:
+///
+///   1. the client-beta `allowed_betas` filter (the anthropic-beta HEADER),
+///   2. `cloak_body` (billing strip, identity stamp, tool-name normalization),
+///   3. `resign_cch_in_place` (the billing-checksum re-sign),
+///   4. the minted OAuth/Claude-Code beta-floor injection.
+///
+/// The predicate is always derived via the single `forwarded_leg` helper --
+/// self-gating inside `cloak_body`, and a local computed at the top of each
+/// dispatch method -- and every new body-mutation site added here MUST carry
+/// the `!forwarded_leg` gate. Own mode (`forwarded_leg(req) == false`) behavior
+/// is byte-for-byte unchanged by this contract.
 impl AnthropicApiProvider {
     pub fn new(cfg: AnthropicApiConfig) -> Self {
         let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind);
@@ -390,6 +408,18 @@ impl AnthropicApiProvider {
         self.cfg.auth.token().await
     }
 
+    /// The forwarded (pure-proxy) leg predicate: the single gate consulted by
+    /// every body/header mutation site (see the FORWARDING TRANSPARENCY
+    /// CONTRACT on the impl). Delegates to `should_use_forwarded_bearer` so
+    /// build_headers and the dispatch methods can never disagree.
+    fn forwarded_leg(&self, req: &ChatRequest) -> bool {
+        should_use_forwarded_bearer(
+            self.cfg.use_forwarded_bearer,
+            req.routectl_internal.forwarded_bearer.is_some(),
+            &self.cfg.base_url,
+        )
+    }
+
     fn build_headers(
         &self,
         rb: reqwest::RequestBuilder,
@@ -415,11 +445,7 @@ impl AnthropicApiProvider {
         // header value. An own-mode provider (`use_forwarded_bearer` false)
         // never enters this branch even with a floating captured bearer, so
         // its minted fingerprint is byte-for-byte unchanged.
-        let forwarded_leg = should_use_forwarded_bearer(
-            self.cfg.use_forwarded_bearer,
-            req.routectl_internal.forwarded_bearer.is_some(),
-            &self.cfg.base_url,
-        );
+        let forwarded_leg = self.forwarded_leg(req);
 
         // Computed once here (rather than re-derived at each 4xx log site)
         // so `BetaDecision` and the floor-gating decision below always
@@ -442,11 +468,20 @@ impl AnthropicApiProvider {
         // `header_extras` pass through unconditionally (the operator
         // typed them in config). Empty `allowed_betas` is pass-through
         // mode (no filtering); see `request::filter_anthropic_betas`.
-        let filtered_req_betas = request::filter_anthropic_betas(
-            &self.cfg.id,
-            &req.anthropic_beta,
-            &self.cfg.allowed_betas,
-        );
+        //
+        // SUPPRESSED on the forwarded leg: there the client's real beta set
+        // must reach Anthropic VERBATIM (per the FORWARDING TRANSPARENCY
+        // CONTRACT), so the allowlist filter is skipped and the client betas
+        // pass through unfiltered.
+        let filtered_req_betas: std::borrow::Cow<'_, [String]> = if forwarded_leg {
+            std::borrow::Cow::Borrowed(req.anthropic_beta.as_slice())
+        } else {
+            request::filter_anthropic_betas(
+                &self.cfg.id,
+                &req.anthropic_beta,
+                &self.cfg.allowed_betas,
+            )
+        };
         let mut beta_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut merged_betas: Vec<String> = Vec::new();
         for entry in filtered_req_betas.iter() {
@@ -764,6 +799,12 @@ impl AnthropicApiProvider {
     /// upstream in the router. The rename touches only tool-NAME strings
     /// -- never `cache_control` keys -- so cached bytes stay byte-stable.
     fn cloak_body(&self, body: &mut Value, req: &ChatRequest) -> Option<cloak::CloakResult> {
+        // Forwarded (pure-proxy) leg: the egress is a byte-transparent
+        // forwarder (see the FORWARDING TRANSPARENCY CONTRACT), so no cloak
+        // transform runs and the client's body reaches Anthropic verbatim.
+        if self.forwarded_leg(req) {
+            return None;
+        }
         if self.cfg.auth_kind != AuthKind::OauthBearer || !is_anthropic_api_host(&self.cfg.base_url)
         {
             return None;
@@ -903,6 +944,7 @@ impl Provider for AnthropicApiProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let forwarded_leg = self.forwarded_leg(&req);
         let mut body = self.normalize_request(&req)?;
         // Ensure stream is absent / false for the non-streaming path.
         if let Some(obj) = body.as_object_mut() {
@@ -955,7 +997,9 @@ impl Provider for AnthropicApiProvider {
         // api.anthropic.com surface; every other path is a no-op.
         let mut body_bytes = serde_json::to_vec(&body)
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-        if self.cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&self.cfg.base_url)
+        if !forwarded_leg
+            && self.cfg.auth_kind == AuthKind::OauthBearer
+            && is_anthropic_api_host(&self.cfg.base_url)
         {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
@@ -1076,6 +1120,7 @@ impl Provider for AnthropicApiProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        let forwarded_leg = self.forwarded_leg(&req);
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), serde_json::Value::Bool(true));
@@ -1104,7 +1149,9 @@ impl Provider for AnthropicApiProvider {
         // api.anthropic.com surface; a no-op everywhere else.
         let mut body_bytes = serde_json::to_vec(&body)
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-        if self.cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&self.cfg.base_url)
+        if !forwarded_leg
+            && self.cfg.auth_kind == AuthKind::OauthBearer
+            && is_anthropic_api_host(&self.cfg.base_url)
         {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
@@ -1302,13 +1349,19 @@ impl Provider for AnthropicApiProvider {
     /// merged beta surface as the messages endpoint.
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        // No `forwarded_leg` local here: count_tokens is unsigned (no cch
+        // re-sign) and its only body mutation is `cloak_body`, which
+        // self-gates on the forwarded leg (see the FORWARDING TRANSPARENCY
+        // CONTRACT). `build_count_tokens_body` copies only the field
+        // allowlist, which never includes `anthropic_beta`.
         let mut normalized = self.normalize_request(&req)?;
-        // Cloak before build_count_tokens_body reads `normalized`. The
-        // metadata user_id is dropped by the count_tokens allowlist (it is
-        // not in that schema), but the system-identity stamp, the billing
-        // strip, and the mcp_ tool-name normalization still apply to the
-        // forwarded body. count_tokens has no response tool_use surface to
-        // reverse, so the returned reverse map is discarded.
+        // Cloak before build_count_tokens_body reads `normalized`. In own
+        // mode the metadata user_id is dropped by the count_tokens allowlist
+        // (it is not in that schema), but the system-identity stamp, the
+        // billing strip, and the mcp_ tool-name normalization apply to the
+        // outgoing body. On the forwarded leg cloak_body self-gates to a
+        // no-op, so none of these run. count_tokens has no response tool_use
+        // surface to reverse, so the returned reverse map is discarded.
         self.cloak_body(&mut normalized, &req);
         let body = build_count_tokens_body(&normalized);
 
@@ -2783,6 +2836,236 @@ mod tests {
         assert!(
             value.split(',').any(|b| b.trim() == "oauth-2025-04-20"),
             "the unconditional oauth gate flag must still be present; got {value}",
+        );
+    }
+
+    // -- forwarded-leg body transparency -----------------------------------
+
+    /// `forwarded_leg` is true EXACTLY when all three legs are positive:
+    /// the provider is configured `use_forwarded_bearer`, a bearer was
+    /// captured on this request, AND the egress host is api.anthropic.com.
+    /// It mirrors `should_use_forwarded_bearer` and is the single gate every
+    /// body-mutation site consults.
+    #[test]
+    fn forwarded_leg_predicate_true_iff_all_three_positive() {
+        for use_fwd in [false, true] {
+            for has_bearer in [false, true] {
+                for anthropic_host in [false, true] {
+                    let base = if anthropic_host {
+                        "https://api.anthropic.com"
+                    } else {
+                        "https://example.invalid"
+                    };
+                    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+                        base,
+                        Some("sid".into()),
+                        Vec::new(),
+                        use_fwd,
+                    ));
+                    let req = if has_bearer {
+                        forwarded_req(&[], &[], &[])
+                    } else {
+                        ChatRequest::default()
+                    };
+                    let expected = use_fwd && has_bearer && anthropic_host;
+                    assert_eq!(
+                        provider.forwarded_leg(&req),
+                        expected,
+                        "forwarded_leg(use_fwd={use_fwd}, bearer={has_bearer}, host={anthropic_host}) must be {expected}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// On the forwarded leg cloak_body is a no-op: it returns None and leaves
+    /// the body byte-for-byte unchanged, so the client's real body (billing
+    /// block included) reaches Anthropic untouched.
+    #[test]
+    fn cloak_body_forwarded_leg_is_noop() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("session-stable-123".into()),
+            Vec::new(),
+            true,
+        ));
+        let req = forwarded_req(&[], &[], &[]);
+        let mut body = cloak_test_body();
+        let before = body.clone();
+
+        let result = provider.cloak_body(&mut body, &req);
+
+        assert!(
+            result.is_none(),
+            "cloak_body must return None on the forwarded leg"
+        );
+        assert_eq!(body, before, "the forwarded leg must not mutate the body");
+        assert!(
+            body_has_billing(&body),
+            "the client billing block must survive the forwarded leg untouched"
+        );
+    }
+
+    /// The cch re-sign gate is the OauthBearer + api.anthropic.com surface
+    /// MINUS the forwarded leg. On the forwarded leg the gate is false, so
+    /// `resign_cch_in_place` never runs and the client's billing checksum
+    /// reaches Anthropic verbatim; own mode keeps the gate true. Asserts the
+    /// exact gate expression from the dispatch methods -- no egress needed.
+    #[test]
+    fn resign_gate_false_on_forwarded_leg_true_in_own_mode() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("session-stable-123".into()),
+            Vec::new(),
+            true,
+        ));
+
+        let fwd = forwarded_req(&[], &[], &[]);
+        let resign_on_fwd = provider.cfg.auth_kind == AuthKind::OauthBearer
+            && is_anthropic_api_host(&provider.cfg.base_url)
+            && !provider.forwarded_leg(&fwd);
+        assert!(
+            !resign_on_fwd,
+            "cch re-sign must be gated off on the forwarded leg"
+        );
+
+        let own = ChatRequest::default();
+        let resign_own = provider.cfg.auth_kind == AuthKind::OauthBearer
+            && is_anthropic_api_host(&provider.cfg.base_url)
+            && !provider.forwarded_leg(&own);
+        assert!(
+            resign_own,
+            "cch re-sign must still run in own mode (no forwarded bearer)"
+        );
+    }
+
+    /// build_headers on the forwarded leg emits the client's anthropic-beta
+    /// set VERBATIM, bypassing the operator `allowed_betas` allowlist: the
+    /// client's real beta fingerprint must reach Anthropic unfiltered.
+    #[test]
+    fn forwarded_leg_anthropic_beta_header_bypasses_allowlist() {
+        let cfg = AnthropicApiConfig {
+            allowed_betas: vec!["allowed-beta".into()],
+            ..oauth_cfg_with_session(
+                "https://api.anthropic.com",
+                Some("sid".into()),
+                Vec::new(),
+                true,
+            )
+        };
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = forwarded_req(&[], &[], &["allowed-beta", "client-blocked"]);
+
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+        assert!(
+            betas.contains(&"client-blocked"),
+            "a client beta not in allowed_betas must still pass verbatim on the forwarded leg; got {value}",
+        );
+        assert!(
+            betas.contains(&"allowed-beta"),
+            "the client's allowed beta must pass too; got {value}",
+        );
+        assert!(
+            !betas.contains(&"oauth-2025-04-20"),
+            "no minted OAuth floor beta may leak onto the forwarded-leg header; got {value}",
+        );
+        assert!(
+            !betas.contains(&"claude-code-20250219"),
+            "no minted Claude Code floor beta may leak onto the forwarded-leg header; got {value}",
+        );
+    }
+
+    /// Own-mode counterpart: with `allowed_betas` set, a client beta not on
+    /// the allowlist IS stripped from the anthropic-beta header. This pins
+    /// that only the forwarded leg bypasses the filter.
+    #[test]
+    fn own_mode_anthropic_beta_header_applies_allowlist() {
+        let cfg = AnthropicApiConfig {
+            allowed_betas: vec!["allowed-beta".into()],
+            ..oauth_cfg_with_session(
+                "https://api.anthropic.com",
+                Some("sid".into()),
+                Vec::new(),
+                false,
+            )
+        };
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = ChatRequest {
+            anthropic_beta: vec!["allowed-beta".into(), "client-blocked".into()],
+            ..Default::default()
+        };
+
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+        assert!(
+            !betas.contains(&"client-blocked"),
+            "own mode must strip a client beta not in allowed_betas; got {value}",
+        );
+        assert!(
+            betas.contains(&"allowed-beta"),
+            "the allowlisted beta must survive; got {value}",
+        );
+    }
+
+    /// Body-strip proof (drives the request.rs body-field decision):
+    /// request.rs `normalize` populates the body `anthropic_beta` field, but
+    /// every api.anthropic.com egress path strips it before the wire --
+    /// complete and stream `remove("anthropic_beta")`, count_tokens reshapes
+    /// through the field allowlist. So the request.rs site is inert on
+    /// egress and needs no forwarded-leg gate.
+    #[test]
+    fn body_anthropic_beta_field_absent_on_all_egress_paths() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("sid".into()),
+            Vec::new(),
+            false,
+        ));
+        let req = ChatRequest {
+            anthropic_beta: vec!["client-beta".into()],
+            ..Default::default()
+        };
+
+        let normalized = provider.normalize_request(&req).expect("normalize");
+        assert!(
+            normalized.get("anthropic_beta").is_some(),
+            "normalize must populate the body anthropic_beta field (the site under proof)",
+        );
+
+        // complete() path: strip stream + anthropic_beta, then cloak.
+        let mut complete_body = normalized.clone();
+        if let Some(obj) = complete_body.as_object_mut() {
+            obj.remove("stream");
+            obj.remove("anthropic_beta");
+        }
+        provider.cloak_body(&mut complete_body, &req);
+        assert!(
+            complete_body.get("anthropic_beta").is_none(),
+            "complete egress body must not carry anthropic_beta",
+        );
+
+        // stream() path: set stream=true, strip anthropic_beta, then cloak.
+        let mut stream_body = normalized.clone();
+        if let Some(obj) = stream_body.as_object_mut() {
+            obj.insert("stream".into(), serde_json::Value::Bool(true));
+            obj.remove("anthropic_beta");
+        }
+        provider.cloak_body(&mut stream_body, &req);
+        assert!(
+            stream_body.get("anthropic_beta").is_none(),
+            "stream egress body must not carry anthropic_beta",
+        );
+
+        // count_tokens() path: cloak, then reshape through the allowlist.
+        let mut ct = normalized.clone();
+        provider.cloak_body(&mut ct, &req);
+        let ct_body = build_count_tokens_body(&ct);
+        assert!(
+            ct_body.get("anthropic_beta").is_none(),
+            "count_tokens egress body must not carry anthropic_beta",
         );
     }
 

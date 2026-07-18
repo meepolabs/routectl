@@ -8,10 +8,12 @@
 //! degrades a failing data source to a single unavailable panel rather than a
 //! 500 or a process crash.
 //!
-//! [`status_router`] is merged into the serve process AUTH-EXEMPT and behind
-//! the status-subtree-only middleware in [`crate::server::status_gate`] (a
-//! `Host` allowlist + a bounded-concurrency load-shed); `/v1/*` inherits none
-//! of it.
+//! [`status_router`] is merged into the serve process behind the
+//! status-subtree-only middleware in [`crate::server::status_gate`] (a
+//! `Host` allowlist + a bounded-concurrency load-shed) and, whenever the
+//! bind requires it (tokens configured or a non-loopback bind), behind the
+//! same listener auth layer as `/v1/*`; token-less loopback keeps the
+//! zero-auth dev path. `/v1/*` inherits none of the status-only middleware.
 
 mod config;
 mod doctor;
@@ -34,7 +36,7 @@ use parking_lot::Mutex;
 use routectl_router::ActivationState;
 use serde::Serialize;
 
-pub use types::{Panel, PanelError, now_utc_rfc3339, vocabulary};
+pub use types::{Panel, now_utc_rfc3339, vocabulary};
 
 pub use page::page_router;
 
@@ -213,9 +215,8 @@ impl PanelCounters {
 
 /// Panic-isolation wrapper every panel builder runs through. A status panel
 /// is best-effort: a broken data source degrades that one panel to
-/// unavailable, never a 500 and never a process crash. This maps all three
+/// unavailable, never a 500 and never a process crash. This maps both
 /// failure modes to an unavailable panel carrying `code`:
-///   - the builder returns `Err`,
 ///   - the builder panics (caught via `catch_unwind`),
 ///   - the `spawn_blocking` join itself fails.
 ///
@@ -228,12 +229,12 @@ pub(super) async fn guard_panel<T, F>(
 ) -> Panel<T>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<Panel<T>, PanelError> + Send + 'static,
+    F: FnOnce() -> Panel<T> + Send + 'static,
 {
     let joined =
         tokio::task::spawn_blocking(move || panic::catch_unwind(AssertUnwindSafe(builder))).await;
     match joined {
-        Ok(Ok(Ok(panel))) => panel,
+        Ok(Ok(panel)) => panel,
         _ => Panel::unavailable(schema_version, code),
     }
 }
@@ -466,17 +467,17 @@ mod tests {
 
         let unavailable = serde_json::to_value(Panel::<u32>::unavailable(
             1,
-            vocabulary::codes::NOT_IMPLEMENTED,
+            vocabulary::codes::DB_UNAVAILABLE,
         ))
         .unwrap();
         assert_eq!(unavailable["schema_version"], 1);
         assert_eq!(unavailable["as_of"], Value::Null);
         assert_eq!(unavailable["data"], Value::Null);
-        assert_eq!(unavailable["unavailable"], "not_implemented");
+        assert_eq!(unavailable["unavailable"], "db_unavailable");
     }
 
     #[tokio::test]
-    async fn guard_isolates_panic_and_err() {
+    async fn guard_isolates_panic() {
         let panicked: Panel<u32> = guard_panel(1, vocabulary::codes::DB_UNAVAILABLE, || {
             panic!("data source blew up");
         })
@@ -484,14 +485,8 @@ mod tests {
         assert_eq!(panicked.unavailable.as_deref(), Some("db_unavailable"));
         assert!(panicked.data.is_none());
 
-        let errored: Panel<u32> = guard_panel(1, vocabulary::codes::DB_BUSY, || {
-            Err(PanelError::NotImplemented)
-        })
-        .await;
-        assert_eq!(errored.unavailable.as_deref(), Some("db_busy"));
-
         let ok: Panel<u32> = guard_panel(1, vocabulary::codes::NO_DATA, || {
-            Ok(Panel::available(1, now_utc_rfc3339(), 5))
+            Panel::available(1, now_utc_rfc3339(), 5)
         })
         .await;
         assert_eq!(ok.data, Some(5));
@@ -506,7 +501,7 @@ mod tests {
     async fn concurrent_composition_isolates_a_panicking_panel() {
         async fn ok_panel(value: u32) -> Panel<u32> {
             guard_panel(1, vocabulary::codes::DB_UNAVAILABLE, move || {
-                Ok(Panel::available(1, now_utc_rfc3339(), value))
+                Panel::available(1, now_utc_rfc3339(), value)
             })
             .await
         }
