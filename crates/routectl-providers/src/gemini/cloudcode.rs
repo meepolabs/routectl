@@ -199,11 +199,17 @@ fn parse_cloudcode_error_classifier(body: &str) -> (Option<String>, Option<Strin
 /// classifier via `Error::upstream_full` -- the path the reference providers
 /// use -- so a `RESOURCE_EXHAUSTED` / `UNAUTHENTICATED` is not collapsed
 /// into an indistinguishable generic 429 / 401.
+///
+/// When `hit_cap` is set the body was truncated at the shared response-body
+/// cap and is untrustworthy: the client-facing message collapses to the
+/// fixed cap-exceeded text (never echoing truncated bytes) while the
+/// classifier enum tokens still lift when the prefix happens to parse.
 fn map_onboarding_error(
     provider_id: &str,
     status: u16,
     headers: &reqwest::header::HeaderMap,
     body_text: &str,
+    hit_cap: bool,
 ) -> Error {
     let retry_after = if crate::retry_after::is_rate_limit_status(status) {
         crate::retry_after::parse_retry_after(headers)
@@ -211,10 +217,15 @@ fn map_onboarding_error(
         None
     };
     let (upstream_type, upstream_code) = parse_cloudcode_error_classifier(body_text);
+    let body = if hit_cap {
+        crate::http_client::body_cap_exceeded_message()
+    } else {
+        clean_error_body(body_text)
+    };
     Error::upstream_full(
         provider_id,
         status,
-        clean_error_body(body_text),
+        body,
         retry_after,
         upstream_type,
         upstream_code,
@@ -244,13 +255,30 @@ pub async fn load_code_assist(
 
     let status = resp.status().as_u16();
     let headers = resp.headers().clone();
-    let body_text = resp.text().await.unwrap_or_default();
+    let content_length = resp.content_length();
+    let (bytes, hit_cap) =
+        crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+            .await
+            .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
+    let body_text = String::from_utf8_lossy(&bytes);
     if status >= 400 {
+        if hit_cap {
+            crate::http_client::warn_body_cap(provider_id, status, content_length, "error_body");
+        }
         return Err(map_onboarding_error(
             provider_id,
             status,
             &headers,
             &body_text,
+            hit_cap,
+        ));
+    }
+    if hit_cap {
+        crate::http_client::warn_body_cap(provider_id, status, content_length, "success_body");
+        return Err(Error::upstream(
+            provider_id,
+            502,
+            crate::http_client::body_cap_exceeded_message(),
         ));
     }
     serde_json::from_str(&body_text).map_err(|e| {
@@ -298,13 +326,35 @@ pub async fn onboard_user(
 
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
-        let body_text = resp.text().await.unwrap_or_default();
+        let content_length = resp.content_length();
+        let (bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
+        let body_text = String::from_utf8_lossy(&bytes);
         if status != 200 {
+            if hit_cap {
+                crate::http_client::warn_body_cap(
+                    provider_id,
+                    status,
+                    content_length,
+                    "error_body",
+                );
+            }
             return Err(map_onboarding_error(
                 provider_id,
                 status,
                 &headers,
                 &body_text,
+                hit_cap,
+            ));
+        }
+        if hit_cap {
+            crate::http_client::warn_body_cap(provider_id, status, content_length, "success_body");
+            return Err(Error::upstream(
+                provider_id,
+                502,
+                crate::http_client::body_cap_exceeded_message(),
             ));
         }
 
@@ -513,7 +563,13 @@ mod tests {
         let body = r#"{"error":{"code":401,"status":"UNAUTHENTICATED","message":"bad token"}}"#;
 
         // Act
-        let err = map_onboarding_error("gemini-cc", 401, &reqwest::header::HeaderMap::new(), body);
+        let err = map_onboarding_error(
+            "gemini-cc",
+            401,
+            &reqwest::header::HeaderMap::new(),
+            body,
+            false,
+        );
 
         // Assert: the classifier survives onto the canonical error.
         match err {
@@ -526,6 +582,50 @@ mod tests {
                 assert_eq!(status, 401);
                 assert_eq!(upstream_type.as_deref(), Some("UNAUTHENTICATED"));
                 assert_eq!(upstream_code.as_deref(), Some("401"));
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn onboarding_error_over_cap_hides_prefix_and_lifts_classifier() {
+        // On a cap trip the classifier still lifts from the (parseable)
+        // prefix, but the client body collapses to the fixed cap message --
+        // the truncated prefix is never echoed -- and the status is preserved.
+        let prefix = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"secret upstream detail"}}"#;
+
+        let err = map_onboarding_error(
+            "gemini-cc",
+            429,
+            &reqwest::header::HeaderMap::new(),
+            prefix,
+            true,
+        );
+
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 429, "original status preserved on cap trip");
+                assert_eq!(
+                    upstream_type.as_deref(),
+                    Some("RESOURCE_EXHAUSTED"),
+                    "classifier must lift from a parseable prefix"
+                );
+                assert_eq!(upstream_code.as_deref(), Some("429"));
+                assert_eq!(
+                    body,
+                    crate::http_client::body_cap_exceeded_message(),
+                    "client body must be the fixed cap message, never the prefix"
+                );
+                assert!(
+                    !body.contains("secret upstream detail"),
+                    "truncated prefix must not be echoed: {body}"
+                );
             }
             other => panic!("expected Error::Upstream, got {other:?}"),
         }

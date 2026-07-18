@@ -925,6 +925,164 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
     );
 }
 
+// -------- drive_stream: immediate cancel on client disconnect --------
+
+/// An upstream that yields its queued items, then parks on
+/// `Poll::Pending` forever (never registering a waker) to model an
+/// upstream that stalls after the client has gone away. Records its own
+/// drop so a test can assert `drive_stream` released the upstream socket
+/// on cancel.
+struct StallingStream {
+    items: std::collections::VecDeque<routectl_core::Result<routectl_core::ChatChunk>>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl futures::Stream for StallingStream {
+    type Item = routectl_core::Result<routectl_core::ChatChunk>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.items.pop_front() {
+            Some(item) => std::task::Poll::Ready(Some(item)),
+            None => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl Drop for StallingStream {
+    fn drop(&mut self) {
+        self.dropped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Client disconnect mid-stream: once the receiver is dropped, the
+/// biased `tx.closed()` select arm must return immediately even though
+/// the upstream is still stalled -- releasing the upstream socket and
+/// the render task rather than blocking to `STREAM_READ_TIMEOUT`. Pre-
+/// fix the loop only awaits `upstream.next()`, so the bounded timeout
+/// converts the resulting hang into a failure (RED). Exactly one
+/// `client_disconnect` row lands with no `stream_stage` marker, and a
+/// single DEBUG breadcrumb records the cancel.
+#[tokio::test]
+async fn drive_stream_cancels_immediately_on_client_disconnect() {
+    use crate::ingress::anthropic::AnthropicIngress;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Arrange: upstream yields one chunk, then stalls forever.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(StallingStream {
+            items: std::collections::VecDeque::from(vec![Ok(streaming_text_chunk("hi"))]),
+            dropped: Arc::clone(&dropped),
+        });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-disconnect");
+
+    // Act: spawn the render task, drain the first event so the loop is
+    // parked on the (now-stalled) upstream, then drop the receiver.
+    let (rows, events) = routectl_testkit::with_capture(async move {
+        let handle = tokio::spawn(render_stream_task(
+            upstream,
+            AnthropicIngress,
+            capture,
+            tx,
+            k_test_router(),
+            None,
+            StreamRequestContext::default(),
+        ));
+        rx.recv().await.expect("first event before disconnect");
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("drive_stream must return promptly after client disconnect")
+            .expect("render task panicked");
+        rig.flush_and_read().await
+    })
+    .await;
+
+    // Assert: upstream released, single client_disconnect row, no stage.
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "upstream stream must be dropped on cancel"
+    );
+    assert_eq!(rows.len(), 1, "exactly one usage row");
+    assert_eq!(rows[0].outcome, "client_disconnect");
+    assert_eq!(
+        rows[0].stream_stage, None,
+        "client cancel is not an upstream stage failure"
+    );
+
+    // Exactly one DEBUG breadcrumb for the disconnect.
+    let disconnects: Vec<&routectl_testkit::CapturedEvent> = events
+        .iter()
+        .filter(|e| e.field("reason") == Some("client_disconnected"))
+        .collect();
+    assert_eq!(disconnects.len(), 1, "exactly one disconnect breadcrumb");
+    assert_eq!(disconnects[0].level, tracing::Level::DEBUG);
+}
+
+/// Partial usage observed before the client left must survive on the
+/// `client_disconnect` row: the first chunk carries usage, so the
+/// persisted row reflects the tokens seen pre-disconnect.
+#[tokio::test]
+async fn drive_stream_preserves_partial_usage_on_client_disconnect() {
+    use crate::ingress::anthropic::AnthropicIngress;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Arrange: first (and only) chunk carries partial usage.
+    let dropped = Arc::new(AtomicBool::new(false));
+    let mut chunk = streaming_text_chunk("hi");
+    chunk.usage = Some(routectl_core::UsageDelta {
+        prompt_tokens: Some(11),
+        completion_tokens: Some(4),
+        total_tokens: Some(15),
+        ..Default::default()
+    });
+    let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(StallingStream {
+            items: std::collections::VecDeque::from(vec![Ok(chunk)]),
+            dropped: Arc::clone(&dropped),
+        });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    let rig = CaptureRig::new();
+    let capture = rig.capture(
+        "anthropic",
+        &sample_request("m", true),
+        "req-disconnect-usage",
+    );
+
+    // Act
+    let handle = tokio::spawn(render_stream_task(
+        upstream,
+        AnthropicIngress,
+        capture,
+        tx,
+        k_test_router(),
+        None,
+        StreamRequestContext::default(),
+    ));
+    rx.recv().await.expect("first event before disconnect");
+    drop(rx);
+    tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+        .await
+        .expect("drive_stream must return promptly after client disconnect")
+        .expect("render task panicked");
+    let rows = rig.flush_and_read().await;
+
+    // Assert: single disconnect row carrying the pre-disconnect tokens.
+    assert!(dropped.load(Ordering::SeqCst), "upstream must be dropped");
+    assert_eq!(rows.len(), 1, "exactly one usage row");
+    assert_eq!(rows[0].outcome, "client_disconnect");
+    assert_eq!(rows[0].input_tokens, Some(11));
+    assert_eq!(rows[0].output_tokens, Some(4));
+}
+
 /// OpenAI ingress, mid-stream upstream error: the receiver must
 /// see the rendered chunk first, then the error chunk, then the
 /// `[DONE]` terminator, then the channel closes. `[DONE]` is the

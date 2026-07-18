@@ -117,6 +117,7 @@ pub struct ProxyMetrics {
     rc_stream_idle_aborts_total: AtomicU64,
     rc_unknown_forwarded_paths_total: AtomicU64,
     rc_tls_handshake_failures_total: AtomicU64,
+    rc_tls_handshake_timeouts_total: AtomicU64,
 }
 
 impl Default for ProxyMetrics {
@@ -127,6 +128,7 @@ impl Default for ProxyMetrics {
             rc_stream_idle_aborts_total: AtomicU64::new(0),
             rc_unknown_forwarded_paths_total: AtomicU64::new(0),
             rc_tls_handshake_failures_total: AtomicU64::new(0),
+            rc_tls_handshake_timeouts_total: AtomicU64::new(0),
         }
     }
 }
@@ -223,6 +225,15 @@ impl ProxyMetrics {
         self.rc_tls_handshake_failures_total.load(Ordering::Relaxed)
     }
 
+    pub fn incr_tls_handshake_timeouts(&self) {
+        self.rc_tls_handshake_timeouts_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn tls_handshake_timeouts_total(&self) -> u64 {
+        self.rc_tls_handshake_timeouts_total.load(Ordering::Relaxed)
+    }
+
     /// Emits one structured `tracing::debug!` line carrying every
     /// counter's current value. Fields are all counter names + numeric
     /// values -- no token, header, or body content ever reaches this
@@ -235,6 +246,7 @@ impl ProxyMetrics {
             rc_stream_idle_aborts_total = self.stream_idle_aborts_total(),
             rc_unknown_forwarded_paths_total = self.unknown_forwarded_paths_total(),
             rc_tls_handshake_failures_total = self.tls_handshake_failures_total(),
+            rc_tls_handshake_timeouts_total = self.tls_handshake_timeouts_total(),
             "proxy metrics snapshot"
         );
     }
@@ -435,10 +447,12 @@ mod tests {
         metrics.incr_stream_idle_aborts();
         metrics.incr_unknown_forwarded_paths();
         metrics.incr_tls_handshake_failures();
+        metrics.incr_tls_handshake_timeouts();
 
         assert_eq!(metrics.stream_idle_aborts_total(), 2);
         assert_eq!(metrics.unknown_forwarded_paths_total(), 1);
         assert_eq!(metrics.tls_handshake_failures_total(), 1);
+        assert_eq!(metrics.tls_handshake_timeouts_total(), 1);
     }
 
     #[test]

@@ -1060,17 +1060,27 @@ impl Provider for AnthropicApiProvider {
         }
 
         // Dir 3: upstream response headers, read BEFORE the body
-        // consume (resp.json() takes ownership). Opt-in via
+        // consume (the capped read takes ownership). Opt-in via
         // ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
         // Parse the anthropic-ratelimit-unified-* quota family from the
         // same headers (BEFORE the body consume) and run the overage-flip
         // log. Returns None on the api-key path (family absent).
         let upstream_meta = self.observe_unified_quota(resp.headers());
-        let raw_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        if hit_cap {
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "complete_success_body",
+            );
+        }
+        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         // Trace upstream success body pre-normalize.
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
         // Clone the raw body before normalize consumes it. Only pay the
@@ -1437,10 +1447,20 @@ impl Provider for AnthropicApiProvider {
         // Dir 3: upstream response headers, read BEFORE the body
         // consume. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
-        let raw_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        if hit_cap {
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "count_tokens_success_body",
+            );
+        }
+        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
         let token_count: TokenCount = serde_json::from_value(raw_body).map_err(|e| {
             Error::normalize_response(&self.cfg.id, format!("count_tokens response parse: {e}"))
@@ -1505,6 +1525,36 @@ impl Provider for AnthropicApiProvider {
     }
 }
 
+/// Map a non-streaming success body `(bytes, hit_cap)` to the parsed JSON.
+///
+/// A cap trip on a 2xx means the upstream returned an unreadable success
+/// response -- an invalid upstream protocol result. It maps to a 502
+/// `Error::upstream`, which classifies as a ServerError (debits the
+/// breaker, retries/fallbacks) exactly like any other upstream protocol
+/// failure. Otherwise the buffered bytes are parsed once.
+fn map_success_body(provider_id: &str, status: u16, bytes: &[u8], hit_cap: bool) -> Result<Value> {
+    if hit_cap {
+        return Err(Error::upstream(
+            provider_id,
+            502,
+            crate::http_client::body_cap_exceeded_message(),
+        ));
+    }
+    serde_json::from_slice(bytes).map_err(|e| Error::upstream(provider_id, status, e.to_string()))
+}
+
+/// Lift the Anthropic upstream classifier (`error.type`) from an
+/// already-parsed error body. Best-effort: `None` when the body was not
+/// JSON (a truncated/incomplete prefix, an HTML gateway page) or carries no
+/// `error.type`. Shared by the cap-trip and intact error paths so a
+/// truncated prefix that still parses keeps the classifier signal.
+fn parse_anthropic_error_type(parsed: Option<&Value>) -> Option<String> {
+    parsed
+        .and_then(|v| v.pointer("/error/type"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 /// Read a 4xx/5xx upstream response body and build a routectl
 /// `Error::Upstream` from it. Encapsulates the
 /// "text-first-then-opportunistic-JSON" pattern shared by
@@ -1513,13 +1563,19 @@ impl Provider for AnthropicApiProvider {
 /// cleartext error page, plain-text 529) must not collapse to an
 /// opaque serde error. Returns both the parsed message (for the
 /// caller's `body_excerpt` log) and the constructed `Error::Upstream`.
+///
+/// The body is read under the shared [`crate::http_client::read_body_capped`]
+/// ceiling: a lying or hostile upstream error body is bounded like any
+/// other. On a cap trip a single WARN records the truncation and the
+/// client-facing message collapses to a fixed cap-exceeded string --
+/// the truncated prefix is never echoed or classified.
 async fn read_anthropic_error(
     provider_id: &str,
     status: u16,
     resp: reqwest::Response,
 ) -> (String, Error) {
-    // Capture the reset hint from response headers BEFORE `resp.text()`
-    // moves the body, gated on rate-limit statuses. This is the single
+    // Capture the reset hint from response headers BEFORE the body read
+    // moves `resp`, gated on rate-limit statuses. This is the single
     // chokepoint for complete/stream/count_tokens, so all three HTTP
     // paths pick up the hint here.
     let retry_after = if crate::retry_after::is_rate_limit_status(status) {
@@ -1527,12 +1583,58 @@ async fn read_anthropic_error(
     } else {
         None
     };
-    let body_text = resp.text().await.unwrap_or_default();
-    // Emit the FULL upstream error body at debug level so triage
+    let content_length = resp.content_length();
+    let (bytes, hit_cap) = match crate::http_client::read_body_capped(
+        resp,
+        crate::http_client::MAX_RESPONSE_BODY_BYTES,
+    )
+    .await
+    {
+        Ok(read) => read,
+        Err(e) => {
+            // A transport failure while reading the error body is not a
+            // cap trip; surface it so the error path is not silently
+            // blind (the 2xx path turns the same failure into an Error).
+            tracing::warn!(
+                provider = %provider_id,
+                status,
+                error = %e,
+                "failed to read upstream error body",
+            );
+            (Vec::new(), false)
+        }
+    };
+    if hit_cap {
+        crate::http_client::warn_body_cap(provider_id, status, content_length, "error_body");
+    }
+    let body_text = String::from_utf8_lossy(&bytes).into_owned();
+    // Emit the FULL (capped) upstream error body at debug level so triage
     // doesn't have to reproduce. The caller's WARN excerpt stays
     // unchanged for `routectl-warn.log` scannability.
     debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &body_text);
+    // Parse once; both the cap-trip and intact paths lift the classifier
+    // from the same parsed value. Anthropic shape
+    // `{type:"error",error:{type,message}}`; errors carry no separate `code`,
+    // so only `upstream_type` is populated.
     let parsed = serde_json::from_str::<Value>(&body_text).ok();
+    let upstream_type = parse_anthropic_error_type(parsed.as_ref());
+    if hit_cap {
+        // A body truncated at the cap is untrustworthy: never echo it to the
+        // client. The client-facing message stays the fixed cap-exceeded
+        // string (upstream status and captured reset hint preserved), while
+        // the classifier lifted above still rides along when `error.type`
+        // survived truncation.
+        let msg = crate::http_client::body_cap_exceeded_message();
+        let err = Error::upstream_full(
+            provider_id,
+            status,
+            msg.clone(),
+            retry_after,
+            upstream_type,
+            None,
+        );
+        return (msg, err);
+    }
     let msg = parsed
         .as_ref()
         .and_then(|v| v.pointer("/error/message"))
@@ -1541,15 +1643,6 @@ async fn read_anthropic_error(
             || sanitize_upstream_body(&body_text),
             std::string::ToString::to_string,
         );
-    // Lift the upstream classifier (Anthropic shape
-    // `{type:"error",error:{type,message}}`) so an SDK that branches on
-    // `error.type` keeps the upstream signal. Anthropic errors carry no
-    // separate `code`, so only `upstream_type` is populated.
-    let upstream_type = parsed
-        .as_ref()
-        .and_then(|v| v.pointer("/error/type"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
     // When the upstream returned a structured `{error:...}` JSON envelope,
     // carry the RAW body so the ingress sanitizer can re-extract the
     // upstream's own top-level `error.message` and surface it to the
@@ -1622,6 +1715,35 @@ fn build_count_tokens_body(normalized: &Value) -> Value {
 mod tests {
     use super::*;
     use tracing_test::traced_test;
+
+    /// The upstream classifier (`error.type`) lifts from a body that parses
+    /// -- including a cap-trip prefix whose envelope survived truncation --
+    /// and yields `None` from an incomplete/unparseable prefix. This is the
+    /// seam the cap-trip branch of `read_anthropic_error` relies on to attempt
+    /// classification over the capped prefix.
+    #[test]
+    fn parse_anthropic_error_type_lifts_when_prefix_parses() {
+        let envelope = r#"{"type":"error","error":{"type":"overloaded_error","message":"x"}}"#;
+        let parsed = serde_json::from_str::<Value>(envelope).ok();
+        assert_eq!(
+            parse_anthropic_error_type(parsed.as_ref()).as_deref(),
+            Some("overloaded_error"),
+            "classifier must lift from a parseable envelope"
+        );
+
+        // An incomplete envelope (truncated mid-value) fails to parse.
+        let truncated =
+            serde_json::from_str::<Value>(r#"{"type":"error","error":{"type":"overl"#).ok();
+        assert_eq!(
+            parse_anthropic_error_type(truncated.as_ref()),
+            None,
+            "an unparseable prefix yields no classifier"
+        );
+
+        // Parseable JSON with no `error.type` yields None.
+        let no_type = serde_json::from_str::<Value>(r#"{"ok":true}"#).ok();
+        assert_eq!(parse_anthropic_error_type(no_type.as_ref()), None);
+    }
 
     /// Body fields routectl forwards to Anthropic's
     /// `/v1/messages/count_tokens` endpoint. This is the forwarding

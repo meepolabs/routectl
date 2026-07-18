@@ -327,10 +327,7 @@ async fn handle_connection(
             );
             return;
         }
-        tokio::spawn(async move {
-            handle_mitm_connection(stream, acceptor, ctx).await;
-            drop(permit);
-        });
+        tokio::spawn(handle_mitm_connection(stream, acceptor, ctx, permit));
         return;
     }
 

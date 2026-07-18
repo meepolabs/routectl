@@ -13,12 +13,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use reqwest::Url;
 use tokio::net::TcpStream;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_rustls::TlsAcceptor;
 
 use super::cc_version::CcVersionWarnGuard;
@@ -35,6 +37,16 @@ use super::split;
 /// mismatch, a scanning/probing client) -- without flooding the log at
 /// `error` on every individual failure.
 const TLS_HANDSHAKE_FAILURE_LOUD_EVERY: u64 = 10;
+
+/// How long the TLS handshake (from the first byte after the CONNECT
+/// tunnel is established) may take before the connection is dropped.
+/// A client that completes the CONNECT tunnel but never sends a
+/// ClientHello would otherwise pin the accepted socket and its
+/// concurrency permit indefinitely. This is a THIRD, distinct concern
+/// from the listener's `CONNECT_READ_TIMEOUT` (bounds reading the
+/// CONNECT request, pre-200) and `CONNECT_TIMEOUT` -- the values being
+/// equal is coincidental, so this is a local const, not an alias.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shared, per-connection-reusable state for the MITM proxy: the
 /// forwarding machinery both split legs reuse ([`ForwardState`]), the
@@ -70,20 +82,53 @@ pub struct MitmCtx {
 /// the decrypted stream, classifying and splitting every request via
 /// [`split::handle_request`]. Intended call pattern for the later
 /// listener task: `tokio::spawn(handle_mitm_connection(tcp, acceptor,
-/// Arc::clone(&ctx)))` per accepted connection.
+/// Arc::clone(&ctx), permit))` per accepted connection.
+///
+/// `permit` is the caller's concurrency slot: never read, held only so
+/// that dropping it -- on any early return or on normal completion --
+/// releases the slot at the same instant the owned `tcp` is dropped
+/// (mirrors `forward::StreamGuard`). This makes the slot's lifetime
+/// panic-safe rather than depending on a `drop(permit)` the caller has
+/// to remember to place after the await.
 ///
 /// Never panics and never propagates an error to the caller: a TLS
 /// handshake failure or an HTTP/1.1 connection-level error is logged
 /// and the function simply returns, dropping the connection. Fails
 /// closed on any error here -- there is no fallback path that serves
 /// plaintext or forwards a request without having decrypted it first.
-pub async fn handle_mitm_connection(tcp: TcpStream, acceptor: TlsAcceptor, ctx: Arc<MitmCtx>) {
+pub async fn handle_mitm_connection(
+    tcp: TcpStream,
+    acceptor: TlsAcceptor,
+    ctx: Arc<MitmCtx>,
+    permit: OwnedSemaphorePermit,
+) {
+    let _permit = permit;
     let peer = tcp.peer_addr().ok();
 
-    let tls_stream = match acceptor.accept(tcp).await {
-        Ok(stream) => stream,
-        Err(error) => {
+    let tls_stream = match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
             record_handshake_failure(&ctx.metrics, peer, &error);
+            return;
+        }
+        Err(_elapsed) => {
+            ctx.metrics.incr_tls_handshake_timeouts();
+            tracing::warn!(
+                target: "routectl_cli::proxy::mitm",
+                peer = ?peer,
+                timeout_secs = TLS_HANDSHAKE_TIMEOUT.as_secs(),
+                "MITM TLS handshake timed out"
+            );
+            // Also feed the aggregate failure counter (with a synthesized
+            // TimedOut error) so the loud-every-N handshake-failure signal
+            // stays coherent -- a timeout is a handshake failure too, just
+            // one the dedicated timeout counter distinguishes for
+            // slowloris detection.
+            record_handshake_failure(
+                &ctx.metrics,
+                peer,
+                &std::io::Error::from(std::io::ErrorKind::TimedOut),
+            );
             return;
         }
     };
@@ -147,6 +192,7 @@ mod tests {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::Semaphore;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -190,7 +236,8 @@ mod tests {
             let ctx = Arc::clone(&ctx);
             async move {
                 let (tcp, _) = listener.accept().await.unwrap();
-                handle_mitm_connection(tcp, acceptor, ctx).await;
+                let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+                handle_mitm_connection(tcp, acceptor, ctx, permit).await;
             }
         });
 
@@ -230,7 +277,8 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
-            handle_mitm_connection(tcp, acceptor, ctx).await;
+            let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+            handle_mitm_connection(tcp, acceptor, ctx, permit).await;
         });
 
         let mut root_store = rustls::RootCertStore::empty();
@@ -270,5 +318,64 @@ mod tests {
             "expected the loopback body to appear in the response, got: {response}"
         );
         server.await.unwrap();
+    }
+
+    /// A client that completes the CONNECT tunnel (the TCP connect here
+    /// stands in for that) then never sends a TLS ClientHello must not
+    /// pin its accepted socket and its concurrency permit forever: the
+    /// accept is bounded by `TLS_HANDSHAKE_TIMEOUT`, after which the
+    /// connection is dropped, both the aggregate handshake-failure
+    /// counter and the dedicated timeout counter tick, and the permit is
+    /// released. `start_paused` lets the test observe the 10s timeout
+    /// without waiting on the wall clock. On a pre-fix build (accept not
+    /// wrapped in a timeout) the server task never returns and the
+    /// bounded outer timeout below fails the test instead of hanging.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_client_hello_times_out_and_releases_the_permit() {
+        let dir = tempfile::tempdir().unwrap();
+        let acceptor = load_or_create(dir.path(), HOST).unwrap();
+        let reinject_server = MockServer::start().await;
+        let upstream_server = MockServer::start().await;
+        let ctx = test_ctx(
+            Url::parse(&reinject_server.uri()).unwrap(),
+            Url::parse(&upstream_server.uri()).unwrap(),
+        );
+
+        // A single-permit semaphore stands in for the listener's
+        // concurrency limiter, so the stall pinning the slot past the
+        // timeout would be directly observable as available_permits() == 0.
+        let sem = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&sem).acquire_owned().await.unwrap();
+        assert_eq!(sem.available_permits(), 0);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn({
+            let ctx = Arc::clone(&ctx);
+            async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                handle_mitm_connection(tcp, acceptor, ctx, permit).await;
+            }
+        });
+
+        // Complete the TCP connect but send nothing: the accept sits
+        // waiting on a ClientHello that never arrives. Hold the client
+        // socket open (a named binding, not `_`) so the server observes a
+        // stall rather than an immediate EOF.
+        let _client = TcpStream::connect(addr).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(30), server_task)
+            .await
+            .expect("handle_mitm_connection must return once the handshake times out")
+            .unwrap();
+
+        assert_eq!(ctx.metrics.tls_handshake_timeouts_total(), 1);
+        assert_eq!(ctx.metrics.tls_handshake_failures_total(), 1);
+        assert_eq!(
+            sem.available_permits(),
+            1,
+            "the concurrency permit must be released when the handshake times out"
+        );
     }
 }

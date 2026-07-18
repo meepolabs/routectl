@@ -684,7 +684,20 @@ async fn drive_stream<A: IngressAdapter>(
     // send failure, render failure, task cancellation) leaves the guard
     // un-finalized and Drop stamps the `client_disconnect` fallback. So
     // exactly one row lands per stream, mapped to the right outcome.
-    while let Some(item) = upstream.next().await {
+    loop {
+        let item = tokio::select! {
+            biased;
+            () = tx.closed() => {
+                tracing::debug!(
+                    target: "routectl_cli::handlers::ingress_handle",
+                    reason = "client_disconnected",
+                    "client disconnected mid-stream; cancelling upstream"
+                );
+                return;
+            }
+            item = upstream.next() => item,
+        };
+        let Some(item) = item else { break };
         match item {
             Ok(chunk) => {
                 // First chunk == the first byte the client can receive:
