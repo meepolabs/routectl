@@ -438,6 +438,31 @@ mod stream_error_class_tests {
         assert_eq!(class.openai_type, STREAM_ERROR_TYPE);
         assert_eq!(class.openai_code, STREAM_ERROR_TYPE);
     }
+
+    /// End-to-end: a native-Anthropic in-band `error` event decoded by
+    /// the real SSE state machine reaches this classifier as a structured
+    /// `Error::Upstream` and renders the preserved `error.type`
+    /// (`overloaded_error`) on the terminal SSE frame -- not the generic
+    /// `api_error` the previous `Error::Streaming` collapse produced. This
+    /// ties the provider-side decode to the client-facing terminal error,
+    /// converging the streaming and non-stream failure surfaces.
+    #[test]
+    fn in_stream_anthropic_error_renders_preserved_type() {
+        use routectl_providers::anthropic_api::sse::SseState;
+
+        let mut state = SseState::default();
+        let payload = r#"{"type":"error","error":{"type":"overloaded_error","message":"slow"}}"#;
+        let decoded = state
+            .parse_event("test-anthropic", payload)
+            .expect_err("in-band error event must surface as Err");
+
+        let class = StreamErrorClass::from_error(&decoded);
+        assert_eq!(
+            class.anthropic_type, "overloaded_error",
+            "the decoded in-stream error.type must reach the client, not api_error"
+        );
+        assert_eq!(class.openai_type, "overloaded_error");
+    }
 }
 
 /// One server-sent event ready to write to the response stream.

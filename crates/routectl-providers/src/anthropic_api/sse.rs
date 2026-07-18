@@ -567,17 +567,32 @@ impl SseState {
                 }
             }
             SseEvent::Ping => Ok(None),
-            // Anthropic spec: a 200 response can carry an in-band
-            // error event mid-stream (e.g. `overloaded_error`,
-            // `api_error`). Surface as `Error::Streaming` so the
-            // ingress wrapper terminates the SSE stream with a
-            // visible failure instead of silently completing. The
-            // payload is JSON-shaped (`{"type": "...", "message":
-            // "..."}`); we serialize it raw to preserve detail for
-            // operators reading logs.
-            SseEvent::Error { error } => Err(Error::Streaming(format!(
-                "anthropic in-stream error: {error}",
-            ))),
+            // Anthropic spec: a 200 response can carry an in-band error
+            // event mid-stream (e.g. `overloaded_error`, `rate_limit_error`).
+            // `error` is the inner object `{"type": ..., "message": ...}`.
+            // Preserve `error.type` and map it to the synthetic status the
+            // sync path would carry, so `failure_class::classify` and the
+            // terminal-error classifier see the same structured facts as a
+            // non-stream failure (streaming vs sync handling converges).
+            SseEvent::Error { error } => {
+                let err_type = error
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("api_error");
+                let message = error
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("upstream signaled error event mid-stream");
+                let status = crate::anthropic_error::anthropic_error_type_to_status(err_type);
+                Err(Error::upstream_full(
+                    provider_id,
+                    status,
+                    format!("{err_type}: {message}"),
+                    None,
+                    Some(err_type.to_string()),
+                    None,
+                ))
+            }
             // Forward-compat catchall for unknown top-level event tags.
             // Top-level Other events are not captured into opaque_events
             // (the carrier is keyed on content_block lifecycle only); a

@@ -3056,7 +3056,7 @@ pub struct RetryPolicy {
     pub backoff_multiplier: f64,
     /// Random additional ms added to each backoff sleep (0..jitter_ms).
     /// Prevents thundering-herd retries when many clients fail at once.
-    #[serde(default)]
+    #[serde(default = "default_jitter_ms")]
     pub jitter_ms: u64,
 
     /// Per-error-class retry caps. When set, override `max_attempts` for
@@ -3123,7 +3123,7 @@ impl Default for RetryPolicy {
             max_attempts: default_max_attempts(),
             initial_backoff_ms: default_backoff_ms(),
             backoff_multiplier: default_backoff_multiplier(),
-            jitter_ms: 50,
+            jitter_ms: default_jitter_ms(),
             retry_on_429: None,
             retry_on_5xx: None,
             retry_on_network: None,
@@ -3338,6 +3338,22 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
             RetryPolicy::default().jitter_ms,
             50,
             "default jitter_ms must be 50 for out-of-the-box retry spread"
+        );
+    }
+
+    /// A `[retry]` block that tunes one knob and omits `jitter_ms` must
+    /// still resolve jitter to 50, not `u64::default()` (0). The struct
+    /// `Default` only applies when the whole table is absent, so this
+    /// parse-boundary case is the one that actually exercises the field's
+    /// serde default.
+    #[test]
+    fn retry_block_present_without_jitter_keeps_50() {
+        use super::RetryPolicy;
+        let cfg: RetryPolicy = toml::from_str("max_attempts = 5\n").expect("parse [retry] block");
+        assert_eq!(cfg.max_attempts, 5);
+        assert_eq!(
+            cfg.jitter_ms, 50,
+            "jitter must stay 50 when [retry] is present but omits it"
         );
     }
 
@@ -4618,12 +4634,21 @@ api_key_ref = "literal:sk-ant-test"
 impl RetryPolicy {
     /// Maximum attempts a single provider can ever consume regardless
     /// of error class. The router uses this as a hard ceiling so a
-    /// misconfigured policy can't loop forever.
+    /// misconfigured policy can't loop forever. Folds the per-class
+    /// `[retry.classes]` overlay so the ceiling can never sit below a
+    /// class cap the resolver would otherwise honor.
     pub fn hard_retry_cap(&self) -> u32 {
         self.max_attempts
             .max(self.retry_on_429.unwrap_or(0))
             .max(self.retry_on_5xx.unwrap_or(0))
             .max(self.retry_on_network.unwrap_or(0))
+            .max(
+                self.classes
+                    .values()
+                    .filter_map(|c| c.retry)
+                    .max()
+                    .unwrap_or(0),
+            )
             .max(1)
     }
 
@@ -4668,6 +4693,16 @@ const fn default_stream_first_byte_timeout_ms() -> Option<u64> {
 
 const fn default_backoff_ms() -> u64 {
     250
+}
+
+/// Backstop for `RetryPolicy::jitter_ms` when a `[retry]` block is present
+/// but omits this key. Serde's bare `#[serde(default)]` would otherwise
+/// fill `u64::default()` (`0`), disabling the anti-thundering-herd jitter
+/// the moment an operator adds `[retry]` to tune any other knob -- the
+/// struct `Default` impl only applies when the whole `[retry]` table is
+/// absent, not when individual keys within it are.
+const fn default_jitter_ms() -> u64 {
+    50
 }
 
 const fn default_backoff_multiplier() -> f64 {

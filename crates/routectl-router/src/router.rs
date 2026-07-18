@@ -2331,19 +2331,18 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
-        // Re-probes the chain filter admitted, grouped by the target that must
-        // settle them. A single target can be admitted to re-probe several
-        // distinct `(state_key, feature)` negatives at once, so every admission
-        // for a `state_key` is held together and consumed per chain-iteration
-        // into one `LearnedProbeGuard` that settles each on the dispatch
-        // outcome.
-        let mut pending_probes: HashMap<String, Vec<ProbeAdmission>> = HashMap::new();
-        for admission in probe_admissions {
-            pending_probes
-                .entry(admission.state_key.clone())
-                .or_default()
-                .push(admission);
-        }
+        // Re-probes the chain filter admitted, owned by a request-scoped set
+        // that settles them on transfer or on drop. `take(state_key)` moves a
+        // target's admissions into its `LearnedProbeGuard` when the loop
+        // reaches the target; any admission still held when the set drops (an
+        // earlier target succeeded, a terminal error, a `break 'chain`, a
+        // client disconnect) was never reached and settles as `OtherError`, so
+        // its `in_flight` slot never latches.
+        let mut probe_set = ProbeAdmissionSet::new(
+            self.learned_capabilities.clone(),
+            probe_admissions,
+            DispatchSurface::Complete.as_str(),
+        );
         // Whether the CLIENT'S request carried a captured forwarded
         // bearer, computed ONCE before the chain loop (mirroring
         // `is_probe` below). This is a request-global observability
@@ -2384,12 +2383,14 @@ impl Router {
             // Learned re-probe settle guard for THIS target, scoped to the
             // whole chain-iteration (persists across same-provider retries,
             // drops -> OtherError on any exit). Inert unless the filter
-            // admitted at least one probe for this state_key; holds every
-            // admission the target owns.
-            let mut learned_probe_guard = match pending_probes.remove(state_key) {
-                Some(admissions) => {
-                    LearnedProbeGuard::armed(self.learned_capabilities.clone(), admissions)
-                }
+            // admitted at least one probe for this state_key; the move takes
+            // ownership out of the set so the set's drop cannot settle it again.
+            let mut learned_probe_guard = match probe_set.take(state_key) {
+                Some(admissions) => LearnedProbeGuard::armed(
+                    self.learned_capabilities.clone(),
+                    admissions,
+                    probe_set.surface,
+                ),
                 None => LearnedProbeGuard::inert(),
             };
             let Some(provider) = target.provider.clone() else {
@@ -2751,6 +2752,14 @@ impl Router {
                         // still falls back releases its slot without a debit
                         // in the fallback branch below.
                         let debits = class_debits(&cf.class);
+                        // Whether THIS attempt force-opened (parked) the
+                        // breaker. When it did, the next in-loop gate is
+                        // guaranteed CircuitOpen, so a same-provider retry
+                        // would be pure waste -- and is exactly the path that
+                        // used to discard the genuine error and let the
+                        // synthetic status-0 gate error surface in its place.
+                        let mut breaker_parked = false;
+                        let mut breaker_effect = "none";
                         if debits {
                             match reset_hint {
                                 // Non-probe LARGE reset: park the provider for
@@ -2763,8 +2772,14 @@ impl Router {
                                 // so only the large non-probe case parks here.
                                 Some(h) if !is_probe && h > INLOOP_RETRY_AFTER_CAP => {
                                     self.park_provider(state_key, h);
+                                    breaker_parked = true;
+                                    breaker_effect = "parked";
                                 }
-                                _ => self.record_failure(state_key),
+                                _ => {
+                                    if self.record_failure_opened(state_key) {
+                                        breaker_effect = "opened";
+                                    }
+                                }
                             }
                             probe_guard.disarm();
                         }
@@ -2778,7 +2793,7 @@ impl Router {
                             provider_name,
                             target,
                             do_fallback,
-                            retry_cap_for(&cf.class, &policy),
+                            &policy,
                             debits,
                             is_probe,
                             is_forwarded,
@@ -2810,7 +2825,22 @@ impl Router {
                                 &policy,
                                 attempts_made,
                                 is_probe,
-                            );
+                            )
+                            && !breaker_parked;
+                        let facts = upstream_facts(&e);
+                        tracing::debug!(
+                            provider = provider_name,
+                            state_key = %state_key,
+                            surface = DispatchSurface::Complete.as_str(),
+                            attempt = attempts_made,
+                            status = ?facts.status,
+                            upstream_type = ?facts.upstream_type,
+                            retry_after_ms = ?reset_hint.map(|d| d.as_millis()),
+                            breaker_effect,
+                            same_provider_retry = can_retry_here,
+                            preserved_upstream_error = facts.status.is_some(),
+                            "retry decision",
+                        );
                         if can_retry_here {
                             tracing::debug!(
                                 provider = provider_name,
@@ -2819,7 +2849,13 @@ impl Router {
                                 error = ?e,
                                 "retrying same provider",
                             );
-                            let _ = e;
+                            // Keep the genuine upstream error as the running
+                            // last_err before re-probing. If the re-gate then
+                            // refuses (CircuitOpen / RPM), the `last_err.is_none()`
+                            // guard above leaves this real error in place rather
+                            // than overwriting it with the synthetic status-0
+                            // gate error, so the client sees the true failure.
+                            last_err = Some(e);
                             // Honor a SMALL non-probe upstream reset as the
                             // next in-loop sleep: bump `backoff` so the
                             // loop-top sleep waits at least the reset before
@@ -3246,15 +3282,14 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req)?;
-        // See `complete_inner`: re-probes the filter admitted, grouped by the
-        // target that must settle them into one `LearnedProbeGuard`.
-        let mut pending_probes: HashMap<String, Vec<ProbeAdmission>> = HashMap::new();
-        for admission in probe_admissions {
-            pending_probes
-                .entry(admission.state_key.clone())
-                .or_default()
-                .push(admission);
-        }
+        // See `complete_inner`: re-probes the filter admitted, owned by a
+        // request-scoped set that settles each on transfer (`take`) or on drop
+        // (`OtherError` for any admission the loop never reached).
+        let mut probe_set = ProbeAdmissionSet::new(
+            self.learned_capabilities.clone(),
+            probe_admissions,
+            DispatchSurface::Stream.as_str(),
+        );
         // See `complete_inner`: request-global observability dimension
         // ONLY, fed to `emit_class_observability`. The per-target
         // `use_forwarded_credential` flag drives the model-rewrite
@@ -3283,11 +3318,14 @@ impl Router {
             let model = target.upstream.as_str();
             // See `complete_inner`: learned re-probe settle guard, scoped to
             // the whole chain-iteration; holds every admission the target owns
-            // and drops -> OtherError on any exit.
-            let mut learned_probe_guard = match pending_probes.remove(state_key) {
-                Some(admissions) => {
-                    LearnedProbeGuard::armed(self.learned_capabilities.clone(), admissions)
-                }
+            // and drops -> OtherError on any exit. The move takes ownership out
+            // of the set so the set's drop cannot settle it again.
+            let mut learned_probe_guard = match probe_set.take(state_key) {
+                Some(admissions) => LearnedProbeGuard::armed(
+                    self.learned_capabilities.clone(),
+                    admissions,
+                    probe_set.surface,
+                ),
                 None => LearnedProbeGuard::inert(),
             };
             let Some(provider) = target.provider.clone() else {
@@ -3648,7 +3686,7 @@ impl Router {
                             provider_name,
                             target,
                             do_fallback,
-                            retry_cap_for(&cf.class, &policy),
+                            &policy,
                             debits,
                             is_probe,
                             is_forwarded,
@@ -3747,7 +3785,7 @@ impl Router {
         provider: &str,
         target: &DispatchTarget,
         fallback: bool,
-        retry_cap: u32,
+        policy: &RetryPolicy,
         debit: bool,
         is_probe: bool,
         is_forwarded: bool,
@@ -3783,7 +3821,8 @@ impl Router {
             matched_by: cf.matched_by,
             facts,
             fallback,
-            retry_cap,
+            retry_cap: retry_cap_for(&cf.class, policy),
+            hard_retry_cap: policy.hard_retry_cap(),
             debit,
             is_probe,
             is_forwarded,
@@ -4014,9 +4053,17 @@ impl Router {
     }
 
     fn record_failure(&self, state_key: &str) {
-        if let Some(state) = self.state.get(state_key) {
-            state.lock().record_failure(Instant::now());
-        }
+        self.record_failure_opened(state_key);
+    }
+
+    /// Debit one breaker failure for `state_key`, returning whether this
+    /// debit tripped (opened) the breaker on this call. The `record_failure`
+    /// wrapper discards that signal; a caller that must report the breaker
+    /// effect of the debit uses this directly.
+    fn record_failure_opened(&self, state_key: &str) -> bool {
+        self.state
+            .get(state_key)
+            .is_some_and(|state| state.lock().record_failure(Instant::now()))
     }
 
     /// Park the provider's breaker open for `cooldown`, bypassing the
@@ -5115,7 +5162,9 @@ fn wrap_with_breaker_accounting(
                 return;
             }
             self.settled = true;
-            self.with_state(|state| state.record_failure(Instant::now()));
+            self.with_state(|state| {
+                state.record_failure(Instant::now());
+            });
         }
     }
 
@@ -5238,6 +5287,9 @@ struct LearnedProbeGuard {
     /// The still-unsettled admissions this target owns, each self-describing
     /// its `(state_key, feature, provider_kind)`.
     probes: Vec<ProbeAdmission>,
+    /// Dispatch surface for the settlement observability event
+    /// (`complete` | `stream`); every reached-target settlement emits under it.
+    surface: &'static str,
 }
 
 impl LearnedProbeGuard {
@@ -5245,10 +5297,12 @@ impl LearnedProbeGuard {
     const fn armed(
         registry: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
         probes: Vec<ProbeAdmission>,
+        surface: &'static str,
     ) -> Self {
         Self {
             registry: Some(registry),
             probes,
+            surface,
         }
     }
 
@@ -5258,6 +5312,7 @@ impl LearnedProbeGuard {
         Self {
             registry: None,
             probes: Vec::new(),
+            surface: "",
         }
     }
 
@@ -5273,6 +5328,7 @@ impl LearnedProbeGuard {
                     crate::learned_capability::ProbeOutcome::Success,
                     now,
                 );
+                emit_probe_settlement(&probe, self.surface, "success", true, "success");
             }
         }
     }
@@ -5305,6 +5361,13 @@ impl LearnedProbeGuard {
                 crate::learned_capability::ProbeOutcome::SameCapabilityRejection,
                 Instant::now(),
             );
+            emit_probe_settlement(
+                &probe,
+                self.surface,
+                "same_capability",
+                true,
+                "same_capability",
+            );
         }
         // Once the last held admission settles, disarm so drop is a no-op.
         if self.probes.is_empty() {
@@ -5326,9 +5389,113 @@ impl Drop for LearnedProbeGuard {
                     crate::learned_capability::ProbeOutcome::OtherError,
                     now,
                 );
+                emit_probe_settlement(probe, self.surface, "other_error", true, "terminal");
             }
         }
     }
+}
+
+/// Request-scoped owner of the re-probe admissions a chain filter staged,
+/// grouped by the target that must settle them. Declared before the chain
+/// loop in `complete_inner` and `stream_inner`; holds every admission the
+/// filter recorded until the loop either reaches a target (transfer) or the
+/// request leaves dispatch (settle-on-drop).
+///
+/// Transfer semantics: [`take`](Self::take) MOVES a target's admissions out
+/// of the set into that target's [`LearnedProbeGuard`] when the loop reaches
+/// it -- from that point the guard owns them and settles each on the dispatch
+/// outcome (Success / SameCapabilityRejection / drop=OtherError). Whatever is
+/// still held when the set drops -- an earlier target already returned success,
+/// a terminal non-fallbackable error, a `break 'chain` under disable_fallbacks,
+/// `?` propagation, or a client disconnect mid-dispatch -- was NEVER reached,
+/// so its `in_flight` slot would otherwise latch forever; the drop settles
+/// each held admission as `OtherError`, which releases only `in_flight` (it
+/// neither confirms nor extends the negative) so the next request re-probes.
+///
+/// The move is what makes settlement exact-once STRUCTURAL: an admission is
+/// owned by the set OR a target guard, never both, so no admission is ever
+/// settled twice.
+struct ProbeAdmissionSet {
+    /// Still-held admissions, grouped by the `state_key` of the target that
+    /// would settle them once reached.
+    pending: HashMap<String, Vec<ProbeAdmission>>,
+    registry: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
+    /// Dispatch surface for the settlement observability event
+    /// (`complete` | `stream`).
+    surface: &'static str,
+}
+
+impl ProbeAdmissionSet {
+    /// Group the filter's flat admission list by settling `state_key`.
+    fn new(
+        registry: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
+        admissions: Vec<ProbeAdmission>,
+        surface: &'static str,
+    ) -> Self {
+        let mut pending: HashMap<String, Vec<ProbeAdmission>> = HashMap::new();
+        for admission in admissions {
+            pending
+                .entry(admission.state_key.clone())
+                .or_default()
+                .push(admission);
+        }
+        Self {
+            pending,
+            registry,
+            surface,
+        }
+    }
+
+    /// Move this target's admissions out of the set into its
+    /// [`LearnedProbeGuard`]. Once taken the set no longer owns them, so the
+    /// set's drop cannot settle them a second time.
+    fn take(&mut self, state_key: &str) -> Option<Vec<ProbeAdmission>> {
+        self.pending.remove(state_key)
+    }
+}
+
+impl Drop for ProbeAdmissionSet {
+    fn drop(&mut self) {
+        let now = Instant::now();
+        for admissions in self.pending.values() {
+            for admission in admissions {
+                self.registry.record_probe_outcome(
+                    &admission.state_key,
+                    &admission.feature,
+                    admission.provider_kind,
+                    crate::learned_capability::ProbeOutcome::OtherError,
+                    now,
+                );
+                emit_probe_settlement(admission, self.surface, "other_error", false, "unreached");
+            }
+        }
+    }
+}
+
+/// Emit the probe-settlement observability event for one admission. DEBUG
+/// level: routine per-request bookkeeping, not an operator-actionable signal.
+/// Capability TOKEN + state_key only -- never a request body. `outcome` is the
+/// settlement disposition (`success` | `same_capability` | `other_error`) and
+/// `reason` its settlement cause (`success` | `same_capability` | `terminal` |
+/// `unreached`); `reached_target` is false only for a never-reached admission.
+fn emit_probe_settlement(
+    admission: &ProbeAdmission,
+    surface: &str,
+    outcome: &str,
+    reached_target: bool,
+    reason: &str,
+) {
+    tracing::debug!(
+        event = "probe_settlement",
+        state_key = %admission.state_key,
+        capability_key = %admission.feature,
+        provider_kind = admission.provider_kind,
+        surface,
+        outcome,
+        reached_target,
+        reason,
+        "learned re-probe admission settled",
+    );
 }
 
 /// Open the upstream stream and pull the first chunk. If that initial step
@@ -5703,6 +5870,11 @@ struct ClassDecisionObs<'a> {
     facts: UpstreamFacts<'a>,
     fallback: bool,
     retry_cap: u32,
+    /// The policy-wide hard ceiling on same-provider attempts. Invariant:
+    /// `hard_retry_cap >= retry_cap` for every class, since the ceiling
+    /// folds the per-class overlay. Emitted alongside `retry_cap` so a
+    /// drift between the logged cap and the enforced one is visible.
+    hard_retry_cap: u32,
     debit: bool,
     is_probe: bool,
     is_forwarded: bool,
@@ -5734,6 +5906,7 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             matched_by = matched_by_label(obs.matched_by),
             fallback = obs.fallback,
             retry_cap = obs.retry_cap,
+            hard_retry_cap = obs.hard_retry_cap,
             debit = obs.debit,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
@@ -5753,6 +5926,7 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             matched_by = matched_by_label(obs.matched_by),
             fallback = obs.fallback,
             retry_cap = obs.retry_cap,
+            hard_retry_cap = obs.hard_retry_cap,
             debit = obs.debit,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
@@ -6134,6 +6308,127 @@ mod tests {
             false
         ));
         assert!(should_fallback(&server_err, &server_class, &policy, false));
+    }
+
+    #[test]
+    fn hard_retry_cap_folds_per_class_overlay_above_max_attempts() {
+        // A per-class retry override above max_attempts must lift the hard
+        // ceiling too, or the retry loop's hard-cap guard silently clips
+        // the class cap the resolver honors.
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+        let mut classes = BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::ServerError,
+            ClassPolicy {
+                retry: Some(5),
+                fallback: None,
+            },
+        );
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            classes,
+            ..RetryPolicy::default()
+        };
+
+        assert_eq!(policy.hard_retry_cap(), 5);
+
+        let server_err = Error::upstream("p", 500, "body");
+        let server_class = classify(&server_err, None).class;
+        assert_eq!(retry_cap_for(&server_class, &policy), 5);
+        assert!(
+            policy.hard_retry_cap() >= retry_cap_for(&server_class, &policy),
+            "hard cap must never sit below an enforced class cap"
+        );
+    }
+
+    #[test]
+    fn emit_class_observability_logs_enforced_and_hard_retry_cap() {
+        // The emitted class-decision event must carry the SAME retry_cap
+        // the shared resolver enforces, plus hard_retry_cap, so logging can
+        // never drift from enforcement.
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+
+        struct StubProvider;
+        #[async_trait::async_trait]
+        impl Provider for StubProvider {
+            fn id(&self) -> &'static str {
+                "stub"
+            }
+            fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+                Err(Error::normalize_response("stub", "unused"))
+            }
+            async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+                unreachable!()
+            }
+            async fn stream(
+                &self,
+                _: ChatRequest,
+            ) -> Result<futures::stream::BoxStream<'static, Result<ChatChunk>>> {
+                unreachable!()
+            }
+        }
+
+        let router = build_router_with_provider_timeouts(None, None);
+        let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+        let model = Arc::new(ResolvedModel::new("nick", "p1", provider, "upstream"));
+        let target = into_one_dispatch_target(model);
+
+        let mut classes = BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::ServerError,
+            ClassPolicy {
+                retry: Some(5),
+                fallback: None,
+            },
+        );
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            classes,
+            ..RetryPolicy::default()
+        };
+
+        let err = Error::upstream("p1", 500, "body");
+        let cf = classify(&err, None);
+        let expected_retry = retry_cap_for(&cf.class, &policy);
+        let expected_hard = policy.hard_retry_cap();
+
+        let events = routectl_testkit::capture_events(|| {
+            router.emit_class_observability(
+                &err,
+                &cf,
+                &cf.class,
+                false,
+                None,
+                DispatchSurface::Complete,
+                "p1",
+                &target,
+                false,
+                &policy,
+                false,
+                false,
+                false,
+            );
+        });
+
+        let decision = events
+            .iter()
+            .find(|e| e.message == "router failure class decision")
+            .expect("one class-decision event emitted");
+        let retry_str = expected_retry.to_string();
+        let hard_str = expected_hard.to_string();
+        assert_eq!(decision.field("retry_cap"), Some(retry_str.as_str()));
+        assert_eq!(decision.field("hard_retry_cap"), Some(hard_str.as_str()));
+        assert_eq!(
+            expected_retry, 5,
+            "class overlay must lift the enforced cap"
+        );
+        assert!(
+            expected_hard >= expected_retry,
+            "emitted hard cap must never sit below the enforced retry cap"
+        );
     }
 
     #[test]
@@ -10025,6 +10320,231 @@ mod gate_error_does_not_mask_real_error_tests {
 }
 
 #[cfg(test)]
+mod breaker_park_preserves_upstream_error_tests {
+    //! Completion-path guard: when a debiting 429 carries an upstream reset
+    //! large enough to force-open (park) the provider's breaker, the SAME
+    //! request must surface the real upstream 429 + Retry-After, NOT the
+    //! synthetic status-0 "circuit breaker open" gate error. The synthetic
+    //! error stays reserved for a request blocked BEFORE dispatch (the next
+    //! request that arrives during the active park).
+    use super::*;
+    use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy};
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
+    use routectl_testkit::with_capture;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    // A reset far above INLOOP_RETRY_AFTER_CAP, so a debiting 429 parks the
+    // provider rather than bumping the in-loop sleep. Equal to the default
+    // max_honored_retry_after ceiling, so it is honored unclamped.
+    const RETRY_AFTER: Duration = Duration::from_hours(1);
+
+    /// Sole chain-entry provider: every dispatch fails with a real,
+    /// debiting 429 carrying a large upstream reset hint. Counts how many
+    /// times its body is actually reached.
+    struct ParkingProvider {
+        id: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ParkingProvider {
+        fn rate_limited(&self) -> Error {
+            Error::upstream_with_retry_after(
+                &self.id,
+                429,
+                "rate limited by upstream",
+                Some(RETRY_AFTER),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ParkingProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(self.rate_limited())
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(self.rate_limited())
+        }
+    }
+
+    /// Router with a sole alias entry dispatching to a provider that always
+    /// 429s with a large reset. The default retry policy caps RateLimited at
+    /// `max_attempts` (2), so a same-provider retry is admitted at attempt 1
+    /// -- exactly the branch that used to discard the genuine error. The
+    /// large reset parks the provider, so that retry re-gates to CircuitOpen.
+    fn router_with_parking_entry() -> (Router, Arc<AtomicUsize>) {
+        let mut config = Config::default();
+        config
+            .aliases
+            .insert("solo".into(), AliasValue::Chain(vec!["seat".into()]));
+        config.providers.insert(
+            "p".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
+                runtime: ProviderRuntimePolicy {
+                    circuit_failures: Some(1),
+                    circuit_cooldown_ms: Some(60_000),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut router = Router::new(Arc::new(config));
+        let provider: Arc<dyn Provider> = Arc::new(ParkingProvider {
+            id: "p".into(),
+            calls: Arc::clone(&calls),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "seat".into(),
+            Arc::new(ResolvedModel::new("seat", "p", provider, "u")),
+        );
+        router.install_resolved_models(models);
+        (router, calls)
+    }
+
+    fn solo_req() -> ChatRequest {
+        ChatRequest {
+            model: "solo".into(),
+            messages: vec![],
+            ..Default::default()
+        }
+    }
+
+    fn upstream_status(err: &Error) -> Option<u16> {
+        match err {
+            Error::Upstream { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    fn upstream_retry_after(err: &Error) -> Option<Duration> {
+        match err {
+            Error::Upstream { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn parking_request_surfaces_real_429_not_synthetic_gate_error() {
+        let (router, _calls) = router_with_parking_entry();
+        let err = router
+            .complete(solo_req())
+            .await
+            .expect_err("a parked sole entry still fails the request");
+        assert_eq!(
+            upstream_status(&err),
+            Some(429),
+            "client must receive the genuine upstream 429, not the synthetic status-0"
+        );
+        assert_eq!(
+            upstream_retry_after(&err),
+            Some(RETRY_AFTER),
+            "the upstream Retry-After must be preserved on the parking request"
+        );
+        assert!(
+            !err.to_string().contains("circuit breaker open"),
+            "the synthetic gate error must not surface on the parking request, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parking_request_does_not_retry_the_self_parked_provider() {
+        let (router, calls) = router_with_parking_entry();
+        let (_result, events) = with_capture(router.complete(solo_req())).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the provider must be dialed exactly once on the parking attempt"
+        );
+        assert!(
+            !events.iter().any(|e| e.message == "retrying same provider"),
+            "no same-provider retry may be attempted once this attempt parked the breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_request_during_park_still_sees_synthetic_circuit_open() {
+        let (router, calls) = router_with_parking_entry();
+        // First request parks the provider and surfaces the real 429.
+        let first = router
+            .complete(solo_req())
+            .await
+            .expect_err("first request fails with the real 429");
+        assert_eq!(upstream_status(&first), Some(429));
+        let dials_after_first = calls.load(Ordering::SeqCst);
+
+        // Second request during the active park is blocked BEFORE dispatch:
+        // it must see the synthetic status-0 gate error, and the provider
+        // body must not be reached again.
+        let second = router
+            .complete(solo_req())
+            .await
+            .expect_err("second request fails while the breaker is parked");
+        assert_eq!(
+            upstream_status(&second),
+            Some(0),
+            "a request blocked before dispatch keeps the synthetic status-0"
+        );
+        assert!(
+            second.to_string().contains("circuit breaker open"),
+            "the pre-dispatch block must surface the synthetic gate error, got: {second}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            dials_after_first,
+            "the parked provider must not be dialed by the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_decision_event_carries_full_field_set() {
+        let (router, _calls) = router_with_parking_entry();
+        let (_result, events) = with_capture(router.complete(solo_req())).await;
+        let ev = events
+            .iter()
+            .find(|e| e.message == "retry decision")
+            .expect("a retry-decision event must be emitted on the completion error path");
+        assert_eq!(ev.level, tracing::Level::DEBUG);
+        assert_eq!(ev.field("provider"), Some("p"));
+        assert_eq!(ev.field("state_key"), Some("seat"));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("attempt"), Some("1"));
+        assert_eq!(ev.field("status"), Some("Some(429)"));
+        assert_eq!(ev.field("upstream_type"), Some("None"));
+        assert_eq!(ev.field("retry_after_ms"), Some("Some(3600000)"));
+        assert_eq!(ev.field("breaker_effect"), Some("parked"));
+        assert_eq!(ev.field("same_provider_retry"), Some("false"));
+        assert_eq!(ev.field("preserved_upstream_error"), Some("true"));
+    }
+}
+
+#[cfg(test)]
 mod seat_pool_dispatch_tests {
     //! Router-level tests for OAuth credential-pool dispatch: a pooled
     //! model expands into one DispatchTarget per seat, each with its own
@@ -12104,7 +12624,11 @@ mod feature_filter_tests {
         // Settle exactly as dispatch does: arm the guard from the captured
         // admissions and drop it (the fallback / other-error settle path).
         {
-            let _guard = LearnedProbeGuard::armed(router.learned_capabilities.clone(), admissions);
+            let _guard = LearnedProbeGuard::armed(
+                router.learned_capabilities.clone(),
+                admissions,
+                "complete",
+            );
         }
         // The released slot makes the feature re-probable; had the admission
         // been dropped the slot would have latched forever.
@@ -12484,6 +13008,68 @@ mod feature_filter_tests {
         assert!(
             !router.beta_pinned_for_target(&target, "advisor"),
             "a tool-shape strip carries no beta token",
+        );
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_provider_beta_floor_routes_away_never_strips() {
+        // Bedrock analogue of `operator_pinned_beta_capability_routes_away_
+        // never_strips`: here the beta token is pinned by the Bedrock
+        // provider's `anthropic_beta` floor, not by header_extras. The
+        // invoke/converse adapters re-add that floor on the wire AFTER the
+        // canonical strip, so a BetaFlag strip of a floor-pinned token is a
+        // false success -> the target must route away instead of shipping the
+        // pinned flag. This pins the `anthropic_beta_floor` source of the
+        // guard, which is otherwise exercised only via header_extras.
+        use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
+        let mut config = Config::default();
+        config.providers.insert(
+            "prov".into(),
+            ProviderEntry::Bedrock {
+                region: "us-west-2".into(),
+                api_shape: BedrockApiShapeConfig::Invoke,
+                creds: BedrockCredsConfig::DefaultChain,
+                user_agent: None,
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                anthropic_beta: vec!["context-management-2025-06-27".to_string()],
+                cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
+                runtime: ProviderRuntimePolicy::default(),
+            },
+        );
+        let router = Router::new(Arc::new(config));
+        let target = strip_target("prov");
+
+        assert!(
+            router.beta_pinned_for_target(&target, "context_management"),
+            "the Bedrock provider anthropic_beta floor pins the beta token",
+        );
+
+        let base = Instant::now();
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_negative("prov", "context_management", base)]);
+
+        let mut admissions = Vec::new();
+        let mut strip_keys = Vec::new();
+        let decision = router.unsupported_feature_for_target(
+            &target,
+            &["context_management".to_string()],
+            &mut admissions,
+            &mut strip_keys,
+        );
+
+        assert_eq!(
+            decision,
+            Some(("context_management".to_string(), FilterSource::Learned)),
+            "a Bedrock floor-pinned beta strip routes away rather than stripping",
+        );
+        assert!(
+            strip_keys.is_empty(),
+            "the pinned strip must not be attached to the target",
         );
     }
 
@@ -16751,6 +17337,39 @@ mod context_reduction_dispatch_tests {
         );
     }
 
+    #[tokio::test]
+    async fn stream_reduce_runs_before_auto_cache_breakpoint_covers_reduced_bytes() {
+        // ORDERING regression, streaming analogue of the completion-path
+        // `reduce_runs_before_auto_cache_breakpoint_covers_reduced_bytes`:
+        // no caller breakpoint, reduction enabled AND auto-emit enabled +
+        // capable target. After a stream dispatch the captured request's
+        // tool_result JSON is compacted AND a top-level cache_control
+        // breakpoint is present -- proving reduction ran BEFORE auto-cache on
+        // the dominant streaming path. `stream_path_also_reduces` runs with
+        // auto_cache OFF, so the interaction is never exercised there: a
+        // reorder of the two blocks in `stream_inner` would disable reduction
+        // on every auto-breakpoint stream and pass every other test.
+        let (router, captured) = rig(anthropic_entry(), true, true);
+        let _ = router
+            .stream(req_with_pretty_tool_result())
+            .await
+            .expect("ok")
+            .collect::<Vec<_>>()
+            .await;
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(
+            first_tool_result_content(up),
+            &serde_json::json!("{\"rows\":[1,2,3]}"),
+            "the dispatched bytes must be the REDUCED string",
+        );
+        assert_eq!(
+            up.cache_control,
+            Some(CacheControl::ephemeral_5m()),
+            "a top-level breakpoint must be auto-emitted over the reduced request on the stream path",
+        );
+    }
+
     #[test]
     fn strategy_token_maps_every_case_to_stable_string() {
         // Operator-facing contract: pin these tokens exactly.
@@ -20424,5 +21043,440 @@ mod strip_wire_egress_tests {
             router.learned_capabilities.is_empty(),
             "the capture path must leave the registry untouched while the loop is dormant",
         );
+    }
+}
+
+#[cfg(test)]
+mod probe_admission_settlement_tests {
+    //! An admitted learned re-probe whose chain target the dispatch never
+    //! reaches must still release its `in_flight` slot, so the next request
+    //! re-probes rather than routing away until reload. The
+    //! `ProbeAdmissionSet` settles every unreached admission as `OtherError` on
+    //! drop. These tests drive `complete_inner` through the early-exit shapes
+    //! -- success on an earlier target, a terminal non-fallbackable error,
+    //! `break 'chain` under disable_fallbacks, and a dropped (cancelled)
+    //! dispatch future -- and assert the unreached target's slot reset. A
+    //! no-double-settle test pins the transfer: an admission the target guard
+    //! settled is not settled again by the set. The settlement observability
+    //! events assert the guard's own emissions too (reached success and a
+    //! reached-then-dropped terminal).
+    use super::*;
+    use crate::config::{AliasValue, ProviderEntry};
+    use crate::learned_capability::ExportedEntry;
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use routectl_core::{
+        ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, Provider,
+        Role, ToolDef, Usage,
+    };
+    use serde_json::json;
+
+    const PROVIDER_KIND: &str = "openai-compat";
+
+    /// What a target's in-process provider returns, chosen per target so a
+    /// test can steer the dispatch loop to leave a LATER target unreached.
+    #[derive(Clone, Copy)]
+    enum Behavior {
+        /// 2xx success -> the loop returns at this target.
+        Succeed,
+        /// A non-`Upstream` error -> classifies as `Unknown` (retry 0,
+        /// fallback false), so the loop returns terminally without a hop.
+        FailTerminal,
+        /// A fallbackable upstream 500 -> the loop would hop, but
+        /// disable_fallbacks makes it return at this target.
+        FailFallbackable,
+        /// 2xx success, but only after a delay long enough for a test to drop
+        /// the dispatch future mid-`complete` (leaving a later target
+        /// unreached, or exercising the reached-then-cancelled path).
+        SucceedAfter(Duration),
+    }
+
+    /// An in-process provider whose `complete` outcome is fixed at
+    /// construction, so a test controls the dispatch path without a wire.
+    struct ScriptedProvider {
+        id: String,
+        behavior: Behavior,
+    }
+
+    impl ScriptedProvider {
+        /// The canonical 2xx response echoing the request model.
+        fn ok_response(req: ChatRequest) -> ChatResponse {
+            ChatResponse {
+                id: "ok".into(),
+                model: req.model,
+                created: 0,
+                choices: vec![Choice {
+                    logprobs: None,
+                    index: 0,
+                    message: Message {
+                        refusal: None,
+                        role: Role::Assistant,
+                        content: MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+                upstream_meta: None,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            match self.behavior {
+                Behavior::Succeed => Ok(Self::ok_response(req)),
+                Behavior::FailTerminal => Err(Error::normalize_response(&self.id, "terminal")),
+                Behavior::FailFallbackable => Err(Error::upstream(&self.id, 500, "boom")),
+                Behavior::SucceedAfter(delay) => {
+                    tokio::time::sleep(delay).await;
+                    Ok(Self::ok_response(req))
+                }
+            }
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            Err(Error::normalize_response(&self.id, "stream unused"))
+        }
+    }
+
+    /// A lapsed (already-expired) self-identifying negative: acting AND due
+    /// for a re-probe, so the chain filter admits it and flips `in_flight`.
+    fn lapsed_negative(state_key: &str, feature_key: &str) -> ExportedEntry {
+        let base = Instant::now();
+        ExportedEntry {
+            state_key: state_key.into(),
+            feature_key: feature_key.into(),
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: base,
+            last_seen: base,
+            expires_at: base.checked_sub(Duration::from_secs(1)).unwrap_or(base),
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }
+    }
+
+    /// Build a router whose alias `chain` resolves to the given
+    /// `(nickname, provider_name, behavior)` targets in order, `[capability]`
+    /// enabled. Each dispatches to an in-process `ScriptedProvider`; a
+    /// `state_key` equals its nickname and every provider is registered
+    /// openai-compat so the learned registry sees a provider kind.
+    fn build_router(targets: &[(&str, &str, Behavior)]) -> Router {
+        let mut providers = BTreeMap::new();
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        for (nickname, provider_name, behavior) in targets {
+            providers.insert(
+                (*provider_name).to_string(),
+                ProviderEntry::openai_compat("https://example.invalid/v1", "literal:k"),
+            );
+            let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider {
+                id: (*provider_name).to_string(),
+                behavior: *behavior,
+            });
+            models.insert(
+                (*nickname).to_string(),
+                Arc::new(ResolvedModel::new(
+                    *nickname,
+                    *provider_name,
+                    provider,
+                    "upstream-model",
+                )),
+            );
+        }
+        let mut aliases = BTreeMap::new();
+        aliases.insert(
+            "chain".to_string(),
+            AliasValue::Chain(targets.iter().map(|(n, _, _)| (*n).to_string()).collect()),
+        );
+        let mut cfg = Config {
+            providers,
+            aliases,
+            ..Config::default()
+        };
+        cfg.capability.enabled = true;
+        let mut router = Router::new(Arc::new(cfg));
+        router.install_resolved_models(models);
+        router
+    }
+
+    /// A request against the `chain` alias carrying a `web_search` built-in
+    /// tool, so `derive_feature_keys` yields `[web_search]` and the seeded
+    /// negative is consulted.
+    fn req_with_web_search() -> ChatRequest {
+        ChatRequest {
+            model: "chain".into(),
+            messages: vec![],
+            tools: Some(vec![ToolDef::Other(
+                json!({"type": "web_search", "name": "t"}),
+            )]),
+            ..Default::default()
+        }
+    }
+
+    /// The resident registry entry for `(state_key, feature_key)`, or a panic
+    /// -- an unreached OtherError settle keeps the entry, so it must persist.
+    fn probe_entry(router: &Router, state_key: &str, feature_key: &str) -> ExportedEntry {
+        router
+            .learned_capabilities
+            .export_entries()
+            .into_iter()
+            .find(|e| e.state_key == state_key && e.feature_key == feature_key)
+            .expect("the seeded negative must still be resident after dispatch")
+    }
+
+    #[tokio::test]
+    async fn success_on_earlier_target_releases_unreached_admission() {
+        // m_a succeeds at the head; m_b (admitted for a re-probe) is never
+        // reached. Its slot must reset so the next request re-probes m_b.
+        let router = build_router(&[
+            ("m_a", "prov_a", Behavior::Succeed),
+            ("m_b", "prov_b", Behavior::Succeed),
+        ]);
+        let cap = normalize_capability_key("web_search", PROVIDER_KIND);
+        router
+            .learned_capabilities
+            .import_entries(vec![lapsed_negative("m_b", &cap)]);
+
+        let d = router
+            .complete_with_options(req_with_web_search(), RouterOptions::default())
+            .await;
+        assert!(d.result.is_ok(), "m_a should succeed: {:?}", d.result.err());
+
+        assert!(
+            !probe_entry(&router, "m_b", &cap).in_flight,
+            "an admission the loop never reached must release in_flight",
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_error_on_earlier_target_releases_unreached_admission() {
+        // m_a returns a non-fallbackable terminal error; the loop returns
+        // without hopping to the admitted m_b, whose slot must still reset.
+        let router = build_router(&[
+            ("m_a", "prov_a", Behavior::FailTerminal),
+            ("m_b", "prov_b", Behavior::Succeed),
+        ]);
+        let cap = normalize_capability_key("web_search", PROVIDER_KIND);
+        router
+            .learned_capabilities
+            .import_entries(vec![lapsed_negative("m_b", &cap)]);
+
+        let d = router
+            .complete_with_options(req_with_web_search(), RouterOptions::default())
+            .await;
+        assert!(
+            d.result.is_err(),
+            "a non-fallbackable terminal error must not fall back",
+        );
+
+        assert!(
+            !probe_entry(&router, "m_b", &cap).in_flight,
+            "a terminal early return must release the unreached admission",
+        );
+    }
+
+    #[tokio::test]
+    async fn break_under_disable_fallbacks_releases_unreached_admission() {
+        // m_a fails with a fallbackable error, but disable_fallbacks breaks the
+        // chain before the hop; the admitted m_b is never reached.
+        let router = build_router(&[
+            ("m_a", "prov_a", Behavior::FailFallbackable),
+            ("m_b", "prov_b", Behavior::Succeed),
+        ]);
+        let cap = normalize_capability_key("web_search", PROVIDER_KIND);
+        router
+            .learned_capabilities
+            .import_entries(vec![lapsed_negative("m_b", &cap)]);
+
+        let mut opts = RouterOptions::new();
+        opts.disable_fallbacks = true;
+        let d = router
+            .complete_with_options(req_with_web_search(), opts)
+            .await;
+        assert!(
+            d.result.is_err(),
+            "disable_fallbacks propagates the failure"
+        );
+
+        assert!(
+            !probe_entry(&router, "m_b", &cap).in_flight,
+            "a disable_fallbacks break must release the unreached admission",
+        );
+    }
+
+    #[tokio::test]
+    async fn reached_admission_settled_by_guard_not_by_set() {
+        // A solo target reached and settled by its own LearnedProbeGuard (a 2xx
+        // clears the negative) emits EXACTLY ONE probe-settlement event -- from
+        // the guard (reached_target=true, outcome=success) -- and NOT a second
+        // from the set's drop. The take() move makes exact-once settlement
+        // structural, so a second event (reached_target=false) would prove a
+        // double-settle.
+        let router = build_router(&[("m_a", "prov_a", Behavior::Succeed)]);
+        let cap = normalize_capability_key("web_search", PROVIDER_KIND);
+        router
+            .learned_capabilities
+            .import_entries(vec![lapsed_negative("m_a", &cap)]);
+
+        let (d, events) = routectl_testkit::with_capture(
+            router.complete_with_options(req_with_web_search(), RouterOptions::default()),
+        )
+        .await;
+        assert!(d.result.is_ok(), "the re-probe reaches m_a and succeeds");
+
+        assert!(
+            router
+                .learned_capabilities
+                .export_entries()
+                .iter()
+                .all(|e| !(e.state_key == "m_a" && e.feature_key == cap)),
+            "a successful re-probe clears the negative via the target guard",
+        );
+        let settlements: Vec<_> = events
+            .iter()
+            .filter(|e| e.field("event") == Some("probe_settlement"))
+            .collect();
+        assert_eq!(
+            settlements.len(),
+            1,
+            "a reached admission settles exactly once (guard only, no set double-settle): {events:?}",
+        );
+        let ev = settlements[0];
+        assert_eq!(ev.field("state_key"), Some("m_a"));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("outcome"), Some("success"));
+        assert_eq!(ev.field("reached_target"), Some("true"));
+        assert_eq!(ev.field("reason"), Some("success"));
+    }
+
+    #[tokio::test]
+    async fn reached_terminal_drop_emits_terminal_settlement() {
+        // A solo target reached by the loop but terminated by a non-capability
+        // error is neither a success nor a same-capability settle, so its guard
+        // drops with the admission still held: the guard's Drop emits one
+        // probe-settlement event tagged reached-then-dropped (outcome=other_error,
+        // reached_target=true, reason=terminal) and releases the slot.
+        let router = build_router(&[("m_a", "prov_a", Behavior::FailTerminal)]);
+        let cap = normalize_capability_key("web_search", PROVIDER_KIND);
+        router
+            .learned_capabilities
+            .import_entries(vec![lapsed_negative("m_a", &cap)]);
+
+        let (d, events) = routectl_testkit::with_capture(
+            router.complete_with_options(req_with_web_search(), RouterOptions::default()),
+        )
+        .await;
+        assert!(d.result.is_err(), "the terminal error returns terminally");
+
+        assert!(
+            !probe_entry(&router, "m_a", &cap).in_flight,
+            "a reached-then-dropped admission must release in_flight",
+        );
+        let ev = events
+            .iter()
+            .find(|e| e.field("event") == Some("probe_settlement"))
+            .expect("the guard drop must emit a probe-settlement event");
+        assert_eq!(ev.field("state_key"), Some("m_a"));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("outcome"), Some("other_error"));
+        assert_eq!(ev.field("reached_target"), Some("true"));
+        assert_eq!(ev.field("reason"), Some("terminal"));
+    }
+
+    #[tokio::test]
+    async fn future_drop_releases_unreached_admission() {
+        // m_a succeeds only after a long delay; the dispatch future is dropped
+        // ~150ms in, while it is still awaiting m_a's completion, so the
+        // admitted tail m_b is never reached. Dropping the future runs the set
+        // destructor on this current-thread runtime, settling the unreached
+        // admission under the capture subscriber (in_flight reset + one
+        // reached_target=false / reason=unreached event).
+        let router = build_router(&[
+            (
+                "m_a",
+                "prov_a",
+                Behavior::SucceedAfter(Duration::from_secs(2)),
+            ),
+            ("m_b", "prov_b", Behavior::Succeed),
+        ]);
+        let cap = normalize_capability_key("web_search", PROVIDER_KIND);
+        router
+            .learned_capabilities
+            .import_entries(vec![lapsed_negative("m_b", &cap)]);
+
+        let ((), events) = routectl_testkit::with_capture(async {
+            let fut = router.complete_with_options(req_with_web_search(), RouterOptions::default());
+            let cancelled = tokio::time::timeout(Duration::from_millis(150), fut).await;
+            assert!(
+                cancelled.is_err(),
+                "the slow completion must keep the future pending until it is dropped",
+            );
+        })
+        .await;
+
+        assert!(
+            !probe_entry(&router, "m_b", &cap).in_flight,
+            "dropping the dispatch future must release the unreached admission",
+        );
+        let ev = events
+            .iter()
+            .find(|e| e.field("event") == Some("probe_settlement"))
+            .expect("the dropped future's set destructor must emit a probe-settlement event");
+        assert_eq!(ev.field("state_key"), Some("m_b"));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("outcome"), Some("other_error"));
+        assert_eq!(ev.field("reached_target"), Some("false"));
+        assert_eq!(ev.field("reason"), Some("unreached"));
+    }
+
+    #[tokio::test]
+    async fn unreached_admission_emits_probe_settlement_event() {
+        // The set drop emits one probe-settlement debug event per unreached
+        // admission, carrying the full field set.
+        let router = build_router(&[
+            ("m_a", "prov_a", Behavior::Succeed),
+            ("m_b", "prov_b", Behavior::Succeed),
+        ]);
+        let cap = normalize_capability_key("web_search", PROVIDER_KIND);
+        router
+            .learned_capabilities
+            .import_entries(vec![lapsed_negative("m_b", &cap)]);
+
+        let (d, events) = routectl_testkit::with_capture(
+            router.complete_with_options(req_with_web_search(), RouterOptions::default()),
+        )
+        .await;
+        assert!(d.result.is_ok());
+
+        let ev = events
+            .iter()
+            .find(|e| e.field("event") == Some("probe_settlement"))
+            .expect("the set drop must emit a probe-settlement event for the unreached admission");
+        assert_eq!(ev.level, tracing::Level::DEBUG);
+        assert_eq!(ev.field("state_key"), Some("m_b"));
+        assert_eq!(ev.field("capability_key"), Some(cap.as_str()));
+        assert_eq!(ev.field("provider_kind"), Some(PROVIDER_KIND));
+        assert_eq!(ev.field("surface"), Some("complete"));
+        assert_eq!(ev.field("outcome"), Some("other_error"));
+        assert_eq!(ev.field("reached_target"), Some("false"));
+        assert_eq!(ev.field("reason"), Some("unreached"));
     }
 }

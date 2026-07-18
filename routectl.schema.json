@@ -1553,7 +1553,7 @@
           "type": "integer"
         },
         "jitter_ms": {
-          "default": 0,
+          "default": 50,
           "description": "Random additional ms added to each backoff sleep (0..jitter_ms).\nPrevents thundering-herd retries when many clients fail at once.",
           "format": "uint64",
           "minimum": 0,

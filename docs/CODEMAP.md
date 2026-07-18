@@ -51,7 +51,7 @@ listed at the bottom of each crate.
 
 ### Top-level
 
-- `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares crate-internal feature-gated helper modules `system_filter`, `claude_signing`, `tool_id`, `upstream_log`
+- `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares crate-internal feature-gated helper modules `system_filter`, `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin and User-Agent override; also owns the response-body cap cluster shared by all five provider egresses: `read_body_capped` (two-guard buffered read -- fast-reject on an honest over-cap `Content-Length` plus a mid-transfer running-total abort for chunked/understated bodies, returns `(bytes, hit_cap)`), the `MAX_RESPONSE_BODY_BYTES` 16 MB egress-side buffering cap (sibling to the streaming `MAX_FRAME_BYTES` frame cap; hardcoded, not a config knob), `body_cap_exceeded_message` (fixed client-safe string, never echoes upstream bytes), and `warn_body_cap` (one-WARN emitter with a fixed, drift-proof field set)
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller `reasoning.effort` against per-model `effort_levels` (rounds toward most-capable above max, least-capable below min); single source of truth across openai-compat, anthropic-api, bedrock, openai-responses
@@ -62,6 +62,7 @@ listed at the bottom of each crate.
 - `src/claude_signing.rs` -- byte-level re-signer for the billing-header checksum; re-signs an existing billing block in place after egress body mutations
 - `src/tool_id.rs` -- shared tool-call id charset sanitizer (chars outside `[a-zA-Z0-9_-]` -> `_`, deterministic) so sanitized `tool_use` ids and their `tool_result` correlators stay equal
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures (401/403-vs-other auth-warn split) across egresses
+- `src/anthropic_error.rs` -- shared Anthropic `error.type` -> synthetic-status mapping (`anthropic_error_type_to_status`; unknown tokens -> 502) consumed by `anthropic_api/sse.rs` and `bedrock/eventstream.rs` so an in-stream error event classifies identically to the sync error path
 
 ### anthropic_api
 

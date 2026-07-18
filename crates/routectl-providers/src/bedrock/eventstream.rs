@@ -161,15 +161,7 @@ fn handle_invoke_frame(
                     .pointer("/error/message")
                     .and_then(|v| v.as_str())
                     .unwrap_or("upstream signaled error event mid-stream");
-                let status = match err_type {
-                    "overloaded_error" => 529,
-                    "rate_limit_error" => 429,
-                    "invalid_request_error" => 400,
-                    "authentication_error" => 401,
-                    "permission_error" => 403,
-                    "not_found_error" => 404,
-                    _ => 502,
-                };
+                let status = crate::anthropic_error::anthropic_error_type_to_status(err_type);
                 if matches!(err_type, "authentication_error" | "permission_error") {
                     tracing::warn!(
                         provider = %provider_id,

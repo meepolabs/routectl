@@ -110,6 +110,15 @@ pub(crate) mod system_filter;
 #[cfg(feature = "anthropic-api")]
 pub(crate) mod claude_signing;
 
+// Shared Anthropic `error.type` -> synthetic HTTP status mapping. Both
+// the native Anthropic SSE path and the Bedrock-Converse eventstream map
+// in-stream error events through this one table so they classify
+// identically to the sync path. Gated on the two anthropic-vocabulary
+// egresses (crate-level, NOT bedrock-only, so the lean anthropic-api
+// build sees it); a lean openai-compat-only build carries no dead code.
+#[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
+pub(crate) mod anthropic_error;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 
