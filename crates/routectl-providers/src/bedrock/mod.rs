@@ -417,38 +417,44 @@ impl Provider for BedrockProvider {
         let status = resp.status().as_u16();
         if status >= 400 {
             // Capture the reset hint from response headers BEFORE
-            // `parse_upstream_error_body` moves `resp`, gated on
-            // rate-limit statuses.
+            // `read_error_body` moves `resp`, gated on rate-limit statuses.
             let retry_after = if crate::retry_after::is_rate_limit_status(status) {
                 crate::retry_after::parse_retry_after(resp.headers())
             } else {
                 None
             };
-            let msg = parse_upstream_error_body(
-                self.cfg.api_shape.provider_kind_str(),
-                &self.cfg.id,
-                resp,
-            )
-            .await;
-            return Err(Error::upstream_with_retry_after(
+            let (prefix, hit_cap) =
+                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
+            return Err(build_client_error(
                 &self.cfg.id,
                 status,
-                msg,
                 retry_after,
+                &prefix,
+                hit_cap,
             ));
         }
 
-        // Dir 3: upstream response headers, read BEFORE resp.json()
-        // consumes the body. Opt-in via ROUTECTL_TRACE_HEADERS.
+        // Dir 3: upstream response headers, read BEFORE the body read
+        // consumes `resp`. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(
             self.cfg.api_shape.provider_kind_str(),
             &self.cfg.id,
             resp.headers(),
         );
-        let raw_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        if hit_cap {
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "complete_success_body",
+            );
+        }
+        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
         // Trace upstream success body pre-normalize. Distinct
         // provider_kind per shape so operators can grep
         // `provider_kind=bedrock-invoke` vs `bedrock-converse`.
@@ -503,24 +509,20 @@ impl Provider for BedrockProvider {
         let status = resp.status().as_u16();
         if status >= 400 {
             // Capture the reset hint from response headers BEFORE
-            // `parse_upstream_error_body` moves `resp`, gated on
-            // rate-limit statuses.
+            // `read_error_body` moves `resp`, gated on rate-limit statuses.
             let retry_after = if crate::retry_after::is_rate_limit_status(status) {
                 crate::retry_after::parse_retry_after(resp.headers())
             } else {
                 None
             };
-            let msg = parse_upstream_error_body(
-                self.cfg.api_shape.provider_kind_str(),
-                &self.cfg.id,
-                resp,
-            )
-            .await;
-            return Err(Error::upstream_with_retry_after(
+            let (prefix, hit_cap) =
+                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
+            return Err(build_client_error(
                 &self.cfg.id,
                 status,
-                msg,
                 retry_after,
+                &prefix,
+                hit_cap,
             ));
         }
 
@@ -604,28 +606,58 @@ fn probe_outcome_for_resolve_error(err: &Error) -> routectl_core::ProbeOutcome {
     }
 }
 
-/// Best-effort parse of a Bedrock error response body into the message
-/// routectl surfaces to the CLIENT. Used by both `complete()` and
-/// `stream()` so the two paths return the same text.
+/// Read a Bedrock upstream error body under the shared response-body cap,
+/// log it, and return the `(capped-prefix, hit_cap)` pair the client-facing
+/// message is built from. Used by both `complete()` and `stream()` so the
+/// two paths log and classify identically.
 ///
-/// Redaction contract: a Bedrock 403 body names the principal ARN,
-/// account id, and resource ARN. None of those reach the client -- only
-/// the IAM action (the actionable bit) survives. All other statuses are
-/// sanitized and capped at `MAX_LOG_BODY_EXCERPT` so an unbounded raw
-/// upstream body never reaches the caller.
+/// The body is read via [`crate::http_client::read_body_capped`]: a lying or
+/// hostile upstream error body is bounded like any other. On a cap trip a
+/// single WARN records the truncation; classification and logging then run
+/// on the capped prefix only.
 ///
-/// Side effect: emits a structured `tracing::warn!` classifying the
-/// failure (full action + principal-present flag stays server-side).
-async fn parse_upstream_error_body(
+/// Redaction contract: a Bedrock 403 body names the principal ARN, account
+/// id, and resource ARN. None of those reach the client -- only the IAM
+/// action (the actionable bit) survives. All other statuses are sanitized
+/// and capped at `MAX_LOG_BODY_EXCERPT` so an unbounded raw upstream body
+/// never reaches the caller.
+///
+/// Side effect: emits a structured `tracing::warn!` classifying the failure
+/// (full action + principal-present flag stays server-side).
+async fn read_error_body(
     provider_kind: &str,
     provider: &str,
     resp: reqwest::Response,
-) -> String {
+) -> (String, bool) {
     let status = resp.status().as_u16();
-    let body_text = resp.text().await.unwrap_or_default();
-    log_bedrock_upstream_error(provider, status, &body_text);
-    // Emit the full upstream error body at debug level alongside the
-    // status-specific WARN above. The WARN excerpt (cap via
+    let content_length = resp.content_length();
+    let (bytes, hit_cap) = match crate::http_client::read_body_capped(
+        resp,
+        crate::http_client::MAX_RESPONSE_BODY_BYTES,
+    )
+    .await
+    {
+        Ok(read) => read,
+        Err(e) => {
+            // A transport failure while reading the error body is not a
+            // cap trip; surface it so the error path is not silently blind
+            // (the 2xx path already turns the same failure into an Error).
+            tracing::warn!(
+                provider = %provider,
+                status,
+                error = %e,
+                "failed to read upstream error body",
+            );
+            (Vec::new(), false)
+        }
+    };
+    if hit_cap {
+        crate::http_client::warn_body_cap(provider, status, content_length, "error_body");
+    }
+    let body_text = String::from_utf8_lossy(&bytes);
+    log_bedrock_upstream_error(provider, status, &body_text, hit_cap);
+    // Emit the full (capped) upstream error body at debug level alongside
+    // the status-specific WARN above. The WARN excerpt (cap via
     // sanitize_for_log) keeps `routectl-warn.log` scannable; DEBUG gives
     // operators field-level detail when they flip log level during triage.
     //
@@ -637,7 +669,61 @@ async fn parse_upstream_error_body(
     let debug_body = sanitized_debug_body(status, &body_text);
     routectl_core::debug_upstream_error_body(provider_kind, provider, status, &debug_body);
 
-    classify_client_error_message(status, &body_text)
+    (body_text.into_owned(), hit_cap)
+}
+
+/// Map a non-streaming success body `(bytes, hit_cap)` to the parsed JSON.
+///
+/// A cap trip on a 2xx means the upstream returned an unreadable success
+/// response -- an invalid upstream protocol result. It maps to a 502
+/// `Error::upstream`, which classifies as a ServerError (debits the
+/// breaker, retries/fallbacks) exactly like any other upstream protocol
+/// failure. Otherwise the buffered bytes are parsed once.
+fn map_success_body(provider_id: &str, status: u16, bytes: &[u8], hit_cap: bool) -> Result<Value> {
+    if hit_cap {
+        return Err(Error::upstream(
+            provider_id,
+            502,
+            crate::http_client::body_cap_exceeded_message(),
+        ));
+    }
+    serde_json::from_slice(bytes).map_err(|e| Error::upstream(provider_id, status, e.to_string()))
+}
+
+/// Build the CLIENT-facing message from an error body prefix.
+///
+/// When the body was truncated at the cap (`hit_cap`), the raw prefix is
+/// untrustworthy and must never be echoed. Only the classifier-derived IAM
+/// action survives (a 403 whose action passes the strict shape check);
+/// every other truncated body collapses to the fixed cap-exceeded message.
+/// An intact body classifies exactly as before.
+fn map_error_message(status: u16, prefix: &str, hit_cap: bool) -> String {
+    if hit_cap {
+        match classify_bedrock_error(status, prefix) {
+            BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
+            BedrockErrorClass::Other => crate::http_client::body_cap_exceeded_message(),
+        }
+    } else {
+        classify_client_error_message(status, prefix)
+    }
+}
+
+/// Assemble the final client-facing `Error` for an upstream error response,
+/// preserving the caller-captured `status` and `retry_after` while deriving
+/// the message from the (possibly truncated) body prefix.
+fn build_client_error(
+    provider_id: &str,
+    status: u16,
+    retry_after: Option<std::time::Duration>,
+    prefix: &str,
+    hit_cap: bool,
+) -> Error {
+    Error::upstream_with_retry_after(
+        provider_id,
+        status,
+        map_error_message(status, prefix, hit_cap),
+        retry_after,
+    )
 }
 
 /// Build the CLIENT-facing error message from a Bedrock upstream body.
@@ -760,14 +846,26 @@ fn classify_bedrock_error(status: u16, body: &str) -> BedrockErrorClass {
 /// credential material because Bedrock error bodies don't contain any.
 /// The 403 action / principal-present fields come from the shared
 /// `classify_bedrock_error` so the client and log paths stay aligned.
-fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
+///
+/// On a cap trip (`hit_cap`) the `body` is a truncated prefix: the
+/// `body_excerpt` field collapses to the fixed cap message so no prefix
+/// bytes reach WARN level. The 403 IAM action (classifier-derived,
+/// shape-checked) still lifts -- it is a bounded token, not free-form
+/// body text.
+fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: bool) {
     // sanitize_upstream_body_with_cap trims edges, collapses HTML pages to
     // a short marker, and caps length. It does NOT filter mid-string control
     // characters (\n, \r, ANSI escapes). sanitize_for_log applied next
     // handles that separately.
-    let excerpt =
-        routectl_core::sanitize_upstream_body_with_cap(body, routectl_core::MAX_LOG_BODY_EXCERPT);
-    let safe_excerpt = sanitize_for_log(&excerpt);
+    let safe_excerpt = if hit_cap {
+        crate::http_client::body_cap_exceeded_message()
+    } else {
+        let excerpt = routectl_core::sanitize_upstream_body_with_cap(
+            body,
+            routectl_core::MAX_LOG_BODY_EXCERPT,
+        );
+        sanitize_for_log(&excerpt)
+    };
     match status {
         401 => {
             tracing::warn!(
@@ -1230,6 +1328,232 @@ mod tests {
             "non-403 client message was not truncated: {} (input {})",
             msg.len(),
             oversized
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Response-body cap seams (the 16 MiB DoS response-body cap). Pure-function mappers exercised
+    // without HTTP: the bedrock endpoint is region-derived (no base_url), so
+    // there is no mock-HTTP harness -- the (bytes, hit_cap) -> outcome logic
+    // is structured as small testable functions instead.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn success_body_over_cap_maps_to_502() {
+        let err = map_success_body("prov", 200, b"partial-json", true)
+            .expect_err("a capped 2xx body must be an error");
+        match err {
+            Error::Upstream {
+                provider,
+                status,
+                body,
+                ..
+            } => {
+                assert_eq!(provider, "prov");
+                assert_eq!(
+                    status, 502,
+                    "unreadable 2xx must classify as 502 ServerError"
+                );
+                assert_eq!(body, crate::http_client::body_cap_exceeded_message());
+                assert!(
+                    !body.contains("partial-json"),
+                    "cap message must not echo the raw body"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn success_body_under_cap_parses_json() {
+        let raw = br#"{"ok":true,"n":7}"#;
+        let value = map_success_body("prov", 200, raw, false).expect("valid json must parse");
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(value["n"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn success_body_under_cap_invalid_json_errors_with_original_status() {
+        let err =
+            map_success_body("prov", 200, b"not json", false).expect_err("invalid json must error");
+        match err {
+            Error::Upstream { status, .. } => {
+                assert_eq!(status, 200, "parse error keeps the success status");
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_body_over_cap_preserves_status_and_retry_after() {
+        let retry = std::time::Duration::from_secs(30);
+        let raw_prefix = "a giant throttling body that was truncated at the cap";
+        let err = build_client_error("prov", 429, Some(retry), raw_prefix, true);
+        match err {
+            Error::Upstream {
+                status,
+                retry_after,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 429, "original upstream status must be preserved");
+                assert_eq!(
+                    retry_after,
+                    Some(retry),
+                    "caller-captured retry_after must be preserved"
+                );
+                assert_eq!(body, crate::http_client::body_cap_exceeded_message());
+                assert!(
+                    !body.contains("throttling"),
+                    "capped error message must not echo the raw body prefix"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_body_over_cap_403_keeps_iam_action_only() {
+        let prefix = "User: arn:aws:iam::123456789012:user/bob is not authorized to \
+                      perform: bedrock:InvokeModel on resource: arn:aws:bedrock:...";
+        let err = build_client_error("prov", 403, None, prefix, true);
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 403);
+                assert_eq!(
+                    body,
+                    "bedrock access denied: missing IAM action bedrock:InvokeModel"
+                );
+                assert!(
+                    !body.contains("arn:aws"),
+                    "principal/resource ARN must not leak"
+                );
+                assert!(!body.contains("123456789012"), "account id must not leak");
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_body_under_cap_classifies_unchanged() {
+        let prefix = "some 400 validation detail";
+        let err = build_client_error("prov", 400, None, prefix, false);
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 400);
+                assert_eq!(
+                    body,
+                    classify_client_error_message(400, prefix),
+                    "under-cap path must classify exactly as before"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cap_trip_emits_single_warn_with_settled_fields() {
+        let events = routectl_testkit::capture_events(|| {
+            crate::http_client::warn_body_cap("prov", 200, Some(1234), "complete_success_body");
+        });
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(warns.len(), 1, "exactly one WARN per cap trip");
+        let w = warns[0];
+        assert_eq!(w.field("provider"), Some("prov"));
+        assert_eq!(w.field("status"), Some("200"));
+        assert_eq!(
+            w.field("body_cap_bytes"),
+            Some(
+                crate::http_client::MAX_RESPONSE_BODY_BYTES
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert_eq!(w.field("content_length"), Some("Some(1234)"));
+        assert_eq!(w.field("body_truncated"), Some("true"));
+        assert_eq!(w.field("path"), Some("complete_success_body"));
+    }
+
+    /// On a cap trip the upstream-failure WARN (`log_bedrock_upstream_error`)
+    /// emits the FIXED cap message as its `body_excerpt` -- the truncated
+    /// prefix must never reach WARN level.
+    #[test]
+    fn error_body_over_cap_warn_excerpt_is_fixed_message() {
+        let prefix = "a giant validation body detail that must not appear at WARN";
+        let events = routectl_testkit::capture_events(|| {
+            log_bedrock_upstream_error("prov", 400, prefix, true);
+        });
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("upstream-failure WARN must fire");
+        assert_eq!(
+            warn.field("body_excerpt"),
+            Some(crate::http_client::body_cap_exceeded_message().as_str()),
+            "WARN excerpt must be the fixed cap message on a cap trip"
+        );
+        assert!(
+            warn.fields
+                .iter()
+                .all(|(_, v)| !v.contains("giant validation body")),
+            "no WARN field may echo the truncated prefix"
+        );
+    }
+
+    /// Spawn a one-shot raw TCP server returning `status` with a chunked
+    /// (no Content-Length) `body`, and return the URL to GET. wiremock sets
+    /// an honest Content-Length, so a chunked server is the only way to
+    /// drive `read_error_body` down its streaming read path.
+    async fn spawn_chunked_error_server(status: u16, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let head = format!(
+                "HTTP/1.1 {status} ERR\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket
+                .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                .await;
+            let _ = socket.write_all(body.as_bytes()).await;
+            let _ = socket.write_all(b"\r\n0\r\n\r\n").await;
+            let _ = socket.flush().await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn read_error_body_under_cap_logs_error_but_not_a_cap_trip() {
+        // An under-cap error body is read fully: the pre-existing upstream
+        // error WARN fires (on the prefix), and the cap-trip WARN (the one
+        // carrying `path`) must NOT fire. This pins that the cap WARN is
+        // gated on an actual trip and is a separate signal from the
+        // error-classification WARN.
+        let url = spawn_chunked_error_server(500, "upstream boom detail").await;
+        let resp = reqwest::get(url).await.unwrap();
+
+        let ((prefix, hit_cap), events) =
+            routectl_testkit::with_capture(read_error_body("bedrock-invoke", "prov", resp)).await;
+
+        assert!(!hit_cap, "an under-cap error body must not trip the cap");
+        assert!(prefix.contains("upstream boom detail"));
+        assert!(
+            events.iter().all(|e| e.field("path").is_none()),
+            "no cap-trip WARN (carrying `path`) may fire under cap",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == tracing::Level::WARN && e.message.contains("bedrock upstream")),
+            "the pre-existing upstream error WARN must still fire on the prefix",
         );
     }
 }

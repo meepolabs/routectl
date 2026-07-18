@@ -1210,6 +1210,78 @@ mod tests {
         );
     }
 
+    /// A body larger than the 16 MiB non-stream cap. Honest wiremock
+    /// Content-Length lets the provider's fast-reject fire without the
+    /// socket ever streaming the body.
+    fn over_cap_body() -> String {
+        "a".repeat(16 * 1024 * 1024 + 1)
+    }
+
+    #[tokio::test]
+    async fn integration_complete_success_body_over_cap_maps_to_502() {
+        // An unreadable 2xx body is an invalid upstream protocol result: it
+        // must classify as a 502 ServerError (not leak the original 200 nor
+        // echo any bytes), so the breaker/retry machinery treats it like any
+        // other upstream failure.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(over_cap_body()))
+            .mount(&mock_server)
+            .await;
+
+        let provider = make_provider(&mock_server.uri());
+        let req = base_req("claude-3-opus", vec![user_msg("hi")]);
+
+        let err = provider.complete(req).await.unwrap_err();
+        match err {
+            routectl_core::Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 502, "over-cap 2xx must map to 502, got {status}");
+                assert!(
+                    body.contains("cap"),
+                    "message must be the bounded cap-exceeded text: {body:?}"
+                );
+                assert!(
+                    !body.contains("aaaa"),
+                    "cap message must not echo the raw body: {body:?}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_complete_error_body_over_cap_preserves_status_bounded() {
+        // An over-cap >=400 body preserves the original upstream status while
+        // collapsing the (truncated, untrustworthy) body to the fixed
+        // cap-exceeded message -- no raw echo.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(429).set_body_string(over_cap_body()))
+            .mount(&mock_server)
+            .await;
+
+        let provider = make_provider(&mock_server.uri());
+        let req = base_req("claude-3-opus", vec![user_msg("hi")]);
+
+        let err = provider.complete(req).await.unwrap_err();
+        match err {
+            routectl_core::Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 429, "original upstream status must be preserved");
+                assert!(
+                    body.contains("cap"),
+                    "message must be the bounded cap-exceeded text: {body:?}"
+                );
+                assert!(
+                    !body.contains("aaaa"),
+                    "capped error body must not be echoed: {body:?}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn integration_stream() {
         let mock_server = MockServer::start().await;

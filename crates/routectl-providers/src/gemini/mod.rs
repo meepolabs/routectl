@@ -257,6 +257,67 @@ impl Provider for GeminiProvider {
 }
 
 impl GeminiProvider {
+    /// Read a non-streaming success body under the shared response-body cap
+    /// and decode it to JSON. A cap trip on a 2xx is an unreadable success
+    /// response -- an invalid upstream protocol result -- so it maps to a
+    /// 502-class `Error::upstream` (classifies as a ServerError: debits the
+    /// breaker, retries/fallbacks like any other upstream protocol failure).
+    /// The caller runs the upstream header trace BEFORE this consumes `resp`.
+    async fn read_success_json(&self, resp: reqwest::Response, status: u16) -> Result<Value> {
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        if hit_cap {
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "complete_success_body",
+            );
+            return Err(Error::upstream(
+                &self.cfg.id,
+                502,
+                crate::http_client::body_cap_exceeded_message(),
+            ));
+        }
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))
+    }
+
+    /// Read a `>= 400` error body under the shared response-body cap and map
+    /// it to the client-facing error, preserving the original upstream status
+    /// and reset hint. A truncated body is untrustworthy and is never echoed
+    /// to the client. The caller runs the upstream header trace BEFORE this
+    /// consumes `resp` where that path traces on the error branch.
+    async fn map_error_response(&self, resp: reqwest::Response, status: u16) -> Error {
+        let headers = resp.headers().clone();
+        let content_length = resp.content_length();
+        let (bytes, hit_cap) = match crate::http_client::read_body_capped(
+            resp,
+            crate::http_client::MAX_RESPONSE_BODY_BYTES,
+        )
+        .await
+        {
+            Ok(read) => read,
+            Err(e) => {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    error = %e,
+                    "failed to read upstream error body",
+                );
+                (Vec::new(), false)
+            }
+        };
+        if hit_cap {
+            crate::http_client::warn_body_cap(&self.cfg.id, status, content_length, "error_body");
+        }
+        let body_text = String::from_utf8_lossy(&bytes);
+        map_gemini_upstream_error(&self.cfg.id, status, &headers, &body_text, hit_cap)
+    }
+
     async fn complete_api_key(&self, req: ChatRequest) -> Result<ChatResponse> {
         let body = self.normalize_request(&req)?;
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
@@ -282,20 +343,10 @@ impl GeminiProvider {
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
         if status >= 400 {
-            let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(map_gemini_upstream_error(
-                &self.cfg.id,
-                status,
-                &headers,
-                &body_text,
-            ));
+            return Err(self.map_error_response(resp, status).await);
         }
 
-        let raw_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        let raw_body: Value = self.read_success_json(resp, status).await?;
 
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
 
@@ -337,20 +388,10 @@ impl GeminiProvider {
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
         if status >= 400 {
-            let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(map_gemini_upstream_error(
-                &self.cfg.id,
-                status,
-                &headers,
-                &body_text,
-            ));
+            return Err(self.map_error_response(resp, status).await);
         }
 
-        let raw_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        let raw_body: Value = self.read_success_json(resp, status).await?;
 
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
 
@@ -388,14 +429,7 @@ impl GeminiProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(map_gemini_upstream_error(
-                &self.cfg.id,
-                status,
-                &headers,
-                &body_text,
-            ));
+            return Err(self.map_error_response(resp, status).await);
         }
 
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
@@ -431,14 +465,7 @@ impl GeminiProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(map_gemini_upstream_error(
-                &self.cfg.id,
-                status,
-                &headers,
-                &body_text,
-            ));
+            return Err(self.map_error_response(resp, status).await);
         }
 
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
@@ -531,11 +558,20 @@ pub(super) fn parse_gemini_error_classifier(body_text: &str) -> (Option<String>,
     (upstream_type, upstream_code)
 }
 
+/// Map a Gemini `>= 400` upstream response to the client-facing error.
+///
+/// When `hit_cap` is set the body was truncated at the shared response-body
+/// cap and is untrustworthy: the client-facing message AND the
+/// upstream-failure WARN excerpt both collapse to the fixed cap-exceeded text
+/// (never echoing truncated bytes), while the classifier enum tokens
+/// (`error.status` / `error.code`) still lift when the prefix happens to
+/// parse. An intact body classifies and logs exactly as before.
 fn map_gemini_upstream_error(
     provider_id: &str,
     status: u16,
     headers: &reqwest::header::HeaderMap,
     body_text: &str,
+    hit_cap: bool,
 ) -> Error {
     let header_hint = if crate::retry_after::is_rate_limit_status(status) {
         crate::retry_after::parse_retry_after(headers)
@@ -545,9 +581,15 @@ fn map_gemini_upstream_error(
     debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
     let (upstream_type, upstream_code) = parse_gemini_error_classifier(body_text);
     let msg = extract_upstream_message(body_text);
-    let safe_excerpt = sanitize_for_log(&msg);
+    let safe_excerpt = if hit_cap {
+        crate::http_client::body_cap_exceeded_message()
+    } else {
+        sanitize_for_log(&msg)
+    };
     crate::upstream_log::warn_upstream_failure(provider_id, status, None, &safe_excerpt, "gemini");
-    let err_body = if is_json_error_envelope(body_text) {
+    let err_body = if hit_cap {
+        crate::http_client::body_cap_exceeded_message()
+    } else if is_json_error_envelope(body_text) {
         body_text.to_string()
     } else {
         msg
@@ -714,7 +756,7 @@ mod e2e_tests {
         let body =
             r#"{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}"#;
 
-        let err = map_gemini_upstream_error("gemini:test", 429, &headers, body);
+        let err = map_gemini_upstream_error("gemini:test", 429, &headers, body, false);
 
         match err {
             Error::Upstream {
@@ -735,6 +777,66 @@ mod e2e_tests {
             }
             other => panic!("expected Upstream, got {other:?}"),
         }
+    }
+
+    /// On a cap trip the mapper lifts the classifier from the (parseable)
+    /// prefix but the client body AND the upstream-failure WARN excerpt both
+    /// collapse to the fixed cap message -- the truncated prefix never appears
+    /// at WARN level (prefix content is confined to the DEBUG-gated path).
+    #[test]
+    fn map_error_over_cap_hides_prefix_and_lifts_classifier() {
+        let prefix = r#"{"error":{"code":429,"message":"secret upstream detail","status":"RESOURCE_EXHAUSTED"}}"#;
+
+        let events = routectl_testkit::capture_events(|| {
+            let err = map_gemini_upstream_error(
+                "gemini:test",
+                429,
+                &reqwest::header::HeaderMap::new(),
+                prefix,
+                true,
+            );
+            match err {
+                Error::Upstream {
+                    status,
+                    upstream_type,
+                    body,
+                    ..
+                } => {
+                    assert_eq!(status, 429, "original status preserved on cap trip");
+                    assert_eq!(
+                        upstream_type.as_deref(),
+                        Some("RESOURCE_EXHAUSTED"),
+                        "classifier must lift from a parseable prefix"
+                    );
+                    assert_eq!(
+                        body,
+                        crate::http_client::body_cap_exceeded_message(),
+                        "client body must be the fixed cap message, never the prefix"
+                    );
+                }
+                other => panic!("expected Upstream, got {other:?}"),
+            }
+        });
+
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN && e.field("context") == Some("gemini"))
+            .expect("upstream-failure WARN must fire on a cap trip");
+        assert_eq!(
+            warn.field("body_excerpt"),
+            Some(crate::http_client::body_cap_exceeded_message().as_str()),
+            "WARN excerpt must be the fixed cap message on a cap trip"
+        );
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN)
+                .all(|e| e
+                    .fields
+                    .iter()
+                    .all(|(_, v)| !v.contains("secret upstream detail"))),
+            "no WARN-level event may echo the truncated prefix"
+        );
     }
 
     fn gemini_stream_sse_body() -> &'static str {
@@ -1083,5 +1185,130 @@ mod e2e_tests {
         assert_eq!(details[0].format.as_deref(), Some(GEMINI_FORMAT));
         assert_eq!(details[0].payload["text"], "reasoning...");
         assert_eq!(details[0].payload["thought_signature"], "sig");
+    }
+
+    // -----------------------------------------------------------------
+    // Response-body cap adoption (the 16 MiB DoS response-body cap)
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn complete_success_over_cap_maps_to_502_and_warns() {
+        // An honest Content-Length over the 16MiB cap trips the fast-reject
+        // before a body byte is read; a 2xx that cannot be buffered is an
+        // invalid upstream response and must classify as 502.
+        let over_cap = crate::http_client::MAX_RESPONSE_BODY_BYTES + 1;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:generateContent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_bytes(vec![b'a'; over_cap]),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let (result, events) = routectl_testkit::with_capture(provider.complete(base_req())).await;
+
+        match result.expect_err("an over-cap 200 must be an error") {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 502, "unreadable 2xx must classify as 502");
+                assert!(
+                    body.contains("exceeded"),
+                    "message must be the fixed cap message; got {body}"
+                );
+                assert!(
+                    !body.contains("aaaa"),
+                    "cap message must not echo the raw body"
+                );
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+
+        let cap_warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN && e.field("path").is_some())
+            .collect();
+        assert_eq!(cap_warns.len(), 1, "exactly one cap-trip WARN");
+        let w = cap_warns[0];
+        assert_eq!(w.field("provider"), Some("gemini:test"));
+        assert_eq!(w.field("status"), Some("200"));
+        assert_eq!(
+            w.field("body_cap_bytes"),
+            Some(
+                crate::http_client::MAX_RESPONSE_BODY_BYTES
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert_eq!(w.field("body_truncated"), Some("true"));
+        assert_eq!(w.field("path"), Some("complete_success_body"));
+        assert_eq!(
+            w.field("content_length"),
+            Some(format!("Some({over_cap})").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_error_over_cap_preserves_status_no_echo() {
+        let over_cap = crate::http_client::MAX_RESPONSE_BODY_BYTES + 1;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:generateContent"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .insert_header("content-type", "application/json")
+                    .set_body_bytes(vec![b'a'; over_cap]),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("an over-cap 400 must be an error");
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 400, "original upstream status must be preserved");
+                assert!(body.contains("exceeded"), "fixed cap message; got {body}");
+                assert!(!body.contains("aaaa"), "must not echo truncated body");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_code_onboarding_error_over_cap_preserves_status() {
+        // An empty cache forces the loadCodeAssist onboarding call before any
+        // generate; an over-cap onboarding error must preserve its status and
+        // never echo the truncated body.
+        let over_cap = crate::http_client::MAX_RESPONSE_BODY_BYTES + 1;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("content-type", "application/json")
+                    .set_body_bytes(vec![b'a'; over_cap]),
+            )
+            .mount(&server)
+            .await;
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("an over-cap onboarding error must surface");
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 429, "onboarding upstream status must be preserved");
+                assert!(body.contains("exceeded"), "fixed cap message; got {body}");
+                assert!(!body.contains("aaaa"), "must not echo truncated body");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
     }
 }

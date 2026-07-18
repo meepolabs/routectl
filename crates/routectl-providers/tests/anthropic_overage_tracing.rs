@@ -347,3 +347,124 @@ async fn count_tokens_500_still_logs_health_warn() {
         "the capability DEBUG note is 501-only; got: {events:#?}",
     );
 }
+
+// -----------------------------------------------------------------------
+// Response-body cap trip WARN. A body over the 16 MiB non-stream cap
+// emits exactly one WARN carrying the settled field set. http_client is
+// crate-private, so the cap value is spelled literally here (it is a
+// stability contract, not an implementation detail).
+// -----------------------------------------------------------------------
+
+const RESPONSE_BODY_CAP: usize = 16 * 1024 * 1024;
+
+/// A body one byte over the cap. Honest wiremock Content-Length trips the
+/// provider fast-reject.
+fn over_cap_body() -> String {
+    "a".repeat(RESPONSE_BODY_CAP + 1)
+}
+
+fn cap_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            e.level == tracing::Level::WARN
+                && e.message
+                    .contains("upstream response body exceeded cap; truncated")
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_success_body_over_cap_warns_once_with_settled_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(over_cap_body()))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    let (result, events) = with_capture(provider.complete(base_req())).await;
+    assert!(result.is_err(), "an over-cap 2xx must surface an error");
+
+    let warns = cap_warns(&events);
+    assert_eq!(
+        warns.len(),
+        1,
+        "exactly one cap-trip WARN; got: {events:#?}"
+    );
+    let w = warns[0];
+    assert_eq!(w.field("provider"), Some("overage-test"));
+    assert_eq!(w.field("status"), Some("200"));
+    assert_eq!(
+        w.field("body_cap_bytes"),
+        Some(RESPONSE_BODY_CAP.to_string().as_str())
+    );
+    assert_eq!(w.field("body_truncated"), Some("true"));
+    assert_eq!(w.field("path"), Some("complete_success_body"));
+    assert!(
+        w.field("content_length")
+            .is_some_and(|v| v.starts_with("Some(")),
+        "honest Content-Length must be recorded: {:?}",
+        w.field("content_length")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_error_body_over_cap_warns_once_with_error_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(over_cap_body()))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    let (result, events) = with_capture(provider.complete(base_req())).await;
+    assert!(result.is_err(), "an over-cap >=400 must surface an error");
+
+    let warns = cap_warns(&events);
+    assert_eq!(
+        warns.len(),
+        1,
+        "exactly one cap-trip WARN; got: {events:#?}"
+    );
+    let w = warns[0];
+    assert_eq!(w.field("provider"), Some("overage-test"));
+    assert_eq!(w.field("status"), Some("500"));
+    assert_eq!(w.field("body_truncated"), Some("true"));
+    assert_eq!(w.field("path"), Some("error_body"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn count_tokens_success_body_over_cap_maps_to_502_and_warns() {
+    // The count_tokens() success read shares the cap with complete() but
+    // carries a distinct WARN path. An over-cap 2xx count_tokens body must
+    // still map to a 502 and emit one cap-trip WARN tagged for this site.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(over_cap_body()))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    let (result, events) = with_capture(provider.count_tokens(base_req())).await;
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, routectl_core::Error::Upstream { status, .. } if *status == 502),
+        "over-cap count_tokens 2xx must map to 502; got {err:?}",
+    );
+
+    let warns = cap_warns(&events);
+    assert_eq!(
+        warns.len(),
+        1,
+        "exactly one cap-trip WARN; got: {events:#?}"
+    );
+    let w = warns[0];
+    assert_eq!(w.field("provider"), Some("overage-test"));
+    assert_eq!(w.field("status"), Some("200"));
+    assert_eq!(w.field("body_truncated"), Some("true"));
+    assert_eq!(w.field("path"), Some("count_tokens_success_body"));
+}

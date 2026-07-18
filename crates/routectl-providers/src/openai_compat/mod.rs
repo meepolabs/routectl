@@ -252,26 +252,45 @@ impl Provider for OpenAiCompatProvider {
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            // Read headers BEFORE `resp.text()` moves the body; the
+            // Read headers BEFORE the capped body read moves `resp`; the
             // shared mapper takes `&HeaderMap` and computes the
             // rate-limit-gated retry_after + classifier + WARN split.
-            let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
+            let (headers, body_text, hit_cap) =
+                read_capped_error_body(&self.cfg.id, status, resp).await;
             return Err(map_openai_compat_upstream_error(
                 &self.cfg.id,
                 status,
                 &headers,
                 &body_text,
+                hit_cap,
             ));
         }
 
-        // Dir 3: upstream response headers, read BEFORE the body
-        // consume (resp.json() takes ownership). Opt-in via
-        // ROUTECTL_TRACE_HEADERS.
+        // Dir 3: upstream response headers, read BEFORE the capped body
+        // read moves `resp`. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
-        let raw: Value = resp
-            .json()
-            .await
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
+        if hit_cap {
+            // An unreadable 2xx body is an invalid upstream response: a
+            // 502-class upstream error (ServerError) so it debits the
+            // breaker and retries/fallbacks like any protocol failure.
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "complete_success_body",
+            );
+            return Err(Error::upstream(
+                &self.cfg.id,
+                502,
+                crate::http_client::body_cap_exceeded_message(),
+            ));
+        }
+        let raw: Value = serde_json::from_slice(&body_bytes)
             .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
 
         // Trace the raw upstream body BEFORE normalization
@@ -334,16 +353,17 @@ impl Provider for OpenAiCompatProvider {
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            // Read headers BEFORE `resp.text()` moves the body. Shared
+            // Read headers BEFORE the capped body read moves `resp`. Shared
             // with complete(): retry_after is preserved on the stream
             // path via the same upstream_full mapping.
-            let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
+            let (headers, body_text, hit_cap) =
+                read_capped_error_body(&self.cfg.id, status, resp).await;
             return Err(map_openai_compat_upstream_error(
                 &self.cfg.id,
                 status,
                 &headers,
                 &body_text,
+                hit_cap,
             ));
         }
 
@@ -630,15 +650,24 @@ fn parse_openai_error_classifier(body_text: &str) -> (Option<String>, Option<Str
 /// debug level here so call sites do not duplicate it.
 ///
 /// `headers` MUST be read from the response BEFORE the body is consumed
-/// (`resp.text()` moves the body). This ordering is a programmer
+/// (the capped body read moves the response). This ordering is a programmer
 /// convention, NOT enforced by the borrow checker: `headers` is an owned
 /// `HeaderMap` clone here, so the compiler does not couple it to the body
-/// move. Both call sites clone the headers before calling `resp.text()`.
+/// move. Both call sites clone the headers before reading the body.
+///
+/// `hit_cap` is true when the body was truncated at the shared response-body
+/// cap. A truncated body is untrustworthy: the client message collapses to a
+/// fixed cap-exceeded string (never an echo of the partial body) while the
+/// original status and rate-limit-gated `retry_after` are preserved. The
+/// classifier is still attempted on the prefix (a partial envelope yields
+/// None), and the upstream-failure WARN still fires -- with the fixed cap
+/// message as its excerpt, never prefix-derived text.
 fn map_openai_compat_upstream_error(
     provider_id: &str,
     status: u16,
     headers: &HeaderMap,
     body_text: &str,
+    hit_cap: bool,
 ) -> Error {
     // Reset hint from response headers, gated on rate-limit statuses so a
     // stray Retry-After on a 400 doesn't park the provider.
@@ -647,30 +676,40 @@ fn map_openai_compat_upstream_error(
     } else {
         None
     };
-    // Full upstream error body at debug level. The truncated WARN excerpt
-    // below stays for warn-log scannability.
-    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
-    // Best-effort lift of the upstream classifier so an SDK that branches
-    // on `error.type` / `error.code` keeps the upstream signal.
+    // Best-effort lift of the upstream classifier so an SDK that branches on
+    // `error.type` / `error.code` keeps the upstream signal. Attempted on the
+    // body (the capped prefix on a cap trip); a truncated envelope simply
+    // fails to parse and yields (None, None).
     let (upstream_type, upstream_code) = parse_openai_error_classifier(body_text);
+    // The upstream-failure WARN fires on every 4xx/5xx -- cap trips included,
+    // so an operator sees the same failure signal regardless. On a cap trip
+    // its excerpt is the fixed cap message: the truncated prefix never appears
+    // at WARN level. openai-compat carries no AuthKind, so the auth_kind field
+    // is omitted.
     let sanitized = extract_upstream_message(body_text);
-    let safe_excerpt = sanitize_for_log(&sanitized);
-    // Extend the auth-only WARN to all 4xx/5xx so an operator never has to
-    // guess WHY a request failed. openai-compat carries no AuthKind, so
-    // the auth_kind field is omitted.
+    let warn_excerpt = if hit_cap {
+        crate::http_client::body_cap_exceeded_message()
+    } else {
+        sanitize_for_log(&sanitized)
+    };
     crate::upstream_log::warn_upstream_failure(
         provider_id,
         status,
         None,
-        &safe_excerpt,
+        &warn_excerpt,
         "openai-compat",
     );
-    // When the upstream returned a structured `{error:...}` JSON envelope,
-    // carry the RAW body so the ingress sanitizer can re-extract the
-    // upstream's own top-level `error.message` and surface it to the
-    // client. Otherwise carry the sanitized excerpt so a non-`{error}`
-    // body falls back to a status-only client message -- never a raw dump.
-    let err_body = if is_json_error_envelope(body_text) {
+    // Full (capped) upstream body at debug level -- the only path where the
+    // truncated prefix bytes may surface, DEBUG-gated and bounded.
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
+    // Client body: on a cap trip the truncated body is untrustworthy, so
+    // collapse to the fixed cap message (never an echo of the partial body)
+    // while preserving the status + retry_after. Otherwise carry the RAW
+    // `{error:...}` envelope so the ingress sanitizer can re-extract the
+    // upstream message, or the sanitized excerpt for a non-envelope body.
+    let err_body = if hit_cap {
+        crate::http_client::body_cap_exceeded_message()
+    } else if is_json_error_envelope(body_text) {
         body_text.to_string()
     } else {
         sanitized
@@ -685,15 +724,170 @@ fn map_openai_compat_upstream_error(
     )
 }
 
+/// Read an openai-compat upstream error body under the shared response-body
+/// cap. `headers` are cloned BEFORE the read consumes `resp` (the mapper
+/// needs them for the rate-limit-gated `retry_after`). On a cap trip a single
+/// WARN records the truncation and the returned prefix is bounded to the cap;
+/// a transport failure is logged and degrades to an empty body.
+async fn read_capped_error_body(
+    provider_id: &str,
+    status: u16,
+    resp: reqwest::Response,
+) -> (HeaderMap, String, bool) {
+    let headers = resp.headers().clone();
+    let content_length = resp.content_length();
+    let (bytes, hit_cap) = match crate::http_client::read_body_capped(
+        resp,
+        crate::http_client::MAX_RESPONSE_BODY_BYTES,
+    )
+    .await
+    {
+        Ok(read) => read,
+        Err(e) => {
+            // A transport failure reading the error body is not a cap trip;
+            // surface it so the error path is not silently blind, then fall
+            // back to an empty body (the mapper still returns a status-only
+            // client error).
+            tracing::warn!(
+                provider = %provider_id,
+                status,
+                error = %e,
+                "failed to read upstream error body",
+            );
+            (Vec::new(), false)
+        }
+    };
+    if hit_cap {
+        crate::http_client::warn_body_cap(provider_id, status, content_length, "error_body");
+    }
+    (
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+        hit_cap,
+    )
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::{
         MAX_STREAM_CHOICES, accumulate_choice_text, ensure_stream_options_include_usage,
         map_openai_compat_upstream_error, parse_openai_error_classifier,
     };
+    use crate::http_client::body_cap_exceeded_message;
     use reqwest::header::HeaderMap;
     use routectl_core::Error;
     use serde_json::json;
+
+    #[test]
+    fn capped_error_body_preserves_status_without_echo() {
+        // A cap trip whose prefix is an INCOMPLETE JSON envelope: the client
+        // message collapses to the fixed cap message (never echoing the
+        // prefix), status is preserved, and the classifier attempt over the
+        // partial envelope fails to parse -> None (the attempt still runs;
+        // see `capped_error_body_lifts_classifier_when_prefix_parses`).
+        let prefix = r#"{"error":{"type":"server_error","message":"aaaaaaaaaaaa"#;
+        let err = map_openai_compat_upstream_error("prov", 500, &HeaderMap::new(), prefix, true);
+        match err {
+            Error::Upstream {
+                status,
+                body,
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(
+                    status, 500,
+                    "capped error must preserve the upstream status"
+                );
+                assert_eq!(body, body_cap_exceeded_message());
+                assert!(
+                    !body.contains("aaaa") && !body.contains("server_error"),
+                    "capped message must not echo the truncated prefix: {body:?}"
+                );
+                assert_eq!(
+                    upstream_type, None,
+                    "an incomplete envelope prefix fails to parse -> no classifier"
+                );
+                assert_eq!(upstream_code, None);
+            }
+            other => panic!("expected Upstream, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capped_error_body_lifts_classifier_when_prefix_parses() {
+        // A cap trip whose prefix happens to be a COMPLETE small envelope
+        // (the cap landed after the classifier fields, before trailing
+        // padding). The classifier IS attempted on the prefix and lifts the
+        // enum tokens, while the client body stays the fixed cap message and
+        // NEVER echoes the prefix message text.
+        let prefix = r#"{"error":{"type":"rate_limit_exceeded","code":"slow_down","message":"x"}}"#;
+        let err = map_openai_compat_upstream_error("prov", 429, &HeaderMap::new(), prefix, true);
+        match err {
+            Error::Upstream {
+                status,
+                body,
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(
+                    status, 429,
+                    "capped error must preserve the upstream status"
+                );
+                assert_eq!(
+                    body,
+                    body_cap_exceeded_message(),
+                    "client body must be the fixed cap message, never the prefix"
+                );
+                assert_eq!(
+                    upstream_type.as_deref(),
+                    Some("rate_limit_exceeded"),
+                    "classifier type must lift from a prefix that parses"
+                );
+                assert_eq!(upstream_code.as_deref(), Some("slow_down"));
+            }
+            other => panic!("expected Upstream, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capped_error_warn_excerpt_is_fixed_message() {
+        // The upstream-failure WARN fires on a cap trip (it was previously
+        // skipped), but its excerpt is the fixed cap message -- the truncated
+        // prefix must never appear at WARN level.
+        let prefix = r#"{"error":{"type":"server_error","message":"secret upstream detail"#;
+        let events = routectl_testkit::capture_events(|| {
+            let _ = super::map_openai_compat_upstream_error(
+                "prov",
+                500,
+                &HeaderMap::new(),
+                prefix,
+                true,
+            );
+        });
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN && e.field("context") == Some("openai-compat")
+            })
+            .expect("upstream-failure WARN must fire on a cap trip");
+        assert_eq!(
+            warn.field("body_excerpt"),
+            Some(body_cap_exceeded_message().as_str()),
+            "WARN excerpt must be the fixed cap message on a cap trip"
+        );
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN)
+                .all(|e| e
+                    .fields
+                    .iter()
+                    .all(|(_, v)| !v.contains("secret upstream detail"))),
+            "no WARN-level event may echo the truncated prefix"
+        );
+    }
 
     #[test]
     fn excerpt_sanitizes_crlf_and_ansi() {
@@ -806,7 +1000,7 @@ mod helper_tests {
         let headers = HeaderMap::new();
 
         // Act
-        let err = map_openai_compat_upstream_error("p", 429, &headers, body);
+        let err = map_openai_compat_upstream_error("p", 429, &headers, body, false);
 
         // Assert
         match err {
@@ -841,7 +1035,7 @@ mod helper_tests {
         headers.insert("retry-after", "30".parse().unwrap());
 
         // Act
-        let err = map_openai_compat_upstream_error("p", 429, &headers, "{}");
+        let err = map_openai_compat_upstream_error("p", 429, &headers, "{}", false);
 
         // Assert
         match err {
@@ -866,7 +1060,7 @@ mod helper_tests {
         let headers = HeaderMap::new();
 
         // Act
-        let err = map_openai_compat_upstream_error("p", 400, &headers, body);
+        let err = map_openai_compat_upstream_error("p", 400, &headers, body, false);
 
         // Assert: the RAW JSON reaches `.body` so ingress can re-parse
         // `/error/message`.
@@ -896,6 +1090,7 @@ mod helper_tests {
             502,
             &headers,
             "<html>upstream-host gateway timeout</html>",
+            false,
         );
 
         // Assert

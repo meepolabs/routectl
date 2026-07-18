@@ -472,16 +472,17 @@ impl Provider for OpenAiResponsesProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            // Capture the headers BEFORE `resp.text()` moves the body;
+            // Capture the headers BEFORE the capped body read moves `resp`;
             // the shared mapper reads the rate-limit hint off them.
             let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
+            let (body_text, hit_cap) = read_error_body(&self.cfg.id, status, resp).await;
             return Err(map_responses_upstream_error(
                 &self.cfg.id,
                 status,
                 &headers,
                 &self.cfg.auth_kind,
                 &body_text,
+                hit_cap,
             ));
         }
 
@@ -665,16 +666,17 @@ impl Provider for OpenAiResponsesProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            // Capture the headers BEFORE `resp.text()` moves the body;
+            // Capture the headers BEFORE the capped body read moves `resp`;
             // the shared mapper reads the rate-limit hint off them.
             let headers = resp.headers().clone();
-            let body_text = resp.text().await.unwrap_or_default();
+            let (body_text, hit_cap) = read_error_body(&self.cfg.id, status, resp).await;
             return Err(map_responses_upstream_error(
                 &self.cfg.id,
                 status,
                 &headers,
                 &self.cfg.auth_kind,
                 &body_text,
+                hit_cap,
             ));
         }
 
@@ -805,16 +807,17 @@ fn build_error_excerpt(body_text: &str) -> String {
 /// upstream body once at debug level so call sites do not duplicate it.
 ///
 /// `headers` MUST be read from the response BEFORE the body is consumed
-/// (`resp.text()` moves the body). This ordering is a programmer
+/// (the capped body read moves the body). This ordering is a programmer
 /// convention: `headers` is an owned `HeaderMap` clone here, so the
 /// compiler does not couple it to the body move. Both call sites clone
-/// the headers before calling `resp.text()`.
+/// the headers before reading the body via [`read_error_body`].
 fn map_responses_upstream_error(
     provider_id: &str,
     status: u16,
     headers: &reqwest::header::HeaderMap,
     auth_kind: &AuthKind,
     body_text: &str,
+    hit_cap: bool,
 ) -> Error {
     // Reset hint from response headers, gated on rate-limit statuses so a
     // stray Retry-After on a 400 doesn't park the provider.
@@ -823,33 +826,80 @@ fn map_responses_upstream_error(
     } else {
         None
     };
-    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
-    let msg = build_error_excerpt(body_text);
-    let safe_excerpt = sanitize_for_log(&msg);
-    crate::upstream_log::warn_upstream_failure(
-        provider_id,
-        status,
-        Some(auth_kind),
-        &safe_excerpt,
-        "openai-responses",
-    );
-    // The Codex usage-limit body wins over the header hint: it carries
-    // the 5-hour-cap reset, which Retry-After does not.
+    // The Codex usage-limit body hint wins over the header hint: it carries
+    // the 5-hour-cap reset, which Retry-After does not. Attempted on the body
+    // (the capped prefix on a cap trip); a truncated body simply fails to
+    // parse and falls back to the header hint.
     let codex_hint = serde_json::from_str::<Value>(body_text)
         .ok()
         .and_then(|v| crate::openai_responses::response::codex_reset_hint(&v));
     let retry_after = codex_hint.or(header_hint);
-    // When the upstream returned a structured `{error:...}` JSON envelope,
-    // carry the RAW body so the ingress sanitizer can re-extract the
-    // upstream's own top-level `error.message` and surface it to the
-    // client. Otherwise carry the sanitized excerpt so a non-`{error}`
-    // body falls back to a status-only client message -- never a raw dump.
-    let err_body = if is_json_error_envelope(body_text) {
-        body_text.to_string()
+    // Client body + WARN excerpt: on a cap trip the truncated body is
+    // untrustworthy, so both collapse to the fixed cap message -- the client
+    // never sees the partial body and the prefix never appears at WARN level.
+    // Otherwise carry the RAW `{error:...}` envelope so the ingress sanitizer
+    // can re-extract the upstream message (sanitized excerpt for a
+    // non-envelope body), and log the sanitized excerpt.
+    let (warn_excerpt, err_body) = if hit_cap {
+        let capped = crate::http_client::body_cap_exceeded_message();
+        (capped.clone(), capped)
     } else {
-        msg
+        let msg = build_error_excerpt(body_text);
+        let excerpt = sanitize_for_log(&msg);
+        let body = if is_json_error_envelope(body_text) {
+            body_text.to_string()
+        } else {
+            msg
+        };
+        (excerpt, body)
     };
+    crate::upstream_log::warn_upstream_failure(
+        provider_id,
+        status,
+        Some(auth_kind),
+        &warn_excerpt,
+        "openai-responses",
+    );
+    // Full (capped) upstream body at debug level -- the only path where the
+    // truncated prefix bytes may surface, DEBUG-gated and bounded.
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
     Error::upstream_with_retry_after(provider_id, status, err_body, retry_after)
+}
+
+/// Read a Responses-API upstream error body under the shared response-body
+/// cap and return the `(capped-prefix, hit_cap)` pair the mapper builds the
+/// client-facing message from. On a cap trip a single WARN records the
+/// truncation (`path="error_body"`); a transport failure while reading is
+/// logged and yields an empty prefix, mirroring the prior
+/// `resp.text().unwrap_or_default()` resilience. `content_length` is read
+/// before the body is consumed so the WARN can carry it.
+async fn read_error_body(
+    provider_id: &str,
+    status: u16,
+    resp: reqwest::Response,
+) -> (String, bool) {
+    let content_length = resp.content_length();
+    let (bytes, hit_cap) = match crate::http_client::read_body_capped(
+        resp,
+        crate::http_client::MAX_RESPONSE_BODY_BYTES,
+    )
+    .await
+    {
+        Ok(read) => read,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                status,
+                error = %e,
+                "failed to read upstream error body",
+            );
+            (Vec::new(), false)
+        }
+    };
+    if hit_cap {
+        crate::http_client::warn_body_cap(provider_id, status, content_length, "error_body");
+    }
+    (String::from_utf8_lossy(&bytes).into_owned(), hit_cap)
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,6 +1312,114 @@ mod e2e_tests {
         }
     }
 
+    /// An over-cap error body must never reach the client: the original
+    /// upstream status and the header `Retry-After` are preserved, the
+    /// client sees only the fixed cap-exceeded message (no raw echo), and
+    /// exactly one cap-trip WARN fires carrying `path="error_body"`.
+    #[tokio::test]
+    async fn error_body_over_cap_preserves_status_and_hides_body() {
+        // A body one byte over the production cap with an honest
+        // Content-Length: the fast-reject guard trips before any body byte
+        // is buffered. `b'Z'` is the sentinel that must not survive into
+        // the client-facing message.
+        let oversized = vec![b'Z'; crate::http_client::MAX_RESPONSE_BODY_BYTES + 1];
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "30")
+                    .set_body_bytes(oversized),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let (result, events) = routectl_testkit::with_capture(provider.complete(base_req())).await;
+        let err = result.expect_err("expected upstream err");
+
+        match err {
+            Error::Upstream {
+                status,
+                retry_after,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 429, "original upstream status must be preserved");
+                assert_eq!(
+                    retry_after,
+                    Some(std::time::Duration::from_secs(30)),
+                    "header Retry-After must survive the cap trip"
+                );
+                let expected = format!(
+                    "response body exceeded {}-byte cap",
+                    crate::http_client::MAX_RESPONSE_BODY_BYTES
+                );
+                assert_eq!(body, expected, "client must see only the cap message");
+                assert!(
+                    !body.contains('Z'),
+                    "capped body must not echo raw upstream bytes: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+
+        let cap_warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN && e.field("path") == Some("error_body"))
+            .collect();
+        assert_eq!(
+            cap_warns.len(),
+            1,
+            "exactly one cap-trip WARN per error body"
+        );
+        let w = cap_warns[0];
+        assert_eq!(w.field("status"), Some("429"));
+        assert_eq!(w.field("body_truncated"), Some("true"));
+        assert_eq!(
+            w.field("body_cap_bytes"),
+            Some(
+                crate::http_client::MAX_RESPONSE_BODY_BYTES
+                    .to_string()
+                    .as_str()
+            )
+        );
+    }
+
+    /// A normal (under-cap) error body is unregressed: the upstream
+    /// `error.message` still reaches the client and NO cap-trip WARN fires.
+    #[tokio::test]
+    async fn error_body_under_cap_unregressed_no_cap_warn() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error":{"message":"bad request detail"}}"#),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let (result, events) = routectl_testkit::with_capture(provider.complete(base_req())).await;
+        let err = result.expect_err("expected upstream err");
+
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 400);
+                assert!(
+                    body.contains("bad request detail"),
+                    "under-cap message must reach client: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+        assert!(
+            events.iter().all(|e| e.field("path") != Some("error_body")),
+            "no cap-trip WARN may fire under cap",
+        );
+    }
+
     #[tokio::test]
     async fn stream_yields_error_on_truncated_sse() {
         // Arrange: a wiremock body that opens an SSE event but never
@@ -1528,7 +1686,7 @@ mod excerpt_tests {
         let body = r#"{"error":{"type":"rate_limit_exceeded","message":"slow down"}}"#;
 
         // Act
-        let err = map_responses_upstream_error("p", 429, &headers, &AuthKind::ApiKey, body);
+        let err = map_responses_upstream_error("p", 429, &headers, &AuthKind::ApiKey, body, false);
 
         // Assert
         match err {
@@ -1561,7 +1719,8 @@ mod excerpt_tests {
         let body = r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":7200,"message":"capped"}}"#;
 
         // Act
-        let err = map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, body);
+        let err =
+            map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, body, false);
 
         // Assert: the body's 7200s reset, not the header's 30s.
         match err {
@@ -1574,6 +1733,117 @@ mod excerpt_tests {
             }
             other => panic!("expected Error::Upstream, got: {other:?}"),
         }
+    }
+
+    /// An over-cap error body (`hit_cap == true`) must never echo the
+    /// truncated prefix -- even one that still looks like a JSON error
+    /// envelope. The client sees only the fixed cap-exceeded message, the
+    /// original status is preserved, and the header `Retry-After` survives
+    /// (the body-derived codex hint is attempted on the prefix but an
+    /// incomplete envelope fails to parse, so it falls back to the header).
+    #[test]
+    fn map_upstream_error_over_cap_hides_body_and_preserves_status() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        let prefix = r#"{"error":{"message":"secret upstream detail"#;
+
+        let err =
+            map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, prefix, true);
+
+        match err {
+            Error::Upstream {
+                status,
+                retry_after,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 429, "original status preserved on cap trip");
+                assert_eq!(
+                    retry_after,
+                    Some(std::time::Duration::from_secs(30)),
+                    "header Retry-After preserved on cap trip"
+                );
+                assert!(
+                    !body.contains("secret upstream detail"),
+                    "truncated body must not be echoed: {body}"
+                );
+                assert!(body.contains("exceeded"), "cap message expected: {body}");
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A cap trip whose prefix is a COMPLETE codex usage-limit envelope: the
+    /// body-derived reset hint IS attempted on the prefix and wins over the
+    /// header hint, while the client body still collapses to the fixed cap
+    /// message (never echoing the envelope text).
+    #[test]
+    fn map_upstream_error_over_cap_lifts_codex_hint_when_prefix_parses() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        let prefix = r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":7200,"message":"capped"}}"#;
+
+        let err =
+            map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, prefix, true);
+
+        match err {
+            Error::Upstream {
+                retry_after, body, ..
+            } => {
+                assert_eq!(
+                    retry_after,
+                    Some(std::time::Duration::from_hours(2)),
+                    "codex body hint must lift from a parseable prefix and win over the header"
+                );
+                assert!(
+                    !body.contains("capped"),
+                    "client body must be the fixed cap message, never the envelope: {body}"
+                );
+                assert!(body.contains("exceeded"), "cap message expected: {body}");
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// The upstream-failure WARN fires on a cap trip, but its `body_excerpt`
+    /// is the fixed cap message -- the truncated prefix must never appear at
+    /// WARN level (prefix content is confined to the DEBUG-gated path).
+    #[test]
+    fn map_upstream_error_over_cap_warn_excerpt_is_fixed_message() {
+        let prefix = r#"{"error":{"message":"secret upstream detail that must not be logged"#;
+
+        let events = routectl_testkit::capture_events(|| {
+            let _ = map_responses_upstream_error(
+                "p",
+                429,
+                &HeaderMap::new(),
+                &AuthKind::ChatgptOauth,
+                prefix,
+                true,
+            );
+        });
+
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN && e.field("context") == Some("openai-responses")
+            })
+            .expect("upstream-failure WARN must fire on a cap trip");
+        assert_eq!(
+            warn.field("body_excerpt"),
+            Some(crate::http_client::body_cap_exceeded_message().as_str()),
+            "WARN excerpt must be the fixed cap message on a cap trip"
+        );
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN)
+                .all(|e| e
+                    .fields
+                    .iter()
+                    .all(|(_, v)| !v.contains("secret upstream detail"))),
+            "no WARN-level event may echo the truncated prefix"
+        );
     }
 }
 

@@ -859,3 +859,126 @@ async fn probe_connection_refused_is_unreachable() {
         routectl_core::ProbeOutcome::Unreachable(_)
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Response-body cap adoption (the DoS response-body cap). One byte over the 16 MiB ceiling
+// exercised end-to-end; wiremock advertises an honest Content-Length, so the
+// fast-reject guard trips without transferring the whole body.
+// ---------------------------------------------------------------------------
+
+/// One byte past the shared 16 MiB response-body cap.
+const OVER_CAP_BODY_LEN: usize = 16 * 1024 * 1024 + 1;
+
+#[tokio::test]
+async fn complete_success_body_over_cap_maps_to_502() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'a'; OVER_CAP_BODY_LEN]))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+
+    let (result, events) =
+        routectl_testkit::with_capture(provider.complete(user_request("gpt-4o"))).await;
+    let err = result.unwrap_err();
+
+    match err {
+        routectl_core::Error::Upstream { status, body, .. } => {
+            assert_eq!(status, 502, "an unreadable 2xx body must classify as 502");
+            // Exact match proves the body is the bounded fixed message, not
+            // an echo of the 16 MiB raw upstream body.
+            assert_eq!(body, "response body exceeded 16777216-byte cap");
+        }
+        other => panic!("expected Upstream, got: {other:?}"),
+    }
+
+    let cap_warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.field("path").is_some())
+        .collect();
+    assert_eq!(cap_warns.len(), 1, "exactly one cap-trip WARN per trip");
+    let w = cap_warns[0];
+    assert_eq!(w.field("provider"), Some("test-provider"));
+    assert_eq!(w.field("status"), Some("200"));
+    assert_eq!(
+        w.field("body_cap_bytes"),
+        Some((16 * 1024 * 1024).to_string().as_str())
+    );
+    assert_eq!(
+        w.field("content_length"),
+        Some(format!("Some({OVER_CAP_BODY_LEN})").as_str())
+    );
+    assert_eq!(w.field("body_truncated"), Some("true"));
+    assert_eq!(w.field("path"), Some("complete_success_body"));
+}
+
+#[tokio::test]
+async fn complete_error_body_over_cap_preserves_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).set_body_bytes(vec![b'a'; OVER_CAP_BODY_LEN]))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+
+    let (result, events) =
+        routectl_testkit::with_capture(provider.complete(user_request("gpt-4o"))).await;
+    let err = result.unwrap_err();
+
+    match err {
+        routectl_core::Error::Upstream { status, body, .. } => {
+            assert_eq!(
+                status, 429,
+                "the original upstream status must be preserved"
+            );
+            // Exact match proves the body is the bounded fixed message, not
+            // an echo of the 16 MiB raw upstream body.
+            assert_eq!(body, "response body exceeded 16777216-byte cap");
+        }
+        other => panic!("expected Upstream, got: {other:?}"),
+    }
+
+    let cap_warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.field("path").is_some())
+        .collect();
+    assert_eq!(cap_warns.len(), 1, "exactly one cap-trip WARN per trip");
+    let w = cap_warns[0];
+    assert_eq!(w.field("provider"), Some("test-provider"));
+    assert_eq!(w.field("status"), Some("429"));
+    assert_eq!(w.field("body_truncated"), Some("true"));
+    assert_eq!(w.field("path"), Some("error_body"));
+}
+
+#[tokio::test]
+async fn stream_error_body_over_cap_preserves_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_bytes(vec![b'a'; OVER_CAP_BODY_LEN]))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+
+    // `stream()` yields a `BoxStream` that is not `Debug`, so `unwrap_err`
+    // is unavailable; match the `Result` directly.
+    let err = match provider.stream(user_request("gpt-4o")).await {
+        Ok(_) => panic!("expected an upstream error, got a stream"),
+        Err(e) => e,
+    };
+
+    match err {
+        routectl_core::Error::Upstream { status, body, .. } => {
+            assert_eq!(
+                status, 503,
+                "the original upstream status must be preserved"
+            );
+            // Exact match proves the body is the bounded fixed message, not
+            // an echo of the 16 MiB raw upstream body.
+            assert_eq!(body, "response body exceeded 16777216-byte cap");
+        }
+        other => panic!("expected Upstream, got: {other:?}"),
+    }
+}

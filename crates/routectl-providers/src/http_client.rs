@@ -38,6 +38,107 @@ pub const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_m
 /// and short enough to fail a black-holed connect fast.
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Upper bound on a non-streaming response (success or error) body that
+/// any provider will buffer into memory. The streaming path already caps
+/// individual eventstream frames; this closes the analogous gap on the
+/// one-shot `complete()` / error-body reads, where a lying or hostile
+/// upstream could otherwise stream an unbounded body and exhaust memory.
+///
+/// Hardcoded like the sibling timeouts above -- deliberately not a config
+/// knob. `server.max_body_bytes` is a different, ingress-side concern (how
+/// large a request routectl accepts); this is the egress-side ceiling on
+/// what an upstream may return. 16 MiB is far above any legitimate
+/// completion or error envelope and small enough to bound a single
+/// buffered read.
+pub const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Read a response body into memory, refusing to buffer more than `cap`
+/// bytes. Returns `(bytes, hit_cap)` where `bytes` is the prefix read
+/// (always `<= cap`) and `hit_cap` is true when the body was rejected or
+/// truncated at the cap.
+///
+/// Two independent guards, because `Content-Length` cannot be trusted:
+///
+/// 1. **Fast-reject** -- an honest `Content-Length` over `cap` lets us
+///    bail before reading a single body byte (`bytes` is empty).
+/// 2. **Mid-transfer** -- a running byte total checked after every chunk,
+///    aborting the moment it crosses `cap`. This is the adversarial case:
+///    a chunked transfer (no `Content-Length`) or a proxy whose header
+///    understates the real size would slip past the fast-reject, so the
+///    running total is the real ceiling. The prefix is truncated to `cap`.
+///
+/// The body is read once into a single buffer; callers derive
+/// `serde_json::from_slice` / `String::from_utf8_lossy` from that buffer
+/// rather than re-reading. `cap` is a parameter so tests can inject a
+/// small ceiling. Kept `pub` (crate-visible) so every provider egress
+/// shares one implementation.
+pub async fn read_body_capped(
+    mut resp: reqwest::Response,
+    cap: usize,
+) -> reqwest::Result<(Vec<u8>, bool)> {
+    if let Some(len) = resp.content_length()
+        && len > cap as u64
+    {
+        return Ok((Vec::new(), true));
+    }
+    let mut body = Vec::new();
+    // Peak transient allocation per iteration is bounded, not just the
+    // accumulated `body`. `resp.chunk()` yields one hyper HTTP/1 Data
+    // frame, and hyper slices each frame out of its read buffer, whose
+    // size the adaptive read strategy caps at DEFAULT_MAX_BUFFER_SIZE
+    // (~408 KiB) regardless of the declared chunk size on the wire. So a
+    // single hostile chunked frame claiming, say, 4 MiB is delivered as a
+    // sequence of <=408 KiB `Bytes`, not one giant allocation -- the loop
+    // trips the cap after a bounded number of small frames rather than
+    // buffering the whole frame first. The `chunk[..remaining]` truncation
+    // then bounds the accumulated `body` itself to `cap`.
+    while let Some(chunk) = resp.chunk().await? {
+        let remaining = cap - body.len();
+        if chunk.len() > remaining {
+            // Stop at the cap boundary inside this chunk: buffer only up to
+            // the ceiling so peak memory never exceeds `cap`, even when a
+            // single chunk alone would cross it.
+            body.extend_from_slice(&chunk[..remaining]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
+}
+
+/// Fixed, client-safe message for a response body that exceeded the
+/// buffering cap ([`MAX_RESPONSE_BODY_BYTES`]). Never echoes any upstream
+/// bytes -- every provider egress collapses a capped body (client message
+/// and the upstream-failure WARN excerpt alike) to this single string.
+///
+/// Hoisted here so all five providers share one implementation. Depends
+/// only on the unconditionally-compiled `MAX_RESPONSE_BODY_BYTES`, never
+/// on feature-gated code, so it is safe in a lean single-feature build.
+pub fn body_cap_exceeded_message() -> String {
+    format!("response body exceeded {MAX_RESPONSE_BODY_BYTES}-byte cap")
+}
+
+/// Emit exactly one WARN when a response-body read trips the cap. `path`
+/// distinguishes the call site (`complete_success_body` | `error_body` |
+/// `success_body` | `count_tokens_success_body`); `content_length` is the
+/// upstream-advertised size when it sent one (`None` for a chunked/absent
+/// -length response).
+///
+/// Shared by every provider so the field set
+/// (`provider`, `status`, `body_cap_bytes`, `content_length`,
+/// `body_truncated`, `path`) cannot drift.
+pub fn warn_body_cap(provider: &str, status: u16, content_length: Option<u64>, path: &str) {
+    tracing::warn!(
+        provider = %provider,
+        status,
+        body_cap_bytes = MAX_RESPONSE_BODY_BYTES,
+        content_length = ?content_length,
+        body_truncated = true,
+        path,
+        "upstream response body exceeded cap; truncated",
+    );
+}
+
 /// Build a `reqwest::Client` with the given optional User-Agent.
 ///
 /// `None` keeps reqwest's default UA. Use this anywhere a provider
@@ -314,8 +415,9 @@ pub fn apply_header_extras(
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_HEADERS, CONNECT_TIMEOUT, MANAGED_HEADERS, STREAM_READ_TIMEOUT, apply_header_extras,
-        insert_header, is_auth_header, is_managed_header,
+        AUTH_HEADERS, CONNECT_TIMEOUT, MANAGED_HEADERS, MAX_RESPONSE_BODY_BYTES,
+        STREAM_READ_TIMEOUT, apply_header_extras, insert_header, is_auth_header, is_managed_header,
+        read_body_capped,
     };
     use reqwest::header::HeaderMap;
 
@@ -561,5 +663,179 @@ mod tests {
                 "header {h:?} appears in both AUTH and MANAGED lists",
             );
         }
+    }
+
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Spawn a one-shot raw TCP server that replies with a chunked
+    /// (no `Content-Length`) body of `total` bytes split into `chunk_size`
+    /// pieces, then returns the base URL to GET. wiremock always sets an
+    /// honest `Content-Length` -- which the fast-reject guard would
+    /// short-circuit -- so a chunked upstream is the only way to drive the
+    /// mid-transfer running-total guard against a real socket.
+    async fn spawn_chunked_server(total: usize, chunk_size: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+                      Content-Type: application/octet-stream\r\n\
+                      Transfer-Encoding: chunked\r\n\
+                      \r\n",
+                )
+                .await;
+            let mut sent = 0usize;
+            while sent < total {
+                let this = chunk_size.min(total - sent);
+                let _ = socket.write_all(format!("{this:x}\r\n").as_bytes()).await;
+                let _ = socket.write_all(&vec![b'a'; this]).await;
+                let _ = socket.write_all(b"\r\n").await;
+                sent += this;
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+            let _ = socket.flush().await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn max_response_body_cap_is_16_mib() {
+        assert_eq!(MAX_RESPONSE_BODY_BYTES, 16 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_fast_rejects_honest_content_length_over_cap() {
+        // wiremock computes an honest Content-Length from the body, so a
+        // body over the cap is rejected by the header check before a single
+        // body byte is streamed -- `bytes` comes back empty.
+        let cap = 100;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'a'; cap * 4]))
+            .mount(&server)
+            .await;
+        let resp = reqwest::get(server.uri()).await.unwrap();
+
+        let (bytes, hit_cap) = read_body_capped(resp, cap).await.unwrap();
+
+        assert!(hit_cap, "honest Content-Length over cap must trip hit_cap");
+        assert!(
+            bytes.is_empty(),
+            "fast-reject must not read the body: got {} bytes",
+            bytes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_returns_under_cap_body_intact() {
+        let cap = 1024;
+        let body = vec![b'x'; 256];
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+        let resp = reqwest::get(server.uri()).await.unwrap();
+
+        let (bytes, hit_cap) = read_body_capped(resp, cap).await.unwrap();
+
+        assert!(!hit_cap, "an under-cap body must not trip hit_cap");
+        assert_eq!(bytes, body, "under-cap body must be returned intact");
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_trips_mid_transfer_on_chunked_body_over_cap() {
+        // A chunked upstream sends no Content-Length, so the fast-reject
+        // cannot see the size -- the running-total guard must catch it and
+        // truncate the prefix to the cap. This is the "content-length lie":
+        // an absent/understated length only the mid-transfer check defends.
+        let cap = 512;
+        let url = spawn_chunked_server(cap * 8, 128).await;
+        let resp = reqwest::get(url).await.unwrap();
+
+        let (bytes, hit_cap) = read_body_capped(resp, cap).await.unwrap();
+
+        assert!(hit_cap, "a chunked body over cap must trip mid-transfer");
+        assert!(
+            bytes.len() <= cap,
+            "prefix must be truncated to cap: got {} > {cap}",
+            bytes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_reads_chunked_body_under_cap_fully() {
+        // The streaming path (no Content-Length) reads every chunk when the
+        // running total stays under the cap.
+        let cap = 4096;
+        let total = 900;
+        let url = spawn_chunked_server(total, 128).await;
+        let resp = reqwest::get(url).await.unwrap();
+
+        let (bytes, hit_cap) = read_body_capped(resp, cap).await.unwrap();
+
+        assert!(!hit_cap, "an under-cap chunked body must not trip hit_cap");
+        assert_eq!(bytes.len(), total, "all chunks must be read");
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_bounds_peak_at_cap_when_one_chunk_straddles_it() {
+        // A single chunk larger than the cap must be truncated to exactly
+        // `cap` -- peak buffered bytes never exceed the ceiling even when
+        // one chunk alone would cross it.
+        let cap = 500;
+        let url = spawn_chunked_server(cap * 3, cap * 3).await;
+        let resp = reqwest::get(url).await.unwrap();
+
+        let (bytes, hit_cap) = read_body_capped(resp, cap).await.unwrap();
+
+        assert!(hit_cap, "an over-cap single chunk must trip mid-transfer");
+        assert_eq!(bytes.len(), cap, "prefix must be bounded to exactly cap");
+    }
+
+    /// Empirical proof that a single oversized HTTP/1.1 chunked frame does
+    /// NOT materialize as one giant `Bytes` from `resp.chunk()`. An
+    /// upstream declares one 4 MiB wire chunk; hyper's HTTP/1 read buffer
+    /// (adaptive strategy, capped at DEFAULT_MAX_BUFFER_SIZE ~= 408 KiB for
+    /// the pinned hyper + reqwest, which do not override http1_max_buf_size)
+    /// slices that frame into a sequence of small `Bytes`. This is the fact
+    /// the `read_body_capped` loop relies on: transient per-iteration
+    /// allocation stays far below the 16 MiB cap regardless of the wire
+    /// chunk size, so the cap check trips before any large buffer forms.
+    #[tokio::test]
+    async fn single_wire_chunk_is_yielded_as_bounded_frames() {
+        // One 4 MiB declared chunk, sent as a single wire chunk.
+        let total = 4 * 1024 * 1024;
+        let url = spawn_chunked_server(total, total).await;
+        let mut resp = reqwest::get(url).await.unwrap();
+
+        let mut seen = 0usize;
+        let mut max_frame = 0usize;
+        while let Some(chunk) = resp.chunk().await.unwrap() {
+            seen += chunk.len();
+            max_frame = max_frame.max(chunk.len());
+        }
+
+        assert_eq!(seen, total, "the whole body must be delivered");
+        // The largest single frame must sit well under the whole wire chunk
+        // and far below the 16 MiB response cap. 512 KiB gives headroom over
+        // the ~408 KiB hyper read-buffer ceiling without admitting a
+        // multi-megabyte single allocation.
+        assert!(
+            max_frame <= 512 * 1024,
+            "a single chunk() frame must stay below the read-buffer bound: \
+             got {max_frame} bytes from a {total}-byte wire chunk",
+        );
+        assert!(
+            max_frame < MAX_RESPONSE_BODY_BYTES,
+            "per-frame allocation must be far below the response cap",
+        );
     }
 }
