@@ -914,7 +914,49 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             );
             sanitize_upstream_for_client(*status, body)
         }
-        _ => e.to_string(),
+        // Normalization failures embed the internal provider config id
+        // and raw serialization/translation detail in their Display
+        // string. Log the full detail server-side (operators have logs)
+        // and return an opaque, status-appropriate message to the client.
+        Error::NormalizeRequest(provider, detail) => {
+            let safe_detail = routectl_core::sanitize_detail_for_log(detail);
+            tracing::error!(
+                provider = %provider,
+                detail = %safe_detail,
+                "request normalization failed; suppressed in HTTP response"
+            );
+            "request could not be prepared for the upstream".to_string()
+        }
+        Error::NormalizeResponse(provider, detail) => {
+            let safe_detail = routectl_core::sanitize_detail_for_log(detail);
+            tracing::error!(
+                provider = %provider,
+                detail = %safe_detail,
+                "response normalization failed; suppressed in HTTP response"
+            );
+            "upstream response could not be processed".to_string()
+        }
+        // A missing optional provider capability, not a failure: the
+        // Display string names the internal provider id and the method.
+        // Log at WARN and return an opaque message.
+        Error::NotImplemented(provider, detail) => {
+            tracing::warn!(
+                provider = %provider,
+                detail = %detail,
+                "capability not implemented; suppressed in HTTP response"
+            );
+            "requested capability is not implemented".to_string()
+        }
+        // Caller-actionable classes: their Display string carries no
+        // internal topology, so the verbose message stays. Kept as
+        // explicit arms (no wildcard) so a new core Error variant fails
+        // to compile here and forces a client-exposure decision.
+        Error::UnknownProvider(_)
+        | Error::UnknownAlias(_)
+        | Error::Validation(_)
+        | Error::Streaming(_)
+        | Error::Io(_)
+        | Error::Json(_) => e.to_string(),
     };
     // Lift the upstream classifier so an SDK that branches on
     // `error.type` / `error.code` keeps the upstream signal instead of

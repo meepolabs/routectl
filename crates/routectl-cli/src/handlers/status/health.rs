@@ -121,7 +121,7 @@ pub(super) async fn build(state: &StatusState) -> Panel<HealthPanel> {
     let as_of = now_utc_rfc3339();
     let panel = guard_panel(SCHEMA_VERSION, codes::DB_UNAVAILABLE, move || {
         let dto = build_from_view(&view);
-        Ok(Panel::available(SCHEMA_VERSION, as_of, dto))
+        Panel::available(SCHEMA_VERSION, as_of, dto)
     })
     .await;
     state.observability.health.record(&panel);

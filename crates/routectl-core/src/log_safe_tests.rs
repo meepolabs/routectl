@@ -6,9 +6,36 @@
 
 use super::{
     MAX, MAX_DEBUG_BODY_BYTES, is_json_error_envelope, redact_prompts_with_flag, sanitize_capped,
-    sanitize_for_log, sanitize_upstream_body,
+    sanitize_detail_with_flag, sanitize_for_log, sanitize_upstream_body,
 };
 use serde_json::json;
+
+#[test]
+fn detail_unredacted_truncates_and_strips_but_keeps_short_content() {
+    // Default (no prompt redaction): a short detail passes through, control
+    // chars are filtered, and the length cap bounds the field.
+    assert_eq!(
+        sanitize_detail_with_flag("tool_use block missing `id`", false),
+        "tool_use block missing `id`"
+    );
+    assert_eq!(sanitize_detail_with_flag("a\nb", false), "a?b");
+    let long = "x".repeat(MAX + 500);
+    assert_eq!(sanitize_detail_with_flag(&long, false).chars().count(), MAX);
+}
+
+#[test]
+fn detail_redacted_collapses_to_length_marker() {
+    // With prompt redaction on, a detail that embedded a raw request fragment
+    // never reaches the log line -- only the char count survives.
+    let detail = "tool_use block is not an object: {\"input\":\"sk-live-LEAKED-SECRET\"}";
+    let redacted = sanitize_detail_with_flag(detail, true);
+    assert!(!redacted.contains("LEAKED"), "{redacted}");
+    assert!(!redacted.contains("sk-live"), "{redacted}");
+    assert_eq!(
+        redacted,
+        format!("<redacted len={}>", detail.chars().count())
+    );
+}
 
 #[test]
 fn is_json_error_envelope_true_for_top_level_error_object() {

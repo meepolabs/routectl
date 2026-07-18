@@ -142,7 +142,7 @@ async fn build_window(
     // wait or slow disk cannot skew the freshness marker.
     let as_of = now_utc_rfc3339();
     let panel = guard_panel(SCHEMA_VERSION, codes::DB_UNAVAILABLE, move || {
-        Ok(build_panel(&db_path, token, bounds, as_of))
+        build_panel(&db_path, token, bounds, as_of)
     })
     .await;
     state.observability.usage.record(&panel);

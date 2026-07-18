@@ -1,6 +1,6 @@
 //! Wire types for the read-only `/status` family: the per-panel `Panel<T>`
-//! envelope, the builder error type, a UTC timestamp helper, and the fixed
-//! token vocabulary the panel DTOs share with the routing/event surface.
+//! envelope, a UTC timestamp helper, and the fixed token vocabulary the panel
+//! DTOs share with the routing/event surface.
 
 use serde::Serialize;
 
@@ -48,15 +48,6 @@ impl<T> Panel<T> {
             unavailable: Some(code.to_string()),
         }
     }
-}
-
-/// Failure a panel builder returns when its data source cannot produce a
-/// payload. The panic-isolation guard maps every variant to an unavailable
-/// panel; later tasks add source-specific variants as panels are wired.
-#[derive(Debug)]
-pub enum PanelError {
-    /// The panel's data source is not wired yet (skeleton stub).
-    NotImplemented,
 }
 
 /// Current instant as an RFC3339-UTC string, the format every panel's
@@ -121,7 +112,5 @@ pub mod vocabulary {
         /// Doctor: no on-disk config path is bound to this server, so the
         /// disk-based doctor gather has nothing to read.
         pub const NO_CONFIG_PATH: &str = "no_config_path";
-        /// Generic stub code: this panel's data source is not wired yet.
-        pub const NOT_IMPLEMENTED: &str = "not_implemented";
     }
 }

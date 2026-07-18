@@ -3195,3 +3195,147 @@ async fn ingress_handle_admits_a_spoofed_seam_header_end_to_end() {
         "a spoofed seam header must never trigger the token_missing admission rejection"
     );
 }
+
+const LEAK_PROVIDER: &str = "secret-provider-id";
+const LEAK_DETAIL: &str = "serde detail xyz";
+
+async fn assert_body_redacts_leaks(
+    resp: Response,
+    expected_status: StatusCode,
+    expected_msg: &str,
+) {
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+    let rendered = body.to_string();
+
+    assert_eq!(status, expected_status);
+    assert!(
+        !rendered.contains(LEAK_PROVIDER),
+        "client body leaked the internal provider id: {rendered}"
+    );
+    assert!(
+        !rendered.contains(LEAK_DETAIL),
+        "client body leaked the internal normalization detail: {rendered}"
+    );
+    assert_eq!(
+        body["error"]["message"].as_str().unwrap_or(""),
+        expected_msg,
+        "client body must carry only the fixed opaque message"
+    );
+}
+
+#[tokio::test]
+async fn map_error_normalize_request_redacts_provider_and_detail_both_dialects() {
+    for shape in [ErrorEnvelopeShape::OpenAi, ErrorEnvelopeShape::Anthropic] {
+        let err = Error::NormalizeRequest(LEAK_PROVIDER.into(), LEAK_DETAIL.into());
+        let resp = map_error(shape, err);
+        assert_body_redacts_leaks(
+            resp,
+            StatusCode::BAD_REQUEST,
+            "request could not be prepared for the upstream",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn map_error_normalize_response_redacts_provider_and_detail_both_dialects() {
+    for shape in [ErrorEnvelopeShape::OpenAi, ErrorEnvelopeShape::Anthropic] {
+        let err = Error::NormalizeResponse(LEAK_PROVIDER.into(), LEAK_DETAIL.into());
+        let resp = map_error(shape, err);
+        assert_body_redacts_leaks(
+            resp,
+            StatusCode::BAD_GATEWAY,
+            "upstream response could not be processed",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn map_error_not_implemented_redacts_provider_and_detail_both_dialects() {
+    for shape in [ErrorEnvelopeShape::OpenAi, ErrorEnvelopeShape::Anthropic] {
+        let err = Error::NotImplemented(LEAK_PROVIDER.into(), LEAK_DETAIL.into());
+        let resp = map_error(shape, err);
+        assert_body_redacts_leaks(
+            resp,
+            StatusCode::NOT_IMPLEMENTED,
+            "requested capability is not implemented",
+        )
+        .await;
+    }
+}
+
+#[test]
+fn map_error_normalize_request_logs_full_detail_server_side() {
+    let events = routectl_testkit::capture_events(|| {
+        let err = Error::NormalizeRequest(LEAK_PROVIDER.into(), LEAK_DETAIL.into());
+        let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    });
+
+    let logged = events
+        .iter()
+        .find(|e| e.level == tracing::Level::ERROR)
+        .expect("normalize-request must emit a server-side ERROR log");
+    assert_eq!(logged.field("provider"), Some(LEAK_PROVIDER));
+    assert_eq!(logged.field("detail"), Some(LEAK_DETAIL));
+}
+
+#[test]
+fn map_error_normalize_response_logs_full_detail_server_side() {
+    let events = routectl_testkit::capture_events(|| {
+        let err = Error::NormalizeResponse(LEAK_PROVIDER.into(), LEAK_DETAIL.into());
+        let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    });
+
+    let logged = events
+        .iter()
+        .find(|e| e.level == tracing::Level::ERROR)
+        .expect("normalize-response must emit a server-side ERROR log");
+    assert_eq!(logged.field("provider"), Some(LEAK_PROVIDER));
+    assert_eq!(logged.field("detail"), Some(LEAK_DETAIL));
+}
+
+#[test]
+fn map_error_normalize_request_log_caps_long_user_payload_keeps_provider() {
+    // A normalization error can format a raw request fragment into its detail
+    // (see the openai_compat tool_use lift). The logging boundary routes the
+    // detail through the log-safety helper, so a long embedded user payload is
+    // truncated out of the server log line while the provider id stays logged
+    // for triage. Complements the short-detail server-side test above, which
+    // pins that a small detail is still logged in full.
+    let payload_marker = "PAYLOAD_MARKER_PAST_THE_CAP";
+    let detail = format!(
+        "tool_use block is not an object: {}{payload_marker}",
+        "x".repeat(512)
+    );
+
+    let events = routectl_testkit::capture_events(|| {
+        let err = Error::NormalizeRequest(LEAK_PROVIDER.into(), detail.clone());
+        let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    });
+
+    let logged = events
+        .iter()
+        .find(|e| e.level == tracing::Level::ERROR)
+        .expect("normalize-request must emit a server-side ERROR log");
+    assert_eq!(logged.field("provider"), Some(LEAK_PROVIDER));
+    let detail_field = logged.field("detail").expect("detail field logged");
+    assert!(
+        !detail_field.contains(payload_marker),
+        "server log leaked the user payload past the length cap: {detail_field}"
+    );
+}
+
+#[tokio::test]
+async fn map_error_validation_preserves_exact_message_after_exhaustive_match() {
+    // Regression pin: an unchanged newly-explicit arm must reproduce
+    // the prior `e.to_string()` output byte-for-byte.
+    let err = Error::Validation("max_tokens must be positive".into());
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+    assert_eq!(
+        body["error"]["message"].as_str().unwrap_or(""),
+        "validation: max_tokens must be positive",
+    );
+}

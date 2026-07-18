@@ -94,14 +94,14 @@ async fn build_from_path(state: &StatusState, config_path: PathBuf) -> Panel<Doc
                 .map(map_reachability)
                 .collect();
             let schema_version = report.schema_version;
-            Ok(Panel::available(
+            Panel::available(
                 schema_version,
                 as_of,
                 DoctorPanel {
                     report,
                     reachability,
                 },
-            ))
+            )
         },
     )
     .await

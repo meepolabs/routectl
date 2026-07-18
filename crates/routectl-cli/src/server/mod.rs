@@ -901,6 +901,17 @@ pub(crate) async fn build_router_from_config_with_overlay(
 /// value is zero.
 const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
+/// Whether the read-only `/status*` subtree (and the `GET /` dashboard)
+/// must sit behind the listener auth layer for this bind: true whenever
+/// tokens are configured OR the bind is non-loopback. One decision point,
+/// fail-closed by construction -- a no-tokens + non-loopback bind (which
+/// the startup invariant at `serve_on_listener` already refuses) still
+/// returns true, so status is never served auth-exempt on a public
+/// address even if that invariant ever drifts.
+fn status_requires_auth(token_set: &TokenSet, bound: std::net::SocketAddr) -> bool {
+    !token_set.is_empty() || !bound.ip().is_loopback()
+}
+
 /// `max_body_bytes` MUST already be the resolved effective value
 /// (zero -> default mapped by `compute_max_body_bytes`). Private to
 /// this module; the only call site is `serve_on_listener`.
@@ -952,6 +963,11 @@ fn build_axum_router(
     // Mount the auth middleware only when tokens are configured.
     // Loopback dev (empty token list) gets the historical zero-auth
     // behavior with no per-request overhead.
+    //
+    // Clone the `Arc` for the status gate BEFORE `token_set` is moved
+    // into the /v1 layer below; the status subtree reuses the same
+    // `TokenSet` under its own auth layer.
+    let status_token_set = Arc::clone(&token_set);
     if !token_set.is_empty() {
         authed = authed.layer(axum::middleware::from_fn_with_state(
             token_set,
@@ -962,20 +978,25 @@ fn build_axum_router(
     // The `/v1/*` + `/health` surface, with its own `AppState` erased away.
     let versioned = public.merge(authed).with_state(state.clone());
 
-    // The read-only `/status*` subtree. It is AUTH-EXEMPT (merged alongside
-    // the public/authed surface, never inside the auth group), so a status
-    // poll needs no token even when `[server.auth]` is set. It carries its
-    // OWN state and two subtree-only layers that `/v1/*` never inherits:
+    // The read-only `/status*` subtree. It carries its OWN state and
+    // subtree-only layers that `/v1/*` never inherits:
     //   1. a `Host` allowlist (anti-DNS-rebinding), applied OUTERMOST so a
-    //      rejected host is turned away before it can consume a shed permit;
-    //   2. a bounded-concurrency load-shed (see `status_gate`), so a poller
-    //      burst sheds as a 503 instead of contending with the proxy.
+    //      rejected host is turned away before it can consume a shed permit
+    //      or reach the auth check;
+    //   2. the listener auth layer, applied beneath the host guard whenever
+    //      `status_requires_auth` holds (tokens configured OR non-loopback
+    //      bind) -- so status/usage/health/config/doctor and the dashboard
+    //      shell are gated exactly like `/v1/*`. Token-less loopback keeps
+    //      the historical zero-auth dev path;
+    //   3. a bounded-concurrency load-shed (see `status_gate`) on the JSON
+    //      routes only, so a poller burst sheds as a 503 instead of
+    //      contending with the proxy.
     // `with_state` erases `Router<Arc<StatusState>>` to `Router<()>` so it
     // merges into the state-erased `versioned` router below.
     //
     // The dashboard page (`GET /`, stateless `Router<()>`) is merged in
     // ALONGSIDE the JSON routes but OUTSIDE `apply_overload_layers`: it shares
-    // the host guard + auth-exemption, yet does NOT consume the JSON shed
+    // the host guard + auth gate, yet does NOT consume the JSON shed
     // budget. A zero-I/O `&'static str` response cannot stall or hold a permit,
     // and keeping it off that budget means an overload sheds status DATA while
     // the operator's incident window (the shell) still loads.
@@ -985,12 +1006,17 @@ fn build_axum_router(
         crate::handlers::status::status_router().with_state(Arc::new(status_state)),
     );
     let status_page = crate::handlers::status::page_router();
-    let status = status_json
-        .merge(status_page)
-        .layer(axum::middleware::from_fn_with_state(
-            status_allowlist,
-            status_gate::host_guard,
+    let mut status_authed = status_json.merge(status_page);
+    if status_requires_auth(&status_token_set, bound) {
+        status_authed = status_authed.layer(axum::middleware::from_fn_with_state(
+            status_token_set,
+            auth::auth_layer,
         ));
+    }
+    let status = status_authed.layer(axum::middleware::from_fn_with_state(
+        status_allowlist,
+        status_gate::host_guard,
+    ));
 
     versioned
         .merge(status)
@@ -1834,6 +1860,33 @@ mod tests {
         let dir = tempfile::tempdir().expect("usage tempdir");
         config.usage.db_path = dir.path().join("usage.db");
         dir
+    }
+
+    #[test]
+    fn status_requires_auth_covers_the_four_cells() {
+        use std::net::SocketAddr;
+
+        let empty = TokenSet::new(vec![]);
+        let tokened = TokenSet::new(vec!["secret".to_string()]);
+        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let public: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+
+        assert!(
+            !status_requires_auth(&empty, loopback),
+            "token-less loopback is the open dev path"
+        );
+        assert!(
+            status_requires_auth(&tokened, loopback),
+            "configured tokens gate status even on loopback"
+        );
+        assert!(
+            status_requires_auth(&empty, public),
+            "a non-loopback bind gates status even with no tokens (fail-closed)"
+        );
+        assert!(
+            status_requires_auth(&tokened, public),
+            "tokens plus a non-loopback bind gate status"
+        );
     }
 
     #[test]

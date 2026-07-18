@@ -97,6 +97,31 @@ pub fn sanitize_for_log(s: &str) -> String {
     sanitize_capped(s, MAX)
 }
 
+/// Log-safe rendering for a client-controlled string that MAY embed raw
+/// request content -- e.g. a normalization-error `detail` that formats a
+/// malformed request fragment (a tool_use block, a content part) into its
+/// message. Always control-char-filtered and length-capped via
+/// [`sanitize_for_log`]; that cap bounds size and blocks log injection but
+/// does NOT redact a secret or prompt sitting within the first [`MAX`]
+/// chars. When `ROUTECTL_LOG_REDACT_PROMPTS=1` the content is instead
+/// collapsed to a `<redacted len=N>` marker so embedded user content never
+/// reaches the log line -- same length-side-channel caveat as
+/// [`redact_prompts_in`].
+pub fn sanitize_detail_for_log(s: &str) -> String {
+    sanitize_detail_with_flag(s, redact_enabled())
+}
+
+/// Flag-taking core of [`sanitize_detail_for_log`], split out so both
+/// branches are unit-testable without touching the process-global
+/// `ROUTECTL_LOG_REDACT_PROMPTS` `OnceLock`.
+pub(crate) fn sanitize_detail_with_flag(s: &str, redact: bool) -> String {
+    if redact {
+        format!("<redacted len={}>", s.chars().count())
+    } else {
+        sanitize_for_log(s)
+    }
+}
+
 /// Trim and sanitize an upstream error body for inclusion in routectl's
 /// error envelope or `body_excerpt=...` log fields. If the upstream
 /// returned HTML (a marketing 404 page from a misconfigured base_url,

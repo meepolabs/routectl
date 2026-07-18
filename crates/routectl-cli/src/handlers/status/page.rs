@@ -7,11 +7,12 @@
 //! [`super`] covers this source alongside the panels.
 //!
 //! [`page_router`] is a stateless [`AxumRouter<()>`]. It is merged into the
-//! serve process AUTH-EXEMPT and under the same `Host` allowlist as the
-//! `/status` JSON, but deliberately OUTSIDE the JSON load-shed budget (see
-//! [`crate::server`] wiring): a zero-I/O `&'static str` response cannot stall
-//! or hold a shed permit, so an overload sheds status DATA while the page shell
-//! still loads.
+//! serve process under the same `Host` allowlist as the `/status` JSON, and
+//! under the same listener auth gate (applied whenever tokens are configured
+//! or the bind is non-loopback), but deliberately OUTSIDE the JSON load-shed
+//! budget (see [`crate::server`] wiring): a zero-I/O `&'static str` response
+//! cannot stall or hold a shed permit, so an overload sheds status DATA while
+//! the page shell still loads.
 
 use axum::Router as AxumRouter;
 use axum::http::header;
