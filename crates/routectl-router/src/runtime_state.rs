@@ -137,8 +137,9 @@ impl ProviderState {
     /// Mark the most recent dispatch as failed. Trips the breaker
     /// when consecutive failures hit the configured threshold. If
     /// this was a half-open probe, re-trip the breaker by setting
-    /// a fresh `circuit_opened_at = now`.
-    pub const fn record_failure(&mut self, now: Instant) {
+    /// a fresh `circuit_opened_at = now`. Returns whether this call
+    /// opened (tripped) the breaker.
+    pub const fn record_failure(&mut self, now: Instant) -> bool {
         let was_half_open_probe = self.half_open_in_flight;
         self.half_open_in_flight = false;
 
@@ -152,8 +153,10 @@ impl ProviderState {
                 // A normal failure-driven trip always uses the baseline
                 // cooldown, discarding any custom park set by force_open.
                 self.active_cooldown = self.circuit_cooldown;
+                return true;
             }
         }
+        false
     }
 
     /// Park the provider immediately for `cooldown`, bypassing the

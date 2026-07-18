@@ -49,6 +49,28 @@ fn circuit_opens_after_threshold_and_skips_until_cooldown() {
 }
 
 #[test]
+fn breaker_opens_on_own_threshold_below_class_retry_cap() {
+    // Even when a class permits up to 5 same-provider retries, a breaker
+    // set to trip at 3 consecutive failures opens on its own threshold
+    // first: effective attempts are bounded by min(class cap, breaker
+    // availability), not by the larger retry cap.
+    let policy = ProviderRuntimePolicy {
+        circuit_failures: Some(3),
+        circuit_cooldown_ms: Some(1_000),
+        ..Default::default()
+    };
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    for _ in 0..3 {
+        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+        s.record_failure(t0);
+    }
+    // The 4th attempt is refused although the class retry cap (5) is
+    // not yet reached.
+    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+}
+
+#[test]
 fn release_probe_slot_frees_slot_without_recording_outcome() {
     // A probe fast-fail releases the claimed half-open slot WITHOUT
     // counting a failure. The slot must clear, the failure counter

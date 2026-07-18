@@ -1281,3 +1281,300 @@ filealias = "claude_file"
         "credentials recovery must happen in the same daemon process, no restart"
     );
 }
+
+// -----------------------------------------------------------------
+// Learned-capability kill-switch flip E2E
+// -----------------------------------------------------------------
+
+/// A byte-accurate openai-compat `unsupported_parameter` 400 whose
+/// `/error/param` is `web_search` -- the capability the probe request carries
+/// as a built-in tool `type`. The request-membership gate admits the negative
+/// because the request derived that same key from the tool; the router learns
+/// a negative for the rejecting target and de-prioritizes it.
+const WEB_SEARCH_UNSUPPORTED_400: &str = r#"{"error":{"message":"Unsupported parameter: 'web_search' is not supported with this model.","type":"invalid_request_error","param":"web_search","code":"unsupported_parameter"}}"#;
+
+/// A minimal, valid openai chat-completion success body for the clean tail
+/// upstream.
+fn openai_ok_body() -> Value {
+    json!({
+        "id": "cmpl-test",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "upstream-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    })
+}
+
+/// Two openai-compat providers behind wiremock (A rejects the probed
+/// `web_search` feature, B succeeds) plus the learned-capability chain
+/// alias. `enabled` flips the `[capability]` kill switch; `marker_alias`, when
+/// set, adds a second alias whose appearance on `/v1/models` signals the
+/// reloaded config went live.
+fn kill_switch_config(
+    a_url: &str,
+    b_url: &str,
+    enabled: bool,
+    marker_alias: Option<&str>,
+) -> String {
+    let key_ref = common::file_ref("test-key");
+    let marker = marker_alias.map_or_else(String::new, |a| format!("{a} = \"m_b\"\n"));
+    format!(
+        r#"
+version = 3
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[providers.prov_a]
+kind = "openai-compat"
+base_url = "{a_url}"
+api_key_ref = "{key_ref}"
+
+[providers.prov_b]
+kind = "openai-compat"
+base_url = "{b_url}"
+api_key_ref = "{key_ref}"
+
+[models.m_a]
+provider = "prov_a"
+upstream = "upstream-model"
+
+[models.m_b]
+provider = "prov_b"
+upstream = "upstream-model"
+
+[capability]
+enabled = {enabled}
+decay_hours = 48
+
+[aliases]
+probe-chain = ["m_a", "m_b"]
+{marker}"#
+    )
+}
+
+/// An openai upstream mounted at `POST /chat/completions` that always rejects
+/// with the `response_format` unsupported-parameter 400.
+async fn probe_upstream_reject() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock_path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header("content-type", "application/json")
+                .set_body_string(WEB_SEARCH_UNSUPPORTED_400),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// An openai upstream mounted at `POST /chat/completions` that always succeeds.
+async fn probe_upstream_ok() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock_path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_ok_body()))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Number of requests this upstream has received.
+async fn mock_hits(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .map_or(0, |reqs| reqs.len())
+}
+
+/// POST a `/v1/chat/completions` request against `alias` carrying a
+/// `web_search` built-in tool so `derive_feature_keys` yields `web_search`,
+/// the capability target A rejects with a resolvable 400. Returns the
+/// client-visible status.
+async fn post_web_search_probe(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+) -> reqwest::StatusCode {
+    let body = json!({
+        "model": alias,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "web_search", "name": "t"}]
+    });
+    let resp = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .expect("post /v1/chat/completions");
+    resp.status()
+}
+
+/// The `state_key`s of the learned negatives currently resident in the live
+/// router, read through the read-only `/status/health` panel.
+async fn learned_negative_keys(base_url: &str) -> Vec<String> {
+    let resp = reqwest::get(format!("{base_url}/status/health"))
+        .await
+        .expect("GET /status/health");
+    assert!(resp.status().is_success(), "GET /status/health failed");
+    let body: Value = resp.json().await.expect("status/health body is JSON");
+    body["data"]["learned_negatives"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e["state_key"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Poll until a learned negative for `state_key` becomes resident, re-issuing
+/// the web_search probe each iteration so a self-identifying negative
+/// is learned. Returns true once it surfaces, false on timeout.
+async fn wait_for_learned_negative(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+    state_key: &str,
+    max_wait: Duration,
+) -> bool {
+    let deadline = Instant::now() + max_wait;
+    while Instant::now() < deadline {
+        let _ = post_web_search_probe(client, base_url, alias).await;
+        if learned_negative_keys(base_url)
+            .await
+            .iter()
+            .any(|k| k == state_key)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// The learned-capability kill switch (`[capability] enabled`) flips OFF across
+/// a hot-reload, and the learned registry carries over the reload.
+///
+/// Enabled-state behavior is OBSERVED FIRST (a learned negative is established
+/// and A is de-prioritized so a second probe never dials it) so the test
+/// asserts a real transition, not a state that was already flipped. The flip
+/// is then driven by an idempotent restimulus loop
+/// (`poll_alias_with_restimulus`) that atomically rewrites the SAME disabled
+/// config on an interval while polling a behavior signal (the marker alias on
+/// `/v1/models`) at 50ms -- never a single write, because the watcher's inotify
+/// watch arms asynchronously after `/health` is already answering, so a single
+/// write can race ahead of the armed watch and be silently lost.
+///
+/// After the flip the disabled router is live: A is dialed again (route-away is
+/// off), AND the learned negative is STILL resident on `/status/health` --
+/// `Router::carry_over_learned_from` imported it across the reload. That import
+/// path (`LearnedCapabilityRegistry::import_entries`) resets every carried
+/// entry's `in_flight` slot to false, so a re-probe that was in flight at
+/// reload time can never latch across the swap (the reload cross-check for the
+/// unreached-admission fix).
+#[tokio::test]
+async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
+    // Arrange: A rejects the probed feature; B is the clean tail.
+    let a = probe_upstream_reject().await;
+    let b = probe_upstream_ok().await;
+    let enabled_cfg = kill_switch_config(&a.uri(), &b.uri(), true, None);
+    let (base_url, dir) = spawn_server_with_config_text(&enabled_cfg).await;
+    let config_path = dir.path().join("config.toml");
+    let client = reqwest::Client::new();
+
+    // Warm-up reload BEFORE learning: the test-only `serve_on_listener` boots
+    // with an empty catalog overlay, but the reload path computes a real one
+    // from disk, so the first reload's overlay revision differs and
+    // `carry_over_learned_from` clears the registry. Doing an initial reload
+    // now moves the live router onto the reload-path overlay while the registry
+    // is still empty (a harmless clear), so the kill-switch flip below carries
+    // over equal catalog/overlay revisions -- the same steady state production
+    // boot (which loads the real overlay) sees on every reload.
+    let armed_cfg = kill_switch_config(&a.uri(), &b.uri(), true, Some("armed"));
+    assert!(
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            armed_cfg.as_bytes(),
+            "armed",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "the warm-up reload did not go live within {RELOAD_WAIT_CEILING:?}",
+    );
+
+    // Observe enabled-state behavior FIRST: a self-identifying negative for A
+    // is learned (kill switch ON), established before the flip.
+    assert!(
+        wait_for_learned_negative(
+            &client,
+            &base_url,
+            "probe-chain",
+            "m_a",
+            RELOAD_WAIT_CEILING
+        )
+        .await,
+        "with the kill switch ON, target A must learn a web_search negative",
+    );
+    let a_hits_after_learn = mock_hits(&a).await;
+    assert!(
+        a_hits_after_learn >= 1,
+        "A was dialed at least once to learn"
+    );
+
+    // A is now de-prioritized: a further probe is served by the clean tail B
+    // without dialing A again (route-away, the enabled-state behavior).
+    let status = post_web_search_probe(&client, &base_url, "probe-chain").await;
+    assert!(status.is_success(), "the clean tail B serves the probe");
+    assert_eq!(
+        mock_hits(&a).await,
+        a_hits_after_learn,
+        "with the kill switch ON, a learned negative de-prioritizes A (not re-dialed)",
+    );
+
+    // Act: flip the kill switch OFF via an idempotent restimulus loop, polling
+    // the marker alias on /v1/models until the reloaded config goes live.
+    let disabled_cfg = kill_switch_config(&a.uri(), &b.uri(), false, Some("kill-switch-off"));
+    assert!(
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            disabled_cfg.as_bytes(),
+            "kill-switch-off",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "the disabled config did not go live within {RELOAD_WAIT_CEILING:?}",
+    );
+
+    // Assert reload carry-over: the learned negative is STILL resident after
+    // the reload (imported by carry_over_learned_from, in_flight reset false).
+    assert!(
+        learned_negative_keys(&base_url)
+            .await
+            .iter()
+            .any(|k| k == "m_a"),
+        "the learned negative must carry over the reload (imported live)",
+    );
+
+    // Behavior flip confirmation: with the kill switch OFF, route-away is gone
+    // -- A is dialed again on the next probe.
+    let a_hits_before = mock_hits(&a).await;
+    let status = post_web_search_probe(&client, &base_url, "probe-chain").await;
+    assert!(
+        status.is_success(),
+        "B still serves the probe after the flip"
+    );
+    assert!(
+        mock_hits(&a).await > a_hits_before,
+        "with the kill switch OFF, the learned negative no longer de-prioritizes A",
+    );
+}

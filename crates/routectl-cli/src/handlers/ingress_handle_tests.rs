@@ -2317,6 +2317,93 @@ async fn warm_render_ok_then_mid_stream_error_marks_mid_stream_stage() {
     );
 }
 
+/// An in-band Anthropic `error` event arriving AFTER the first content
+/// chunk (decoded by the real SSE state machine) is terminal -- the
+/// client gets exactly one terminal SSE error carrying the preserved
+/// `error.type` (`overloaded_error`, not the generic `api_error`), and
+/// the request finalizes exactly once (no second provider hit past the
+/// first-content-chunk non-retry boundary).
+#[tokio::test]
+async fn warm_render_post_content_anthropic_error_is_terminal_with_preserved_type() {
+    use crate::ingress::anthropic::AnthropicIngress;
+    use routectl_providers::anthropic_api::sse::SseState;
+
+    // Decode a real in-band overloaded_error through the SSE state machine
+    // -- the exact structured error the provider stream now yields.
+    let mut state = SseState::default();
+    let decoded = state
+        .parse_event(
+            "p",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"slow"}}"#,
+        )
+        .expect_err("in-band error event must surface as Err");
+
+    // Arrange: warm-hold, dispatch Ok, one content chunk then the decoded
+    // in-stream error (post-first-chunk -> terminal, not retryable).
+    let (router, meta) = k_recording_router_and_meta().await;
+    let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(futures::stream::iter(vec![
+            Ok(streaming_text_chunk("partial")),
+            Err(decoded),
+        ]));
+    let fut = ready_dispatch(meta, Ok(stream));
+    let rig = CaptureRig::new();
+    let capture = rig.capture(
+        "anthropic",
+        &sample_request("m", true),
+        "req-warm-overloaded",
+    );
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 10,
+        model: "m".into(),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+
+    // Act
+    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    let events = drain(rx).await;
+
+    // Assert: exactly one terminal error, last, carrying overloaded_error.
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| e.event.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        names.iter().filter(|n| **n == "error").count(),
+        1,
+        "exactly one terminal in-stream error: {names:?}"
+    );
+    assert_eq!(
+        names.last().copied(),
+        Some("error"),
+        "the terminal error is the last event: {names:?}"
+    );
+    let err_ev = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("error"))
+        .expect("terminal error event present");
+    let payload: Value = serde_json::from_str(&err_ev.data).unwrap();
+    assert_eq!(
+        payload["error"]["type"], "overloaded_error",
+        "the preserved error.type must reach the client, not api_error"
+    );
+
+    // Exactly one usage row: the request finalized once past the non-retry
+    // boundary -- no second provider was dispatched.
+    let rows = rig.flush_and_read().await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "finalized exactly once -> no second provider hit"
+    );
+    assert_eq!(rows[0].outcome, "upstream_error");
+    assert_eq!(
+        rows[0].stream_stage.as_deref(),
+        Some("mid_stream"),
+        "content rendered before the cut -> mid-stream terminal, not pre-content"
+    );
+}
+
 /// Client disconnects before the warm-hold render task can flush its early
 /// frame (the receiver is already gone). Pins Q4's Drop reservation: the
 /// finalize path never runs (the early-frame send fails and the task returns
