@@ -293,6 +293,7 @@ pub mod scenarios {
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "Please review the attached document.".into(),
+                citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
             })]),
             reasoning: None,

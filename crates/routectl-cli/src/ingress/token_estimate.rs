@@ -103,7 +103,9 @@ fn content_part_chars(part: &ContentPart) -> usize {
 
 fn known_content_part_chars(part: &KnownContentPart) -> usize {
     match part {
-        KnownContentPart::Text { text, .. } => text.chars().count(),
+        KnownContentPart::Text {
+            text, citations, ..
+        } => text.chars().count() + citations.as_ref().map_or(0, json_chars),
         KnownContentPart::Image { source, .. } => json_chars(source),
         KnownContentPart::ImageUrl { image_url, .. } => json_chars(image_url),
         KnownContentPart::File { file, .. } => json_chars(file),
@@ -247,6 +249,7 @@ mod tests {
             role: Role::User,
             content: MC::Parts(vec![CP::Known(KCP::Text {
                 text: "a text content part with several words in it".into(),
+                citations: None,
                 cache_control: None,
             })]),
             reasoning: None,

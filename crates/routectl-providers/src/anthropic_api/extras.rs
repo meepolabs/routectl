@@ -458,6 +458,15 @@ pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value
     }
 }
 
+/// True iff the assembled body carries a `thinking` key at all (legacy
+/// `enabled` OR `adaptive`). Shared final-body predicate: the sampling-params
+/// reconciler restores caller sampling when this is false, and
+/// `body_has_adaptive_thinking` is layered on it, so the two late passes
+/// cannot disagree about whether thinking survived the strip passes.
+fn body_has_thinking(body: &Value) -> bool {
+    body.get("thinking").is_some()
+}
+
 /// True iff `body.thinking.type == "adaptive"`.
 ///
 /// INVARIANT: this trusts `thinking` read straight from the assembled
@@ -467,10 +476,74 @@ pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value
 /// from that set, provider_extras could forge adaptive here and trigger
 /// spurious effort re-injection -- the two MUST stay in sync.
 fn body_has_adaptive_thinking(body: &Value) -> bool {
-    body.get("thinking")
-        .and_then(|t| t.get("type"))
-        .and_then(Value::as_str)
-        == Some("adaptive")
+    body_has_thinking(body)
+        && body
+            .get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(Value::as_str)
+            == Some("adaptive")
+}
+
+/// Late enforcer of the temperature/top_p invariant, the sampling analogue
+/// of `reconcile_output_config_effort`. Assembly forces `temperature = 1.0`
+/// and drops `top_p` whenever thinking is composed (Anthropic forbids
+/// alternative-continuation sampling while spending reasoning budget). A
+/// later strip pass (cache-miss soft-fail, tool_choice-forces-use) can then
+/// remove `thinking` from the body, leaving the forced sampling behind and
+/// discarding the caller's original values.
+///
+/// This recomputes from the FINAL body: when no `thinking` survives, re-apply
+/// the caller's sampling from the SOURCE request -- `temperature =
+/// req.temperature`, and `top_p` only when temperature is absent (mirrors the
+/// assembly else-branch; Claude 4.x rejects `temperature`+`top_p` together).
+/// Computing from the final body rather than restoring saved pre-strip values
+/// means a future strip pass cannot invalidate it. Must run after ALL strip
+/// passes.
+pub(super) fn reconcile_sampling_params(provider_id: &str, req: &ChatRequest, body: &mut Value) {
+    if body_has_thinking(body) {
+        return;
+    }
+    let temperature = req.temperature;
+    let top_p = if temperature.is_some() {
+        None
+    } else {
+        req.top_p
+    };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let temp_changed = set_optional_f64(obj, "temperature", temperature);
+    let top_p_changed = set_optional_f64(obj, "top_p", top_p);
+    if temp_changed || top_p_changed {
+        tracing::debug!(
+            provider = provider_id,
+            "recomputed temperature/top_p after a strip pass removed thinking; \
+             restored caller sampling params"
+        );
+    }
+}
+
+/// Set `key` to `value` on `obj`, or remove it when `value` is None
+/// (mirroring the wire's `skip_serializing_if = "Option::is_none"`).
+/// Returns true iff the emitted field actually changed, so the caller only
+/// logs a real correction.
+fn set_optional_f64(
+    obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<f64>,
+) -> bool {
+    match value {
+        Some(v) => {
+            let next = Value::from(v);
+            if obj.get(key) == Some(&next) {
+                false
+            } else {
+                obj.insert(key.to_string(), next);
+                true
+            }
+        }
+        None => obj.remove(key).is_some(),
+    }
 }
 
 /// Remove `output_config.effort` from `body`, preserving any orthogonal

@@ -120,6 +120,7 @@ fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() 
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
                         text: "I'll compute that".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {

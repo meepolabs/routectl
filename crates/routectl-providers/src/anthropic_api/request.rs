@@ -53,8 +53,8 @@ use super::types::{
 
 // Primitives used only by the orchestrator below.
 use super::extras::{
-    build_output_config, merge_provider_extras, reconcile_output_config_effort, resolve_max_tokens,
-    strip_thinking_when_tool_choice_forces_use,
+    build_output_config, merge_provider_extras, reconcile_output_config_effort,
+    reconcile_sampling_params, resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
 };
 use super::messages::{normalize_replay_invariants, translate_messages};
 use super::tools::translate_tool_choice;
@@ -394,6 +394,12 @@ pub(crate) fn normalize(
     // (cache-miss soft-fail above, tool_choice strip just now) is
     // correctly reflected -- no stale `adaptive` flag is trusted.
     reconcile_output_config_effort(req, &mut body);
+    // Sampling analogue of the enforcer above, same final-body discipline:
+    // assembly forces temperature=1.0 (dropping top_p) when thinking is
+    // composed, and the strip passes above may then remove thinking. Recompute
+    // the caller's sampling from the source request when no thinking survives,
+    // so a stripped-thinking body never ships the forced 1.0.
+    reconcile_sampling_params(id, req, &mut body);
     Ok(body)
 }
 
@@ -813,6 +819,37 @@ mod context_management_normalize_tests {
             "orphan output_config.effort must be dropped once thinking is stripped; got: {body}"
         );
     }
+    /// Ordering invariant (cache-miss soft-fail path): thinking is composed
+    /// -- forcing `temperature=1.0` and dropping `top_p` -- and then the
+    /// cache-miss soft-fail strips `thinking` from the body. Sampling params
+    /// must be recomputed from the SOURCE request once thinking is gone:
+    /// emitted `temperature == req.temperature`, and `top_p` follows the
+    /// else-branch (absent while temperature is present). Pins the ordering
+    /// so a future strip pass added without revisiting sampling regresses
+    /// this test rather than silently shipping the forced 1.0.
+    #[test]
+    fn normalize_recomputes_sampling_after_cache_miss_thinking_strip() {
+        let mut req = req_with_tool_use_history_and_cm();
+        req.temperature = Some(0.2);
+        req.top_p = Some(0.9); // caller sent both; temperature wins per else-branch
+        let cache = Arc::new(small_cache(8)); // nothing seeded -> cache miss
+        let body = normalize("test", &req, false, &[], true, Some(&cache))
+            .expect("normalize must succeed even on cache miss");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped on cache miss; got: {body}"
+        );
+        assert_eq!(
+            body.get("temperature").and_then(Value::as_f64),
+            Some(0.2),
+            "temperature must revert to the caller's value once thinking is stripped; got: {body}"
+        );
+        assert!(
+            body.get("top_p").is_none(),
+            "top_p must follow the else-branch (absent while temperature present); got: {body}"
+        );
+    }
+
     /// tool_use id: the `thinking` key must remain in the outgoing body.
     #[test]
     fn normalize_no_soft_fail_when_cache_hits() {
@@ -956,6 +993,7 @@ mod multi_turn_tool_use_tests {
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Text {
                             text: "Let me think.".into(),
+                            citations: None,
                             cache_control: None,
                         }),
                         ContentPart::Known(KnownContentPart::Thinking {
@@ -1040,6 +1078,7 @@ mod multi_turn_tool_use_tests {
                         }),
                         ContentPart::Known(KnownContentPart::Text {
                             text: "answer".into(),
+                            citations: None,
                             cache_control: None,
                         }),
                         ContentPart::Known(KnownContentPart::Thinking {
@@ -1211,6 +1250,7 @@ mod multi_turn_tool_use_tests {
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Text {
                             text: "answer".into(),
+                            citations: None,
                             cache_control: None,
                         }),
                         ContentPart::Known(KnownContentPart::Thinking {
@@ -1319,6 +1359,7 @@ mod multi_turn_tool_use_tests {
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Text {
                             text: "answer".into(),
+                            citations: None,
                             cache_control: None,
                         }),
                         ContentPart::Known(KnownContentPart::Thinking {
@@ -1385,6 +1426,48 @@ mod multi_turn_tool_use_tests {
             .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
             .unwrap();
         assert_eq!(tool_use["input"], json!({"_arguments": "this is not json"}));
+    }
+
+    /// Ordering invariant (tool_choice-forces-use path): thinking is composed
+    /// -- forcing `temperature=1.0` and dropping `top_p` -- and then
+    /// `strip_thinking_when_tool_choice_forces_use` removes `thinking` because
+    /// tool_choice forces tool use. Sampling params must be recomputed from
+    /// the SOURCE request: `temperature == req.temperature` (None here, so
+    /// absent) and `top_p` re-emitted per the else-branch (present because
+    /// temperature is None). This is the documented Claude Code WebSearch
+    /// production path.
+    #[test]
+    fn normalize_recomputes_sampling_after_tool_choice_forces_use_strip() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("search the web")],
+            max_tokens: Some(2048),
+            temperature: None,
+            top_p: Some(0.9),
+            tool_choice: Some(json!("required")),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped when tool_choice forces tool use; got: {body}"
+        );
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must revert to the caller's None once thinking is stripped; got: {body}"
+        );
+        assert_eq!(
+            body.get("top_p").and_then(Value::as_f64),
+            Some(0.9),
+            "top_p must be re-emitted per the else-branch once thinking is stripped; got: {body}"
+        );
     }
 
     /// With `adaptive = true`, the wire shape is the
@@ -2341,6 +2424,7 @@ mod multi_turn_tool_use_tests {
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
                     text: "Let me think.".into(),
+                    citations: None,
                     cache_control: None,
                 }),
                 ContentPart::Known(KnownContentPart::Thinking {

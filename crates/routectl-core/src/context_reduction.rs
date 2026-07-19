@@ -440,6 +440,7 @@ mod tests {
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: text.into(),
+                citations: None,
                 cache_control: cc,
             })]),
             reasoning: None,
@@ -458,6 +459,7 @@ mod tests {
         let content = match cc {
             Some(cc) => MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "calling".into(),
+                citations: None,
                 cache_control: Some(cc),
             })]),
             None => MessageContent::Null,

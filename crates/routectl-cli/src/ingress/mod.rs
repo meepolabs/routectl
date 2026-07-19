@@ -212,6 +212,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
                 for p in parts {
                     if let ContentPart::Known(KnownContentPart::Text {
                         text,
+                        citations,
                         cache_control,
                     }) = p
                     {
@@ -219,7 +220,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
                             kind: "text".into(),
                             text: text.clone(),
                             cache_control: cache_control.clone(),
-                            citations: None,
+                            citations: citations.clone(),
                         });
                     }
                 }

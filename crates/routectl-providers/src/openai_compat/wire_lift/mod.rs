@@ -221,6 +221,7 @@ mod order_test {
             content: MessageContent::Parts(vec![ContentPart::Known(
                 routectl_core::KnownContentPart::Text {
                     text: "here".into(),
+                    citations: None,
                     cache_control: None,
                 },
             )]),

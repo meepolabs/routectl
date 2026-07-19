@@ -169,6 +169,7 @@ mod tests {
                     content: MessageContent::Parts(vec![ContentPart::Known(
                         KnownContentPart::Text {
                             text: "primary system".into(),
+                            citations: None,
                             cache_control: None,
                         },
                     )]),
@@ -282,6 +283,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                     text: "look at this".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 })]),
                 reasoning: None,
@@ -409,18 +411,22 @@ mod tests {
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
                         text: "a".into(),
+                        citations: None,
                         cache_control: Some(CacheControl::ephemeral_5m()),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "b".into(),
+                        citations: None,
                         cache_control: Some(CacheControl::ephemeral_5m()),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "c".into(),
+                        citations: None,
                         cache_control: Some(CacheControl::ephemeral_5m()),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "d".into(),
+                        citations: None,
                         cache_control: Some(CacheControl::ephemeral_5m()),
                     }),
                 ]),

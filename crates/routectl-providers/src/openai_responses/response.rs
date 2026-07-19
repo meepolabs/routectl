@@ -130,6 +130,7 @@ fn walk_output(
                             text_parts.push(text.clone());
                             parts.push(ContentPart::Known(KnownContentPart::Text {
                                 text: text.clone(),
+                                citations: None,
                                 cache_control: None,
                             }));
                         }
@@ -363,7 +364,7 @@ fn translate_usage(u: &ResponsesUsage) -> Usage {
         .and_then(|v| v.get("reasoning_tokens"))
         .and_then(serde_json::Value::as_u64)
         .map(|n| n as u32);
-    Usage {
+    let mut usage = Usage {
         prompt_tokens: u.input_tokens,
         completion_tokens: u.output_tokens,
         total_tokens: u.total_tokens,
@@ -373,7 +374,9 @@ fn translate_usage(u: &ResponsesUsage) -> Usage {
         cache_creation: None,
         server_tool_use: None,
         extras: Default::default(),
-    }
+    };
+    usage.derive_total_if_absent();
+    usage
 }
 
 /// Split a forward-compat `ResponseOutputItem::Other` Value into the

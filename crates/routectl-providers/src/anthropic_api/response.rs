@@ -88,10 +88,13 @@ pub(crate) fn walk_content_blocks(
                 });
                 detail_index += 1;
             }
-            ContentBlock::Text { text, .. } => {
+            ContentBlock::Text {
+                text, citations, ..
+            } => {
                 text_parts.push(text.clone());
                 parts.push(ContentPart::Known(KnownContentPart::Text {
                     text: text.clone(),
+                    citations: citations.clone(),
                     cache_control: None,
                 }));
             }

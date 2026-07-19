@@ -413,13 +413,17 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
             content,
             is_error,
             ..
-        } => Ok(Some(ConverseContentBlock::ToolResult {
-            tool_result: ConverseToolResult {
-                tool_use_id: tool_use_id.clone(),
-                content: translate_tool_result_content(content),
-                status: is_error.map(|e| if e { "error".into() } else { "success".into() }),
-            },
-        })),
+        } => {
+            let mut result_content = translate_tool_result_content(content);
+            ensure_min_tool_result_content(&mut result_content);
+            Ok(Some(ConverseContentBlock::ToolResult {
+                tool_result: ConverseToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: result_content,
+                    status: is_error.map(|e| if e { "error".into() } else { "success".into() }),
+                },
+            }))
+        }
         KnownContentPart::Thinking {
             thinking,
             signature,
@@ -723,6 +727,19 @@ fn translate_tool_result_content(content: &Value) -> Vec<ConverseToolResultConte
     }
 }
 
+/// AWS Converse rejects `toolResult.content: []` ("Member must have at
+/// least 1 element"). Empty tool output is a legal, common shape, so the
+/// emitted content vector gets a single empty-string Text block when it
+/// would otherwise be empty. Applied to the EMITTED Converse vector after
+/// translation so nonempty-but-unsupported content keeps its JSON fallback.
+fn ensure_min_tool_result_content(content: &mut Vec<ConverseToolResultContent>) {
+    if content.is_empty() {
+        content.push(ConverseToolResultContent::Text {
+            text: String::new(),
+        });
+    }
+}
+
 /// Translate one element from an Anthropic-shape tool_result content
 /// array. Anthropic clients send blocks like `{"type":"text","text":"..."}`
 /// or `{"type":"image","source":{...}}`. The naive `Json` wrap loses
@@ -837,11 +854,7 @@ fn build_tool_message(msg: &Message) -> Result<ConverseMessage> {
     // Null content (and the degenerate empty-Parts case) default to a
     // single empty-string text block rather than producing `content: []`
     // which AWS rejects.
-    if content.is_empty() {
-        content.push(ConverseToolResultContent::Text {
-            text: String::new(),
-        });
-    }
+    ensure_min_tool_result_content(&mut content);
     Ok(ConverseMessage {
         role: "user".to_string(),
         content: vec![ConverseContentBlock::ToolResult {
@@ -1134,6 +1147,7 @@ mod tests {
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "result".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                 ]),
@@ -1276,6 +1290,7 @@ mod tests {
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
                     text: "see attached".into(),
+                    citations: None,
                     cache_control: None,
                 }),
                 ContentPart::Known(KnownContentPart::File {
@@ -1323,6 +1338,7 @@ mod tests {
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
                     text: "see attached".into(),
+                    citations: None,
                     cache_control: None,
                 }),
                 ContentPart::Known(KnownContentPart::File {
@@ -1372,6 +1388,7 @@ mod tests {
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
                     text: "look at this".into(),
+                    citations: None,
                     cache_control: None,
                 }),
                 ContentPart::Known(KnownContentPart::Image {
@@ -1783,6 +1800,92 @@ mod tests {
                 );
             }
             other => panic!("expected an empty Text block, got {other:?}"),
+        }
+    }
+
+    /// Helper: run `translate_known_part` on a ToolResult part and return
+    /// its emitted `toolResult.content` vector.
+    fn tool_result_content_of(content: Value) -> Vec<ConverseToolResultContent> {
+        use routectl_core::KnownContentPart;
+        let part = KnownContentPart::ToolResult {
+            tool_use_id: "tu_1".into(),
+            content,
+            is_error: None,
+            cache_control: None,
+        };
+        let block = translate_known_part("test", &part)
+            .expect("ToolResult part must translate")
+            .expect("ToolResult part must produce a block");
+        match block {
+            ConverseContentBlock::ToolResult { tool_result } => tool_result.content,
+            other => panic!("expected a ToolResult block, got {other:?}"),
+        }
+    }
+
+    /// The `KnownContentPart::ToolResult` arm must guard empty content the
+    /// same way `build_tool_message` does: `Value::Null` content emits
+    /// exactly one empty-string Text block, never `content: []` (which AWS
+    /// Converse rejects with "Member must have at least 1 element").
+    #[test]
+    fn tool_result_part_null_content_emits_single_empty_text_block() {
+        let content = tool_result_content_of(Value::Null);
+        assert_eq!(
+            content.len(),
+            1,
+            "Null content must yield exactly one element (AWS requires >=1), got: {content:?}"
+        );
+        match &content[0] {
+            ConverseToolResultContent::Text { text } => {
+                assert_eq!(
+                    text, "",
+                    "the single element must be an empty-string text block"
+                );
+            }
+            other => panic!("expected an empty Text block, got {other:?}"),
+        }
+    }
+
+    /// The `KnownContentPart::ToolResult` arm must also guard an empty
+    /// content array: `[]` emits exactly one empty-string Text block.
+    #[test]
+    fn tool_result_part_empty_array_content_emits_single_empty_text_block() {
+        let content = tool_result_content_of(json!([]));
+        assert_eq!(
+            content.len(),
+            1,
+            "empty-array content must yield exactly one element (AWS requires >=1), got: {content:?}"
+        );
+        match &content[0] {
+            ConverseToolResultContent::Text { text } => {
+                assert_eq!(
+                    text, "",
+                    "the single element must be an empty-string text block"
+                );
+            }
+            other => panic!("expected an empty Text block, got {other:?}"),
+        }
+    }
+
+    /// Nonempty-but-unsupported content must NOT be collapsed by the guard:
+    /// a bare JSON object (no `type` tag) round-trips through the Json
+    /// fallback rather than being replaced by an empty Text block.
+    #[test]
+    fn tool_result_part_nonempty_unsupported_content_keeps_json_fallback() {
+        let payload = json!({"result": 42, "ok": true});
+        let content = tool_result_content_of(payload.clone());
+        assert_eq!(
+            content.len(),
+            1,
+            "unsupported object content maps to exactly one Json element, got: {content:?}"
+        );
+        match &content[0] {
+            ConverseToolResultContent::Json { json } => {
+                assert_eq!(
+                    json, &payload,
+                    "unsupported content must survive as its JSON fallback"
+                );
+            }
+            other => panic!("expected a Json fallback block, got {other:?}"),
         }
     }
 

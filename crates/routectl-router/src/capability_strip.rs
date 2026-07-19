@@ -264,7 +264,7 @@ impl RequestInterceptor for StripInterceptor {
             }
         }
 
-        if let Err(err) = validate_post_strip(req) {
+        if let Err(err) = validate_post_strip(req, touch_tools) {
             restore(req, snapshot);
             return Outcome::Reject(err);
         }
@@ -289,10 +289,19 @@ fn plan_matches(req: &ChatRequest, plan: &StripPlan) -> bool {
 
 /// Remove every surface named by the plan from the request in place.
 fn apply_plan(req: &mut ChatRequest, plan: &StripPlan) {
-    if let Some(tool_type) = plan.tool_type
-        && let Some(tools) = req.tools.as_mut()
-    {
-        tools.retain(|tool| !tool_matches_type(tool, tool_type));
+    if let Some(tool_type) = plan.tool_type {
+        if let Some(tools) = req.tools.as_mut() {
+            tools.retain(|tool| !tool_matches_type(tool, tool_type));
+        }
+        // Normalize an emptied list back to None so egress serialization
+        // never emits `tools: []` (skip_serializing_if only skips None),
+        // which Anthropic / Bedrock Invoke reject with a 400. Done outside
+        // the as_mut borrow and only when this plan touched the tools
+        // surface, so a beta/body-only strip never disturbs (or fails to
+        // snapshot) an untouched tools field.
+        if req.tools.as_ref().is_some_and(Vec::is_empty) {
+            req.tools = None;
+        }
     }
     if !plan.beta_tokens.is_empty() {
         req.anthropic_beta
@@ -308,9 +317,17 @@ fn apply_plan(req: &mut ChatRequest, plan: &StripPlan) {
 }
 
 /// Narrow checker for strip-CREATED hazards ONLY -- not a general
-/// `ChatRequest` validator. The one hazard the seeded table can create
-/// is a forced `tool_choice` that now names a tool the strip removed.
-fn validate_post_strip(req: &ChatRequest) -> Result<(), Error> {
+/// `ChatRequest` validator. `stripped_tools` says whether the strip
+/// actually touched the tools surface; when it did not, no tool-surface
+/// hazard can be strip-created, so a pre-existing invalid request (e.g. a
+/// mandatory `tool_choice` over no tools before this run) is never
+/// misclassified as a strip rollback. The two hazards the seeded table
+/// can create are a forced `tool_choice` that now names a removed tool,
+/// and a mandatory `tool_choice` whose tools the strip emptied.
+fn validate_post_strip(req: &ChatRequest, stripped_tools: bool) -> Result<(), Error> {
+    if !stripped_tools {
+        return Ok(());
+    }
     if let Some(forced) = forced_tool_name(req.tool_choice.as_ref())
         && !tools_contains_name(req, forced)
     {
@@ -318,7 +335,38 @@ fn validate_post_strip(req: &ChatRequest) -> Result<(), Error> {
             "capability strip removed tool `{forced}` still forced by tool_choice"
         )));
     }
+    if tool_choice_is_mandatory(req.tool_choice.as_ref()) && tools_are_empty(req) {
+        return Err(Error::Validation(
+            "capability strip emptied tools while tool_choice mandates a tool".to_string(),
+        ));
+    }
     Ok(())
+}
+
+/// True when `tool_choice` requires the model to call some tool, across
+/// both dialects: Anthropic `{"type":"any"}` / `{"type":"tool"}` and
+/// OpenAI `"required"` (string) / `{"type":"function"}`. Auto / none /
+/// absent do not mandate a tool.
+fn tool_choice_is_mandatory(tool_choice: Option<&Value>) -> bool {
+    let Some(choice) = tool_choice else {
+        return false;
+    };
+    if choice.as_str() == Some("required") {
+        return true;
+    }
+    matches!(
+        choice
+            .as_object()
+            .and_then(|obj| obj.get("type"))
+            .and_then(Value::as_str),
+        Some("any" | "tool" | "function")
+    )
+}
+
+/// True when the request carries no usable tool (`None` after the
+/// emptied-list normalization, or an empty list defensively).
+fn tools_are_empty(req: &ChatRequest) -> bool {
+    req.tools.as_ref().is_none_or(|tools| tools.is_empty())
 }
 
 /// Restore the touched surfaces, undoing a strip. An `Untouched` field
@@ -766,5 +814,174 @@ mod tests {
         // Assert
         assert!(matches!(outcome, Outcome::Unchanged));
         assert_eq!(req.tools.as_ref().unwrap().len(), 1);
+    }
+
+    // --- emptied-tools normalization + mandatory tool_choice ---
+
+    #[test]
+    fn sole_stripped_tool_normalizes_tools_to_none() {
+        // The advisor is the only tool: after the retain the list is empty
+        // and must normalize to None, not serialize as `[]`.
+        let mut req = ChatRequest {
+            tools: Some(vec![other_tool(
+                json!({"type": "advisor", "name": "advisor"}),
+            )]),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+
+        // Assert
+        assert!(matches!(outcome, Outcome::Stripped));
+        assert!(
+            req.tools.is_none(),
+            "an emptied tools list normalizes to None, not Some([])",
+        );
+    }
+
+    #[test]
+    fn tool_choice_is_mandatory_recognizes_all_four_shapes() {
+        for choice in [
+            json!({"type": "any"}),
+            json!({"type": "tool"}),
+            json!("required"),
+            json!({"type": "function"}),
+        ] {
+            assert!(
+                tool_choice_is_mandatory(Some(&choice)),
+                "mandatory shape {choice}",
+            );
+        }
+        for choice in [
+            json!({"type": "auto"}),
+            json!({"type": "none"}),
+            json!("auto"),
+            json!("none"),
+        ] {
+            assert!(
+                !tool_choice_is_mandatory(Some(&choice)),
+                "non-mandatory shape {choice}",
+            );
+        }
+        assert!(!tool_choice_is_mandatory(None));
+    }
+
+    #[test]
+    fn mandatory_choice_emptying_tools_rolls_back_for_every_shape() {
+        // For each mandatory shape, stripping the sole tool empties the
+        // list; the post-strip check rejects and rollback restores the
+        // original Some([...]) and the original tool_choice.
+        for choice in [
+            json!({"type": "any"}),
+            json!({"type": "tool"}),
+            json!("required"),
+            json!({"type": "function"}),
+        ] {
+            let mut req = ChatRequest {
+                tools: Some(vec![other_tool(
+                    json!({"type": "advisor", "name": "advisor"}),
+                )]),
+                tool_choice: Some(choice.clone()),
+                ..Default::default()
+            };
+
+            // Act
+            let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+
+            // Assert -- rejected, and the original Some([...]) restored.
+            assert!(
+                matches!(outcome, Outcome::Reject(Error::Validation(_))),
+                "shape {choice} must reject",
+            );
+            assert_eq!(
+                req.tools.as_ref().map(Vec::len),
+                Some(1),
+                "rollback restores the original Some([...]) for shape {choice}",
+            );
+            assert_eq!(
+                req.tool_choice.as_ref(),
+                Some(&choice),
+                "rollback leaves tool_choice untouched for shape {choice}",
+            );
+        }
+    }
+
+    #[test]
+    fn mandatory_choice_with_surviving_tool_is_not_rejected() {
+        // Stripping advisor leaves a surviving tool, so a mandatory choice
+        // is still satisfiable -- no hazard, no rollback.
+        let mut req = ChatRequest {
+            tools: Some(vec![
+                other_tool(json!({"type": "advisor", "name": "advisor"})),
+                other_tool(json!({"type": "web_search_20250305", "name": "search"})),
+            ]),
+            tool_choice: Some(json!({"type": "any"})),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+
+        // Assert
+        assert!(matches!(outcome, Outcome::Stripped));
+        assert_eq!(req.tools.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn preexisting_mandatory_no_tools_is_not_misclassified_as_rollback() {
+        // The request is ALREADY invalid (mandatory choice, no tools)
+        // before this run; a beta-only strip does not touch the tools
+        // surface, so the pre-existing invalidity must not be read as a
+        // strip-created hazard and rolled back.
+        let mut req = ChatRequest {
+            tools: None,
+            tool_choice: Some(json!({"type": "any"})),
+            anthropic_beta: vec!["context-management-2025-06-27".to_string()],
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"], false));
+
+        // Assert -- the beta strip proceeds; pre-existing invalidity is not
+        // the strip's hazard.
+        assert!(matches!(outcome, Outcome::Stripped));
+        assert!(req.anthropic_beta.is_empty());
+    }
+
+    #[test]
+    fn rejection_message_distinguishes_named_from_mandatory() {
+        // named-tool-removed: tool_choice forces the removed tool by name.
+        let mut named = ChatRequest {
+            tools: Some(vec![other_tool(
+                json!({"type": "advisor", "name": "advisor"}),
+            )]),
+            tool_choice: Some(json!({"type": "tool", "name": "advisor"})),
+            ..Default::default()
+        };
+        match StripInterceptor.apply(&mut named, &ctx(&["advisor"], false)) {
+            Outcome::Reject(Error::Validation(msg)) => {
+                assert!(msg.contains("removed tool `advisor`"), "{msg}");
+            }
+            other => panic!("expected named-tool rejection, got {other:?}"),
+        }
+
+        // mandatory-choice-no-tools: tool_choice mandates a tool but names
+        // none, and the strip emptied the list.
+        let mut mandatory = ChatRequest {
+            tools: Some(vec![other_tool(
+                json!({"type": "advisor", "name": "advisor"}),
+            )]),
+            tool_choice: Some(json!({"type": "any"})),
+            ..Default::default()
+        };
+        match StripInterceptor.apply(&mut mandatory, &ctx(&["advisor"], false)) {
+            Outcome::Reject(Error::Validation(msg)) => {
+                assert!(msg.contains("emptied tools"), "{msg}");
+                assert!(!msg.contains("removed tool"), "{msg}");
+            }
+            other => panic!("expected mandatory-choice rejection, got {other:?}"),
+        }
     }
 }

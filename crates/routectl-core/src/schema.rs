@@ -536,8 +536,11 @@ pub struct Choice {
 /// `cache_read_input_tokens`, and the per-TTL breakdown).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
+    #[serde(default)]
     pub prompt_tokens: u32,
+    #[serde(default)]
     pub completion_tokens: u32,
+    #[serde(default)]
     pub total_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
@@ -566,6 +569,31 @@ pub struct Usage {
     /// `ChatResponse.extras`.
     #[serde(default, flatten, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extras: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Usage {
+    /// Reconstruct `total_tokens` from the component counts when an
+    /// upstream reported the parts but omitted (or zeroed) the
+    /// aggregate. Some openai-compat hosts ship `prompt_tokens` /
+    /// `completion_tokens` without `total_tokens`; without this,
+    /// downstream accounting would record a zero total for a response
+    /// that clearly consumed tokens. The nonzero-component guard keeps a
+    /// genuinely empty usage object all-zero so a total is never
+    /// invented. Must run at every normalize entry point before usage
+    /// accounting reads the response, so the derived total is the single
+    /// value the ledger ever sees.
+    pub fn derive_total_if_absent(&mut self) {
+        if self.total_tokens == 0 && (self.prompt_tokens > 0 || self.completion_tokens > 0) {
+            self.total_tokens = self.prompt_tokens.saturating_add(self.completion_tokens);
+            tracing::debug!(
+                target: "routectl::usage",
+                prompt_tokens = self.prompt_tokens,
+                completion_tokens = self.completion_tokens,
+                total_tokens = self.total_tokens,
+                "derived absent usage total_tokens from component counts"
+            );
+        }
+    }
 }
 
 /// Per-TTL breakdown of cache writes for one request.
@@ -754,6 +782,74 @@ pub enum ReasoningDetailKind {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A partial `usage` object that omits `total_tokens` must not sink
+    /// the whole `ChatResponse` deserialization -- some openai-compat
+    /// upstreams ship only the component counts. The missing aggregate
+    /// defaults to 0 (the derive step fills it in downstream).
+    #[test]
+    fn chatresponse_with_partial_usage_deserializes() {
+        let resp: ChatResponse = serde_json::from_value(json!({
+            "choices": [],
+            "usage": { "prompt_tokens": 12, "completion_tokens": 8 }
+        }))
+        .expect("partial usage (no total_tokens) must deserialize");
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 8);
+        assert_eq!(usage.total_tokens, 0, "absent aggregate defaults to 0");
+    }
+
+    /// The derive step reconstructs an absent aggregate from the
+    /// component counts via `saturating_add`.
+    #[test]
+    fn derive_total_fills_absent_aggregate_from_components() {
+        let mut usage = Usage {
+            prompt_tokens: 12,
+            completion_tokens: 8,
+            total_tokens: 0,
+            ..Usage::default()
+        };
+        usage.derive_total_if_absent();
+        assert_eq!(usage.total_tokens, 20);
+    }
+
+    /// The nonzero-component guard keeps a genuinely empty usage object
+    /// all-zero -- a total is never invented.
+    #[test]
+    fn derive_total_leaves_all_zero_usage_untouched() {
+        let mut usage = Usage::default();
+        usage.derive_total_if_absent();
+        assert_eq!(usage.total_tokens, 0);
+    }
+
+    /// An already-present aggregate is authoritative and never overwritten,
+    /// even when it diverges from the component sum.
+    #[test]
+    fn derive_total_preserves_present_aggregate() {
+        let mut usage = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 99,
+            ..Usage::default()
+        };
+        usage.derive_total_if_absent();
+        assert_eq!(usage.total_tokens, 99);
+    }
+
+    /// The reconstruction saturates rather than overflowing when the
+    /// component counts sum past `u32::MAX`.
+    #[test]
+    fn derive_total_saturates_on_overflow() {
+        let mut usage = Usage {
+            prompt_tokens: u32::MAX,
+            completion_tokens: 5,
+            total_tokens: 0,
+            ..Usage::default()
+        };
+        usage.derive_total_if_absent();
+        assert_eq!(usage.total_tokens, u32::MAX);
+    }
 
     /// A `RoutectlInternal` built via `Default` carries `Library`
     /// provenance, and a directly-constructed `ChatRequest` (no ingress)

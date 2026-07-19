@@ -59,6 +59,7 @@ fn render(message: Message, finish_reason: Option<&str>) -> Value {
 fn text_part(text: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::Text {
         text: text.to_string(),
+        citations: None,
         cache_control: None,
     })
 }

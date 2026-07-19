@@ -427,6 +427,26 @@ fn response_usage_extracts_input_output_tokens() {
 }
 
 #[test]
+fn response_usage_derives_absent_total_from_components() {
+    let body = json!({
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "id": "m1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "x"}]
+        }],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 25
+        }
+    });
+    let resp = parse(body);
+    let u = resp.usage.unwrap();
+    assert_eq!(u.total_tokens, 125);
+}
+
+#[test]
 fn codex_resets_in_seconds_lifted() {
     // Arrange: a usage-limit body with the relative reset form.
     let body = json!({

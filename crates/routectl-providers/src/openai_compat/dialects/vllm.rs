@@ -19,7 +19,7 @@ use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 use super::util::{
     derive_reasoning_effort, lift_delta_reasoning_content, lift_reasoning_content_field,
-    preserve_history_reasoning_content,
+    preserve_history_reasoning_content, reasoning_enabled_for_wire,
 };
 use crate::effort::clamp_effort_to_supported;
 
@@ -50,11 +50,10 @@ impl Dialect for VllmDialect {
         // reasoning config.
         if let Some(ctk) = req.chat_template_kwargs.as_ref() {
             obj.insert("chat_template_kwargs".into(), ctk.clone());
-        } else if let Some(r) = req.reasoning.as_ref() {
-            let enabled = r.enabled.unwrap_or(false);
+        } else if req.reasoning.is_some() {
             obj.insert(
                 "chat_template_kwargs".into(),
-                json!({ "enable_thinking": enabled }),
+                json!({ "enable_thinking": reasoning_enabled_for_wire(req) }),
             );
         }
         if let Some(effort) = derive_reasoning_effort(req) {
@@ -309,6 +308,7 @@ mod tests {
 
     // Reasoning explicitly disabled must NOT emit reasoning_effort,
     // even when an effort value is set (e.g. a model output_config default).
+    // The enable_thinking flag and the effort gate must AGREE: both off.
     #[test]
     fn disabled_reasoning_emits_no_effort() {
         // Arrange: enabled=false but an effort is still present.
@@ -331,10 +331,112 @@ mod tests {
         )
         .unwrap();
 
-        // Assert: disabled reasoning suppresses the effort entirely.
+        // Assert: disabled reasoning suppresses the effort entirely, and
+        // enable_thinking is off -- no contradictory payload.
         assert!(
             body.get("reasoning_effort").is_none(),
             "disabled reasoning must not emit reasoning_effort: {body}"
+        );
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], false,
+            "disabled reasoning must set enable_thinking=false: {body}"
+        );
+    }
+
+    // enabled unset + explicit effort (what the OpenAI ingress produces when
+    // promoting a top-level reasoning_effort) must turn thinking ON and
+    // forward the effort -- the two must not disagree.
+    #[test]
+    fn enabled_none_with_effort_enables_thinking_and_emits_effort() {
+        // Arrange: enabled unset, effort present.
+        let mut req = user_req("qwen3-30b");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("high".into()),
+            max_tokens: None,
+            enabled: None,
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Vllm,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert: thinking on AND effort forwarded verbatim.
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], true,
+            "effort-only request must enable thinking: {body}"
+        );
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    // enabled unset + max_tokens must turn thinking ON and derive the effort.
+    #[test]
+    fn enabled_none_with_max_tokens_enables_thinking_and_derives_effort() {
+        // Arrange: enabled unset, only a budget present.
+        let mut req = user_req("qwen3-30b");
+        req.reasoning = Some(ReasoningConfig {
+            effort: None,
+            max_tokens: Some(4096),
+            enabled: None,
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Vllm,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert: thinking on AND derived effort emitted.
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], true,
+            "budget-only request must enable thinking: {body}"
+        );
+        assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    // Caller-supplied chat_template_kwargs wins: the unified reasoning config
+    // must not overwrite an explicit caller payload.
+    #[test]
+    fn caller_supplied_chat_template_kwargs_wins() {
+        // Arrange: caller sets chat_template_kwargs explicitly AND a reasoning
+        // config that would otherwise inject enable_thinking=true.
+        let mut req = user_req("qwen3-30b");
+        req.chat_template_kwargs = Some(serde_json::json!({ "enable_thinking": false }));
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("high".into()),
+            max_tokens: None,
+            enabled: Some(true),
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Vllm,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert: caller payload wins verbatim.
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], false,
+            "caller-supplied chat_template_kwargs must win: {body}"
         );
     }
 }

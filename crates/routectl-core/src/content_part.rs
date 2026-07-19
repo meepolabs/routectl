@@ -52,6 +52,8 @@ pub enum KnownContentPart {
     Text {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        citations: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
     /// Anthropic-shape image block. `source` is `{type: "base64",
@@ -375,6 +377,7 @@ mod tests {
     fn cache_control_is_accessible_through_either_variant() {
         let known = ContentPart::Known(KnownContentPart::Text {
             text: "hi".into(),
+            citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
         });
         assert!(known.cache_control().is_some());

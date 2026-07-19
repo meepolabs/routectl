@@ -13153,8 +13153,8 @@ mod feature_filter_tests {
 
         assert!(matches!(decision, StripDecision::Proceed));
         assert!(
-            attempt_req.tools.as_ref().unwrap().is_empty(),
-            "the advisor tool is stripped from the attempt request",
+            attempt_req.tools.is_none(),
+            "the sole advisor tool is stripped and the emptied list normalizes to None",
         );
         assert_eq!(router.metrics.strip_total(), 1);
         assert_eq!(router.metrics.strip_rollback_total(), 0);
@@ -16772,6 +16772,7 @@ mod auto_emit_cache_control_tests {
         let part = |t: &str| {
             ContentPart::Known(KnownContentPart::Text {
                 text: t.into(),
+                citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
             })
         };
@@ -19846,6 +19847,16 @@ mod strip_interceptor_dispatch_tests {
         }
     }
 
+    /// Advisor request whose `tool_choice` mandates SOME tool (`{"type":
+    /// "any"}`) while the advisor is the only tool -- stripping it empties
+    /// the list, a strip-created hazard the post-strip check rolls back.
+    fn advisor_request_mandatory_choice() -> ChatRequest {
+        ChatRequest {
+            tool_choice: Some(json!({"type": "any"})),
+            ..advisor_request()
+        }
+    }
+
     fn captured() -> Arc<ParkingMutex<Vec<ChatRequest>>> {
         Arc::new(ParkingMutex::new(Vec::new()))
     }
@@ -20075,6 +20086,79 @@ mod strip_interceptor_dispatch_tests {
             .import_entries(vec![acting_advisor_negative("haiku")]);
 
         let result = router.count_tokens(advisor_request_forcing_advisor()).await;
+
+        assert!(result.is_err(), "the only seat rolled back and was skipped");
+        assert!(
+            cap.lock().is_empty(),
+            "a rolled-back seat never calls the upstream count_tokens",
+        );
+        assert_eq!(router.metrics.strip_rollback_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_rollback_on_mandatory_choice_emptied_tools() {
+        // The sole tool is the advisor; stripping it empties the list while
+        // tool_choice mandates a tool. The post-strip check rolls back, so
+        // the single-entry chain exhausts with no upstream call.
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let result = router.complete(advisor_request_mandatory_choice()).await;
+
+        assert!(
+            result.is_err(),
+            "the emptied-tools attempt does not dispatch"
+        );
+        assert!(
+            cap.lock().is_empty(),
+            "a rolled-back attempt never dispatches the mutated request",
+        );
+        assert_eq!(router.metrics.strip_rollback_total(), 1);
+        assert_eq!(router.metrics.strip_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn stream_rollback_on_mandatory_choice_emptied_tools() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let result = router.stream(advisor_request_mandatory_choice()).await;
+
+        assert!(result.is_err(), "the streaming path rolls back identically");
+        assert!(
+            cap.lock().is_empty(),
+            "a rolled-back stream never dispatches the mutated request",
+        );
+        assert_eq!(router.metrics.strip_rollback_total(), 1);
+        assert_eq!(router.metrics.strip_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_rollback_on_mandatory_choice_emptied_tools() {
+        let cap = captured();
+        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
+            captured: cap.clone(),
+        });
+        let router = build_router(provider, true);
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative("haiku")]);
+
+        let result = router
+            .count_tokens(advisor_request_mandatory_choice())
+            .await;
 
         assert!(result.is_err(), "the only seat rolled back and was skipped");
         assert!(

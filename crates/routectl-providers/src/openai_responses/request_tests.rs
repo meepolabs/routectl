@@ -197,6 +197,7 @@ fn assistant_thinking_with_unknown_format_emits_empty_encrypted_content() {
         }),
         ContentPart::Known(KnownContentPart::Text {
             text: "final".into(),
+            citations: None,
             cache_control: None,
         }),
     ];
@@ -924,6 +925,7 @@ fn tool_role_mixed_text_and_image_emits_items_array() {
     let parts = vec![
         ContentPart::Known(KnownContentPart::Text {
             text: "here is the screenshot".into(),
+            citations: None,
             cache_control: None,
         }),
         ContentPart::Known(KnownContentPart::Image {
@@ -1168,6 +1170,7 @@ fn user_text_part_with_cc(text: &str) -> Message {
         role: Role::User,
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
             text: text.into(),
+            citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
         })]),
         reasoning: None,

@@ -677,6 +677,7 @@ mod tests {
         req.messages[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
+                citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
             })]);
 
@@ -714,6 +715,7 @@ mod tests {
         req.messages[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
+                citations: None,
                 cache_control: None,
             })]);
 
@@ -779,6 +781,7 @@ mod tests {
         req.messages[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
+                citations: None,
                 cache_control: Some(CacheControl::ephemeral_1h()),
             })]);
 
@@ -851,6 +854,7 @@ mod tests {
         req.messages[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
+                citations: None,
                 cache_control: None,
             })]);
 
