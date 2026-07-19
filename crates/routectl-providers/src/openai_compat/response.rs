@@ -62,6 +62,7 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
     }
 
     let lifted_usage_subkeys = if let Some(usage) = resp.usage.as_mut() {
+        usage.derive_total_if_absent();
         lift_and_strip_usage_extras(usage)
     } else {
         Vec::new()
@@ -591,6 +592,84 @@ mod tests {
         });
         let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
         assert_eq!(resp.usage.unwrap().reasoning_tokens, Some(11));
+    }
+
+    /// An openai-compat upstream (vLLM / NIM / DashScope / a proxy) that
+    /// ships a `usage` object WITHOUT `total_tokens` used to hard-error
+    /// the entire `ChatResponse` deserialization; now it normalizes and
+    /// the absent aggregate is reconstructed from the components, so the
+    /// usage object downstream accounting consumes carries a coherent
+    /// total instead of a split-brain zero.
+    #[test]
+    fn partial_usage_missing_total_normalizes_and_derives() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 12, "completion_tokens": 8
+            }
+        });
+        let resp = normalize("test", raw, ReasoningDialect::OpenAi)
+            .expect("partial usage (no total_tokens) must not hard-error normalize");
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 8);
+        assert_eq!(
+            usage.total_tokens, 20,
+            "absent total must be reconstructed from the components"
+        );
+    }
+
+    /// The derivation emits a greppable DEBUG line so an operator can
+    /// audit where an aggregate was reconstructed.
+    #[test]
+    fn partial_usage_derivation_emits_debug_log() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 12, "completion_tokens": 8 }
+        });
+        let events = routectl_testkit::capture_events(|| {
+            let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+            assert_eq!(resp.usage.unwrap().total_tokens, 20);
+        });
+        let event = events
+            .iter()
+            .find(|e| e.target == "routectl::usage")
+            .unwrap_or_else(|| panic!("no usage-derivation event captured: {events:#?}"));
+        assert_eq!(event.level, tracing::Level::DEBUG);
+        assert_eq!(event.field("total_tokens"), Some("20"));
+    }
+
+    /// A genuinely empty usage object (all components zero) is never
+    /// inflated: the aggregate stays 0 and no derivation event fires.
+    #[test]
+    fn all_zero_usage_stays_zero_and_is_silent() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 0, "completion_tokens": 0 }
+        });
+        let events = routectl_testkit::capture_events(|| {
+            let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+            assert_eq!(resp.usage.unwrap().total_tokens, 0);
+        });
+        assert!(
+            !events.iter().any(|e| e.target == "routectl::usage"),
+            "all-zero usage must not emit a derivation event: {events:#?}"
+        );
     }
 
     /// Audit trail for foreign-shape sanitization: when the helpers

@@ -638,6 +638,7 @@ fn strict_translation_off_warns_and_allows_request() {
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "hi".into(),
+                citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
             })]),
             reasoning: None,

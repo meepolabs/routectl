@@ -37,6 +37,7 @@ fn tool_use_block(id: &str) -> ContentBlock {
 fn text_block(text: &str) -> ContentBlock {
     ContentBlock::Text {
         text: text.to_string(),
+        citations: None,
         cache_control: None,
     }
 }

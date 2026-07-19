@@ -1087,6 +1087,7 @@ mod tests {
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "answer".into(),
+                    citations: None,
                     cache_control: None,
                 }),
             ]),

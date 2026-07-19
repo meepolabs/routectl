@@ -259,6 +259,7 @@ fn document_with_existing_text_sibling_does_not_prepend_empty_text() {
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
                     text: "see the attached report".into(),
+                    citations: None,
                     cache_control: None,
                 }),
                 ContentPart::Known(KnownContentPart::Document {
@@ -312,6 +313,7 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
                         text: "see attached".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                     ContentPart::Known(KnownContentPart::Image {
@@ -550,6 +552,7 @@ fn thinking_block_with_signature_translates_to_converse_reasoning_text() {
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "answer".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                 ]),
@@ -691,6 +694,7 @@ fn redacted_thinking_translates_to_converse_redacted_content() {
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "ok".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                 ]),
@@ -749,6 +753,7 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "Let me check.".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
@@ -875,6 +880,7 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: t.clone(),
+                    citations: None,
                     cache_control: None,
                 }),
             ]

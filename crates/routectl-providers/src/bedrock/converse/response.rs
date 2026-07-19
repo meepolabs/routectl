@@ -162,6 +162,7 @@ fn walk_content_blocks(
                 text_parts.push(text.clone());
                 parts.push(ContentPart::Known(KnownContentPart::Text {
                     text: text.clone(),
+                    citations: None,
                     cache_control: None,
                 }));
             }
@@ -278,7 +279,7 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
     let cache_read = u.cache_read_input_tokens.unwrap_or(0);
     let prompt_tokens = sum_prompt_tokens(u.input_tokens, cache_write, cache_read);
     let completion_tokens = u.output_tokens;
-    Usage {
+    let mut usage = Usage {
         prompt_tokens,
         completion_tokens,
         // Trust AWS's `totalTokens` if it diverges from the sum (it
@@ -293,7 +294,10 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
         cache_creation: u.cache_details.as_deref().map(translate_cache_details),
         server_tool_use: None,
         extras: Default::default(),
-    }
+    };
+    // Guards an explicit `totalTokens: 0` sent alongside nonzero components.
+    usage.derive_total_if_absent();
+    usage
 }
 
 /// Flatten Converse's `cacheDetails: [{inputTokens, ttl}]` array into

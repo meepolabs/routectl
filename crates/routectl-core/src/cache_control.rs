@@ -548,6 +548,7 @@ mod tests {
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: text.into(),
+                citations: None,
                 cache_control: cc,
             })]),
             reasoning: None,
@@ -638,6 +639,7 @@ mod tests {
             .map(|_| {
                 ContentPart::Known(KnownContentPart::Text {
                     text: "x".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 })
             })

@@ -125,6 +125,7 @@ pub(super) fn normalize_replay_invariants<'a>(
     let mut out: Vec<Message> = Vec::with_capacity(req.messages.len());
     let mut dropped_blocks: usize = 0;
     let mut affected_messages: Vec<usize> = Vec::new();
+    let mut dropped_turn_indices: Vec<usize> = Vec::new();
     for (i, msg) in req.messages.iter().enumerate() {
         let MessageContent::Parts(parts) = &msg.content else {
             // Text / Null content cannot carry a Thinking block.
@@ -143,12 +144,18 @@ pub(super) fn normalize_replay_invariants<'a>(
             affected_messages.push(i);
         }
         let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
-        let has_reasoning = !msg.reasoning_details.is_empty();
-        if kept.is_empty() && !has_tool_calls && !has_reasoning {
-            // Stripping emptied this message and there's no other
-            // content source. Anthropic's wire spec rejects
-            // content: [] for both user and assistant roles; emit
-            // nothing rather than trade one 400 for another.
+        let has_emittable_reasoning = message_has_emittable_reasoning(msg);
+        if kept.is_empty() && !has_tool_calls && !has_emittable_reasoning {
+            // Stripping emptied this message and there is no other content
+            // the wire can serialize: no tool_calls, and every
+            // reasoning_detail is non-emittable (unsigned or foreign
+            // format, so `emit_reasoning_blocks` would skip them all).
+            // Anthropic's wire spec rejects content: [] for both roles;
+            // keeping the message here would just trade the strip 400 for
+            // an empty-array 400 in `build_assistant_content`. A message
+            // with tool_calls is NEVER dropped -- that would orphan the
+            // next tool_result turn.
+            dropped_turn_indices.push(i);
             continue;
         }
         out.push(Message {
@@ -178,6 +185,23 @@ pub(super) fn normalize_replay_invariants<'a>(
          drops just the unsigned blocks; signed thinking blocks and \
          other content pass through unchanged."
     );
+
+    // Separate aggregated WARN when stripping emptied a whole assistant
+    // turn (the per-block WARN above only covers individual dropped
+    // blocks). Distinct field/message so operators can tell "some blocks
+    // stripped" from "an entire turn omitted". No content is logged.
+    if !dropped_turn_indices.is_empty() {
+        tracing::warn!(
+            provider = id,
+            dropped_turns = dropped_turn_indices.len(),
+            dropped_message_indices = ?dropped_turn_indices,
+            "dropping assistant turn(s) from outgoing request: stripping \
+             left no wire-serializable content (no Anthropic-emittable \
+             reasoning and no tool_calls). Emitting content: [] would 400 \
+             upstream, so the turn is omitted; tool_result correlation is \
+             unaffected because a dropped turn carries no tool_use."
+        );
+    }
 
     Ok(Cow::Owned(out))
 }
@@ -252,6 +276,42 @@ fn message_has_unsigned_thinking(msg: &Message) -> bool {
     }
 }
 
+/// True iff `detail` will produce an Anthropic content block in
+/// `emit_reasoning_blocks`. A `Text` detail needs the
+/// `anthropic-claude-v1` format AND a non-empty signature (Anthropic
+/// 400s a Thinking block with no signature). An `Encrypted` detail needs
+/// only that format (RedactedThinking carries no signature). A `Summary`
+/// detail is never an Anthropic block.
+///
+/// Shared by the `normalize_replay_invariants` keep-decision and the
+/// `emit_reasoning_blocks` gate so the two cannot drift: a turn is kept
+/// for its reasoning ONLY when that reasoning will actually emit at least
+/// one block. Without this, a turn kept because it merely HAS
+/// reasoning_details can emit zero blocks (all unsigned or foreign
+/// format) and reach the wire as an invalid `content: []`.
+fn is_anthropic_emittable_detail(detail: &ReasoningDetail) -> bool {
+    match detail.kind {
+        ReasoningDetailKind::Text => {
+            detail.format.as_deref() == Some(super::ANTHROPIC_FORMAT)
+                && detail
+                    .payload
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+        }
+        ReasoningDetailKind::Encrypted => detail.format.as_deref() == Some(super::ANTHROPIC_FORMAT),
+        ReasoningDetailKind::Summary => false,
+    }
+}
+
+/// True iff `msg` carries at least one reasoning detail that
+/// `emit_reasoning_blocks` will turn into an Anthropic content block.
+fn message_has_emittable_reasoning(msg: &Message) -> bool {
+    msg.reasoning_details
+        .iter()
+        .any(is_anthropic_emittable_detail)
+}
+
 fn translate_content_part(p: &ContentPart) -> ContentBlock {
     match p {
         ContentPart::Known(k) => translate_known_part(k),
@@ -271,10 +331,12 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
     match k {
         KnownContentPart::Text {
             text,
+            citations,
             cache_control,
         } => ContentBlock::Text {
             text: text.clone(),
             cache_control: cache_control.clone(),
+            citations: citations.clone(),
         },
         KnownContentPart::Image {
             source,
@@ -428,6 +490,28 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
     if let Some(tool_calls) = msg.tool_calls.as_ref() {
         emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks)?;
     }
+    if blocks.is_empty() {
+        // Last-resort backstop. `normalize_replay_invariants` drops a
+        // reasoning-only turn whose reasoning is non-emittable, but it
+        // returns early (Borrowed) on the Preserve and no-strip paths and
+        // never inspects those messages -- a Null-content turn carrying
+        // only unsigned reasoning_details reaches here with an empty
+        // block list. Anthropic 400s on content: [], so insert one empty
+        // text block. Should be rare: frequent firing means the
+        // emittability predicate drifted from the emit behavior.
+        tracing::warn!(
+            provider = id,
+            event = "empty_content_backstop",
+            "assistant content assembled empty after reasoning/tool_call \
+             emission; inserting one empty text block so an invalid \
+             content: [] never reaches the wire (last-resort backstop)."
+        );
+        blocks.push(ContentBlock::Text {
+            text: String::new(),
+            citations: None,
+            cache_control: None,
+        });
+    }
     Ok(AnthropicContent::Blocks(blocks))
 }
 
@@ -516,14 +600,28 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
     let mut skipped_format_count: usize = 0;
     let mut skipped_format_values: Vec<String> = Vec::new();
     for detail in &sorted {
-        match detail.kind {
-            ReasoningDetailKind::Text => {
-                if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) {
+        if !is_anthropic_emittable_detail(detail) {
+            // Not emittable: categorize for the aggregated WARNs so
+            // operators can distinguish a foreign-format drop from an
+            // unsigned drop. A non-anthropic-claude-v1 format is a format
+            // skip; a Text detail with the right format but an empty
+            // signature is an unsigned skip; Summary details are silently
+            // non-emittable (never a wire block).
+            match detail.kind {
+                ReasoningDetailKind::Text | ReasoningDetailKind::Encrypted
+                    if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) =>
+                {
                     skipped_format_count = skipped_format_count.saturating_add(1);
                     skipped_format_values
                         .push(detail.format.as_deref().unwrap_or("<none>").to_string());
-                    continue;
                 }
+                ReasoningDetailKind::Text => skipped_unsigned.push(detail.index),
+                ReasoningDetailKind::Encrypted | ReasoningDetailKind::Summary => {}
+            }
+            continue;
+        }
+        match detail.kind {
+            ReasoningDetailKind::Text => {
                 let thinking = detail
                     .payload
                     .get("text")
@@ -535,15 +633,6 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                     .get("signature")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if signature.is_empty() {
-                    // Anthropic 400s on a Thinking block without a
-                    // signature; skipping is better than a hard fail.
-                    // Aggregate the WARN per-call (Claude 4.5 multi-
-                    // block thinking turns can pile up several skipped
-                    // entries and per-detail WARN would flood the log).
-                    skipped_unsigned.push(detail.index);
-                    continue;
-                }
                 blocks.push(ContentBlock::Thinking {
                     thinking,
                     signature: signature.to_string(),
@@ -551,12 +640,6 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                 });
             }
             ReasoningDetailKind::Encrypted => {
-                if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) {
-                    skipped_format_count = skipped_format_count.saturating_add(1);
-                    skipped_format_values
-                        .push(detail.format.as_deref().unwrap_or("<none>").to_string());
-                    continue;
-                }
                 let data = detail
                     .payload
                     .get("data")
@@ -568,9 +651,7 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                     cache_control: None,
                 });
             }
-            ReasoningDetailKind::Summary => {
-                // Not an Anthropic block; skip.
-            }
+            ReasoningDetailKind::Summary => {}
         }
     }
     if !skipped_unsigned.is_empty() {
@@ -611,6 +692,7 @@ fn append_assistant_message_blocks(blocks: &mut Vec<ContentBlock>, content: &Mes
         MessageContent::Text(t) if !t.is_empty() => blocks.push(ContentBlock::Text {
             text: t.clone(),
             cache_control: None,
+            citations: None,
         }),
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
@@ -812,6 +894,60 @@ mod translate_file_part_tests {
             other => panic!("expected Document, got {other:?}"),
         }
     }
+
+    // Starts from a RAW Anthropic response body (not a pre-parsed
+    // ContentBlock) so a missed deser site cannot be masked. A pure-text
+    // response collapses to MessageContent::Text and would not exercise
+    // the Part egress, so a tool_use block rides along to force Parts.
+    #[test]
+    fn text_block_citations_survive_raw_json_round_trip() {
+        use routectl_core::MessageContent;
+
+        let raw = json!({
+            "id": "msg_01",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The sky is blue.",
+                    "citations": [{
+                        "type": "char_location",
+                        "cited_text": "sky is blue",
+                        "document_index": 0,
+                        "document_title": "Colors",
+                        "start_char_index": 4,
+                        "end_char_index": 15
+                    }]
+                },
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "lookup",
+                    "input": {"q": "sky"}
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+
+        let resp = crate::anthropic_api::response::normalize("test", raw).expect("normalize");
+        let MessageContent::Parts(parts) = &resp.choices[0].message.content else {
+            panic!("expected Parts content for a text + tool_use response");
+        };
+        let text_part = parts
+            .iter()
+            .find(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })))
+            .expect("text part present");
+
+        let wire = serde_json::to_value(translate_content_part(text_part)).expect("serialize");
+
+        assert_eq!(wire["type"], "text");
+        assert_eq!(wire["text"], "The sky is blue.");
+        assert_eq!(
+            wire["citations"][0]["cited_text"], "sky is blue",
+            "text-block citations must survive ingress -> canonical -> egress"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -946,6 +1082,7 @@ mod thinking_signature_tests {
         let r_kept = thinking_part(Some(r_signature()));
         let text = ContentPart::Known(KnownContentPart::Text {
             text: "answer".to_string(),
+            citations: None,
             cache_control: None,
         });
         let msg = assistant_with_parts(vec![foreign, e_kept, r_kept, text]);
@@ -984,6 +1121,7 @@ mod thinking_signature_tests {
         let empty = thinking_part(Some(String::new()));
         let text = ContentPart::Known(KnownContentPart::Text {
             text: "answer".to_string(),
+            citations: None,
             cache_control: None,
         });
         let req = ChatRequest {
@@ -1119,5 +1257,212 @@ mod tool_id_correlation_tests {
         // Assert
         assert_eq!(tool_use_id(&out), "call_abc-1_2");
         assert_eq!(tool_result_id(&out), "call_abc-1_2");
+    }
+}
+
+#[cfg(test)]
+mod empty_content_backstop_tests {
+    use super::{build_assistant_content, normalize_replay_invariants, translate_messages};
+    use crate::anthropic_api::ANTHROPIC_FORMAT;
+    use crate::anthropic_api::types::{AnthropicContent, ContentBlock};
+    use routectl_core::{
+        ChatRequest, ContentPart, CoreHistoryReasoning, KnownContentPart, Message, MessageContent,
+        ReasoningDetail, ReasoningDetailKind, Role,
+    };
+    use serde_json::{Value, json};
+
+    /// A `reasoning.text` detail with the given format and signature.
+    /// A `None` signature omits the field entirely (unsigned); an empty
+    /// string sets it to `""` (also unsigned).
+    fn text_detail(format: Option<&str>, signature: Option<&str>) -> ReasoningDetail {
+        let mut payload = serde_json::Map::new();
+        payload.insert("text".to_string(), json!("chain of thought"));
+        if let Some(sig) = signature {
+            payload.insert("signature".to_string(), json!(sig));
+        }
+        ReasoningDetail {
+            kind: ReasoningDetailKind::Text,
+            id: None,
+            format: format.map(str::to_string),
+            index: Some(0),
+            payload: Value::Object(payload),
+        }
+    }
+
+    /// An unsigned Thinking part (signature None) -- foreign to a Claude
+    /// replay, so it triggers the unsigned-thinking strip in
+    /// `normalize_replay_invariants`.
+    fn unsigned_thinking_part() -> ContentPart {
+        ContentPart::Known(KnownContentPart::Thinking {
+            thinking: "step".to_string(),
+            signature: None,
+        })
+    }
+
+    fn assistant(
+        content: MessageContent,
+        reasoning_details: Vec<ReasoningDetail>,
+        tool_calls: Option<Vec<Value>>,
+    ) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content,
+            reasoning: None,
+            reasoning_details,
+            name: None,
+            tool_call_id: None,
+            tool_calls,
+        }
+    }
+
+    fn tool_call(id: &str) -> Value {
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {"name": "f", "arguments": "{}"},
+        })
+    }
+
+    /// Unsigned-only reasoning, no residual content after the strip, and
+    /// no tool_calls: the whole assistant turn is dropped (emitting
+    /// content: [] would 400), and the new aggregated drop WARN fires.
+    #[test]
+    fn unsigned_only_reasoning_turn_is_dropped_with_aggregated_warn() {
+        // Arrange -- Parts hold only an unsigned thinking block (triggers
+        // the strip); reasoning_details are unsigned (non-emittable).
+        let msg = assistant(
+            MessageContent::Parts(vec![unsigned_thinking_part()]),
+            vec![text_detail(Some(ANTHROPIC_FORMAT), Some(""))],
+            None,
+        );
+        let req = ChatRequest {
+            messages: vec![msg],
+            ..Default::default()
+        };
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
+                .expect("normalize must not error");
+            // Assert -- the turn is gone.
+            assert!(
+                out.is_empty(),
+                "unsigned-only reasoning turn must be dropped"
+            );
+        });
+
+        // Assert -- the aggregated whole-turn drop WARN fired.
+        let drop_warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN && e.field("dropped_turns").is_some())
+            .expect("aggregated drop WARN must fire");
+        assert_eq!(drop_warn.field("dropped_turns"), Some("1"));
+    }
+
+    /// Reasoning details in a non-anthropic format (even with a non-empty
+    /// signature) are not emittable, so a reasoning-only turn with them is
+    /// dropped rather than emitted as an empty content array.
+    #[test]
+    fn non_anthropic_format_reasoning_turn_is_dropped() {
+        // Arrange
+        let msg = assistant(
+            MessageContent::Parts(vec![unsigned_thinking_part()]),
+            vec![text_detail(
+                Some("openai-responses-v1"),
+                Some("sig-present"),
+            )],
+            None,
+        );
+        let req = ChatRequest {
+            messages: vec![msg],
+            ..Default::default()
+        };
+
+        // Act
+        let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
+            .expect("normalize must not error");
+
+        // Assert
+        assert!(
+            out.is_empty(),
+            "non-anthropic-format reasoning-only turn must be dropped"
+        );
+    }
+
+    /// Same non-emittable reasoning shape, but WITH tool_calls: the turn is
+    /// KEPT (dropping it would orphan the next tool_result) and its wire
+    /// content is non-empty (the tool_call becomes a ToolUse block).
+    #[test]
+    fn reasoning_only_turn_with_tool_calls_is_kept_with_non_empty_wire_content() {
+        // Arrange
+        let msg = assistant(
+            MessageContent::Parts(vec![unsigned_thinking_part()]),
+            vec![text_detail(Some(ANTHROPIC_FORMAT), Some(""))],
+            Some(vec![tool_call("call_1")]),
+        );
+        let req = ChatRequest {
+            messages: vec![msg],
+            ..Default::default()
+        };
+
+        // Act -- normalize keeps it, then translate to the wire shape.
+        let normalized = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
+            .expect("normalize must not error");
+        assert_eq!(
+            normalized.len(),
+            1,
+            "a turn with tool_calls is never dropped"
+        );
+        let wire = translate_messages("anthropic", &normalized).expect("translate must not error");
+
+        // Assert -- wire content is a non-empty block array with a ToolUse.
+        let AnthropicContent::Blocks(blocks) = &wire[0].content else {
+            panic!("expected Blocks content");
+        };
+        assert!(!blocks.is_empty(), "wire content must not be empty");
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+            "tool_call must survive as a ToolUse block"
+        );
+    }
+
+    /// The backstop path: a Null-content turn carrying only unsigned
+    /// reasoning_details never passes through the strip rebuild (Null is
+    /// skipped there), so `build_assistant_content` assembles zero blocks.
+    /// The backstop inserts one empty text block and WARNs.
+    #[test]
+    fn build_assistant_content_backstops_empty_blocks_with_warn() {
+        // Arrange
+        let msg = assistant(
+            MessageContent::Null,
+            vec![text_detail(Some(ANTHROPIC_FORMAT), Some(""))],
+            None,
+        );
+
+        // Act
+        let mut captured = None;
+        let events = routectl_testkit::capture_events(|| {
+            captured =
+                Some(build_assistant_content("anthropic", &msg).expect("build must not error"));
+        });
+
+        // Assert -- exactly one empty text block, never content: [].
+        let AnthropicContent::Blocks(blocks) = captured.expect("content produced") else {
+            panic!("expected Blocks content");
+        };
+        assert_eq!(blocks.len(), 1, "backstop inserts exactly one block");
+        assert!(
+            matches!(&blocks[0], ContentBlock::Text { text, .. } if text.is_empty()),
+            "backstop block is an empty text block"
+        );
+
+        // Assert -- the backstop WARN fired.
+        let backstop_warn = events.iter().find(|e| {
+            e.level == tracing::Level::WARN && e.field("event") == Some("empty_content_backstop")
+        });
+        assert!(backstop_warn.is_some(), "backstop WARN must fire");
     }
 }

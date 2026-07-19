@@ -809,6 +809,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                     text: "frozen".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 })]),
                 reasoning: None,

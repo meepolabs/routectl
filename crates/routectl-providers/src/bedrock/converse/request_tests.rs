@@ -453,6 +453,7 @@ fn tool_use_block_in_assistant_content_translates_to_aws_tool_use_block() {
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
                         text: "computing".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
@@ -506,6 +507,7 @@ fn assistant_text_after_tool_use_is_stripped() {
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
                         text: "computing".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
@@ -516,6 +518,7 @@ fn assistant_text_after_tool_use_is_stripped() {
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "Sure! On it.".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                 ]),
@@ -698,6 +701,7 @@ fn thinking_block_with_cache_control_does_not_emit_orphan_cache_point() {
                 },
                 ContentPart::Known(KnownContentPart::Text {
                     text: "anchor".into(),
+                    citations: None,
                     cache_control: None,
                 }),
             ]),
@@ -784,22 +788,27 @@ fn cache_control_breakpoint_validation_runs_in_converse_path() {
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
                     text: "a".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "b".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "c".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "d".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "e".into(),
+                    citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 }),
             ]),

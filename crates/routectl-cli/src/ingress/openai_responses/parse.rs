@@ -362,6 +362,7 @@ fn parse_content_block(block: &Value) -> Option<ContentPart> {
             let text = block.get("text").and_then(Value::as_str).unwrap_or("");
             Some(ContentPart::Known(KnownContentPart::Text {
                 text: text.to_string(),
+                citations: None,
                 cache_control: None,
             }))
         }

@@ -200,7 +200,7 @@ pub(super) fn map_finish_reason(
 
 /// Map Gemini `usageMetadata` to canonical `Usage`.
 fn translate_usage(meta: &UsageMetadata) -> Usage {
-    Usage {
+    let mut usage = Usage {
         prompt_tokens: meta.prompt_token_count,
         completion_tokens: meta.candidates_token_count,
         total_tokens: meta.total_token_count,
@@ -218,7 +218,9 @@ fn translate_usage(meta: &UsageMetadata) -> Usage {
         cache_creation: None,
         server_tool_use: None,
         extras: Default::default(),
-    }
+    };
+    usage.derive_total_if_absent();
+    usage
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +377,20 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, Some(20));
         assert_eq!(usage.reasoning_tokens, Some(30));
         assert!(usage.cache_creation_input_tokens.is_none());
+    }
+
+    #[test]
+    fn absent_total_derived_from_component_sum() {
+        let meta = UsageMetadata {
+            prompt_token_count: 100,
+            candidates_token_count: 50,
+            total_token_count: 0,
+            cached_content_token_count: 0,
+            thoughts_token_count: 0,
+            tool_use_prompt_token_count: 0,
+        };
+        let usage = translate_usage(&meta);
+        assert_eq!(usage.total_tokens, 150);
     }
 
     #[test]

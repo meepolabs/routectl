@@ -80,9 +80,18 @@ fn translate_format(format: &Value) -> Option<Value> {
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("response");
+            let mut json_schema = Map::new();
+            json_schema.insert("name".into(), Value::from(name));
+            json_schema.insert("schema".into(), schema);
+            // Emit strict only when the source explicitly requests it;
+            // omit otherwise (absent beats explicit false on strict
+            // hosts that reject an Anthropic-shape schema).
+            if obj.get("strict").and_then(Value::as_bool) == Some(true) {
+                json_schema.insert("strict".into(), Value::Bool(true));
+            }
             Some(serde_json::json!({
                 "type": "json_schema",
-                "json_schema": {"name": name, "schema": schema, "strict": true}
+                "json_schema": json_schema
             }))
         }
         "json_object" => Some(serde_json::json!({"type": "json_object"})),
@@ -121,6 +130,7 @@ mod tests {
             "output_config": {
                 "format": {
                     "type": "json_schema",
+                    "strict": true,
                     "schema": {"type": "object", "properties": {"x": {"type": "integer"}}}
                 }
             }
@@ -143,6 +153,87 @@ mod tests {
         assert_eq!(
             rf["json_schema"]["schema"]["properties"]["x"]["type"],
             "integer"
+        );
+    }
+
+    #[test]
+    fn json_schema_strict_absent_emits_no_strict_key() {
+        // Arrange -- source format omits strict; absent must beat a
+        // hosted default that would reject an Anthropic-shape schema.
+        let extras = json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "properties": {"x": {"type": "integer"}}}
+                }
+            }
+        });
+        let req = req_with_extras(Some(extras));
+        let mut obj = Map::new();
+
+        // Act
+        lift("test", &mut obj, &req, false).unwrap();
+
+        // Assert
+        assert!(
+            obj["response_format"]["json_schema"]
+                .get("strict")
+                .is_none(),
+            "strict must be omitted when the source does not request it"
+        );
+    }
+
+    #[test]
+    fn json_schema_strict_false_emits_no_strict_key() {
+        // Arrange -- explicit false must also omit the key, not emit false.
+        let extras = json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "strict": false,
+                    "schema": {"type": "object"}
+                }
+            }
+        });
+        let req = req_with_extras(Some(extras));
+        let mut obj = Map::new();
+
+        // Act
+        lift("test", &mut obj, &req, false).unwrap();
+
+        // Assert
+        assert!(
+            obj["response_format"]["json_schema"]
+                .get("strict")
+                .is_none(),
+            "explicit strict:false must omit the key entirely"
+        );
+    }
+
+    #[test]
+    fn json_schema_strict_non_bool_emits_no_strict_key() {
+        // Arrange -- a malformed (non-bool) strict is ignored.
+        let extras = json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "strict": "yes",
+                    "schema": {"type": "object"}
+                }
+            }
+        });
+        let req = req_with_extras(Some(extras));
+        let mut obj = Map::new();
+
+        // Act
+        lift("test", &mut obj, &req, false).unwrap();
+
+        // Assert
+        assert!(
+            obj["response_format"]["json_schema"]
+                .get("strict")
+                .is_none(),
+            "a non-bool strict must be ignored"
         );
     }
 

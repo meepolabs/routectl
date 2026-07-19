@@ -18,20 +18,46 @@ use crate::openai_compat::util::build_reasoning_detail;
 /// DeepSeek and vLLM dialects, which derive effort identically.
 const BUDGET_HIGH_THRESHOLD: u32 = 8192;
 
+/// Whether reasoning is "on for wire purposes" -- the single predicate that
+/// gates BOTH the vLLM `chat_template_kwargs.enable_thinking` flag and the
+/// `reasoning_effort` emission, so the two can never disagree.
+///
+/// Contract (exact):
+///   `enabled == Some(false)`                                        -> false
+///   `enabled == Some(true) || effort.is_some() || max_tokens.is_some()` -> true
+///   otherwise (no reasoning config, or a config with no signal)      -> false
+///
+/// A present `effort`/`max_tokens` with `enabled` unset is a reasoning signal
+/// (this is what the OpenAI ingress produces when promoting a top-level
+/// `reasoning_effort`); explicit `Some(false)` always wins.
+///
+/// Shared by the DeepSeek and vLLM dialects; hoisted here so they cannot drift.
+pub(super) fn reasoning_enabled_for_wire(req: &ChatRequest) -> bool {
+    let Some(r) = req.reasoning.as_ref() else {
+        return false;
+    };
+    if r.enabled == Some(false) {
+        return false;
+    }
+    r.enabled == Some(true) || r.effort.is_some() || r.max_tokens.is_some()
+}
+
 /// Derive a `reasoning_effort` string from the canonical reasoning config.
 /// Returns `Some(effort)` when the request carries a reasoning signal;
 /// returns `None` when reasoning is absent or explicitly disabled.
 ///
 /// Precedence: explicit `effort` > derived from `max_tokens` > None.
 ///
-/// Shared by the DeepSeek and vLLM dialects (identical derivation).
+/// Shared by the DeepSeek and vLLM dialects (identical derivation). Gated by
+/// [`reasoning_enabled_for_wire`] so the effort emission and vLLM's
+/// `enable_thinking` flag are driven by one predicate.
 pub(super) fn derive_reasoning_effort(req: &ChatRequest) -> Option<String> {
-    let r = req.reasoning.as_ref()?;
-    // Explicitly disabled reasoning must not leak an effort onto the wire,
-    // even when the model's output_config set a default effort level.
-    if r.enabled == Some(false) {
+    // Disabled (or signal-less) reasoning must not leak an effort onto the
+    // wire, even when the model's output_config set a default effort level.
+    if !reasoning_enabled_for_wire(req) {
         return None;
     }
+    let r = req.reasoning.as_ref()?;
     // Explicit effort wins over everything; passthrough verbatim.
     if let Some(effort) = r.effort.as_deref() {
         return Some(effort.to_string());
@@ -533,6 +559,56 @@ mod tests {
             derive_reasoning_effort(&req).is_none(),
             "disabled reasoning must derive no effort"
         );
+    }
+
+    /// The shared wire-enabled predicate: explicit Some(false) wins;
+    /// otherwise a present enabled/effort/max_tokens signal turns it on;
+    /// an empty or absent config is off.
+    #[test]
+    fn reasoning_enabled_for_wire_contract() {
+        use routectl_core::{ChatRequest, ReasoningConfig};
+
+        let with = |r: Option<ReasoningConfig>| ChatRequest {
+            reasoning: r,
+            ..Default::default()
+        };
+        let cfg = |enabled, effort: Option<&str>, max_tokens| ReasoningConfig {
+            effort: effort.map(str::to_string),
+            max_tokens,
+            enabled,
+            exclude: None,
+        };
+
+        // No reasoning config -> off.
+        assert!(!reasoning_enabled_for_wire(&with(None)));
+        // Explicit false wins even with effort + max_tokens present.
+        assert!(!reasoning_enabled_for_wire(&with(Some(cfg(
+            Some(false),
+            Some("high"),
+            Some(16000)
+        )))));
+        // enabled unset + effort -> on.
+        assert!(reasoning_enabled_for_wire(&with(Some(cfg(
+            None,
+            Some("high"),
+            None
+        )))));
+        // enabled unset + max_tokens -> on.
+        assert!(reasoning_enabled_for_wire(&with(Some(cfg(
+            None,
+            None,
+            Some(4096)
+        )))));
+        // enabled true, no other signal -> on.
+        assert!(reasoning_enabled_for_wire(&with(Some(cfg(
+            Some(true),
+            None,
+            None
+        )))));
+        // Config present but no signal -> off.
+        assert!(!reasoning_enabled_for_wire(&with(Some(cfg(
+            None, None, None
+        )))));
     }
 
     /// A usage-only terminal frame (no `choices` key) must pass

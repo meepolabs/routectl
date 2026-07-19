@@ -982,6 +982,7 @@ mod tests {
         if let Some(t) = text {
             parts.push(ContentPart::Known(KnownContentPart::Text {
                 text: t.into(),
+                citations: None,
                 cache_control: None,
             }));
         }
@@ -1139,6 +1140,7 @@ mod tests {
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
                         text: "Checking.".into(),
+                        citations: None,
                         cache_control: None,
                     }),
                     ContentPart::Other {

@@ -114,6 +114,7 @@ pub enum ContentBlock {
     Text {
         text: String,
         cache_control: Option<CacheControl>,
+        citations: Option<Value>,
     },
     Image {
         source: Value,
@@ -162,7 +163,16 @@ impl Serialize for ContentBlock {
             Self::Text {
                 text,
                 cache_control,
-            } => merge_cc(json!({"type": "text", "text": text}), cache_control),
+                citations,
+            } => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("type".into(), Value::String("text".into()));
+                obj.insert("text".into(), Value::String(text.clone()));
+                if let Some(c) = citations {
+                    obj.insert("citations".into(), c.clone());
+                }
+                merge_cc(Value::Object(obj), cache_control)
+            }
             Self::Image {
                 source,
                 cache_control,
@@ -267,6 +277,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
             "text" => Ok(Self::Text {
                 text: take_str(obj, "text").map_err(D::Error::custom)?,
                 cache_control,
+                citations: obj.remove("citations"),
             }),
             "image" => Ok(Self::Image {
                 source: obj
@@ -555,6 +566,7 @@ mod tests {
     fn text_block_serializes_with_cache_control() {
         let b = ContentBlock::Text {
             text: "hi".into(),
+            citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
         };
         let v = serde_json::to_value(&b).unwrap();

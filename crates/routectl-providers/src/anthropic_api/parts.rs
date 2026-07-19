@@ -461,6 +461,7 @@ mod strip_text_after_tool_use_tests {
     fn text(s: &str) -> ContentPart {
         ContentPart::Known(KnownContentPart::Text {
             text: s.into(),
+            citations: None,
             cache_control: None,
         })
     }
