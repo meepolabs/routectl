@@ -78,4 +78,21 @@ pub trait SecretStore: Send + Sync {
     async fn set_cloud_project_id(&self, _secret_ref: &SecretRef, _project_id: &str) -> Result<()> {
         Ok(())
     }
+
+    /// Compare-and-clear a persisted Cloud Code project id for the
+    /// credential named by `secret_ref`. Clears only when the stored id
+    /// equals `expected`; returns `Ok(true)` when it matched and was
+    /// cleared, `Ok(false)` when it did not match (value retained).
+    /// Default no-op returning `Ok(false)` for `env://`, `file://`, and
+    /// `literal:` refs (they have no writable backing store). The OAuth
+    /// store overrides this to clear the field in the credentials file
+    /// atomically. The equality guard keeps a late stale-id failure from
+    /// wiping a fresh id a concurrent request already re-resolved.
+    async fn clear_cloud_project_id_if_matches(
+        &self,
+        _secret_ref: &SecretRef,
+        _expected: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }

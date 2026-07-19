@@ -426,6 +426,60 @@ impl OAuthStore {
         Ok(())
     }
 
+    /// Compare-and-clear the persisted Cloud Code project id for
+    /// `provider` (a seat key). Clears the `cloud_project_id` field only
+    /// when it equals `expected`, using the same disk-first
+    /// `update_under_lock` discipline as `set_cloud_project_id`. Returns
+    /// `Ok(true)` when it matched and was cleared (persisted to disk),
+    /// `Ok(false)` when the stored id differed, was absent, or the record
+    /// itself was missing (no write in any of those cases).
+    ///
+    /// The equality guard is the whole point: a late failure carrying a
+    /// stale id must not wipe a fresh id a concurrent request already
+    /// re-resolved. The durable copy is what survives restarts, so the
+    /// clear persists rather than only dropping the in-memory value.
+    /// A missing record is not an error -- an un-onboarded seat has
+    /// nothing to clear.
+    pub async fn clear_cloud_project_id_if_matches(
+        &self,
+        provider: &str,
+        expected: &str,
+    ) -> OAuthResult<bool> {
+        // A degraded store must never overwrite a file it could not read.
+        // Refuse before the lock helper and surface the cause.
+        if let Some(cause) = self.load_error_cause() {
+            return Err(OAuthError::Degraded(cause));
+        }
+        let mut guard = self.inner.file.write().await;
+        let provider = provider.to_string();
+        let expected = expected.to_string();
+        let (merged, cleared) = file_io::update_under_lock(&self.inner.path, {
+            let provider = provider.clone();
+            move |cf| match cf.get(&provider).cloned() {
+                Some(mut rec) if rec.cloud_project_id.as_deref() == Some(expected.as_str()) => {
+                    rec.cloud_project_id = None;
+                    cf.upsert(&provider, rec);
+                    file_io::Mutation {
+                        directive: file_io::WriteDirective::Write,
+                        report: true,
+                    }
+                }
+                // Record present but the id differs or is absent, or no
+                // record at all: nothing to clear. Leave the file
+                // byte-identical.
+                _ => file_io::Mutation {
+                    directive: file_io::WriteDirective::Skip,
+                    report: false,
+                },
+            }
+        })
+        .await?;
+        // Commit the merged disk-fresh state to the cache on every path so
+        // a sibling's concurrent change observed on disk is not lost.
+        *guard = merged;
+        Ok(cleared)
+    }
+
     /// Persist a token record. Takes the in-process write guard first, then
     /// merges the one-seat upsert onto the disk-fresh state under the
     /// cross-process advisory lock (`file_io::update_under_lock`), and
@@ -990,6 +1044,24 @@ impl SecretStore for OAuthStore {
         Self::set_cloud_project_id(self, &seat_key(provider, label.as_deref()), project_id)
             .await
             .map_err(Error::from)
+    }
+
+    async fn clear_cloud_project_id_if_matches(
+        &self,
+        secret_ref: &SecretRef,
+        expected: &str,
+    ) -> Result<bool> {
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
+            _ => return Ok(false),
+        };
+        Self::clear_cloud_project_id_if_matches(
+            self,
+            &seat_key(provider, label.as_deref()),
+            expected,
+        )
+        .await
+        .map_err(Error::from)
     }
 
     async fn list_seats(&self, secret_ref: &SecretRef) -> Result<Vec<SecretRef>> {

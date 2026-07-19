@@ -1,12 +1,17 @@
 //! Gemini `generateContent` response -> canonical `ChatResponse` translation.
 //!
 //! Finish-reason mapping (Gemini -> canonical):
-//!   STOP                     -> "stop"
-//!   MAX_TOKENS               -> "length"
-//!   SAFETY, RECITATION       -> "content_filter"
-//!   MALFORMED_FUNCTION_CALL  -> "error"
-//!   any functionCall parts   -> "tool_calls" (overrides the above)
-//!   anything else            -> "stop" (safe default)
+//!   STOP                                     -> "stop"
+//!   MAX_TOKENS                               -> "length"
+//!   SAFETY, RECITATION, PROHIBITED_CONTENT,
+//!   BLOCKLIST, SPII, IMAGE_SAFETY, LANGUAGE  -> "content_filter"
+//!   MALFORMED_FUNCTION_CALL,
+//!   UNEXPECTED_TOOL_CALL, TOO_MANY_TOOL_CALLS -> "error"
+//!   any functionCall parts                   -> "tool_calls" (overrides the above)
+//!   OTHER / any unknown token                -> "stop" (safe default; logged at DEBUG)
+//!
+//! A prompt-level block (empty candidates + `promptFeedback.blockReason`)
+//! also maps to "content_filter" on the HTTP-200 surface.
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -25,12 +30,41 @@ pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<Cha
     let candidate = resp.candidates.into_iter().next();
 
     let (text, tool_calls, reasoning_details, finish_reason) = match candidate {
-        None => (String::new(), None, Vec::new(), Some("stop".to_string())),
+        None => {
+            let block_reason = resp
+                .prompt_feedback
+                .as_ref()
+                .and_then(|pf| pf.block_reason.as_deref())
+                .filter(|r| !r.is_empty());
+            let finish = match block_reason {
+                Some(reason) => {
+                    tracing::info!(
+                        provider = %provider_id,
+                        surface = "complete",
+                        origin = "prompt_feedback",
+                        block_reason = %reason,
+                        "gemini: prompt blocked on 200 surface"
+                    );
+                    Some("content_filter".to_string())
+                }
+                None => Some("stop".to_string()),
+            };
+            (String::new(), None, Vec::new(), finish)
+        }
         Some(c) => {
             let parts = c.content.map(|cont| cont.parts).unwrap_or_default();
             let walked = walk_parts(provider_id, &parts)?;
             let has_tool_calls = walked.tool_calls.is_some();
             let finish = map_finish_reason(c.finish_reason.as_deref(), has_tool_calls);
+            if finish.as_deref() == Some("content_filter") {
+                tracing::info!(
+                    provider = %provider_id,
+                    surface = "complete",
+                    origin = "candidate_finish",
+                    block_reason = c.finish_reason.as_deref().unwrap_or_default(),
+                    "gemini: candidate blocked on 200 surface"
+                );
+            }
             (
                 walked.text,
                 walked.tool_calls,
@@ -175,6 +209,14 @@ fn thought_detail(text: &str, signature: Option<&str>, index: u32) -> ReasoningD
 }
 
 /// Map Gemini's `finishReason` to the canonical finish_reason string.
+///
+/// Safety / policy tokens (`SAFETY`, `RECITATION`, `PROHIBITED_CONTENT`,
+/// `BLOCKLIST`, `SPII`, `IMAGE_SAFETY`, `LANGUAGE`) map to `content_filter`;
+/// tool-protocol failures (`MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`,
+/// `TOO_MANY_TOOL_CALLS`) map to `error`. `OTHER` and any token this map does
+/// not know are deliberately left as `stop` -- labelling a non-policy
+/// termination as `content_filter` would be wrong -- and the fallthrough
+/// emits a DEBUG naming the token so a newly minted Google token surfaces.
 pub(super) fn map_finish_reason(
     gemini_reason: Option<&str>,
     has_tool_calls: bool,
@@ -186,16 +228,21 @@ pub(super) fn map_finish_reason(
         None | Some("") => return Some("stop".to_string()),
         Some(r) => r,
     };
-    Some(
-        match reason {
-            "STOP" => "stop",
-            "MAX_TOKENS" => "length",
-            "SAFETY" | "RECITATION" => "content_filter",
-            "MALFORMED_FUNCTION_CALL" => "error",
-            _ => "stop",
+    let mapped = match reason {
+        "STOP" => "stop",
+        "MAX_TOKENS" => "length",
+        "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "BLOCKLIST" | "SPII" | "IMAGE_SAFETY"
+        | "LANGUAGE" => "content_filter",
+        "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "TOO_MANY_TOOL_CALLS" => "error",
+        other => {
+            tracing::debug!(
+                finish_reason = %other,
+                "gemini: unmapped finishReason; defaulting to stop"
+            );
+            "stop"
         }
-        .to_string(),
-    )
+    };
+    Some(mapped.to_string())
 }
 
 /// Map Gemini `usageMetadata` to canonical `Usage`.
@@ -231,8 +278,8 @@ fn translate_usage(meta: &UsageMetadata) -> Usage {
 mod tests {
     use super::*;
     use crate::gemini::types::{
-        Candidate, GenerateContentResponse, ResponseContent, ResponseFunctionCall, ResponsePart,
-        UsageMetadata,
+        Candidate, GenerateContentResponse, PromptFeedback, ResponseContent, ResponseFunctionCall,
+        ResponsePart, UsageMetadata,
     };
 
     fn text_response(text: &str, finish: &str) -> GenerateContentResponse {
@@ -257,6 +304,7 @@ mod tests {
             }),
             model_version: Some("gemini-2.5-pro-001".to_string()),
             response_id: Some("resp-123".to_string()),
+            prompt_feedback: None,
         }
     }
 
@@ -295,6 +343,7 @@ mod tests {
             usage_metadata: None,
             model_version: None,
             response_id: None,
+            prompt_feedback: None,
         };
         let chat = translate("gemini:test", resp).expect("translate ok");
 
@@ -349,6 +398,71 @@ mod tests {
             map_finish_reason(Some("MALFORMED_FUNCTION_CALL"), false).as_deref(),
             Some("error")
         );
+    }
+
+    #[test]
+    fn content_filter_tokens_map_to_content_filter() {
+        for token in [
+            "SAFETY",
+            "RECITATION",
+            "PROHIBITED_CONTENT",
+            "BLOCKLIST",
+            "SPII",
+            "IMAGE_SAFETY",
+            "LANGUAGE",
+        ] {
+            assert_eq!(
+                map_finish_reason(Some(token), false).as_deref(),
+                Some("content_filter"),
+                "token {token} should map to content_filter"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_error_tokens_map_to_error() {
+        for token in [
+            "MALFORMED_FUNCTION_CALL",
+            "UNEXPECTED_TOOL_CALL",
+            "TOO_MANY_TOOL_CALLS",
+        ] {
+            assert_eq!(
+                map_finish_reason(Some(token), false).as_deref(),
+                Some("error"),
+                "token {token} should map to error"
+            );
+        }
+    }
+
+    #[test]
+    fn other_and_unknown_tokens_map_to_stop() {
+        assert_eq!(
+            map_finish_reason(Some("OTHER"), false).as_deref(),
+            Some("stop")
+        );
+        assert_eq!(
+            map_finish_reason(Some("SOME_FUTURE_TOKEN"), false).as_deref(),
+            Some("stop")
+        );
+    }
+
+    #[test]
+    fn retained_arms_unchanged() {
+        assert_eq!(
+            map_finish_reason(Some("STOP"), false).as_deref(),
+            Some("stop")
+        );
+        assert_eq!(
+            map_finish_reason(Some("MAX_TOKENS"), false).as_deref(),
+            Some("length")
+        );
+        // has_tool_calls short-circuits regardless of the reason token.
+        assert_eq!(
+            map_finish_reason(Some("SAFETY"), true).as_deref(),
+            Some("tool_calls")
+        );
+        assert_eq!(map_finish_reason(None, false).as_deref(), Some("stop"));
+        assert_eq!(map_finish_reason(Some(""), false).as_deref(), Some("stop"));
     }
 
     #[test]
@@ -433,6 +547,7 @@ mod tests {
             usage_metadata: None,
             model_version: None,
             response_id: Some("r".into()),
+            prompt_feedback: None,
         };
         let chat = translate("gemini:test", resp).expect("translate ok");
 
@@ -447,5 +562,136 @@ mod tests {
         assert_eq!(details[0].format.as_deref(), Some(super::GEMINI_FORMAT));
         assert_eq!(details[0].payload["text"], "let me think");
         assert_eq!(details[0].payload["thought_signature"], "sig-42");
+    }
+
+    fn empty_response(prompt_feedback: Option<PromptFeedback>) -> GenerateContentResponse {
+        GenerateContentResponse {
+            candidates: vec![],
+            usage_metadata: None,
+            model_version: Some("gemini-2.5-pro".into()),
+            response_id: Some("resp-x".into()),
+            prompt_feedback,
+        }
+    }
+
+    #[test]
+    fn empty_candidates_with_prompt_block_maps_to_content_filter() {
+        let resp = empty_response(Some(PromptFeedback {
+            block_reason: Some("SAFETY".into()),
+        }));
+        let chat = translate("gemini:test", resp).expect("translate ok");
+        assert_eq!(
+            chat.choices[0].finish_reason.as_deref(),
+            Some("content_filter")
+        );
+    }
+
+    #[test]
+    fn empty_candidates_without_prompt_block_stays_stop() {
+        // A legit empty completion (no candidates, no blockReason) must
+        // remain a clean stop, not be mislabelled as a policy block.
+        let chat = translate("gemini:test", empty_response(None)).expect("translate ok");
+        assert_eq!(chat.choices[0].finish_reason.as_deref(), Some("stop"));
+
+        // An empty (present-but-blank) blockReason is also not a block.
+        let resp = empty_response(Some(PromptFeedback {
+            block_reason: Some(String::new()),
+        }));
+        let chat = translate("gemini:test", resp).expect("translate ok");
+        assert_eq!(chat.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn prompt_block_emits_one_info_no_payload() {
+        let events = routectl_testkit::capture_events(|| {
+            let resp = empty_response(Some(PromptFeedback {
+                block_reason: Some("PROHIBITED_CONTENT".into()),
+            }));
+            let _ = translate("gemini:test", resp).expect("translate ok");
+        });
+        let infos: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::INFO)
+            .collect();
+        assert_eq!(infos.len(), 1, "exactly one INFO; got {infos:?}");
+        assert_eq!(infos[0].field("provider"), Some("gemini:test"));
+        assert_eq!(infos[0].field("surface"), Some("complete"));
+        assert_eq!(infos[0].field("origin"), Some("prompt_feedback"));
+        assert_eq!(infos[0].field("block_reason"), Some("PROHIBITED_CONTENT"));
+    }
+
+    #[test]
+    fn candidate_content_filter_emits_one_info() {
+        let events = routectl_testkit::capture_events(|| {
+            let _ = translate("gemini:test", text_response("", "SAFETY")).expect("translate ok");
+        });
+        let infos: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::INFO)
+            .collect();
+        assert_eq!(infos.len(), 1, "exactly one INFO; got {infos:?}");
+        assert_eq!(infos[0].field("surface"), Some("complete"));
+        assert_eq!(infos[0].field("origin"), Some("candidate_finish"));
+        assert_eq!(infos[0].field("block_reason"), Some("SAFETY"));
+    }
+
+    #[test]
+    fn unmapped_token_emits_debug_but_mapped_tokens_do_not() {
+        // The fallthrough arm is the only place a DEBUG fires.
+        let events = routectl_testkit::capture_events(|| {
+            assert_eq!(
+                map_finish_reason(Some("SOME_FUTURE_TOKEN"), false).as_deref(),
+                Some("stop")
+            );
+        });
+        let debugs: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::DEBUG)
+            .collect();
+        assert_eq!(
+            debugs.len(),
+            1,
+            "one DEBUG on the fallthrough; got {debugs:?}"
+        );
+        assert_eq!(debugs[0].field("finish_reason"), Some("SOME_FUTURE_TOKEN"));
+
+        // A mapped token never logs.
+        let quiet = routectl_testkit::capture_events(|| {
+            let _ = map_finish_reason(Some("STOP"), false);
+            let _ = map_finish_reason(Some("SAFETY"), false);
+        });
+        assert!(
+            quiet.iter().all(|e| e.level != tracing::Level::DEBUG),
+            "mapped tokens must not log; got {quiet:?}"
+        );
+    }
+
+    #[test]
+    fn quota_and_permission_stay_off_content_filter_path() {
+        use routectl_core::Error;
+        use routectl_core::failure_class::{FailureClass, classify};
+
+        let rate_limited = Error::upstream_full(
+            "gemini",
+            429,
+            "",
+            None,
+            Some("RESOURCE_EXHAUSTED".to_string()),
+            None,
+        );
+        assert_eq!(
+            classify(&rate_limited, Some("gemini")).class,
+            FailureClass::RateLimited
+        );
+
+        let auth = Error::upstream_full(
+            "gemini",
+            403,
+            "",
+            None,
+            Some("PERMISSION_DENIED".to_string()),
+            None,
+        );
+        assert_eq!(classify(&auth, Some("gemini")).class, FailureClass::Auth);
     }
 }

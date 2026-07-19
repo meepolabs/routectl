@@ -243,4 +243,17 @@ mod tests {
             assert_eq!(seats, vec![sr]);
         }
     }
+
+    #[tokio::test]
+    async fn default_clear_cloud_project_id_if_matches_returns_false() {
+        // MemoryStore inherits the trait default: a non-oauth ref has no
+        // writable backing store, so a compare-and-clear is a no-op that
+        // reports "nothing cleared".
+        let store = MemoryStore::new();
+        let cleared = store
+            .clear_cloud_project_id_if_matches(&SecretRef::Env("FOO".into()), "projects/anything")
+            .await
+            .unwrap();
+        assert!(!cleared);
+    }
 }

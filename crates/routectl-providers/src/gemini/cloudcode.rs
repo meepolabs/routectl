@@ -193,6 +193,25 @@ fn parse_cloudcode_error_classifier(body: &str) -> (Option<String>, Option<Strin
     super::parse_gemini_error_classifier(body)
 }
 
+/// Whether `err` signals that the resolved Cloud Code project no longer
+/// applies (revoked, deleted, or never valid for this caller), so the
+/// cached project id must be invalidated and re-resolved on the next
+/// request. The signal is the bare Google canonical classifier only:
+/// `PERMISSION_DENIED` or `NOT_FOUND` on an `Upstream` error.
+///
+/// Everything else is not a mismatch and leaves the cache untouched:
+/// `UNAUTHENTICATED` (a credential problem, not a project one),
+/// `RESOURCE_EXHAUSTED` (quota), any 5xx or transport-level (`status 0`)
+/// failure, and any non-`Upstream` variant. No body-substring inspection --
+/// the enum token is the whole signal.
+pub(super) fn is_project_mismatch(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Upstream { upstream_type: Some(t), .. }
+            if t == "PERMISSION_DENIED" || t == "NOT_FOUND"
+    )
+}
+
 /// Map an onboarding (`loadCodeAssist` / `onboardUser`) HTTP failure into a
 /// routectl upstream error, preserving the Google Cloud Code classifier
 /// (`error.status` / `error.code`) and any rate-limit reset hint. Lifts the
@@ -629,5 +648,49 @@ mod tests {
             }
             other => panic!("expected Error::Upstream, got {other:?}"),
         }
+    }
+
+    fn upstream_with_type(status: u16, upstream_type: &str) -> Error {
+        Error::upstream_full(
+            "gemini:test",
+            status,
+            "{}",
+            None,
+            Some(upstream_type.to_string()),
+            Some(status.to_string()),
+        )
+    }
+
+    #[test]
+    fn is_project_mismatch_true_for_permission_denied_and_not_found() {
+        assert!(is_project_mismatch(&upstream_with_type(
+            403,
+            "PERMISSION_DENIED"
+        )));
+        assert!(is_project_mismatch(&upstream_with_type(404, "NOT_FOUND")));
+    }
+
+    #[test]
+    fn is_project_mismatch_false_for_auth_quota_and_server_errors() {
+        assert!(!is_project_mismatch(&upstream_with_type(
+            401,
+            "UNAUTHENTICATED"
+        )));
+        assert!(!is_project_mismatch(&upstream_with_type(
+            429,
+            "RESOURCE_EXHAUSTED"
+        )));
+        assert!(!is_project_mismatch(&upstream_with_type(500, "INTERNAL")));
+        // Transport-level failure: status 0, no classifier token.
+        assert!(!is_project_mismatch(&Error::upstream(
+            "gemini:test",
+            0,
+            "connection reset"
+        )));
+    }
+
+    #[test]
+    fn is_project_mismatch_false_for_non_upstream_variant() {
+        assert!(!is_project_mismatch(&Error::Auth("token expired".into())));
     }
 }

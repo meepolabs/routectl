@@ -133,12 +133,20 @@ impl GeminiConfig {
 pub struct GeminiProvider {
     cfg: GeminiConfig,
     client: Client,
+    /// Serializes cold Cloud Code project resolution so a herd of
+    /// concurrent cold-start requests runs onboarding once, not N times.
+    /// Runtime-only state: it is NOT on the `Clone` `GeminiConfig`.
+    resolve_lock: tokio::sync::Mutex<()>,
 }
 
 impl GeminiProvider {
     pub fn new(cfg: GeminiConfig) -> Self {
         let client = crate::http_client::build(cfg.user_agent.as_deref());
-        Self { cfg, client }
+        Self {
+            cfg,
+            client,
+            resolve_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     fn generate_url(&self, model: &str) -> String {
@@ -163,9 +171,13 @@ impl GeminiProvider {
         format!("{base}{}", cloudcode::STREAM_PATH)
     }
 
-    /// Resolve the Cloud Code project id, preferring the cache. On a cache
-    /// miss this runs the onboarding HTTP once and seeds the cache, so a
-    /// populated cache short-circuits onboarding on every later request.
+    /// Resolve the Cloud Code project id, preferring the cache. The warm
+    /// path reads the cache with NO lock held. On a miss it takes
+    /// `resolve_lock` and re-checks the cache under the lock (the
+    /// double-check is load-bearing: without it a post-invalidation herd
+    /// would each re-run onboarding); only if still unresolved does it run
+    /// the onboarding HTTP once and seed the cache. The lock never wraps the
+    /// warm path and never covers anything but the cold resolve.
     async fn cloud_project_id(&self, token: &str) -> Result<String> {
         let cache = self.cfg.project_cache.as_ref().ok_or_else(|| {
             Error::Internal(format!(
@@ -173,6 +185,10 @@ impl GeminiProvider {
                 self.cfg.id
             ))
         })?;
+        if let Some(p) = cache.get().await {
+            return Ok(p);
+        }
+        let _guard = self.resolve_lock.lock().await;
         if let Some(p) = cache.get().await {
             return Ok(p);
         }
@@ -388,7 +404,14 @@ impl GeminiProvider {
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
         if status >= 400 {
-            return Err(self.map_error_response(resp, status).await);
+            let err = self.map_error_response(resp, status).await;
+            if cloudcode::is_project_mismatch(&err)
+                && let Some(cache) = self.cfg.project_cache.as_ref()
+                && let Err(e) = cache.clear_if_matches(&project).await
+            {
+                tracing::warn!(provider = %self.cfg.id, error = %e, "gemini: cloud project cache clear failed");
+            }
+            return Err(err);
         }
 
         let raw_body: Value = self.read_success_json(resp, status).await?;
@@ -465,7 +488,14 @@ impl GeminiProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            return Err(self.map_error_response(resp, status).await);
+            let err = self.map_error_response(resp, status).await;
+            if cloudcode::is_project_mismatch(&err)
+                && let Some(cache) = self.cfg.project_cache.as_ref()
+                && let Err(e) = cache.clear_if_matches(&project).await
+            {
+                tracing::warn!(provider = %self.cfg.id, error = %e, "gemini: cloud project cache clear failed");
+            }
+            return Err(err);
         }
 
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
@@ -1311,5 +1341,194 @@ mod e2e_tests {
             }
             other => panic!("expected Upstream, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cold_start_onboards_exactly_once() {
+        // #44: N concurrent cold-start completes must run onboarding once.
+        // Single-flight collapses the herd; loadCodeAssist `.expect(1)`
+        // verifies on server drop. A barrier -- not a sleep -- releases all
+        // callers at once so the race is real and deterministic.
+        const N: usize = 8;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"cloudaicompanionProject": "proj-race"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({"project": "proj-race"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"response": gemini_ok_response()})),
+            )
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let provider = Arc::new(make_cloud_code_provider(&server.uri(), cache));
+        let barrier = Arc::new(tokio::sync::Barrier::new(N));
+
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let provider = provider.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                provider.complete(base_req()).await
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("task joined").expect("complete ok");
+        }
+    }
+
+    #[tokio::test]
+    async fn project_mismatch_403_clears_cache_and_re_onboards() {
+        // #25: a 403 PERMISSION_DENIED on generate must invalidate the
+        // seeded (stale) project and surface the original error; the next
+        // request re-onboards and succeeds.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({"project": "projects/stale"})))
+            .respond_with(ResponseTemplate::new(403).set_body_string(
+                r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"caller lacks access"}}"#,
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"cloudaicompanionProject": "proj-fresh"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({"project": "proj-fresh"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"response": gemini_ok_response()})),
+            )
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> =
+            Arc::new(InMemoryProjectCache::with("projects/stale"));
+        let provider = make_cloud_code_provider(&server.uri(), cache.clone());
+
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("mismatch must surface");
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                ..
+            } => {
+                assert_eq!(status, 403, "original status preserved");
+                assert_eq!(upstream_type.as_deref(), Some("PERMISSION_DENIED"));
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+        assert!(
+            cache.get().await.is_none(),
+            "mismatch must clear the stale project"
+        );
+
+        let resp = provider.complete(base_req()).await.expect("re-onboard ok");
+        assert_eq!(resp.id, "resp-abc");
+        assert_eq!(cache.get().await.as_deref(), Some("proj-fresh"));
+    }
+
+    #[tokio::test]
+    async fn quota_429_retains_cached_project() {
+        // #25 negative: a 429 RESOURCE_EXHAUSTED is not a project mismatch,
+        // so the seeded project must survive the failure.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({"project": "projects/stale"})))
+            .respond_with(ResponseTemplate::new(429).set_body_string(
+                r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> =
+            Arc::new(InMemoryProjectCache::with("projects/stale"));
+        let provider = make_cloud_code_provider(&server.uri(), cache.clone());
+
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("quota error must surface");
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                ..
+            } => {
+                assert_eq!(status, 429);
+                assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+        assert_eq!(
+            cache.get().await.as_deref(),
+            Some("projects/stale"),
+            "a non-mismatch failure must leave the cache intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_project_mismatch_403_clears_cache() {
+        // #25: the stream path carries the same invalidation hook as
+        // generate -- a 403 PERMISSION_DENIED must clear the seeded (stale)
+        // project and surface the original upstream error.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(STREAM_PATH))
+            .and(body_partial_json(json!({"project": "projects/stale"})))
+            .respond_with(ResponseTemplate::new(403).set_body_string(
+                r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"project gone"}}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> =
+            Arc::new(InMemoryProjectCache::with("projects/stale"));
+        let provider = make_cloud_code_provider(&server.uri(), cache.clone());
+
+        match provider.stream(base_req()).await {
+            Err(Error::Upstream {
+                status,
+                upstream_type,
+                ..
+            }) => {
+                assert_eq!(status, 403, "original status preserved");
+                assert_eq!(upstream_type.as_deref(), Some("PERMISSION_DENIED"));
+            }
+            Err(other) => panic!("expected Upstream, got {other:?}"),
+            Ok(_) => panic!("mismatch must surface as an error, not open a stream"),
+        }
+        assert!(
+            cache.get().await.is_none(),
+            "mismatch must clear the stale project"
+        );
     }
 }

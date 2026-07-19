@@ -57,17 +57,20 @@ pub struct GeminiStreamState {
     /// Sticky: set once any functionCall part is seen, so the terminal
     /// chunk maps to `tool_calls` even if the finishReason says STOP.
     saw_function_call: bool,
-    /// Set once a terminal chunk has fired (on a `finishReason`). Guards
-    /// against a trailing usage-only event emitting a second terminal
-    /// chunk or post-terminal content.
+    /// Set once a terminal chunk has fired (on a `finishReason`, or on a
+    /// prompt-level block with no candidate). Guards against a trailing
+    /// usage-only event emitting a second terminal chunk or post-terminal
+    /// content.
     terminal_emitted: bool,
     /// Latest `usageMetadata` observed on any event, terminal or not.
     /// Folded into the terminal chunk when the finishReason event lacks
     /// its own usage; the latest write wins, so a terminal event's own
     /// usage supersedes an interim value with no double-count.
     cached_usage: Option<UsageMetadata>,
-    /// Set once any event carried a `finishReason`. Distinguishes a
-    /// proven-terminal stream from one that ends at EOS without one.
+    /// Set once termination is proven: any event carried a `finishReason`,
+    /// or a prompt-level block arrived (empty candidates + blockReason).
+    /// Distinguishes a proven-terminal stream from one that ends at EOS
+    /// without proof, which is the only case `on_eos` WARNs on.
     saw_finish_reason: bool,
 }
 
@@ -106,6 +109,13 @@ impl GeminiStreamState {
 
         let candidate = event.candidates.into_iter().next();
         let finish_reason_raw = candidate.as_ref().and_then(|c| c.finish_reason.clone());
+        let has_candidate = candidate.is_some();
+        let prompt_block = event
+            .prompt_feedback
+            .as_ref()
+            .and_then(|pf| pf.block_reason.as_deref())
+            .filter(|r| !r.is_empty())
+            .map(str::to_string);
 
         if let Some(cand) = candidate {
             let parts = cand.content.map(|c| c.parts).unwrap_or_default();
@@ -131,7 +141,33 @@ impl GeminiStreamState {
             self.saw_finish_reason = true;
             self.terminal_emitted = true;
             let usage = self.cached_usage.take();
-            chunks.push(self.terminal_chunk(finish_reason_raw.as_deref(), usage));
+            let finish = map_finish_reason(finish_reason_raw.as_deref(), self.saw_function_call);
+            if finish.as_deref() == Some("content_filter") {
+                tracing::info!(
+                    provider = %provider_id,
+                    surface = "stream",
+                    origin = "candidate_finish",
+                    block_reason = finish_reason_raw.as_deref().unwrap_or_default(),
+                    "gemini: candidate blocked on 200 surface"
+                );
+            }
+            chunks.push(self.terminal_chunk(finish, usage));
+        } else if !has_candidate && let Some(reason) = prompt_block {
+            // Prompt-level block: no finishReason and no candidate, but
+            // promptFeedback.blockReason is present. This is PROVEN
+            // terminality, so mark saw_finish_reason too -- on_eos must not
+            // WARN about a stream that ended without a finishReason.
+            self.saw_finish_reason = true;
+            self.terminal_emitted = true;
+            let usage = self.cached_usage.take();
+            tracing::info!(
+                provider = %provider_id,
+                surface = "stream",
+                origin = "prompt_feedback",
+                block_reason = %reason,
+                "gemini: prompt blocked on 200 surface"
+            );
+            chunks.push(self.terminal_chunk(Some("content_filter".to_string()), usage));
         }
 
         Ok(chunks)
@@ -235,12 +271,15 @@ impl GeminiStreamState {
         })
     }
 
+    /// Build the terminal chunk from an already-mapped canonical
+    /// `finish_reason` and the folded-in usage. The reason mapping happens
+    /// at the call site so both the candidate-finish and prompt-block
+    /// terminal paths share this constructor.
     fn terminal_chunk(
         &self,
-        finish_reason: Option<&str>,
+        finish: Option<String>,
         usage_meta: Option<UsageMetadata>,
     ) -> ChatChunk {
-        let finish = map_finish_reason(finish_reason, self.saw_function_call);
         let usage = usage_meta.map(|m| usage_delta(&m));
         ChatChunk {
             id: self.response_id.clone(),
