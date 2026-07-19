@@ -1303,22 +1303,21 @@ fn ipv4_compatible_embedded(ip: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Add
 fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
-        // Operator-asserted "use the provider kind's default" -- the
-        // factory will substitute the auth_kind-appropriate default
-        // base_url when building the provider. Surface a TRACE so an
-        // operator wondering why their request landed on a vendor
-        // default can find it in the logs without flipping debug.
-        tracing::trace!(
-            provider = provider_name,
-            "base_url empty; provider will use its kind-default endpoint",
-        );
-        return Ok(());
+        // A present-but-empty base_url is an operator typo, not a
+        // "use the kind default" signal: the only default substitution
+        // is for the OpenaiResponses `None` case, which is resolved to
+        // a concrete URL BEFORE this fn is called. Reject here as
+        // defense-in-depth for direct library consumers.
+        return Err(routectl_core::Error::Config(format!(
+            "provider `{provider_name}`: base_url is set but empty; \
+             set an explicit endpoint or omit the field to use the kind default"
+        )));
     }
     let url = match url::Url::parse(trimmed) {
         Ok(u) => u,
         Err(e) => {
             return Err(routectl_core::Error::Config(format!(
-                "provider `{provider_name}`: base_url `{trimmed}` is not a valid URL: {e}"
+                "provider `{provider_name}`: base_url is not a valid URL: {e}"
             )));
         }
     };
@@ -1357,7 +1356,7 @@ fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
         };
         if link_local {
             return Err(routectl_core::Error::Config(format!(
-                "provider `{provider_name}`: base_url `{trimmed}` targets a link-local \
+                "provider `{provider_name}`: base_url targets a link-local \
                  address; cloud-metadata IPs (169.254.169.254 etc.) and IPv6 fe80::/10 \
                  are blocked at build time to prevent SSRF / credential leak"
             )));
@@ -1395,8 +1394,8 @@ fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
         return Ok(());
     }
     Err(routectl_core::Error::Config(format!(
-        "provider `{provider_name}`: base_url `{trimmed}` uses cleartext http:// for \
-         non-loopback host `{host}` -- API keys and prompt content would be sent in \
+        "provider `{provider_name}`: base_url uses cleartext http:// for a \
+         non-loopback host -- API keys and prompt content would be sent in \
          the clear. Use https:// (or bind a local proxy on 127.0.0.1)"
     )))
 }
@@ -2310,6 +2309,99 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Reject any float config leaf that is non-finite (NaN or +/-inf), plus a
+/// non-positive `retry.backoff_multiplier`. Non-finite is the latent hole:
+/// NaN and inf both slip past the `wm < sentinel` / `rm <= 0.0` overlay
+/// checks, and a non-finite multiplier turns backoff duration math into a
+/// runaway sleep. The covered leaves are pinned against the schema's
+/// `type: number` set by `float_leaf_coverage_matches_schema`.
+fn validate_float_fields(config: &Config) -> Result<()> {
+    use routectl_core::Error;
+
+    let mul = config.retry.backoff_multiplier;
+    if !mul.is_finite() {
+        return Err(Error::Config(format!(
+            "retry.backoff_multiplier is `{mul}`; must be a finite number"
+        )));
+    }
+    if mul <= 0.0 {
+        return Err(Error::Config(format!(
+            "retry.backoff_multiplier is `{mul}`; must be greater than 0"
+        )));
+    }
+
+    for (key, entry) in &config.registry {
+        let Some(pricing) = entry.pricing.as_ref() else {
+            continue;
+        };
+        let leaves: [(&str, Option<f64>); 5] = [
+            ("input_per_mtok", pricing.input_per_mtok),
+            ("output_per_mtok", pricing.output_per_mtok),
+            ("cache_read_per_mtok", pricing.cache_read_per_mtok),
+            ("cache_write_5m_per_mtok", pricing.cache_write_5m_per_mtok),
+            ("cache_write_1h_per_mtok", pricing.cache_write_1h_per_mtok),
+        ];
+        for (field, value) in leaves {
+            let Some(v) = value else { continue };
+            if !v.is_finite() {
+                return Err(Error::Config(format!(
+                    "registry.`{key}`.pricing.{field} is `{v}`; must be a finite number"
+                )));
+            }
+        }
+    }
+
+    for (key, override_entry) in &config.cache_pricing {
+        let leaves: [(&str, Option<f32>); 3] = [
+            ("wm", override_entry.wm),
+            ("rm", override_entry.rm),
+            ("storage_rent", override_entry.storage_rent),
+        ];
+        for (field, value) in leaves {
+            let Some(v) = value else { continue };
+            if !v.is_finite() {
+                return Err(Error::Config(format!(
+                    "cache_pricing.`{key}`.{field} is `{v}`; must be a finite number"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Reject a present-but-empty (or whitespace-only) `base_url` on any
+/// provider entry. An explicit `base_url = ""` is an operator typo;
+/// silently routing to a vendor default they did not name is the
+/// surprising behavior. A field that is omitted entirely keeps its
+/// serde default (`None` / kind-default) and is left untouched.
+fn validate_base_urls(config: &Config) -> Result<()> {
+    use routectl_core::Error;
+
+    for (name, entry) in &config.providers {
+        let is_empty = match entry {
+            ProviderEntry::OpenaiCompat { base_url, .. }
+            | ProviderEntry::AnthropicApi { base_url, .. } => base_url.trim().is_empty(),
+            #[cfg(feature = "gemini")]
+            ProviderEntry::Gemini { base_url, .. } => base_url.trim().is_empty(),
+            #[cfg(feature = "openai-responses")]
+            ProviderEntry::OpenaiResponses { base_url, .. } => {
+                base_url.as_deref().is_some_and(|s| s.trim().is_empty())
+            }
+            #[cfg(feature = "bedrock")]
+            ProviderEntry::Bedrock { .. } => false,
+        };
+        if is_empty {
+            return Err(Error::Config(format!(
+                "provider `{name}`: base_url is set but empty; \
+                 set an explicit endpoint or omit the field to use the kind default"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Collected outcome of the shared config-validation suite:
 /// `errors` are hard-fail conditions, `warnings` are advisory.
 ///
@@ -2383,6 +2475,12 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = crate::override_registry::validate_capability_overrides(config) {
         errors.push(e);
     }
+    if let Err(e) = validate_float_fields(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_base_urls(config) {
+        errors.push(bare_validation_message(e));
+    }
 
     let warnings = class_policy_warnings(config);
 
@@ -2414,7 +2512,33 @@ mod base_url_validation_tests {
         let msg = err.to_string();
         assert!(msg.contains("acme"), "got: {msg}");
         assert!(msg.contains("cleartext"), "got: {msg}");
-        assert!(msg.contains("api.openai.com"), "got: {msg}");
+        // The raw host is NOT echoed: a base_url can carry embedded userinfo
+        // (credentials) or an internal hostname the message must not surface.
+        assert!(
+            !msg.contains("api.openai.com"),
+            "host must not be echoed; got: {msg}"
+        );
+    }
+
+    /// Pin: a rejected base_url carrying embedded userinfo (credentials in
+    /// the `user:pass@host` form) must not echo the raw URL, host, or the
+    /// embedded secret into the rejection message -- only the provider name
+    /// and the violation class survive.
+    #[test]
+    fn cleartext_rejection_does_not_echo_userinfo_or_host() {
+        let err = validate_base_url_scheme("acme", "http://user:sk-live-LEAKED@internal.example")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("acme"), "got: {msg}");
+        assert!(msg.contains("cleartext"), "got: {msg}");
+        assert!(
+            !msg.contains("sk-live-LEAKED"),
+            "credential must not surface; got: {msg}"
+        );
+        assert!(
+            !msg.contains("internal.example"),
+            "host must not surface; got: {msg}"
+        );
     }
 
     /// Pin: AWS / Azure / GCP cloud-instance metadata IP must be
@@ -2515,12 +2639,14 @@ mod base_url_validation_tests {
     }
 
     #[test]
-    fn empty_passes() {
-        // Some providers have an unset base_url that the factory fills
-        // in later (e.g. openai-responses computes a default per
-        // auth_kind). The validator MUST NOT reject empty strings.
-        assert!(validate_base_url_scheme("p", "").is_ok());
-        assert!(validate_base_url_scheme("p", "   ").is_ok());
+    fn empty_rejected() {
+        // A present-but-empty base_url is an operator typo, never a
+        // "use the kind default" signal: the OpenaiResponses `None`
+        // default is substituted before this fn is called, so every
+        // string that reaches here was set explicitly.
+        let err = validate_base_url_scheme("acme", "").unwrap_err();
+        assert!(err.to_string().contains("acme"), "got: {err}");
+        assert!(validate_base_url_scheme("p", "   ").is_err());
     }
 
     #[test]
@@ -4997,6 +5123,235 @@ mod collect_config_validation_tests {
             validation.errors.is_empty(),
             "default config must pass the whole suite: {:?}",
             validation.errors
+        );
+    }
+
+    fn parse(toml_text: &str) -> Config {
+        toml::from_str(toml_text).expect("fixture must parse")
+    }
+
+    fn has_finite_error(validation: &super::ConfigValidation) -> bool {
+        validation.errors.iter().any(|e| e.contains("finite"))
+    }
+
+    fn has_base_url_error(validation: &super::ConfigValidation) -> bool {
+        validation
+            .errors
+            .iter()
+            .any(|e| e.contains("base_url") && e.contains("kind default"))
+    }
+
+    #[test]
+    fn rejects_non_finite_backoff_multiplier_from_literal_toml() {
+        // The `inf` float literal survives the real TOML parse as a
+        // non-finite f64, the one path a constructed `Config` value
+        // cannot exercise -- a hand-edited config is how this reaches
+        // duration math unchecked.
+        let config = parse("[retry]\nbackoff_multiplier = inf\n");
+        assert!(
+            config.retry.backoff_multiplier.is_infinite(),
+            "sanity: parses to inf"
+        );
+        let validation = collect_config_validation(&config);
+        assert!(
+            has_finite_error(&validation),
+            "inf backoff_multiplier must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_negative_backoff_multiplier() {
+        let validation = collect_config_validation(&parse("[retry]\nbackoff_multiplier = -1.0\n"));
+        assert!(
+            !validation.errors.is_empty(),
+            "negative backoff_multiplier must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_zero_backoff_multiplier() {
+        let validation = collect_config_validation(&parse("[retry]\nbackoff_multiplier = 0.0\n"));
+        assert!(
+            !validation.errors.is_empty(),
+            "zero backoff_multiplier must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_registry_pricing() {
+        let validation = collect_config_validation(&parse(
+            "[registry.\"gpt-4\".pricing]\ninput_per_mtok = nan\n",
+        ));
+        assert!(
+            has_finite_error(&validation),
+            "nan registry pricing must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_cache_pricing_wm() {
+        let validation = collect_config_validation(&parse("[cache_pricing.\"m\"]\nwm = inf\n"));
+        assert!(
+            has_finite_error(&validation),
+            "inf cache_pricing.wm must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_cache_pricing_rm() {
+        let validation = collect_config_validation(&parse("[cache_pricing.\"m\"]\nrm = inf\n"));
+        assert!(
+            has_finite_error(&validation),
+            "inf cache_pricing.rm must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_cache_pricing_storage_rent() {
+        let validation =
+            collect_config_validation(&parse("[cache_pricing.\"m\"]\nstorage_rent = nan\n"));
+        assert!(
+            has_finite_error(&validation),
+            "nan cache_pricing.storage_rent must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_empty_base_url_openai_compat() {
+        let validation = collect_config_validation(&parse(
+            "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+        ));
+        assert!(
+            has_base_url_error(&validation),
+            "empty openai-compat base_url must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn rejects_empty_base_url_anthropic_api() {
+        let validation = collect_config_validation(&parse(
+            "[providers.p]\nkind = \"anthropic-api\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+        ));
+        assert!(
+            has_base_url_error(&validation),
+            "empty anthropic-api base_url must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn rejects_empty_base_url_gemini() {
+        let validation = collect_config_validation(&parse(
+            "[providers.p]\nkind = \"gemini\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+        ));
+        assert!(
+            has_base_url_error(&validation),
+            "empty gemini base_url must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn rejects_present_but_empty_base_url_openai_responses() {
+        let validation = collect_config_validation(&parse(
+            "[providers.p]\nkind = \"openai-responses\"\nauth_kind = \"api-key\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+        ));
+        assert!(
+            has_base_url_error(&validation),
+            "present-but-empty openai-responses base_url must be rejected: {:?}",
+            validation.errors
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn omitted_base_url_openai_responses_stays_valid() {
+        let validation = collect_config_validation(&parse(
+            "[providers.p]\nkind = \"openai-responses\"\nauth_kind = \"api-key\"\napi_key_ref = \"literal:k\"\n",
+        ));
+        assert!(
+            !has_base_url_error(&validation),
+            "omitted openai-responses base_url must stay valid: {:?}",
+            validation.errors
+        );
+    }
+
+    /// Drift tripwire: every schema leaf whose `type` includes `number`
+    /// (float leaves; integers are out of scope) must be registered in
+    /// `validate_float_fields`' covered set. A future f64/f32 leaf added
+    /// to the config without registering it here fails this test.
+    const COVERED_FLOAT_LEAVES: [&str; 9] = [
+        "RetryPolicy.backoff_multiplier",
+        "PricingConfig.input_per_mtok",
+        "PricingConfig.output_per_mtok",
+        "PricingConfig.cache_read_per_mtok",
+        "PricingConfig.cache_write_5m_per_mtok",
+        "PricingConfig.cache_write_1h_per_mtok",
+        "CachePricingOverride.wm",
+        "CachePricingOverride.rm",
+        "CachePricingOverride.storage_rent",
+    ];
+
+    #[test]
+    fn float_leaf_coverage_matches_schema() {
+        use std::collections::BTreeSet;
+
+        let committed = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../routectl.schema.json"
+        ));
+        let schema: serde_json::Value =
+            serde_json::from_str(committed).expect("committed schema parses");
+
+        fn type_includes_number(field: &serde_json::Value) -> bool {
+            match field.get("type") {
+                Some(serde_json::Value::String(s)) => s == "number",
+                Some(serde_json::Value::Array(items)) => {
+                    items.iter().any(|v| v.as_str() == Some("number"))
+                }
+                _ => false,
+            }
+        }
+
+        let defs = schema
+            .get("$defs")
+            .and_then(serde_json::Value::as_object)
+            .expect("schema carries $defs");
+
+        let mut schema_number_leaves: BTreeSet<String> = BTreeSet::new();
+        for (def_name, def) in defs {
+            let Some(props) = def.get("properties").and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for (prop_name, prop) in props {
+                if type_includes_number(prop) {
+                    schema_number_leaves.insert(format!("{def_name}.{prop_name}"));
+                }
+            }
+        }
+
+        let covered: BTreeSet<String> =
+            COVERED_FLOAT_LEAVES.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            schema_number_leaves,
+            covered,
+            "float-leaf coverage diverged from the schema: unregistered={:?}, stale={:?}",
+            schema_number_leaves
+                .difference(&covered)
+                .collect::<Vec<_>>(),
+            covered
+                .difference(&schema_number_leaves)
+                .collect::<Vec<_>>(),
         );
     }
 }

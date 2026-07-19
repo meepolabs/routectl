@@ -5,11 +5,13 @@
 //! crates already in the workspace (`serde`, `serde_json`, `thiserror`,
 //! `tempfile`) -- zero `routectl_core` types and zero router-specific type
 //! imports (no `Config`, no `CatalogRow`, ...), so it can later `mv`
-//! to a standalone crate with a Cargo.toml edit and nothing else. The one
-//! router-crate touch point is [`default_path`], which calls the sibling
-//! `config::routectl_config_dir()` function (a plain `PathBuf` helper, not
-//! a type) to resolve the on-disk location; every other function here
-//! takes its `path: &Path` as an argument.
+//! to a standalone crate with a Cargo.toml edit and nothing else. Two
+//! router-crate touch points remain to resolve at that point: [`default_path`]
+//! calls the sibling `config::routectl_config_dir()` (a plain `PathBuf`
+//! helper), and [`load`] calls `catalog::cell_value_defects` (the one shared
+//! home of the cell-value invariants -- see that function) to validate cell
+//! degeneracy on load. Every other function here takes its `path: &Path` as
+//! an argument.
 //!
 //! Semantics of a map value `Option<OverlayCell>` (see [`CatalogOverlay`]):
 //! - `Some(Some(cell))` (JSON object) -> overlay value.
@@ -213,6 +215,33 @@ pub fn load(path: &Path) -> Result<CatalogOverlay, OverlayError> {
             found: overlay.schema_version,
             current: CATALOG_OVERLAY_SCHEMA_VERSION,
         });
+    }
+
+    // Cell VALUE degeneracy: the file is hand-editable, so a structurally
+    // valid overlay can still carry a degenerate cell (rm <= 0, non-finite
+    // wm/rm reachable from an f32-overflowing JSON literal, a zero context
+    // window). Run the shared value predicate per cell: any HARD defect
+    // fails closed, naming the selector and field; the one SOFT defect (a
+    // finite below-sentinel wm) warns and is accepted -- an operator may
+    // knowingly run a cheap write multiplier (settled constraint).
+    for (selector, cell) in &overlay.cells {
+        let Some(cell) = cell else { continue };
+        for defect in crate::catalog::cell_value_defects(cell.wm, cell.rm, cell.max_context_tokens)
+        {
+            if defect.is_hard() {
+                return Err(OverlayError::Corrupt {
+                    path: display,
+                    reason: format!("cell {selector}: {}", defect.describe()),
+                });
+            }
+            tracing::warn!(
+                selector = selector.as_str(),
+                field = defect.field(),
+                "catalog overlay cell has a below-sentinel write multiplier; accepting it as \
+                 an intentional operator override (a too-cheap wm can make a cache break look \
+                 falsely profitable)",
+            );
+        }
     }
 
     Ok(overlay)
@@ -608,6 +637,129 @@ mod tests {
         assert_eq!(overlay.schema_version, 1);
         assert_eq!(overlay.revision, 0);
         assert!(overlay.cells.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cell value degeneracy: load() runs the shared value predicate per
+    // cell, failing closed on a HARD defect and warn-and-accepting a SOFT
+    // one. The overlay file is explicitly hand-editable, so load() is the
+    // trust boundary for degenerate cell VALUES (rm <= 0, non-finite
+    // wm/rm, max_context_tokens 0), distinct from the structural checks
+    // above.
+    // -----------------------------------------------------------------------
+
+    fn one_cell_overlay(field_json: &str) -> String {
+        format!(
+            r#"{{"schema_version":1,"revision":0,"cells":{{"openai-compat:grok-*":{{"source":"user","verified_at":"2026-01-01",{field_json}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn load_rejects_non_positive_rm_naming_selector_and_field() {
+        // Arrange: a hand-edited overlay with rm = 0.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, one_cell_overlay(r#""rm":0.0"#)).unwrap();
+
+        // Act
+        let err = load(&path).expect_err("rm <= 0 must fail closed");
+
+        // Assert: Corrupt naming the selector key and the field.
+        match err {
+            OverlayError::Corrupt { reason, .. } => {
+                assert!(reason.contains("openai-compat:grok-*"), "reason: {reason}");
+                assert!(reason.contains("rm"), "reason: {reason}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_non_finite_rm_from_hand_edited_overflow() {
+        // Arrange: `4e38` is finite as an f64 (so serde_json parses it) but
+        // overflows f32 to inf on deserialize, so a hand-edited overlay can
+        // carry a non-finite rm past the JSON parse into the value predicate.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, one_cell_overlay(r#""rm":4e38"#)).unwrap();
+
+        // Act
+        let err = load(&path).expect_err("non-finite rm must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::Corrupt { reason, .. } => {
+                assert!(reason.contains("openai-compat:grok-*"), "reason: {reason}");
+                assert!(reason.contains("rm"), "reason: {reason}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_zero_max_context_tokens_naming_the_field() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, one_cell_overlay(r#""max_context_tokens":0"#)).unwrap();
+
+        // Act
+        let err = load(&path).expect_err("max_context_tokens 0 must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::Corrupt { reason, .. } => {
+                assert!(reason.contains("openai-compat:grok-*"), "reason: {reason}");
+                assert!(reason.contains("max_context_tokens"), "reason: {reason}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_non_finite_wm_naming_the_field() {
+        // Arrange: `4e38` deserializes to an f32 inf (see the rm case).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, one_cell_overlay(r#""wm":4e38"#)).unwrap();
+
+        // Act
+        let err = load(&path).expect_err("non-finite wm must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::Corrupt { reason, .. } => {
+                assert!(reason.contains("openai-compat:grok-*"), "reason: {reason}");
+                assert!(reason.contains("wm"), "reason: {reason}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_accepts_below_sentinel_finite_wm_with_a_warn() {
+        // Arrange: a finite wm below the sentinel (2.0) is a SOFT defect --
+        // load warns and ACCEPTS (the operator may knowingly run a cheap
+        // write multiplier); it never rejects on this vector.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, one_cell_overlay(r#""wm":1.0"#)).unwrap();
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            let overlay = load(&path).expect("below-sentinel wm must be accepted");
+            assert_eq!(
+                overlay.cells["openai-compat:grok-*"].as_ref().unwrap().wm,
+                Some(1.0)
+            );
+        });
+
+        // Assert: a WARN naming the selector was emitted.
+        assert!(
+            events.iter().any(|e| e.level == tracing::Level::WARN
+                && e.field("selector") == Some("openai-compat:grok-*")),
+            "a below-sentinel wm must emit a WARN naming the selector: {events:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

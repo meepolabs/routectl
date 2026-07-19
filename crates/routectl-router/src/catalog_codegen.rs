@@ -608,6 +608,22 @@ fn models_dev_context(entry: &Value) -> Option<u32> {
         .map(|v| v as u32)
 }
 
+/// The stable marker every cross-check-disagreement error message from
+/// [`derive_cells`] carries -- produced ONLY by [`resolve_f64`] /
+/// [`resolve_bool`] on a genuine source disagreement. A missing-source-key
+/// or absent-data `Err` does not carry it, which is what lets
+/// [`reason_is_cross_check_mismatch`] tell the two apart.
+pub(crate) const CROSS_CHECK_MISMATCH_MARKER: &str = "cross-check mismatch";
+
+/// Whether a [`derive_cells`] `Err` reason denotes a source cross-check
+/// disagreement (as opposed to a missing source key or absent data): the
+/// discriminator [`crate::catalog_import`] uses to tag a skip as
+/// counted-toward-totals vs fail-safe not-counted.
+#[must_use]
+pub(crate) fn reason_is_cross_check_mismatch(reason: &str) -> bool {
+    reason.contains(CROSS_CHECK_MISMATCH_MARKER)
+}
+
 /// Relative-tolerance float comparison (`1e-6`): the two sources round
 /// their published prices independently, so a f64-noise-level difference
 /// is not a real mismatch.
@@ -633,7 +649,7 @@ fn resolve_f64(
             match allowlist.resolved_f64(&key) {
                 Some(r) => r.map(Some),
                 None => Err(format!(
-                    "cross-check mismatch at {key}: models.dev={p} litellm={s}; add an \
+                    "{CROSS_CHECK_MISMATCH_MARKER} at {key}: models.dev={p} litellm={s}; add an \
                      allowlist entry at catalog_data/cross_check_allowlist.json[\"{key}\"] to \
                      accept one of these, or fix the source data"
                 )),
@@ -675,7 +691,7 @@ fn resolve_bool(
             match allowlist.resolved_bool(&key) {
                 Some(r) => r.map(Some),
                 None => Err(format!(
-                    "cross-check mismatch at {key}: models.dev={p} litellm={s}; add an \
+                    "{CROSS_CHECK_MISMATCH_MARKER} at {key}: models.dev={p} litellm={s}; add an \
                      allowlist entry at catalog_data/cross_check_allowlist.json[\"{key}\"] to \
                      accept one of these, or fix the source data"
                 )),
@@ -826,6 +842,23 @@ mod tests {
         let err = resolve_f64("k", "f", Some(1.0), Some(2.0), &allowlist)
             .expect_err("must fail without an allowlist entry");
         assert!(err.contains("cross-check mismatch"), "msg: {err}");
+    }
+
+    #[test]
+    fn reason_is_cross_check_mismatch_only_matches_a_genuine_disagreement() {
+        let allowlist = Allowlist::parse("{}").expect("parse");
+        let mismatch = resolve_f64("anthropic-api:m", "wm", Some(1.0), Some(2.0), &allowlist)
+            .expect_err("mismatch");
+        assert!(reason_is_cross_check_mismatch(&mismatch));
+        // Representative NON-disagreement errors from `derive_cells`: a
+        // missing source key and absent data must NOT be classified as a
+        // cross-check disagreement (so they stay uncounted, fail-safe).
+        assert!(!reason_is_cross_check_mismatch(
+            "anthropic-api:m: litellm key `foo` not found in the vendored snapshot"
+        ));
+        assert!(!reason_is_cross_check_mismatch(
+            "anthropic-api:m: no source publishes a cache_read price"
+        ));
     }
 
     /// Drives `derive_cells` on small in-memory `Value`s keyed to one real

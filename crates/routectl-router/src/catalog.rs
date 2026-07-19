@@ -187,6 +187,107 @@ impl CatalogRow {
     }
 }
 
+/// A degeneracy found in one catalog cell's economic values. The single
+/// home for the rm / max_context_tokens / wm invariants, shared by the
+/// overlay load path ([`crate::catalog_overlay::load`], fail-closed) and
+/// [`CachePricingOverride::validate`] (ack-gated). The predicate only
+/// CLASSIFIES; each caller owns its posture on the result.
+///
+/// HARD defects (every variant but [`CellDefect::WriteMultiplierBelowSentinel`])
+/// are structurally degenerate and rejected by both callers. The one SOFT
+/// defect -- a finite `wm` below the sentinel -- is a judgement call the
+/// operator may knowingly accept: `validate` gates it on
+/// `override_acknowledges_cost_risk`, the overlay loader only warns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CellDefect {
+    /// `rm` is `<= 0.0` or non-finite: a zero / negative / NaN read
+    /// multiplier makes the break-even math degenerate. HARD.
+    ReadMultiplier(f32),
+    /// `wm` is non-finite (NaN / inf, reachable from a hand-edited JSON
+    /// literal that overflows f32). HARD.
+    WriteMultiplierNotFinite(f32),
+    /// `max_context_tokens` is `Some(0)`: a zero window is a silent data
+    /// error downstream; `None` is the way to leave it unconfirmed. HARD.
+    ZeroMaxContextTokens,
+    /// `wm` is finite but below the sentinel's `wm` (2.0): a too-cheap
+    /// write multiplier can make a cache break look falsely profitable.
+    /// SOFT -- an operator may knowingly accept it.
+    WriteMultiplierBelowSentinel(f32),
+}
+
+impl CellDefect {
+    /// A HARD defect is structurally degenerate; both callers reject it.
+    /// The lone SOFT defect ([`CellDefect::WriteMultiplierBelowSentinel`])
+    /// is caller-gated (ack flag) or warn-only.
+    pub(crate) const fn is_hard(self) -> bool {
+        !matches!(self, Self::WriteMultiplierBelowSentinel(_))
+    }
+
+    /// The offending field name, for a caller assembling an operator-
+    /// facing message that names WHICH field of a cell is degenerate.
+    pub(crate) const fn field(self) -> &'static str {
+        match self {
+            Self::ReadMultiplier(_) => "rm",
+            Self::WriteMultiplierNotFinite(_) | Self::WriteMultiplierBelowSentinel(_) => "wm",
+            Self::ZeroMaxContextTokens => "max_context_tokens",
+        }
+    }
+
+    /// A self-contained sentence naming the field, the value, and why it
+    /// is degenerate. Callers embed this in their own envelope (an overlay
+    /// `Corrupt { reason }`, a `validate` `Err(String)`).
+    pub(crate) fn describe(self) -> String {
+        match self {
+            Self::ReadMultiplier(rm) => format!(
+                "rm must be > 0.0 (got {rm}); a zero, negative, or non-finite read multiplier \
+                 makes the break-even math degenerate"
+            ),
+            Self::WriteMultiplierNotFinite(wm) => {
+                format!("wm must be finite (got {wm})")
+            }
+            Self::ZeroMaxContextTokens => {
+                "max_context_tokens must not be Some(0); use None to leave the window unconfirmed"
+                    .to_string()
+            }
+            Self::WriteMultiplierBelowSentinel(wm) => format!(
+                "wm = {wm} is below the conservative sentinel wm = {}, which can make a cache \
+                 break look falsely profitable",
+                CatalogRow::sentinel().wm
+            ),
+        }
+    }
+}
+
+/// The ONE copy of the cell-value invariants, shared by the overlay load
+/// path and [`CachePricingOverride::validate`]. Pure: it classifies the
+/// three economic value fields into [`CellDefect`]s and takes no posture.
+/// Field order (`wm`, `rm`, `max_context_tokens`) is deliberate -- callers
+/// that short-circuit on the first defect surface the same field they did
+/// before this predicate was extracted.
+pub(crate) fn cell_value_defects(
+    wm: Option<f32>,
+    rm: Option<f32>,
+    max_context_tokens: Option<u32>,
+) -> Vec<CellDefect> {
+    let mut defects = Vec::new();
+    if let Some(wm) = wm {
+        if !wm.is_finite() {
+            defects.push(CellDefect::WriteMultiplierNotFinite(wm));
+        } else if wm < CatalogRow::sentinel().wm {
+            defects.push(CellDefect::WriteMultiplierBelowSentinel(wm));
+        }
+    }
+    if let Some(rm) = rm
+        && (!rm.is_finite() || rm <= 0.0)
+    {
+        defects.push(CellDefect::ReadMultiplier(rm));
+    }
+    if max_context_tokens == Some(0) {
+        defects.push(CellDefect::ZeroMaxContextTokens);
+    }
+    defects
+}
+
 /// Field-level operator override for one `(provider_kind, model_glob)`
 /// cell, deserialized from a LEGACY `[cache_pricing]` TOML entry (retired
 /// in a later increment). Every
@@ -235,35 +336,35 @@ pub struct CachePricingOverride {
 impl CachePricingOverride {
     /// Reject a degenerate override before it is merged onto a baked row.
     ///
-    /// RELIABILITY GUARD: a `wm` BELOW the sentinel's `wm` (2.0) is rejected
-    /// unless `override_acknowledges_cost_risk = true` -- a too-cheap write
-    /// multiplier makes a cache break look falsely profitable. A non-positive
-    /// `rm` is rejected unconditionally (the ack flag does not exempt it): a
-    /// zero or negative read multiplier makes the break-even math degenerate.
-    /// A `verified_at` value that does not parse as `YYYY-MM-DD` is rejected
-    /// so a malformed stamp fails fast at startup rather than silently going
-    /// wrong later.
+    /// The `wm` / `rm` / `max_context_tokens` structural invariants are the
+    /// shared [`cell_value_defects`] predicate; this method adds the
+    /// caller-owned posture on its result plus the `verified_at` check.
+    ///
+    /// RELIABILITY GUARD: a finite `wm` BELOW the sentinel's `wm` (2.0) is
+    /// rejected unless `override_acknowledges_cost_risk = true` -- a too-cheap
+    /// write multiplier makes a cache break look falsely profitable. Every
+    /// other cell defect is rejected unconditionally (the ack flag does not
+    /// exempt them): a non-positive OR non-finite `rm`, a non-finite `wm`, and
+    /// a `max_context_tokens` of `Some(0)`. A `verified_at` value that does not
+    /// parse as `YYYY-MM-DD` is rejected so a malformed stamp fails fast at
+    /// startup rather than silently going wrong later.
     /// Shared by the merge path ([`CatalogRow::with_overrides`]) and the
     /// startup validate-only pass ([`validate_overrides`]).
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(wm) = self.wm
-            && wm < CatalogRow::sentinel().wm
-            && !self.override_acknowledges_cost_risk
-        {
-            return Err(format!(
-                "cache-pricing override sets wm = {wm} below the conservative sentinel wm = \
-                     {}, which can make a cache break look falsely profitable; set \
-                     override_acknowledges_cost_risk = true to accept this risk",
-                CatalogRow::sentinel().wm
-            ));
-        }
-        if let Some(rm) = self.rm
-            && rm <= 0.0
-        {
-            return Err(format!(
-                "cache_pricing override: rm must be > 0.0 (got {rm}); a zero or negative read \
-                     multiplier makes the break-even math degenerate"
-            ));
+        for defect in cell_value_defects(self.wm, self.rm, self.max_context_tokens) {
+            match defect {
+                CellDefect::WriteMultiplierBelowSentinel(wm) => {
+                    if !self.override_acknowledges_cost_risk {
+                        return Err(format!(
+                            "cache-pricing override sets wm = {wm} below the conservative sentinel wm = \
+                                 {}, which can make a cache break look falsely profitable; set \
+                                 override_acknowledges_cost_risk = true to accept this risk",
+                            CatalogRow::sentinel().wm
+                        ));
+                    }
+                }
+                hard => return Err(format!("cache-pricing override: {}", hard.describe())),
+            }
         }
         if let Some(s) = &self.verified_at
             && parse_epoch_day(s).is_none()
@@ -271,13 +372,6 @@ impl CachePricingOverride {
             return Err(format!(
                 "cache-pricing override: verified_at = \"{s}\" is not a valid YYYY-MM-DD date"
             ));
-        }
-        if self.max_context_tokens == Some(0) {
-            return Err(
-                "cache-pricing override: max_context_tokens must not be Some(0); use None to \
-                 leave the window unconfirmed"
-                    .to_string(),
-            );
         }
         Ok(())
     }

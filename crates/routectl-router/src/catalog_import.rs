@@ -51,7 +51,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use crate::catalog::{CatalogRow, baked_table_rows};
-use crate::catalog_codegen::{Allowlist, GeneratedCell, derive_cells};
+use crate::catalog_codegen::{
+    Allowlist, GeneratedCell, derive_cells, reason_is_cross_check_mismatch,
+};
 use crate::catalog_codegen_selectors::{
     ANTHROPIC_SELECTORS, BEDROCK_SELECTORS, CATCH_ALL_ROWS, OPENAI_COMPAT_SELECTORS,
     OPENAI_RESPONSES_SELECTORS,
@@ -83,6 +85,35 @@ pub enum CandidateOrigin {
 pub struct SkippedSelector {
     pub selector: String,
     pub reason: String,
+    pub kind: SkipKind,
+}
+
+/// Why the group-and-agree mapper could not admit a selector -- the
+/// machine-readable discriminator beside [`SkippedSelector::reason`]'s
+/// human string. Only [`SkipKind::CrossCheckDisagreement`] counts the
+/// selector as PRESENT toward the shrink-guard family/source totals (see
+/// [`candidate_shrink_counts`]); every other kind, and the fail-safe
+/// [`SkipKind::Other`] default, leaves the selector uncounted so a
+/// genuinely-vanished model still trips the guard. A skip site that
+/// forgets to set a kind therefore fails SAFE (strict), never looser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkipKind {
+    /// The two freshly-fetched sources disagree on a field for this
+    /// selector (see the module doc's PER-SELECTOR PARTITION note): an
+    /// EXPECTED skip under the empty allowlist, so the selector still
+    /// counts as present -- the model has not vanished, its two sources
+    /// merely refreshed at different times.
+    CrossCheckDisagreement,
+    /// The selector is not present in the baked catalog table (see the
+    /// module doc's admission note). Not counted.
+    UnknownSelector,
+    /// A derived cell carried a degenerate value (see
+    /// [`validate_candidate_cell`]). Not counted.
+    DegenerateValue,
+    /// Any other skip -- the fail-safe default so an un-tagged skip is
+    /// never counted and the shrink guard stays strict.
+    #[default]
+    Other,
 }
 
 /// One built import candidate: per-selector [`OverlayCell`]s ready to
@@ -129,10 +160,21 @@ pub fn build_import_candidate(
                 }
                 Err(skip) => skipped.push(skip),
             },
-            Err(reason) => skipped.push(SkippedSelector {
-                selector: key,
-                reason,
-            }),
+            Err(reason) => {
+                // `derive_cells` returns a source cross-check
+                // disagreement (counts as present) OR a missing-key /
+                // absent-data error (a real absence -- not counted).
+                let kind = if reason_is_cross_check_mismatch(&reason) {
+                    SkipKind::CrossCheckDisagreement
+                } else {
+                    SkipKind::Other
+                };
+                skipped.push(SkippedSelector {
+                    selector: key,
+                    reason,
+                    kind,
+                });
+            }
         }
     }
 
@@ -159,6 +201,7 @@ fn admit_group(
         return Err(SkippedSelector {
             selector: key.to_string(),
             reason: "selector is not present in the baked catalog table".to_string(),
+            kind: SkipKind::UnknownSelector,
         });
     }
     let cell = group_and_agree(group, verified_at);
@@ -178,6 +221,7 @@ fn validate_candidate_cell(key: &str, cell: &OverlayCell) -> Result<(), SkippedS
     let invalid = |field: &str, value: String| SkippedSelector {
         selector: key.to_string(),
         reason: format!("invalid derived value: {field}={value}"),
+        kind: SkipKind::DegenerateValue,
     };
     if let Some(wm) = cell.wm
         && (!wm.is_finite() || wm <= 0.0)
@@ -629,11 +673,24 @@ const fn required_count(baseline: usize, pct: usize) -> usize {
     baseline.saturating_mul(pct).div_ceil(100)
 }
 
-/// [`ShrinkCounts`] derived from a candidate's OWN admitted selectors
-/// (never the overlay -- see [`shrink_guard`]'s doc).
+/// [`ShrinkCounts`] derived from a candidate's admitted selectors PLUS
+/// the selectors it skipped for an EXPECTED cross-check disagreement
+/// (`SkipKind::CrossCheckDisagreement`) -- those models have not
+/// vanished, their two sources merely disagreed under the empty
+/// allowlist, so counting them as present stops one legitimate
+/// disagreement in a small family from tripping the shrink guard. Every
+/// other skip kind stays uncounted (fail-safe: a genuinely-vanished
+/// selector still trips the guard). Never counts the overlay -- see
+/// [`shrink_guard`]'s doc.
 #[must_use]
 pub fn candidate_shrink_counts(candidate: &ImportCandidate) -> ShrinkCounts {
-    shrink_counts_from_selectors(candidate.cells.keys().map(String::as_str))
+    let admitted = candidate.cells.keys().map(String::as_str);
+    let disagreement_skips = candidate
+        .skipped
+        .iter()
+        .filter(|skip| skip.kind == SkipKind::CrossCheckDisagreement)
+        .map(|skip| skip.selector.as_str());
+    shrink_counts_from_selectors(admitted.chain(disagreement_skips))
 }
 
 /// [`ShrinkCounts`] derived from the compiled-in baked table -- the
@@ -1369,6 +1426,7 @@ mod tests {
         candidate.skipped.push(SkippedSelector {
             selector: "bedrock:*".to_string(),
             reason: "cross-check mismatch".to_string(),
+            kind: SkipKind::CrossCheckDisagreement,
         });
         let baked = baked_row_map();
 
@@ -1594,6 +1652,7 @@ mod tests {
         candidate.skipped.push(SkippedSelector {
             selector: "bedrock:*".to_string(),
             reason: "cross-check mismatch".to_string(),
+            kind: SkipKind::CrossCheckDisagreement,
         });
         let overlay = overlay_with_cell(
             &selector,
@@ -1643,11 +1702,123 @@ mod tests {
     }
 
     #[test]
+    fn build_import_candidate_tags_missing_source_data_skips_as_not_counted() {
+        // Arrange: two empty source objects. Every selector that reads
+        // source data fails with a missing-key / absent-data `Err` (never
+        // a cross-check disagreement).
+        let empty = serde_json::json!({});
+
+        // Act
+        let candidate =
+            build_import_candidate(CandidateOrigin::DocRefresh, &empty, &empty, "2026-07-11");
+
+        // Assert: those skips are NOT tagged as a disagreement, so they
+        // stay uncounted (fail-safe); the counted total never picks them up.
+        assert!(
+            candidate
+                .skipped
+                .iter()
+                .any(|skip| skip.kind == SkipKind::Other),
+            "expected at least one missing-data skip tagged Other"
+        );
+        assert!(
+            !candidate
+                .skipped
+                .iter()
+                .any(|skip| skip.kind == SkipKind::CrossCheckDisagreement),
+            "no empty-source skip is a genuine cross-check disagreement"
+        );
+        let counts = candidate_shrink_counts(&candidate);
+        let admitted_only =
+            shrink_counts_from_selectors(candidate.cells.keys().map(String::as_str));
+        assert_eq!(
+            counts, admitted_only,
+            "not-counted skips must not inflate the shrink totals"
+        );
+    }
+
+    #[test]
     fn candidate_shrink_counts_matches_the_candidates_own_admitted_selectors() {
         let candidate = one_cell_candidate(&opus_selector(), candidate_cell(1.0, 0.10));
         let counts = candidate_shrink_counts(&candidate);
         assert_eq!(counts.per_source.get("anthropic-api"), Some(&1));
         assert_eq!(counts.per_family.get("anthropic-api"), Some(&1));
+    }
+
+    #[test]
+    fn small_family_with_a_cross_check_disagreement_skip_still_passes() {
+        // Arrange: a small family with 2 admitted selectors + 1 skipped
+        // for an EXPECTED cross-check disagreement, against baseline 3.
+        let mut candidate = one_cell_candidate(
+            &selector_key("anthropic-api", "claude-a*"),
+            candidate_cell(1.0, 0.10),
+        );
+        candidate.cells.insert(
+            selector_key("anthropic-api", "claude-b*"),
+            candidate_cell(1.0, 0.10),
+        );
+        candidate.skipped.push(SkippedSelector {
+            selector: selector_key("anthropic-api", "claude-c*"),
+            reason: "cross-check mismatch at anthropic-api:claude-c*:wm".to_string(),
+            kind: SkipKind::CrossCheckDisagreement,
+        });
+        let candidate_counts = candidate_shrink_counts(&candidate);
+        let baseline = counts(("anthropic-api", 3), ("anthropic-api", 3));
+
+        // Act
+        let verdict = shrink_guard(&candidate_counts, &baseline);
+
+        // Assert: the disagreement-skipped selector counts as present, so
+        // the family total is 3 and the small-family exact rule passes.
+        assert_eq!(candidate_counts.per_family.get("anthropic-api"), Some(&3));
+        assert!(!verdict.is_shrunk());
+    }
+
+    #[test]
+    fn small_family_real_shrink_still_trips_the_guard() {
+        // Arrange: 1 admitted, NO disagreement skip, baseline 2.
+        let candidate = one_cell_candidate(
+            &selector_key("anthropic-api", "claude-a*"),
+            candidate_cell(1.0, 0.10),
+        );
+        let candidate_counts = candidate_shrink_counts(&candidate);
+        let baseline = counts(("anthropic-api", 2), ("anthropic-api", 2));
+
+        // Act
+        let verdict = shrink_guard(&candidate_counts, &baseline);
+
+        // Assert: a genuine shrink (1 < 2) still trips the exact rule.
+        assert!(verdict.is_shrunk());
+        assert_eq!(verdict.shrunk_families.len(), 1);
+        assert_eq!(verdict.shrunk_families[0].required, 2);
+    }
+
+    #[test]
+    fn a_non_disagreement_skip_never_counts_and_a_vanished_family_trips() {
+        // Arrange: every selector in the family gone; the one skip is an
+        // UnknownSelector skip, NOT a disagreement, so nothing counts.
+        let candidate = ImportCandidate {
+            origin: CandidateOrigin::DocRefresh,
+            verified_at: "2026-07-11".to_string(),
+            cells: BTreeMap::new(),
+            skipped: vec![SkippedSelector {
+                selector: selector_key("anthropic-api", "claude-a*"),
+                reason: "selector is not present in the baked catalog table".to_string(),
+                kind: SkipKind::UnknownSelector,
+            }],
+        };
+        let candidate_counts = candidate_shrink_counts(&candidate);
+        let baseline = counts(("anthropic-api", 3), ("anthropic-api", 3));
+
+        // Act
+        let verdict = shrink_guard(&candidate_counts, &baseline);
+
+        // Assert: the non-disagreement skip is uncounted; the vanished
+        // family trips the guard (a previously-contributing source hitting
+        // zero).
+        assert_eq!(candidate_counts.per_family.get("anthropic-api"), None);
+        assert!(verdict.is_shrunk());
+        assert_eq!(verdict.zero_sources.len(), 1);
     }
 
     #[test]

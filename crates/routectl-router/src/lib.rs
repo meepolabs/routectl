@@ -54,9 +54,9 @@ pub use catalog::{
 pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
 pub use catalog_import::{
     CandidateOrigin, DiffRow, ExistingCell, ImportCandidate, ImportDiff, ShrinkCounts,
-    ShrinkVerdict, ShrunkFamily, ShrunkSource, SkippedSelector, baked_row_map, baked_shrink_counts,
-    build_import_candidate, candidate_shrink_counts, diff_has_no_effective_change, diff_overlay,
-    shrink_guard,
+    ShrinkVerdict, ShrunkFamily, ShrunkSource, SkipKind, SkippedSelector, baked_row_map,
+    baked_shrink_counts, build_import_candidate, candidate_shrink_counts,
+    diff_has_no_effective_change, diff_overlay, shrink_guard,
 };
 pub use catalog_import_state::{
     CatalogImportState, CatalogImportStateError, default_path as catalog_import_state_default_path,
