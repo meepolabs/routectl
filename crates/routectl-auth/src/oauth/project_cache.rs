@@ -58,6 +58,12 @@ impl CloudProjectCache for OAuthStoreProjectCache {
             .set_cloud_project_id(&self.secret_ref, &project_id)
             .await
     }
+
+    async fn clear_if_matches(&self, expected: &str) -> Result<bool> {
+        self.store
+            .clear_cloud_project_id_if_matches(&self.secret_ref, expected)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +173,84 @@ mod tests {
             result.is_err(),
             "put on a missing record must return an error"
         );
+    }
+
+    #[tokio::test]
+    async fn clear_if_matches_clears_and_persists_across_reload() {
+        // Arrange: seed a record with a cached project id.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        {
+            let store = OAuthStore::open(&path).await.unwrap();
+            store
+                .write_record("anthropic", test_record())
+                .await
+                .unwrap();
+            let secret_ref = SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            };
+            let cache = OAuthStoreProjectCache::new(Arc::new(store), secret_ref);
+            cache.put("X".into()).await.unwrap();
+            // Act: compare-and-clear against the matching id.
+            let cleared = cache.clear_if_matches("X").await.unwrap();
+            // Assert (in-process): cleared and now empty.
+            assert!(cleared);
+            assert!(cache.get().await.is_none());
+        }
+        // Assert (durable): a store reopened from the same path sees no id.
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        assert!(
+            reopened.peek_cloud_project_id("anthropic").await.is_none(),
+            "clear must persist to disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_if_matches_retains_on_mismatch_across_reload() {
+        // Arrange: seed a record with a cached project id.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        {
+            let store = OAuthStore::open(&path).await.unwrap();
+            store
+                .write_record("anthropic", test_record())
+                .await
+                .unwrap();
+            let secret_ref = SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            };
+            let cache = OAuthStoreProjectCache::new(Arc::new(store), secret_ref);
+            cache.put("X".into()).await.unwrap();
+            // Act: compare-and-clear against a NON-matching id.
+            let cleared = cache.clear_if_matches("Y").await.unwrap();
+            // Assert (in-process): retained.
+            assert!(!cleared);
+            assert_eq!(cache.get().await.as_deref(), Some("X"));
+        }
+        // Assert (durable): the id survives a reopen.
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        assert_eq!(
+            reopened.peek_cloud_project_id("anthropic").await.as_deref(),
+            Some("X"),
+            "a non-matching clear must not touch the persisted id"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_if_matches_on_missing_record_returns_false() {
+        // Arrange: store with no credential for "anthropic".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        let secret_ref = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        };
+        let cache = OAuthStoreProjectCache::new(Arc::new(store), secret_ref);
+        // Act + Assert: no panic, no write, reports "nothing cleared".
+        let cleared = cache.clear_if_matches("X").await.unwrap();
+        assert!(!cleared);
     }
 }

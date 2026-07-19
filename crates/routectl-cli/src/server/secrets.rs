@@ -272,6 +272,35 @@ impl SecretStore for CompositeStore {
             }
         }
     }
+
+    async fn clear_cloud_project_id_if_matches(
+        &self,
+        secret_ref: &SecretRef,
+        expected: &str,
+    ) -> Result<bool> {
+        match secret_ref {
+            // Route oauth:// project-id clears to the OAuth arm so a
+            // stale/wrong persisted id can self-heal. A clear is
+            // best-effort: when the OAuth arm is absent (no HOME/XDG)
+            // there is nothing durable to clear, which is Ok(false), NOT
+            // an error -- unlike the set path, a missing arm must not
+            // abort a self-heal. Fully-qualified call: OAuthStore also
+            // has an inherent `clear_cloud_project_id_if_matches(&str,
+            // &str)`.
+            SecretRef::OAuth { .. } => match &self.oauth {
+                Some(oauth) => {
+                    SecretStore::clear_cloud_project_id_if_matches(oauth, secret_ref, expected)
+                        .await
+                }
+                None => Ok(false),
+            },
+            _ => {
+                self.fallback
+                    .clear_cloud_project_id_if_matches(secret_ref, expected)
+                    .await
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -711,6 +740,46 @@ mod tests {
 
         // Assert: the value persisted and reads back via the composite.
         assert_eq!(got.as_deref(), Some("projects/round-trip"));
+    }
+
+    /// The compare-and-clear self-heal path must reach the persistent
+    /// OAuth arm through the composite, not inherit the trait no-op
+    /// default. Drives the composite (not a raw OAuthStore) because that
+    /// seam is the one that silently no-ops if the override is missing.
+    #[tokio::test]
+    async fn composite_clear_if_matches_reaches_oauth_arm() {
+        // Arrange: seed a record and cache a project id through the composite.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        seed_credentials_file(&path, "anthropic", "seed-access-token", now + 3600);
+        let store = CompositeStore::open_at(&path).await.unwrap();
+        let secret_ref = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        };
+        store
+            .set_cloud_project_id(&secret_ref, "projects/heal-me")
+            .await
+            .expect("set_cloud_project_id must persist via the OAuth arm");
+
+        // Act: compare-and-clear the matching id THROUGH the composite.
+        let cleared = store
+            .clear_cloud_project_id_if_matches(&secret_ref, "projects/heal-me")
+            .await
+            .expect("clear must route to the OAuth arm");
+
+        // Assert: cleared, and a subsequent read (routed to the OAuth arm)
+        // sees nothing -- proving the clear reached the persistent arm and
+        // did not inherit the no-op default.
+        assert!(cleared, "clear must report the id was cleared");
+        assert!(
+            store.peek_cloud_project_id(&secret_ref).await.is_none(),
+            "the cleared id must not read back through the composite"
+        );
     }
 
     /// Start-and-degrade at the composite seam: a corrupt `credentials.json`

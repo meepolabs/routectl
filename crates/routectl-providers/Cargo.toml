@@ -63,7 +63,7 @@ chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 async-stream = { version = "0.3", optional = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["sync"] }
 tokio-stream = { workspace = true, optional = true }
 regex = { version = "1", optional = true }
 lru = { workspace = true, optional = true }
@@ -102,7 +102,7 @@ xxhash-rust = { version = "0.8", optional = true, features = ["xxh64"] }
 # only for test/bench builds, never for the release library.
 routectl-core = { workspace = true, features = ["test-utils"] }
 wiremock.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync"] }
 pretty_assertions = "1"
 insta.workspace = true
 tracing-test = "0.2"

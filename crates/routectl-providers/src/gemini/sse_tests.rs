@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::gemini::types::{
-    Candidate, GenerateContentResponse, ResponseContent, ResponseFunctionCall, ResponsePart,
-    UsageMetadata,
+    Candidate, GenerateContentResponse, PromptFeedback, ResponseContent, ResponseFunctionCall,
+    ResponsePart, UsageMetadata,
 };
 use routectl_core::Role;
 use routectl_testkit::{CapturedEvent, capture_events};
@@ -54,6 +54,7 @@ fn event(
         usage_metadata: usage,
         model_version: Some("gemini-2.5-pro".into()),
         response_id: Some("resp-x".into()),
+        prompt_feedback: None,
     }
 }
 
@@ -504,8 +505,73 @@ fn empty_candidates_event_without_usage_emits_only_role() {
         usage_metadata: None,
         model_version: Some("gemini-2.5-pro".into()),
         response_id: Some("resp-x".into()),
+        prompt_feedback: None,
     };
     let chunks = state.parse_event(PID, ev).expect("parse ok");
     assert_eq!(chunks.len(), 1, "only the opening role chunk");
     assert!(chunks[0].choices[0].finish_reason.is_none());
+}
+
+#[test]
+fn candidate_content_filter_finish_reason_maps_terminal() {
+    let mut state = GeminiStreamState::default();
+    let chunks = state
+        .parse_event(PID, event(vec![], Some("PROHIBITED_CONTENT"), None))
+        .expect("parse ok");
+    let terminal = chunks
+        .iter()
+        .find(|c| c.choices[0].finish_reason.is_some())
+        .expect("a terminal chunk");
+    assert_eq!(
+        terminal.choices[0].finish_reason.as_deref(),
+        Some("content_filter")
+    );
+}
+
+#[test]
+fn prompt_block_event_emits_single_content_filter_terminal_and_no_eos_warn() {
+    let events = capture_events(|| {
+        let mut state = GeminiStreamState::default();
+        let ev = GenerateContentResponse {
+            candidates: vec![],
+            usage_metadata: Some(UsageMetadata {
+                prompt_token_count: 3,
+                total_token_count: 3,
+                ..Default::default()
+            }),
+            model_version: Some("gemini-2.5-pro".into()),
+            response_id: Some("resp-x".into()),
+            prompt_feedback: Some(PromptFeedback {
+                block_reason: Some("SAFETY".into()),
+            }),
+        };
+        let chunks = state.parse_event(PID, ev).expect("parse ok");
+
+        // role chunk + one terminal content_filter chunk.
+        let terminals: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.choices[0].finish_reason.is_some())
+            .collect();
+        assert_eq!(terminals.len(), 1, "exactly one terminal chunk");
+        assert_eq!(
+            terminals[0].choices[0].finish_reason.as_deref(),
+            Some("content_filter")
+        );
+        // A prompt block is proven terminality -- on_eos must stay silent.
+        assert!(
+            state.saw_finish_reason,
+            "prompt block sets saw_finish_reason"
+        );
+        state.on_eos(PID);
+    });
+    assert!(
+        events.iter().all(|e| e.level != Level::WARN),
+        "a prompt-blocked stream must not warn at EOS; got {events:?}"
+    );
+    let infos: Vec<_> = events.iter().filter(|e| e.level == Level::INFO).collect();
+    assert_eq!(infos.len(), 1, "exactly one INFO; got {infos:?}");
+    assert_eq!(infos[0].field("provider"), Some(PID));
+    assert_eq!(infos[0].field("surface"), Some("stream"));
+    assert_eq!(infos[0].field("origin"), Some("prompt_feedback"));
+    assert_eq!(infos[0].field("block_reason"), Some("SAFETY"));
 }

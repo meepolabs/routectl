@@ -211,6 +211,22 @@ pub struct GenerateContentResponse {
     /// Unique response id. Used as the canonical `ChatResponse.id`.
     #[serde(default)]
     pub(crate) response_id: Option<String>,
+
+    /// Prompt-level feedback. When Gemini blocks the entire prompt before
+    /// producing any candidate, it returns on the HTTP-200 surface with no
+    /// candidates and a `blockReason` set here.
+    #[serde(default)]
+    pub(crate) prompt_feedback: Option<PromptFeedback>,
+}
+
+/// Prompt-level feedback carrying a policy `blockReason` when the prompt
+/// itself was blocked (empty `candidates`). Deserialize-only; only
+/// `block_reason` is consumed (safetyRatings / block message are not).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptFeedback {
+    #[serde(default)]
+    pub(crate) block_reason: Option<String>,
 }
 
 /// One candidate in the response. Non-streaming responses have one.

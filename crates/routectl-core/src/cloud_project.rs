@@ -30,6 +30,17 @@ pub trait CloudProjectCache: Send + Sync + std::fmt::Debug {
     /// disk write failure from a persistent backend). In-memory
     /// implementations always return `Ok(())`.
     async fn put(&self, project_id: String) -> Result<()>;
+
+    /// Compare-and-clear the cached project id. Clears only when the
+    /// current value equals `expected`; returns `Ok(true)` when it
+    /// matched and was cleared, `Ok(false)` when it did not match and the
+    /// value was retained.
+    ///
+    /// The equality guard is what makes this race-safe: a late failure
+    /// carrying a stale id must not wipe a fresh id that a concurrent
+    /// request already re-resolved. Blind invalidation cannot express
+    /// that.
+    async fn clear_if_matches(&self, expected: &str) -> Result<bool>;
 }
 
 /// In-memory `CloudProjectCache`. Suitable for tests and for providers
@@ -89,6 +100,19 @@ impl CloudProjectCache for InMemoryProjectCache {
             .expect("InMemoryProjectCache lock poisoned") = Some(project_id);
         Ok(())
     }
+
+    async fn clear_if_matches(&self, expected: &str) -> Result<bool> {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("InMemoryProjectCache lock poisoned");
+        if guard.as_deref() == Some(expected) {
+            *guard = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +168,29 @@ mod tests {
         cache.put("projects/shared".into()).await.unwrap();
         // Assert
         assert_eq!(cache2.get().await.as_deref(), Some("projects/shared"));
+    }
+
+    #[tokio::test]
+    async fn clear_if_matches_clears_on_match() {
+        // Arrange
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        cache.put("X".into()).await.unwrap();
+        // Act
+        let cleared = cache.clear_if_matches("X").await.unwrap();
+        // Assert
+        assert!(cleared);
+        assert!(cache.get().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_if_matches_retains_on_mismatch() {
+        // Arrange
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        cache.put("X".into()).await.unwrap();
+        // Act
+        let cleared = cache.clear_if_matches("Y").await.unwrap();
+        // Assert
+        assert!(!cleared);
+        assert_eq!(cache.get().await.as_deref(), Some("X"));
     }
 }
