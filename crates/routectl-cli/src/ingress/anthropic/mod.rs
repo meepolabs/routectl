@@ -164,8 +164,8 @@ mod stream;
 use parse::translate_request;
 use render::render_messages_response;
 use stream::{
-    anthropic_state_mut, close_open_block, emit_message_delta, emit_message_start,
-    emit_message_stop, flush_tool_blocks, new_state, render_chunk_internal,
+    anthropic_state_mut, close_lingering_opaque_blocks, close_open_block, emit_message_delta,
+    emit_message_start, emit_message_stop, flush_tool_blocks, new_state, render_chunk_internal,
     render_error_eos_internal,
 };
 
@@ -319,16 +319,7 @@ impl IngressAdapter for AnthropicIngress {
             }
             flush_tool_blocks(s, &mut events);
             close_open_block(s, &mut events);
-            // Close any opaque blocks left open (the upstream stream ended
-            // before their ContentBlockStop arrived). Emit one
-            // content_block_stop per lingering entry so the wire never has
-            // an unclosed block before message_stop.
-            for (_, ingress_index) in std::mem::take(&mut s.opaque_index_map) {
-                events.push(SseEvent::named(
-                    "content_block_stop",
-                    format!("{{\"type\":\"content_block_stop\",\"index\":{ingress_index}}}"),
-                ));
-            }
+            close_lingering_opaque_blocks(s, &mut events);
             // Flush a deferred finish_reason (no usage chunk arrived).
             if let Some(fr) = s.pending_finish_reason.take() {
                 let matched = s.pending_matched_stop_sequence.take();

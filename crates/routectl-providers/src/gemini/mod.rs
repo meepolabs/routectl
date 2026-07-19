@@ -523,6 +523,7 @@ impl GeminiProvider {
                     }
                 }
             }
+            state.on_eos(&provider_id);
         };
 
         routectl_core::wrap_stream_with_summary(

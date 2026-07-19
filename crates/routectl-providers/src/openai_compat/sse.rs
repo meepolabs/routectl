@@ -79,11 +79,21 @@ pub fn parse_event(
 /// inside a 200-OK SSE stream by some upstreams (Azure content filter,
 /// OpenRouter overload, NIM auth-wall). Returns `Some(Error::Upstream)`
 /// when the envelope is present so the caller can short-circuit instead
-/// of treating it as a malformed ChatChunk. Status defaults to 502 when
-/// `error.code` is absent or non-numeric; message defaults to a generic
-/// string. Shared by `parse_event` and `process`.
+/// of treating it as a malformed ChatChunk. A `null` or empty-object
+/// `error` field is not an envelope and returns `None`. Status defaults
+/// to 502 when `error.code` is absent or non-numeric; message defaults
+/// to a generic string. Shared by `parse_event` and `process`.
 fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
-    val.get("error")?;
+    let err = val.get("error")?;
+    // Some gateways (LiteLLM, some vLLM/OpenRouter proxies) attach a
+    // top-level `error: null` -- or an empty `error: {}` -- to every
+    // normal chunk. Those are not error envelopes; treating them as one
+    // would truncate a healthy stream with a spurious 502. Any other
+    // shape (populated object, string, number) stays terminal as before.
+    if err.is_null() || err.as_object().is_some_and(serde_json::Map::is_empty) {
+        tracing::debug!(provider = %id, "skipping null/empty error field in stream chunk");
+        return None;
+    }
     let status = val
         .pointer("/error/code")
         .and_then(serde_json::Value::as_u64)
@@ -1123,6 +1133,125 @@ mod tests {
                 );
             }
             other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A normal content chunk carrying a top-level `error: null` (emitted
+    /// on every chunk by LiteLLM and some vLLM/OpenRouter proxies) must
+    /// pass through as ordinary content, NOT be misclassified as a 502
+    /// that truncates the healthy stream.
+    #[test]
+    fn null_error_field_passes_through_as_content() {
+        let raw = json!({
+            "id": "chunk-1",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "hello"},
+                "finish_reason": null
+            }],
+            "error": null
+        })
+        .to_string();
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+            .expect("null error must not abort the stream")
+            .expect("null error chunk must yield content");
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
+    }
+
+    /// An empty `error: {}` object is likewise not a real error envelope
+    /// and must pass through as normal content.
+    #[test]
+    fn empty_error_object_passes_through_as_content() {
+        let raw = json!({
+            "id": "chunk-1",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "world"},
+                "finish_reason": null
+            }],
+            "error": {}
+        })
+        .to_string();
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+            .expect("empty error object must not abort the stream")
+            .expect("empty error chunk must yield content");
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("world"));
+    }
+
+    /// A populated error object still surfaces as `Error::Upstream` with
+    /// the mapped status -- the loosening must not let a real structured
+    /// error through (the router's pre-first-chunk fallback depends on it).
+    #[test]
+    fn populated_error_object_stays_terminal() {
+        let raw = json!({
+            "error": {"code": 429, "message": "rate limited"}
+        })
+        .to_string();
+        let err = parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 429);
+                assert!(body.contains("rate limited"), "got: {body}");
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A non-object error (string here) is not null and not an empty
+    /// object, so it stays terminal exactly as before -- defaulting to a
+    /// 502 with the generic message.
+    #[test]
+    fn string_error_field_stays_terminal() {
+        let raw = json!({"error": "something went wrong"}).to_string();
+        let err = parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        match err {
+            Error::Upstream { status, .. } => assert_eq!(status, 502),
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// The null/empty skip emits exactly one DEBUG event carrying no
+    /// payload bytes, so a new gateway shape stays visible to operators
+    /// without leaking chunk content.
+    #[test]
+    fn null_error_skip_emits_one_clean_debug_log() {
+        let raw = json!({
+            "id": "chunk-1",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "secret token text"},
+                "finish_reason": null
+            }],
+            "error": null
+        })
+        .to_string();
+        let events = routectl_testkit::capture_events(|| {
+            let _ = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0);
+        });
+        let debug: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::DEBUG)
+            .filter(|e| e.message.contains("error field"))
+            .collect();
+        assert_eq!(
+            debug.len(),
+            1,
+            "expected exactly one skip debug log, got: {events:?}"
+        );
+        for e in &events {
+            assert!(
+                !e.message.contains("secret token text"),
+                "skip log must not carry payload bytes: {e:?}"
+            );
+            for (_, v) in &e.fields {
+                assert!(
+                    !v.contains("secret token text"),
+                    "skip log field must not carry payload bytes: {e:?}"
+                );
+            }
         }
     }
 }

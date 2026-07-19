@@ -241,10 +241,18 @@ fn emit_reasoning_detail(
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
 ) {
-    // Only Responses-shape reasoning participates in the streamed
-    // reasoning lifecycle; a foreign-format detail still rides into the
-    // completed body via the accumulator (slice 2 filters it there).
+    // Every detail rides into the completed body via the accumulator
+    // (slice 2 filters to the Responses format when building it).
     state.reasoning_accumulator.push(d.clone());
+
+    // Only Responses-format reasoning participates in the streamed
+    // lifecycle. A foreign-format detail (normal when the turn went to a
+    // non-Responses upstream) must NOT open an item or emit a delta:
+    // gating only the delta would still leak an `output_index` gap via
+    // `ensure_reasoning_item` and absent it from the completed body.
+    if d.format.as_deref() != Some(OPENAI_RESPONSES_FORMAT) {
+        return;
+    }
 
     let output_index = ensure_reasoning_item(d.id.clone(), state, events);
     let event_name = match d.kind {
@@ -258,19 +266,47 @@ fn emit_reasoning_detail(
     let Some(text) = d.payload.get("text").and_then(Value::as_str) else {
         return;
     };
+    // Advance the per-item part counter only for a detail that actually
+    // streams, so the streamed part indices match the completed body's
+    // `summary[]` / `content[]` positions one-for-one.
     let data = match d.kind {
         ReasoningDetailKind::Summary => json!({
             "output_index": output_index,
-            "summary_index": 0,
+            "summary_index": next_reasoning_summary_index(state),
             "delta": text,
         }),
         _ => json!({
             "output_index": output_index,
-            "content_index": 0,
+            "content_index": next_reasoning_content_index(state),
             "delta": text,
         }),
     };
     push_event(state, events, event_name, data);
+}
+
+/// Take the open reasoning item's `summary_index` and advance it. The
+/// open item is always `Reasoning` here (set by `ensure_reasoning_item`);
+/// falls back to 0 defensively.
+const fn next_reasoning_summary_index(state: &mut ResponsesStreamState) -> u64 {
+    if let Some(OpenOutputItem::Reasoning { summary_index, .. }) = &mut state.open {
+        let idx = *summary_index;
+        *summary_index += 1;
+        idx
+    } else {
+        0
+    }
+}
+
+/// Take the open reasoning item's `content_index` and advance it. See
+/// `next_reasoning_summary_index`.
+const fn next_reasoning_content_index(state: &mut ResponsesStreamState) -> u64 {
+    if let Some(OpenOutputItem::Reasoning { content_index, .. }) = &mut state.open {
+        let idx = *content_index;
+        *content_index += 1;
+        idx
+    } else {
+        0
+    }
 }
 
 /// Open a `reasoning` item if one is not already open, closing any
@@ -284,6 +320,7 @@ fn ensure_reasoning_item(
     if let Some(OpenOutputItem::Reasoning {
         output_index,
         detail_id: open_id,
+        ..
     }) = &state.open
         && open_id == &detail_id
     {
@@ -294,6 +331,8 @@ fn ensure_reasoning_item(
     state.open = Some(OpenOutputItem::Reasoning {
         output_index,
         detail_id: detail_id.clone(),
+        summary_index: 0,
+        content_index: 0,
     });
     let mut item = Map::new();
     item.insert("type".into(), Value::String("reasoning".into()));
@@ -448,6 +487,7 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
         Some(OpenOutputItem::Reasoning {
             output_index,
             detail_id,
+            ..
         }) => {
             push_event(
                 state,
@@ -554,7 +594,17 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     if let (Some(obj), Some(details)) = (body.as_object_mut(), incomplete_details) {
         obj.insert("incomplete_details".into(), details);
     }
-    push_response_event(state, &mut events, "response.completed", body);
+    // A "failed" status is delivered via the distinct `response.failed`
+    // event -- real Responses SDKs and the egress reader key off the event
+    // NAME, so `response.completed(status=failed)` is non-conformant. The
+    // accumulated usage and partial output already sit in `body`; only the
+    // event name diverges (branch around the shared skeleton, not inside).
+    let event_name = if status == "failed" {
+        "response.failed"
+    } else {
+        "response.completed"
+    };
+    push_response_event(state, &mut events, event_name, body);
     state.finished = true;
     events
 }

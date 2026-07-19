@@ -114,6 +114,26 @@ pub struct SseState {
     /// `Some` while an `OpenBlockKind::Unknown` block is open; cleared
     /// on `content_block_stop`.
     pub(super) current_capture: Option<OpaqueCapture>,
+    /// Per-STREAM running totals for bounded opaque-capture, summed
+    /// across every unknown block (unlike `current_capture`, these
+    /// never reset per block). `pending_opaque` only drains onto an
+    /// emitted canonical chunk, so a stream of only unknown blocks
+    /// buffers unbounded without a per-stream ceiling. Counts only the
+    /// start + delta captures that were actually pushed.
+    pub(super) opaque_bytes_total: usize,
+    pub(super) opaque_events_total: usize,
+    /// Sticky: set once either per-stream opaque cap is crossed. Mirrors
+    /// the per-block `OpaqueCapture::degraded` idiom at stream scope.
+    /// Once set, `open_unknown_block` / `capture_unknown_delta`
+    /// short-circuit to sink-drain -- no further opaque bytes buffer.
+    /// Never reset within a response.
+    pub(super) opaque_stream_degraded: bool,
+    /// True once ANY chunk has been emitted downstream for this
+    /// response. Recorded so the per-stream degrade WARN can report
+    /// whether the trip landed before or after the first client-visible
+    /// chunk (pre-first-chunk vs post-first-chunk fidelity loss); the
+    /// degrade-to-drop behavior itself is identical either way.
+    pub(super) canonical_chunk_emitted: bool,
     /// Thinking blocks completed since the last tool_use block (or since
     /// the start of the turn). Accumulates across `content_block_stop`
     /// events for Thinking blocks; CLEARED at each `ContentBlockStart::ToolUse`
@@ -182,6 +202,9 @@ impl SseState {
         let event: SseEvent = serde_json::from_str(data)
             .map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
         let emitted = self.dispatch_event(provider_id, event)?;
+        if emitted.is_some() {
+            self.canonical_chunk_emitted = true;
+        }
         Ok(emitted.map(|mut chunk| {
             if !self.pending_opaque.is_empty() {
                 chunk.opaque_events = std::mem::take(&mut self.pending_opaque);

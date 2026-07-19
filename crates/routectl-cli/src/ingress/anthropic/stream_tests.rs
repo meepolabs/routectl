@@ -970,6 +970,146 @@ fn render_eos_closes_lingering_opaque_block_before_message_stop() {
     assert_eq!(payload["type"], "content_block_stop");
 }
 
+/// Terminal INLINE-usage chunk path with a lingering opaque block: a
+/// finish_reason and usage arrive on the same chunk while an opaque
+/// content_block_start has been replayed but never stopped. The
+/// terminal ordering must be EXACTLY
+/// content_block_stop -> message_delta -> message_stop, the opaque map
+/// drained (no unclosed block), and no post-stop events. Before the
+/// fix, this path emitted message_delta -> message_stop without
+/// closing the lingering opaque block, since the drain lived only in
+/// render_eos (which message_stop's `finished = true` no-ops).
+#[test]
+fn inline_usage_terminal_closes_lingering_opaque_block() {
+    use routectl_core::{ChunkChoice, ChunkDelta, OpaqueSseEvent, UsageDelta};
+    let mut s = fresh_state();
+    // Replay an opaque content_block_start with no matching stop.
+    let open = opaque_only_chunk(vec![OpaqueSseEvent::ContentBlockStart {
+        upstream_index: 3,
+        type_tag: "server_tool_use".into(),
+        raw_data: br#"{"type":"server_tool_use","id":"srv_01","name":"web_search","input":{}}"#
+            .to_vec(),
+    }]);
+    let _ = render_chunk_internal(open, &mut s).unwrap();
+    assert!(
+        !s.opaque_index_map.is_empty(),
+        "opaque block must be open before the terminal chunk"
+    );
+
+    // Terminal chunk: finish_reason + inline usage on the same chunk.
+    let closing = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(UsageDelta {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+            total_tokens: Some(15),
+            ..Default::default()
+        }),
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    };
+    let out = render_chunk_internal(closing, &mut s).unwrap();
+    let names: Vec<&str> = out.iter().filter_map(|e| e.event.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec!["content_block_stop", "message_delta", "message_stop"],
+        "inline-usage terminal path must close the lingering opaque block first; got {names:?}"
+    );
+    // The content_block_stop references the opaque block's ingress index (0).
+    let stop_payload: Value = serde_json::from_str(&out[0].data).unwrap();
+    assert_eq!(stop_payload["type"], "content_block_stop");
+    assert_eq!(stop_payload["index"], 0);
+    // Drained exactly once: no unclosed block remains.
+    assert!(
+        s.opaque_index_map.is_empty(),
+        "opaque map must be drained after the terminal chunk"
+    );
+}
+
+/// Terminal DEFERRED-usage chunk path with a lingering opaque block:
+/// the finish_reason buffers on one chunk and usage arrives on a later
+/// chunk, while an opaque content_block_start was replayed but never
+/// stopped. The buffered-finish chunk must NOT close the opaque block
+/// prematurely; the finalize (usage) chunk's ordering must be EXACTLY
+/// content_block_stop -> message_delta -> message_stop, drained once.
+#[test]
+fn deferred_usage_terminal_closes_lingering_opaque_block() {
+    use routectl_core::{ChunkChoice, ChunkDelta, OpaqueSseEvent, UsageDelta};
+    let mut s = fresh_state();
+    // Replay an opaque content_block_start with no matching stop.
+    let open = opaque_only_chunk(vec![OpaqueSseEvent::ContentBlockStart {
+        upstream_index: 3,
+        type_tag: "server_tool_use".into(),
+        raw_data: br#"{"type":"server_tool_use","id":"srv_01","name":"web_search","input":{}}"#
+            .to_vec(),
+    }]);
+    let _ = render_chunk_internal(open, &mut s).unwrap();
+
+    // finish_reason with no usage -> buffers; must not drain the opaque block yet.
+    let finish = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    };
+    let finish_out = render_chunk_internal(finish, &mut s).unwrap();
+    let finish_names: Vec<&str> = finish_out
+        .iter()
+        .filter_map(|e| e.event.as_deref())
+        .collect();
+    assert!(
+        finish_names.is_empty(),
+        "buffered finish must not drain the opaque block; got {finish_names:?}"
+    );
+    assert!(
+        !s.opaque_index_map.is_empty(),
+        "opaque block must still be open after a buffered finish_reason"
+    );
+
+    // Trailing usage-only chunk finalizes the stream.
+    let usage_chunk = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![],
+        usage: Some(UsageDelta {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: Some(150),
+            ..Default::default()
+        }),
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    };
+    let out = render_chunk_internal(usage_chunk, &mut s).unwrap();
+    let names: Vec<&str> = out.iter().filter_map(|e| e.event.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec!["content_block_stop", "message_delta", "message_stop"],
+        "deferred-usage finalize must close the lingering opaque block first; got {names:?}"
+    );
+    let stop_payload: Value = serde_json::from_str(&out[0].data).unwrap();
+    assert_eq!(stop_payload["type"], "content_block_stop");
+    assert_eq!(stop_payload["index"], 0);
+    assert!(
+        s.opaque_index_map.is_empty(),
+        "opaque map must be drained exactly once after the finalize chunk"
+    );
+}
+
 // -------- terminal-error event on upstream mid-stream failure --------
 
 /// Mid-stream upstream failure on the Anthropic ingress: the adapter

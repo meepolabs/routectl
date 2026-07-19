@@ -891,10 +891,22 @@ async fn config_set_valid_edit_hot_reloads() {
     )
     .expect("valid set must succeed");
 
-    // Assert: the watcher hot-reloads and the new alias surfaces.
+    // Assert: the watcher hot-reloads and the new alias surfaces. The edit
+    // above is the behavior under test, but its single atomic rename can race
+    // ahead of the asynchronously-armed inotify watch and be dropped with no
+    // fs-event re-delivery; re-issue the identical post-edit bytes on an
+    // interval (idempotent for the reload) until the alias surfaces.
+    let edited = std::fs::read(&config_path).expect("read edited config");
     assert!(
-        wait_for_alias(&base_url, "set-after", Duration::from_secs(3)).await,
-        "config set did not hot-reload the new alias within 3s"
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            &edited,
+            "set-after",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "config set did not hot-reload the new alias within {RELOAD_WAIT_CEILING:?}"
     );
 }
 
@@ -960,26 +972,31 @@ async fn retry_classes_cap_change_applies_after_reload() {
         "retry.classes.rate-limited.retry = 0 must dispatch exactly once"
     );
 
-    // Act: reload with the cap raised to 2.
-    write_atomic(
-        &config_path,
-        config_text_with_rate_limited_cap(&mock.uri(), 2).as_bytes(),
-    );
-
-    // Assert: poll a single client call at a time until it observes 2
-    // upstream hits -- proof the rebuilt router resolved the raised cap.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Act + Assert: reload with the cap raised to 2, then poll a single client
+    // call at a time until it observes 2 upstream hits -- proof the rebuilt
+    // router resolved the raised cap. The rewrite is re-issued on an interval
+    // (idempotent -- identical bytes always rebuild the same cap) because the
+    // single atomic rename can race ahead of the asynchronously-armed inotify
+    // watch and be dropped with no fs-event re-delivery.
+    let raised = config_text_with_rate_limited_cap(&mock.uri(), 2);
+    write_atomic(&config_path, raised.as_bytes());
+    let mut last_write = Instant::now();
+    let deadline = Instant::now() + RELOAD_WAIT_CEILING;
     let mut observed = before_reload;
     while Instant::now() < deadline {
         observed = same_provider_dispatch_count(&client, &base_url, &mock).await;
         if observed == 2 {
             break;
         }
+        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
+            write_atomic(&config_path, raised.as_bytes());
+            last_write = Instant::now();
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(
         observed, 2,
-        "raised retry.classes.rate-limited cap did not apply within 5s after reload"
+        "raised retry.classes.rate-limited cap did not apply within {RELOAD_WAIT_CEILING:?} after reload"
     );
 }
 
@@ -1480,8 +1497,29 @@ async fn wait_for_learned_negative(
 /// entry's `in_flight` slot to false, so a re-probe that was in flight at
 /// reload time can never latch across the swap (the reload cross-check for the
 /// unreached-admission fix).
+///
+/// Overlay isolation is load-bearing for the carry-over assertion:
+/// `carry_over_learned_from` CLEARS the learned registry whenever the catalog
+/// overlay revision changes across a reload. A reload re-reads the overlay from
+/// the process-global `XDG_CONFIG_HOME` path, while the test-only boot installs
+/// an empty overlay (revision 0). Pinning `XDG_CONFIG_HOME` at an isolated
+/// empty tree makes every reload resolve the same missing-file overlay
+/// (revision 0 as well), so boot and reload share a revision and the flip
+/// carries the registry over rather than invalidating it. Without the pin, a
+/// sibling test toggling `XDG_CONFIG_HOME` mid-run flips the resolved overlay
+/// revision under this test and the carry-over is silently cleared.
+/// `serial_test::serial` is non-negotiable: this test mutates the
+/// process-global `XDG_CONFIG_HOME`, so a sibling test reading or writing it in
+/// parallel would see -- or stomp -- the pinned value.
 #[tokio::test]
+#[serial_test::serial]
 async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
+    // Pin XDG at an isolated empty tree so every reload's overlay read resolves
+    // to the same revision-0 (missing) overlay the boot installed -- otherwise
+    // an overlay-revision change across the flip clears the learned registry.
+    let xdg = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+
     // Arrange: A rejects the probed feature; B is the clean tail.
     let a = probe_upstream_reject().await;
     let b = probe_upstream_ok().await;
@@ -1489,27 +1527,6 @@ async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
     let (base_url, dir) = spawn_server_with_config_text(&enabled_cfg).await;
     let config_path = dir.path().join("config.toml");
     let client = reqwest::Client::new();
-
-    // Warm-up reload BEFORE learning: the test-only `serve_on_listener` boots
-    // with an empty catalog overlay, but the reload path computes a real one
-    // from disk, so the first reload's overlay revision differs and
-    // `carry_over_learned_from` clears the registry. Doing an initial reload
-    // now moves the live router onto the reload-path overlay while the registry
-    // is still empty (a harmless clear), so the kill-switch flip below carries
-    // over equal catalog/overlay revisions -- the same steady state production
-    // boot (which loads the real overlay) sees on every reload.
-    let armed_cfg = kill_switch_config(&a.uri(), &b.uri(), true, Some("armed"));
-    assert!(
-        poll_alias_with_restimulus(
-            &base_url,
-            &config_path,
-            armed_cfg.as_bytes(),
-            "armed",
-            RELOAD_WAIT_CEILING,
-        )
-        .await,
-        "the warm-up reload did not go live within {RELOAD_WAIT_CEILING:?}",
-    );
 
     // Observe enabled-state behavior FIRST: a self-identifying negative for A
     // is learned (kill switch ON), established before the flip.

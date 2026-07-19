@@ -40,6 +40,35 @@ pub(super) const MAX_OPAQUE_DELTAS_PER_BLOCK: usize = 10_000;
 /// bounded against an adversarial upstream.
 pub(super) const MAX_OPAQUE_BYTES_PER_BLOCK: usize = 256 * 1024;
 
+/// Per-stream byte cap on total opaque-capture across ALL unknown
+/// blocks in one streaming response. `SseState::pending_opaque` only
+/// drains onto the next EMITTED canonical chunk, and a stream of only
+/// unknown blocks emits none until `MessageStop`, so without this
+/// ceiling the buffer grows with `block_count * MAX_OPAQUE_BYTES_PER_BLOCK`
+/// unbounded. 4 MB is 16x the per-block cap: generous for any
+/// legitimate multi-block server-tool response while bounding the
+/// heap held by buffered `raw_data` / `raw_delta` against an
+/// adversarial upstream. Once crossed the whole stream degrades to
+/// sink-drain (see `SseState::open_unknown_block`).
+pub(super) const MAX_TOTAL_OPAQUE_BYTES_PER_STREAM: usize = 4 * 1024 * 1024;
+
+/// Per-stream cap on the NUMBER of captured opaque events (start +
+/// delta sentinels) across all unknown blocks in one response. The
+/// byte cap alone does not bound the many-tiny-blocks / many-tiny-deltas
+/// case: millions of ~30-byte entries stay well under 4 MB of payload
+/// yet blow the `Vec<OpaqueSseEvent>` entry overhead (each enum entry
+/// is tens of bytes of stack plus its heap). 40_000 is 4x the per-block
+/// delta cap (`MAX_OPAQUE_DELTAS_PER_BLOCK`) so a single legitimate
+/// block that saturates its own delta cap -- plus several more normal
+/// blocks -- never trips this per-stream backstop; a lower value (e.g.
+/// below the per-block cap) would degrade a single lawful block. Only
+/// start + delta captures are counted here; each block also emits one
+/// uncounted stop sentinel, so the worst-case buffered entry count is
+/// bounded by ~2x this value before the next drain. All three opaque
+/// caps migrate to config together if an operator ever needs them
+/// tunable; there is no in-stream knob today.
+pub(super) const MAX_OPAQUE_EVENTS_PER_STREAM: usize = 40_000;
+
 /// Per-block running totals for the bounded opaque-capture state.
 /// One instance lives on `SseState::current_capture` while an
 /// `OpenBlockKind::Unknown` block is open; cleared at
@@ -52,6 +81,11 @@ pub(super) struct OpaqueCapture {
     pub(super) delta_count: usize,
     /// Set once a cap is exceeded; subsequent events skip capture.
     pub(super) degraded: bool,
+    /// True once the `ContentBlockStart` sentinel has been pushed. Gates
+    /// the `ContentBlockStop` push so a block whose start was dropped
+    /// (e.g. an oversized start payload that trips the byte cap before
+    /// anything is buffered) never emits a start-less orphan stop.
+    pub(super) start_emitted: bool,
 }
 
 impl OpaqueCapture {
@@ -62,6 +96,7 @@ impl OpaqueCapture {
             bytes_so_far: 0,
             delta_count: 0,
             degraded: false,
+            start_emitted: false,
         }
     }
 
@@ -98,6 +133,7 @@ impl OpaqueCapture {
             type_tag: self.type_tag.clone(),
             raw_data,
         });
+        self.start_emitted = true;
     }
 
     /// Capture one `content_block_delta` payload. `value` is the inner
@@ -152,14 +188,16 @@ impl OpaqueCapture {
     }
 
     /// Capture the `content_block_stop` sentinel and emit the INFO
-    /// summary. The stop sentinel is appended unconditionally -- even
-    /// when the block degraded -- so the captured sequence stays
-    /// well-paired: a start that was emitted is always matched by a
-    /// stop. Degrading stops capturing further DELTAS (see
-    /// `record_delta`), not the stop boundary, so the consumer sees
-    /// (start, ..., truncated deltas, stop) rather than an unclosed
-    /// block. The INFO summary fires regardless of degraded state so
-    /// operators see a per-block rollup.
+    /// summary. The stop sentinel is appended only when the matching
+    /// `ContentBlockStart` was actually pushed (`start_emitted`) -- a
+    /// block whose start was dropped (e.g. an oversized start payload
+    /// that tripped the byte cap before anything buffered) must NOT
+    /// emit a start-less orphan stop. A block that DID emit its start
+    /// always emits its stop, even when it later degraded: degrading
+    /// stops capturing further DELTAS (see `record_delta`), not the
+    /// stop boundary, so the consumer sees (start, ..., truncated
+    /// deltas, stop) rather than an unclosed block. The INFO summary
+    /// fires regardless so operators see a per-block rollup.
     pub(super) fn record_stop(&mut self, provider: &str, out: &mut Vec<OpaqueSseEvent>) {
         tracing::info!(
             provider = %provider,
@@ -167,11 +205,14 @@ impl OpaqueCapture {
             block_type = %self.type_tag,
             captured_bytes = self.bytes_so_far,
             delta_count = self.delta_count,
+            start_emitted = self.start_emitted,
             "anthropic SSE: opaque block closed",
         );
-        out.push(OpaqueSseEvent::ContentBlockStop {
-            upstream_index: self.upstream_index,
-        });
+        if self.start_emitted {
+            out.push(OpaqueSseEvent::ContentBlockStop {
+                upstream_index: self.upstream_index,
+            });
+        }
     }
 
     const fn would_overflow_bytes(&self, add: usize) -> bool {
@@ -463,6 +504,397 @@ mod tests {
         assert!(
             !state.pending_opaque.is_empty(),
             "some deltas captured before the cap kicked in",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Orphan ContentBlockStop guard (start_emitted)
+    // -----------------------------------------------------------------
+
+    /// A `content_block_start` payload that alone exceeds the per-block
+    /// byte cap degrades the block immediately: no `ContentBlockStart`
+    /// is captured. The matching `content_block_stop` must then NOT emit
+    /// an orphan `ContentBlockStop` -- the captured sequence for that
+    /// block is empty, not `[ContentBlockStop]` (which would be a
+    /// start-less stop the client never saw a start for).
+    #[test]
+    fn oversized_start_emits_no_orphan_stop() {
+        // Arrange -- a start payload comfortably past the 256 KB cap.
+        let mut state = SseState::default();
+        let big = "x".repeat(300 * 1024);
+        let start = format!(
+            r#"{{"type":"content_block_start","index":0,"content_block":{{"type":"server_tool_use","blob":"{big}"}}}}"#,
+        );
+
+        // Act -- open (degrades on the oversized start), then close.
+        let _ = state.parse_event("test", &start).unwrap();
+        let _ = state
+            .parse_event("test", r#"{"type":"content_block_stop","index":0}"#)
+            .unwrap();
+
+        // Drive a message_delta to flush any buffered opaque events.
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta":{"stop_reason":"end_turn","stop_sequence":null},
+                    "usage":{"output_tokens":1}
+                }"#,
+            )
+            .unwrap()
+            .expect("message_delta emits a chunk");
+
+        // Assert -- no orphan stop; the whole block was dropped from
+        // capture because its start never rode out.
+        assert!(
+            chunk.opaque_events.is_empty(),
+            "oversized start must not leave an orphan stop; got: {:?}",
+            chunk.opaque_events,
+        );
+        assert!(
+            state.pending_opaque.is_empty(),
+            "no opaque events buffered for the dropped block",
+        );
+    }
+
+    /// The inverse of the orphan-stop guard: a block whose start WAS
+    /// emitted (within the cap) must still emit its stop so the pair
+    /// stays well-formed.
+    #[test]
+    fn emitted_start_still_emits_its_stop() {
+        // Arrange
+        let mut state = SseState::default();
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"content_block_start","index":0,
+                    "content_block":{"type":"server_tool_use","id":"x"}
+                }"#,
+            )
+            .unwrap();
+        let _ = state
+            .parse_event("test", r#"{"type":"content_block_stop","index":0}"#)
+            .unwrap();
+
+        // Act -- flush.
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta":{"stop_reason":"end_turn","stop_sequence":null},
+                    "usage":{"output_tokens":1}
+                }"#,
+            )
+            .unwrap()
+            .expect("message_delta emits a chunk");
+
+        // Assert -- start + stop, well paired.
+        assert_eq!(chunk.opaque_events.len(), 2, "start + stop");
+        assert!(matches!(
+            &chunk.opaque_events[0],
+            OpaqueSseEvent::ContentBlockStart {
+                upstream_index: 0,
+                ..
+            },
+        ));
+        assert!(matches!(
+            &chunk.opaque_events[1],
+            OpaqueSseEvent::ContentBlockStop { upstream_index: 0 },
+        ));
+    }
+
+    // -----------------------------------------------------------------
+    // Per-stream opaque memory bound (degrade-to-drop)
+    // -----------------------------------------------------------------
+
+    /// Upstream `index` carried by any opaque event.
+    fn opaque_index(ev: &OpaqueSseEvent) -> u32 {
+        match ev {
+            OpaqueSseEvent::ContentBlockStart { upstream_index, .. }
+            | OpaqueSseEvent::ContentBlockDelta { upstream_index, .. }
+            | OpaqueSseEvent::ContentBlockStop { upstream_index } => *upstream_index,
+            _ => u32::MAX,
+        }
+    }
+
+    /// Drive a `message_delta` to flush `pending_opaque` onto a chunk.
+    fn flush(state: &mut SseState) -> routectl_core::ChatChunk {
+        state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta":{"stop_reason":"end_turn","stop_sequence":null},
+                    "usage":{"output_tokens":1}
+                }"#,
+            )
+            .unwrap()
+            .expect("message_delta flushes a chunk")
+    }
+
+    /// Open unknown blocks and feed each a run of `citations_delta`
+    /// deltas whose `blob` field is `blob_len` bytes, advancing to the
+    /// next block whenever the current block degrades per-block, until
+    /// the PER-STREAM cap trips. `blob_len` of a few KB trips the byte
+    /// cap in a handful of blocks; `blob_len` of 0 keeps each delta tiny
+    /// so the entry-count cap trips first. Returns the index of the
+    /// block open when the stream degraded. Uses only `unwrap`, so any
+    /// `Err` from `parse_event` would panic the test -- the trip must
+    /// never surface as an error.
+    fn trip_stream(state: &mut SseState, blob_len: usize) -> u32 {
+        let blob = "x".repeat(blob_len);
+        let mut idx = 0u32;
+        loop {
+            let start = format!(
+                r#"{{"type":"content_block_start","index":{idx},"content_block":{{"type":"server_tool_use"}}}}"#,
+            );
+            let _ = state.parse_event("test", &start).unwrap();
+            for _ in 0..10_001 {
+                if state.opaque_stream_degraded {
+                    break;
+                }
+                if state.current_capture.as_ref().is_none_or(|c| c.degraded) {
+                    break;
+                }
+                let delta = format!(
+                    r#"{{"type":"content_block_delta","index":{idx},"delta":{{"type":"citations_delta","blob":"{blob}"}}}}"#,
+                );
+                let _ = state.parse_event("test", &delta).unwrap();
+            }
+            let stop = format!(r#"{{"type":"content_block_stop","index":{idx}}}"#);
+            let _ = state.parse_event("test", &stop).unwrap();
+            if state.opaque_stream_degraded {
+                return idx;
+            }
+            idx += 1;
+            assert!(idx < 200, "per-stream cap must trip within 200 blocks");
+        }
+    }
+
+    /// Crossing the per-stream BYTE cap before any canonical chunk has
+    /// been emitted trips the sticky degrade flag, never aborts (all
+    /// events parse Ok), and the stream keeps flowing afterward.
+    #[test]
+    fn stream_byte_cap_trips_degrade_never_aborts() {
+        // Arrange + Act
+        let mut state = SseState::default();
+        assert!(!state.canonical_chunk_emitted, "no canonical chunk yet");
+        trip_stream(&mut state, 4096);
+
+        // Assert -- degraded on bytes, pre-canonical.
+        assert!(state.opaque_stream_degraded, "stream must be degraded");
+        assert!(
+            state.opaque_bytes_total > super::MAX_TOTAL_OPAQUE_BYTES_PER_STREAM,
+            "byte cap crossed, got {}",
+            state.opaque_bytes_total,
+        );
+        assert!(
+            !state.canonical_chunk_emitted,
+            "trip landed before any canonical chunk",
+        );
+
+        // The stream continues cleanly past the trip: a normal
+        // message_delta still emits its closing chunk.
+        let chunk = flush(&mut state);
+        assert_eq!(
+            chunk.choices[0].finish_reason.as_deref(),
+            Some("stop"),
+            "stream continues to its normal terminal chunk after the trip",
+        );
+    }
+
+    /// The many-tiny-deltas case blows the ENTRY count, not the byte
+    /// budget: with tiny deltas the per-stream event cap trips while
+    /// total bytes stay under the byte cap.
+    #[test]
+    fn stream_event_cap_trips_on_entry_count() {
+        // Arrange + Act -- tiny deltas (empty blob).
+        let mut state = SseState::default();
+        trip_stream(&mut state, 0);
+
+        // Assert -- degraded via the event cap, not the byte cap.
+        assert!(state.opaque_stream_degraded, "stream must be degraded");
+        assert!(
+            state.opaque_events_total > super::MAX_OPAQUE_EVENTS_PER_STREAM,
+            "event cap crossed, got {}",
+            state.opaque_events_total,
+        );
+        assert!(
+            state.opaque_bytes_total <= super::MAX_TOTAL_OPAQUE_BYTES_PER_STREAM,
+            "byte cap must NOT be the trip cause here, got {}",
+            state.opaque_bytes_total,
+        );
+    }
+
+    /// Pairing symmetry across the trip boundary: a block opened BEFORE
+    /// the trip keeps both its start and stop; a block opened AFTER the
+    /// trip emits neither.
+    #[test]
+    fn pairing_symmetry_across_trip_boundary() {
+        // Arrange -- trip the stream; blocks 0..N are pre/at-trip. The
+        // returned index is the block open when the cap tripped: its
+        // start was buffered pre-trip and a later delta of the SAME
+        // block crossed the cap -- the subtle boundary case.
+        let mut state = SseState::default();
+        let trip_idx = trip_stream(&mut state, 4096);
+        assert!(state.opaque_stream_degraded);
+        assert!(trip_idx > 0, "trip should span several blocks");
+
+        // Act -- open a clearly post-trip block at a high index.
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"content_block_start","index":900,
+                    "content_block":{"type":"server_tool_use"}
+                }"#,
+            )
+            .unwrap();
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"content_block_delta","index":900,
+                    "delta":{"type":"citations_delta"}
+                }"#,
+            )
+            .unwrap();
+        let _ = state
+            .parse_event("test", r#"{"type":"content_block_stop","index":900}"#)
+            .unwrap();
+
+        // Flush every buffered opaque event onto one chunk.
+        let chunk = flush(&mut state);
+
+        // Assert -- post-trip block 900 emits neither start nor stop.
+        assert!(
+            !chunk.opaque_events.iter().any(|e| opaque_index(e) == 900),
+            "post-trip block must emit nothing (no start, no stop)",
+        );
+        // Pre-trip block 0 keeps a well-formed start/stop pair.
+        assert!(
+            chunk.opaque_events.iter().any(|e| matches!(
+                e,
+                OpaqueSseEvent::ContentBlockStart {
+                    upstream_index: 0,
+                    ..
+                },
+            )),
+            "pre-trip block start must ride out",
+        );
+        assert!(
+            chunk
+                .opaque_events
+                .iter()
+                .any(|e| matches!(e, OpaqueSseEvent::ContentBlockStop { upstream_index: 0 },)),
+            "pre-trip block stop must ride out to pair its start",
+        );
+        // The BOUNDARY block -- open when the cap tripped mid-delta --
+        // must still emit BOTH its start (buffered pre-trip) and its
+        // stop (record_stop runs because start_emitted is set). The
+        // carried-risk case: a trip during a block's deltas must not
+        // orphan that block's start.
+        assert!(
+            chunk.opaque_events.iter().any(|e| matches!(
+                e,
+                OpaqueSseEvent::ContentBlockStart { upstream_index, .. } if *upstream_index == trip_idx
+            )),
+            "boundary block start (buffered pre-trip) must ride out",
+        );
+        assert!(
+            chunk.opaque_events.iter().any(|e| matches!(
+                e,
+                OpaqueSseEvent::ContentBlockStop { upstream_index } if *upstream_index == trip_idx
+            )),
+            "boundary block stop must ride out to pair its pre-trip start",
+        );
+    }
+
+    /// Exactly ONE WARN fires at the trip, carrying provider,
+    /// bytes/events at trip, and the canonical-chunk-emitted flag
+    /// (false here -- trip before any canonical chunk). The trip
+    /// produces no ERROR-level event, so classification / retry /
+    /// fallback are untouched.
+    #[test]
+    fn stream_degrade_emits_exactly_one_warn_pre_canonical() {
+        let events = routectl_testkit::capture_events(|| {
+            let mut state = SseState::default();
+            trip_stream(&mut state, 4096);
+        });
+
+        let trips: Vec<_> = events
+            .iter()
+            .filter(|e| e.message.contains("per-stream opaque-capture cap exceeded"))
+            .collect();
+        assert_eq!(trips.len(), 1, "exactly one per-stream trip WARN");
+        let w = trips[0];
+        assert_eq!(w.level, tracing::Level::WARN);
+        assert_eq!(w.field("provider"), Some("test"));
+        assert!(
+            w.field("opaque_bytes_total").is_some(),
+            "WARN carries bytes at trip",
+        );
+        assert!(
+            w.field("opaque_events_total").is_some(),
+            "WARN carries events at trip",
+        );
+        assert_eq!(
+            w.field("canonical_chunk_emitted"),
+            Some("false"),
+            "trip before any canonical chunk",
+        );
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::ERROR),
+            "the trip must not surface as an error / classification event",
+        );
+    }
+
+    /// When a canonical chunk WAS emitted before the trip, the single
+    /// WARN reflects `canonical_chunk_emitted = true` (post-first-chunk
+    /// fidelity loss). The degrade behavior itself is identical.
+    #[test]
+    fn stream_degrade_warn_reflects_prior_canonical_chunk() {
+        let events = routectl_testkit::capture_events(|| {
+            let mut state = SseState::default();
+            // Emit a real canonical chunk first (text block).
+            let _ = state
+                .parse_event(
+                    "test",
+                    r#"{
+                        "type":"content_block_start","index":0,
+                        "content_block":{"type":"text","text":""}
+                    }"#,
+                )
+                .unwrap();
+            let c = state
+                .parse_event(
+                    "test",
+                    r#"{
+                        "type":"content_block_delta","index":0,
+                        "delta":{"type":"text_delta","text":"hi"}
+                    }"#,
+                )
+                .unwrap();
+            assert!(c.is_some(), "text delta emits a canonical chunk");
+            let _ = state
+                .parse_event("test", r#"{"type":"content_block_stop","index":0}"#)
+                .unwrap();
+            assert!(state.canonical_chunk_emitted);
+            trip_stream(&mut state, 4096);
+        });
+
+        let trips: Vec<_> = events
+            .iter()
+            .filter(|e| e.message.contains("per-stream opaque-capture cap exceeded"))
+            .collect();
+        assert_eq!(trips.len(), 1, "exactly one per-stream trip WARN");
+        assert_eq!(
+            trips[0].field("canonical_chunk_emitted"),
+            Some("true"),
+            "trip landed after a canonical chunk had been emitted",
         );
     }
 }

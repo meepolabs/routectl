@@ -13,6 +13,13 @@
 //!   - a terminal chunk carrying `finish_reason` + usage when a
 //!     `finishReason` lands.
 //!
+//! Contract shift: a chunk is terminal ONLY when it carries a
+//! `finishReason`. `usageMetadata` placement is model/version dependent
+//! and may appear on non-terminal chunks (cumulative or interim), so its
+//! presence does NOT imply termination -- consumers must not assume it
+//! does. The latest observed usage is carried forward and folded into the
+//! terminal chunk.
+//!
 //! Reference: <https://ai.google.dev/api/generate-content>
 
 use serde_json::{Value, json};
@@ -50,10 +57,18 @@ pub struct GeminiStreamState {
     /// Sticky: set once any functionCall part is seen, so the terminal
     /// chunk maps to `tool_calls` even if the finishReason says STOP.
     saw_function_call: bool,
-    /// Set once a terminal chunk (finishReason and/or usage) has fired.
-    /// Guards against a trailing usage-only event emitting a second
-    /// terminal chunk or post-terminal content.
+    /// Set once a terminal chunk has fired (on a `finishReason`). Guards
+    /// against a trailing usage-only event emitting a second terminal
+    /// chunk or post-terminal content.
     terminal_emitted: bool,
+    /// Latest `usageMetadata` observed on any event, terminal or not.
+    /// Folded into the terminal chunk when the finishReason event lacks
+    /// its own usage; the latest write wins, so a terminal event's own
+    /// usage supersedes an interim value with no double-count.
+    cached_usage: Option<UsageMetadata>,
+    /// Set once any event carried a `finishReason`. Distinguishes a
+    /// proven-terminal stream from one that ends at EOS without one.
+    saw_finish_reason: bool,
 }
 
 impl GeminiStreamState {
@@ -99,13 +114,42 @@ impl GeminiStreamState {
             }
         }
 
-        // A finishReason (and/or usageMetadata) marks the terminal event.
-        if finish_reason_raw.is_some() || event.usage_metadata.is_some() {
+        // usageMetadata placement is model/version dependent and can be
+        // cumulative or interim, so stash the latest value rather than
+        // treating its arrival as terminal. The latest write wins, so a
+        // terminal event's own usage supersedes an interim value.
+        if let Some(usage) = event.usage_metadata {
+            self.cached_usage = Some(usage);
+        }
+
+        // Terminal ONLY on a finishReason. The terminal chunk folds in the
+        // cached usage (which already reflects a terminal event's own value
+        // when present, since latest-write wins) -- so a split
+        // usage-interim / finishReason-terminal shape does not lose the
+        // count, and a self-usage terminal is not double-counted.
+        if finish_reason_raw.is_some() {
+            self.saw_finish_reason = true;
             self.terminal_emitted = true;
-            chunks.push(self.terminal_chunk(finish_reason_raw.as_deref(), event.usage_metadata));
+            let usage = self.cached_usage.take();
+            chunks.push(self.terminal_chunk(finish_reason_raw.as_deref(), usage));
         }
 
         Ok(chunks)
+    }
+
+    /// Called once the SSE stream reaches end-of-stream. Emits the
+    /// anomaly WARN when usage was observed but no `finishReason` ever
+    /// arrived: the stream ended without proven terminality, so silent
+    /// truncation must not masquerade as success. Usage still settles via
+    /// the ingress capture path; this WARN is the only signal.
+    pub(crate) fn on_eos(&self, provider_id: &str) {
+        if !self.saw_finish_reason && self.cached_usage.is_some() {
+            tracing::warn!(
+                provider = %provider_id,
+                had_cached_usage = true,
+                "gemini: stream ended with usage but no finishReason"
+            );
+        }
     }
 
     fn part_chunks(&mut self, provider_id: &str, part: &ResponsePart) -> Vec<ChatChunk> {
