@@ -150,10 +150,16 @@ enum OpenOutputItem {
     /// A `reasoning` item streaming summary / text deltas. `detail_id`
     /// groups emitted details (matches slice 2's id-grouping); the
     /// summary/text detail payloads accumulate so the closing
-    /// `output_item.done` carries the full reasoning item.
+    /// `output_item.done` carries the full reasoning item. `summary_index`
+    /// / `content_index` are per-item part counters: they advance once per
+    /// streamed-native Summary / Text detail so each delta carries the
+    /// part index a strict Responses client keys on, matching the
+    /// completed body's `summary[]` / `content[]` ordering.
     Reasoning {
         output_index: u64,
         detail_id: Option<String>,
+        summary_index: u64,
+        content_index: u64,
     },
 }
 

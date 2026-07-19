@@ -6,6 +6,8 @@ use crate::gemini::types::{
     UsageMetadata,
 };
 use routectl_core::Role;
+use routectl_testkit::{CapturedEvent, capture_events};
+use tracing::Level;
 
 const PID: &str = "gemini:test";
 
@@ -276,6 +278,217 @@ fn trailing_usage_only_event_does_not_emit_second_terminal() {
     assert!(
         second.is_empty(),
         "a post-terminal event must emit nothing; got {second:?}"
+    );
+}
+
+#[test]
+fn interim_usage_only_does_not_terminate_stream() {
+    // usageMetadata placement is model/version dependent and can arrive on
+    // an interim chunk. An interim usage-only event (no finishReason) must
+    // NOT terminate the stream: later content and the real finishReason
+    // that follow it must survive.
+    let mut state = GeminiStreamState::default();
+    let _ = state
+        .parse_event(PID, event(vec![text_part("a")], None, None))
+        .expect("parse first");
+    // Interim usage-only event: no finishReason, no content.
+    let interim = state
+        .parse_event(
+            PID,
+            event(
+                vec![],
+                None,
+                Some(UsageMetadata {
+                    prompt_token_count: 5,
+                    candidates_token_count: 2,
+                    total_token_count: 7,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .expect("parse interim");
+    assert!(
+        interim.iter().all(|c| c.choices[0].finish_reason.is_none()),
+        "an interim usage-only event must not emit a terminal chunk; got {interim:?}"
+    );
+    // Content that follows the interim usage event must still stream.
+    let more = state
+        .parse_event(PID, event(vec![text_part("b")], None, None))
+        .expect("parse more");
+    assert_eq!(
+        more.iter()
+            .find_map(|c| c.choices[0].delta.content.as_deref()),
+        Some("b"),
+        "content after an interim usage event must survive"
+    );
+    // The real finishReason arrives on a later event.
+    let terminal = state
+        .parse_event(PID, event(vec![], Some("STOP"), None))
+        .expect("parse terminal");
+    assert_eq!(
+        terminal
+            .iter()
+            .filter(|c| c.choices[0].finish_reason.is_some())
+            .count(),
+        1,
+        "the real finishReason must produce exactly one terminal chunk"
+    );
+    assert_eq!(
+        terminal
+            .iter()
+            .find_map(|c| c.choices[0].finish_reason.as_deref()),
+        Some("stop"),
+    );
+}
+
+#[test]
+fn split_usage_and_finish_reason_carries_forward_count() {
+    // Split shape: usage on an interim event, finishReason on a later event
+    // with no usage of its own. The terminal chunk must carry the
+    // carried-forward usage count -- otherwise the split loses it.
+    let mut state = GeminiStreamState::default();
+    let _ = state
+        .parse_event(
+            PID,
+            event(
+                vec![text_part("hi")],
+                None,
+                Some(UsageMetadata {
+                    prompt_token_count: 11,
+                    candidates_token_count: 9,
+                    total_token_count: 20,
+                    cached_content_token_count: 3,
+                    thoughts_token_count: 2,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .expect("parse interim usage");
+    let terminal = state
+        .parse_event(PID, event(vec![], Some("STOP"), None))
+        .expect("parse terminal");
+    let term = terminal
+        .iter()
+        .find(|c| c.choices[0].finish_reason.is_some())
+        .expect("a terminal chunk");
+    let u = term
+        .usage
+        .as_ref()
+        .expect("terminal chunk must carry the carried-forward usage");
+    assert_eq!(u.prompt_tokens, Some(11));
+    assert_eq!(u.completion_tokens, Some(9));
+    assert_eq!(u.total_tokens, Some(20));
+    assert_eq!(u.cache_read_input_tokens, Some(3));
+    assert_eq!(u.reasoning_tokens, Some(2));
+}
+
+#[test]
+fn terminal_event_own_usage_wins_no_double_count() {
+    // When the terminal event carries its OWN usage, that value wins; the
+    // interim cached value must NOT be added on top (no double-count).
+    let mut state = GeminiStreamState::default();
+    let _ = state
+        .parse_event(
+            PID,
+            event(
+                vec![text_part("hi")],
+                None,
+                Some(UsageMetadata {
+                    prompt_token_count: 100,
+                    candidates_token_count: 100,
+                    total_token_count: 200,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .expect("parse interim usage");
+    let terminal = state
+        .parse_event(
+            PID,
+            event(
+                vec![],
+                Some("STOP"),
+                Some(UsageMetadata {
+                    prompt_token_count: 10,
+                    candidates_token_count: 7,
+                    total_token_count: 17,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .expect("parse terminal");
+    let term = terminal
+        .iter()
+        .find(|c| c.choices[0].finish_reason.is_some())
+        .expect("a terminal chunk");
+    let u = term.usage.as_ref().expect("usage on terminal chunk");
+    assert_eq!(u.prompt_tokens, Some(10), "terminal-event usage must win");
+    assert_eq!(
+        u.completion_tokens,
+        Some(7),
+        "terminal-event usage must win"
+    );
+    assert_eq!(
+        u.total_tokens,
+        Some(17),
+        "terminal event usage wins; interim must not be summed on top"
+    );
+}
+
+#[test]
+fn eos_with_cached_usage_and_no_finish_reason_warns() {
+    // If the stream reaches EOS having observed usage but no finishReason
+    // ever, termination was never proven -- a WARN must fire so silent
+    // truncation cannot masquerade as success.
+    let events = capture_events(|| {
+        let mut state = GeminiStreamState::default();
+        let _ = state
+            .parse_event(
+                PID,
+                event(
+                    vec![text_part("hi")],
+                    None,
+                    Some(UsageMetadata {
+                        prompt_token_count: 5,
+                        candidates_token_count: 2,
+                        total_token_count: 7,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .expect("parse usage event");
+        state.on_eos(PID);
+    });
+    let warns: Vec<&CapturedEvent> = events.iter().filter(|e| e.level == Level::WARN).collect();
+    assert_eq!(warns.len(), 1, "exactly one WARN must fire; got {warns:?}");
+    assert_eq!(warns[0].field("provider"), Some(PID));
+    assert_eq!(warns[0].field("had_cached_usage"), Some("true"));
+}
+
+#[test]
+fn eos_after_finish_reason_does_not_warn() {
+    // A clean stream that saw a finishReason must not warn at EOS, even
+    // though usage was observed.
+    let events = capture_events(|| {
+        let mut state = GeminiStreamState::default();
+        let _ = state
+            .parse_event(
+                PID,
+                event(
+                    vec![text_part("hi")],
+                    Some("STOP"),
+                    Some(UsageMetadata {
+                        total_token_count: 7,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .expect("parse terminal");
+        state.on_eos(PID);
+    });
+    assert!(
+        events.iter().all(|e| e.level != Level::WARN),
+        "a proven-terminal stream must not warn; got {events:?}"
     );
 }
 

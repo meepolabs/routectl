@@ -96,6 +96,7 @@ pub(super) fn render_chunk_internal(
             close_open_block(state, &mut events);
             if chunk.usage.is_some() {
                 // Inline usage: emit combined delta + stop now.
+                close_lingering_opaque_blocks(state, &mut events);
                 emit_message_delta(
                     Some(fr),
                     choice.matched_stop_sequence.as_deref(),
@@ -131,6 +132,7 @@ pub(super) fn render_chunk_internal(
         if let Some(fr) = state.pending_finish_reason.take() {
             // Finalize the buffered finish_reason now that we have usage.
             let matched = state.pending_matched_stop_sequence.take();
+            close_lingering_opaque_blocks(state, &mut events);
             emit_message_delta(Some(&fr), matched.as_deref(), Some(usage), &mut events);
             emit_message_stop(state, &mut events);
         } else {
@@ -554,6 +556,31 @@ pub(super) fn close_open_block(state: &mut AnthropicStreamState, events: &mut Ve
                 "index": idx,
             }))
             .unwrap_or_default(),
+        ));
+    }
+}
+
+/// Close every opaque content block whose `content_block_start` was
+/// replayed to the client but whose upstream `content_block_stop`
+/// never arrived. Invariant: before any `message_stop`, every opaque
+/// block start replayed on the wire must be matched by a stop -- a
+/// strict Anthropic SDK / claude-code consumer rejects an unmatched
+/// block. Opaque blocks live in `opaque_index_map` (keyed by upstream
+/// index, ascending) rather than `state.open`, so `close_open_block`
+/// does not reach them; this helper drains that map.
+///
+/// Consumes the map via `std::mem::take`, so calling it more than once
+/// per stream is a harmless no-op: the terminal chunk paths and
+/// `render_eos` can each invoke it without risking a duplicate
+/// `content_block_stop`.
+pub(super) fn close_lingering_opaque_blocks(
+    state: &mut AnthropicStreamState,
+    events: &mut Vec<SseEvent>,
+) {
+    for (_, ingress_index) in std::mem::take(&mut state.opaque_index_map) {
+        events.push(SseEvent::named(
+            "content_block_stop",
+            format!("{{\"type\":\"content_block_stop\",\"index\":{ingress_index}}}"),
         ));
     }
 }

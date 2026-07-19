@@ -34,6 +34,13 @@ enum Behavior {
     OkSlow,
     Status(u16),
     StreamFirstChunkErrors(u16),
+    /// First (and only) stream item is the error the Anthropic SSE
+    /// classifier emits for an `overloaded_error` event: an
+    /// `Error::Upstream` carrying status 529 and
+    /// `upstream_type = Some("overloaded_error")`. Pins the permissive
+    /// side of the in-stream error boundary -- a first-event upstream
+    /// error must fall the chain over to the next target.
+    StreamFirstChunkOverloaded,
     StreamMidErrors,
     /// `provider.stream()` returns Ok, but the stream yields zero
     /// chunks before EOS. Pins the contract that the router treats
@@ -114,6 +121,17 @@ impl Provider for MockProvider {
             Behavior::Status(s) => Err(Error::upstream(&id, s, "open-stream-error")),
             Behavior::StreamFirstChunkErrors(s) => {
                 let err = Error::upstream(&id, s, "first-chunk-error");
+                Ok(futures::stream::once(async move { Err(err) }).boxed())
+            }
+            Behavior::StreamFirstChunkOverloaded => {
+                let err = Error::upstream_full(
+                    &id,
+                    529,
+                    "overloaded_error: upstream signaled error event mid-stream",
+                    None,
+                    Some("overloaded_error".into()),
+                    None,
+                );
                 Ok(futures::stream::once(async move { Err(err) }).boxed())
             }
             Behavior::StreamMidErrors => {
@@ -560,6 +578,36 @@ async fn stream_falls_back_when_first_chunk_errors() {
         count += 1;
     }
     assert_eq!(count, 2, "p2 should have been used");
+}
+
+#[tokio::test]
+async fn stream_falls_back_when_first_chunk_is_anthropic_overloaded() {
+    let p1 = MockProvider::new("p1", vec![Behavior::StreamFirstChunkOverloaded]);
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    let (k, v) = chain_alias("fast", &["m1", "m2"]);
+    aliases.insert(k, v);
+    let r = build_router_v6(
+        aliases,
+        vec![
+            ("m1".into(), "p1".into(), "m".into()),
+            ("m2".into(), "p2".into(), "m".into()),
+        ],
+        vec![
+            ("p1".into(), p1.clone() as Arc<dyn Provider>),
+            ("p2".into(), p2.clone() as Arc<dyn Provider>),
+        ],
+    );
+
+    let mut s = r.stream(req("fast")).await.expect("ok");
+    let mut count = 0;
+    while let Some(item) = s.next().await {
+        let _ = item.expect("chunk ok");
+        count += 1;
+    }
+    assert_eq!(count, 2, "client should see the fallback target's chunks");
+    assert_eq!(p1.calls(), 1, "overloaded target dispatched once");
+    assert_eq!(p2.calls(), 1, "fallback target dispatched once");
 }
 
 #[tokio::test]

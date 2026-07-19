@@ -82,6 +82,18 @@ fn reasoning_chunk(kind: ReasoningDetailKind, id: &str, payload: Value) -> ChatC
     }
 }
 
+fn foreign_reasoning_chunk(kind: ReasoningDetailKind, id: &str, payload: Value) -> ChatChunk {
+    let mut chunk = reasoning_chunk(kind, id, payload);
+    // Re-tag the detail as coming from a non-Responses upstream (e.g. an
+    // Anthropic turn), which the streamed lifecycle must not surface.
+    for choice in &mut chunk.choices {
+        for d in &mut choice.delta.reasoning_details {
+            d.format = Some("anthropic-v1".into());
+        }
+    }
+    chunk
+}
+
 fn tool_chunk(index: u64, id: &str, name: &str, args: &str) -> ChatChunk {
     ChatChunk {
         id: "resp_01".into(),
@@ -919,4 +931,242 @@ fn missing_upstream_id_is_minted_and_stable_across_events() {
     let completed_id = data_of(&events, "response.completed")["response"]["id"].clone();
     assert!(created_id.as_str().unwrap().starts_with("resp_"));
     assert_eq!(created_id, completed_id);
+}
+
+// ---------------------------------------------------------------------------
+// Terminal failed-event (finish_reason == "error")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn finish_reason_error_emits_response_failed_not_completed() {
+    // Arrange: stream partial text, then a terminal error with usage.
+    let mut state = fresh();
+    let _ = render(&mut state, text_chunk("partial answer"));
+    let usage = UsageDelta {
+        prompt_tokens: Some(10),
+        completion_tokens: Some(4),
+        total_tokens: Some(14),
+        ..Default::default()
+    };
+
+    // Act
+    let _ = render(&mut state, finish_chunk("error", Some(usage)));
+    let events = render_eos_internal(&mut state);
+
+    // Assert: the terminal event NAME is response.failed, never completed.
+    let ns = names(&events);
+    assert!(
+        ns.contains(&"response.failed".to_string()),
+        "error finish must emit response.failed; got {ns:?}"
+    );
+    assert!(
+        !ns.contains(&"response.completed".to_string()),
+        "error finish must NOT emit response.completed; got {ns:?}"
+    );
+    let failed = data_of(&events, "response.failed");
+    assert_eq!(failed["type"], "response.failed");
+    assert_eq!(failed["response"]["status"], "failed");
+}
+
+#[test]
+fn failed_body_preserves_accumulated_usage_and_partial_output() {
+    // Arrange
+    let mut state = fresh();
+    let _ = render(&mut state, text_chunk("half a reply"));
+    let usage = UsageDelta {
+        prompt_tokens: Some(21),
+        completion_tokens: Some(6),
+        total_tokens: Some(27),
+        ..Default::default()
+    };
+
+    // Act
+    let _ = render(&mut state, finish_chunk("error", Some(usage)));
+    let events = render_eos_internal(&mut state);
+
+    // Assert: usage survives into the failed body.
+    let failed = data_of(&events, "response.failed");
+    assert_eq!(failed["response"]["usage"]["input_tokens"], 21);
+    assert_eq!(failed["response"]["usage"]["output_tokens"], 6);
+    assert_eq!(failed["response"]["usage"]["total_tokens"], 27);
+    // Partial streamed output survives into the failed body.
+    let output = &failed["response"]["output"];
+    assert!(
+        output.as_array().is_some_and(|a| !a.is_empty()),
+        "partial output must be preserved in the failed body; got {output}"
+    );
+    assert_eq!(output[0]["content"][0]["text"], "half a reply");
+}
+
+// ---------------------------------------------------------------------------
+// Foreign-format reasoning excluded from the streamed lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn foreign_format_reasoning_not_streamed_and_leaves_no_output_index_gap() {
+    // Arrange: a foreign-format reasoning detail arrives first, then a
+    // Responses-format message.
+    let mut state = fresh();
+    let mut events = render(
+        &mut state,
+        foreign_reasoning_chunk(
+            ReasoningDetailKind::Text,
+            "rs_foreign",
+            json!({"text": "hidden chain"}),
+        ),
+    );
+
+    // Act
+    events.extend(render(&mut state, text_chunk("answer")));
+    events.extend(render(&mut state, finish_chunk("stop", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert: no reasoning lifecycle event emitted for the foreign detail.
+    let ns = names(&events);
+    assert!(
+        !ns.iter().any(|n| n.contains("reasoning")),
+        "foreign-format reasoning must not stream any reasoning event; got {ns:?}"
+    );
+    // No leaked foreign reasoning delta anywhere.
+    assert!(
+        !all_data(&events)
+            .iter()
+            .any(|d| d["delta"] == "hidden chain"),
+        "foreign reasoning delta must not leak into the stream"
+    );
+    // The message item takes output_index 0 (no gap from a phantom
+    // reasoning item that never landed in the completed body).
+    let added_indices: Vec<u64> = all_data(&events)
+        .into_iter()
+        .filter(|d| d["type"] == "response.output_item.added")
+        .map(|d| d["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        added_indices,
+        vec![0],
+        "output_index must be dense from 0 with no gap; got {added_indices:?}"
+    );
+    // Completed body carries no foreign reasoning item (parity with stream).
+    let completed = data_of(&events, "response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert!(
+        output.iter().all(|o| o["type"] != "reasoning"),
+        "foreign reasoning must be absent from the completed body; got {output:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per-item reasoning summary/content indices
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multiple_reasoning_details_get_incrementing_per_item_indices() {
+    // Arrange: one reasoning item carrying two summaries and two texts.
+    let mut state = fresh();
+    let mut events = render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_1", json!({"text": "s0"})),
+    );
+    events.extend(render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_1", json!({"text": "s1"})),
+    ));
+    events.extend(render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Text, "rs_1", json!({"text": "t0"})),
+    ));
+    events.extend(render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Text, "rs_1", json!({"text": "t1"})),
+    ));
+
+    // Act
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert: summary_index increments 0,1; content_index increments 0,1.
+    let summary_indices: Vec<u64> = all_data(&events)
+        .into_iter()
+        .filter(|d| d["type"] == "response.reasoning_summary_text.delta")
+        .map(|d| d["summary_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(summary_indices, vec![0, 1]);
+    let content_indices: Vec<u64> = all_data(&events)
+        .into_iter()
+        .filter(|d| d["type"] == "response.reasoning_text.delta")
+        .map(|d| d["content_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(content_indices, vec![0, 1]);
+
+    // Parity: the completed body carries the same count of parts in order.
+    let completed = data_of(&events, "response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    let reasoning = output
+        .iter()
+        .find(|o| o["type"] == "reasoning")
+        .expect("reasoning item present in completed body");
+    assert_eq!(reasoning["summary"].as_array().unwrap().len(), 2);
+    assert_eq!(reasoning["content"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn reasoning_indices_reset_per_new_item() {
+    // Arrange: two details on rs_A, then a new item rs_B.
+    let mut state = fresh();
+    let mut events = render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_A", json!({"text": "a0"})),
+    );
+    events.extend(render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_A", json!({"text": "a1"})),
+    ));
+    events.extend(render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_B", json!({"text": "b0"})),
+    ));
+
+    // Act
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert: rs_B's counter starts fresh at 0.
+    let summary_indices: Vec<u64> = all_data(&events)
+        .into_iter()
+        .filter(|d| d["type"] == "response.reasoning_summary_text.delta")
+        .map(|d| d["summary_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(summary_indices, vec![0, 1, 0]);
+}
+
+#[test]
+fn reasoning_indices_count_streamed_native_details_only() {
+    // Arrange: native summary, foreign summary (must not advance), native
+    // summary. The foreign detail neither streams nor bumps the counter.
+    let mut state = fresh();
+    let mut events = render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_1", json!({"text": "n0"})),
+    );
+    events.extend(render(
+        &mut state,
+        foreign_reasoning_chunk(
+            ReasoningDetailKind::Summary,
+            "rs_1",
+            json!({"text": "foreign"}),
+        ),
+    ));
+    events.extend(render(
+        &mut state,
+        reasoning_chunk(ReasoningDetailKind::Summary, "rs_1", json!({"text": "n1"})),
+    ));
+
+    // Act
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert: only the two native details streamed, with indices 0 and 1.
+    let summary_indices: Vec<u64> = all_data(&events)
+        .into_iter()
+        .filter(|d| d["type"] == "response.reasoning_summary_text.delta")
+        .map(|d| d["summary_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(summary_indices, vec![0, 1]);
 }

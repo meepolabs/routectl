@@ -20,8 +20,12 @@
 
 use serde_json::{Value, json};
 
+use routectl_core::OpaqueSseEvent;
+
 use super::sse::{OpenBlockKind, SseState};
-use super::sse_opaque::OpaqueCapture;
+use super::sse_opaque::{
+    MAX_OPAQUE_EVENTS_PER_STREAM, MAX_TOTAL_OPAQUE_BYTES_PER_STREAM, OpaqueCapture,
+};
 use super::types::SseDelta;
 
 /// Stable wire-ish tag for an open block kind, used in index-mismatch
@@ -80,6 +84,25 @@ impl SseState {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
         );
+        // Per-stream sink-drain: once the stream-level opaque cap has
+        // tripped, open the block for lifecycle routing (so its deltas
+        // and stop still attribute correctly) but capture nothing --
+        // no start sentinel buffered, no `current_capture`. Its stop
+        // then finds no capture and emits nothing either, preserving
+        // pairing symmetry: post-trip blocks emit neither start nor stop.
+        if self.opaque_stream_degraded {
+            self.open_block = Some(OpenBlockKind::Unknown {
+                upstream_index: index,
+                type_tag,
+            });
+            self.current_capture = None;
+            tracing::debug!(
+                provider = %provider,
+                upstream_index = index,
+                "anthropic SSE: per-stream opaque cap tripped; sink-draining unknown block",
+            );
+            return;
+        }
         self.open_block = Some(OpenBlockKind::Unknown {
             upstream_index: index,
             type_tag: type_tag.clone(),
@@ -92,8 +115,11 @@ impl SseState {
             "anthropic SSE: opening forward-compat opaque content block",
         );
         let mut capture = OpaqueCapture::new(index, type_tag);
+        let before = self.pending_opaque.len();
         capture.record_start(value, provider, &mut self.pending_opaque);
+        let (events, bytes) = opaque_growth(&self.pending_opaque[before..]);
         self.current_capture = Some(capture);
+        self.note_opaque_growth(events, bytes, provider);
     }
 
     /// Handle a `content_block_delta` while an `OpenBlockKind::Unknown`
@@ -103,6 +129,13 @@ impl SseState {
     /// delta inside an unknown block) preserves its bytes for verbatim
     /// re-emission. Always yields no canonical chunk.
     pub(super) fn capture_unknown_delta(&mut self, delta: &SseDelta, provider: &str) {
+        // Per-stream sink-drain: once tripped, drop every further delta
+        // (including deltas of a block whose start rode out pre-trip --
+        // that block's stop still emits via `record_stop`, so the pair
+        // stays well-formed while post-trip content is dropped).
+        if self.opaque_stream_degraded {
+            return;
+        }
         let raw_value: Value = match delta {
             SseDelta::Other(v) => v.clone(),
             SseDelta::TextDelta { text } => json!({"type": "text_delta", "text": text}),
@@ -116,10 +149,66 @@ impl SseState {
                 json!({"type": "signature_delta", "signature": signature})
             }
         };
+        let before = self.pending_opaque.len();
         if let Some(capture) = self.current_capture.as_mut() {
             capture.record_delta(&raw_value, provider, &mut self.pending_opaque);
         }
+        let (events, bytes) = opaque_growth(&self.pending_opaque[before..]);
+        self.note_opaque_growth(events, bytes, provider);
     }
+
+    /// Fold the events/bytes just pushed into the per-stream running
+    /// totals and trip the sticky `opaque_stream_degraded` flag when
+    /// either per-stream cap is crossed. Fires the single per-stream
+    /// degrade WARN exactly once, at the trip. The trip is a local
+    /// memory guard: it must NOT surface as an upstream health failure
+    /// or affect retry / fallback, so nothing here returns an error or
+    /// touches classification.
+    fn note_opaque_growth(&mut self, events: usize, bytes: usize, provider: &str) {
+        if self.opaque_stream_degraded {
+            return;
+        }
+        self.opaque_events_total = self.opaque_events_total.saturating_add(events);
+        self.opaque_bytes_total = self.opaque_bytes_total.saturating_add(bytes);
+        if self.opaque_bytes_total > MAX_TOTAL_OPAQUE_BYTES_PER_STREAM
+            || self.opaque_events_total > MAX_OPAQUE_EVENTS_PER_STREAM
+        {
+            self.opaque_stream_degraded = true;
+            tracing::warn!(
+                provider = %provider,
+                opaque_bytes_total = self.opaque_bytes_total,
+                opaque_events_total = self.opaque_events_total,
+                canonical_chunk_emitted = self.canonical_chunk_emitted,
+                "anthropic SSE: per-stream opaque-capture cap exceeded; degrading stream to sink-drain",
+            );
+        }
+    }
+}
+
+/// Count of captured events and their total captured bytes across a
+/// freshly-pushed slice of `pending_opaque`. Stop sentinels carry no
+/// bytes and are not counted toward the per-stream event total (each is
+/// paired 1:1 with a counted start; see `MAX_OPAQUE_EVENTS_PER_STREAM`).
+fn opaque_growth(pushed: &[OpaqueSseEvent]) -> (usize, usize) {
+    let mut events = 0;
+    let mut bytes = 0;
+    for ev in pushed {
+        match ev {
+            OpaqueSseEvent::ContentBlockStart { raw_data, .. } => {
+                events += 1;
+                bytes += raw_data.len();
+            }
+            OpaqueSseEvent::ContentBlockDelta { raw_delta, .. } => {
+                events += 1;
+                bytes += raw_delta.len();
+            }
+            OpaqueSseEvent::ContentBlockStop { .. } => {}
+            // Non-exhaustive enum: a future sentinel with no captured
+            // payload contributes nothing to the per-stream totals.
+            _ => {}
+        }
+    }
+    (events, bytes)
 }
 
 #[cfg(test)]
