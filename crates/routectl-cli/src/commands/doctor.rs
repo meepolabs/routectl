@@ -755,6 +755,19 @@ fn gather_orphan_secrets(config: &Config) -> Vec<String> {
 /// credential; every message names the scheme, never the value or ref.
 fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
     let mut findings = Vec::new();
+    if ctx.config_load_error.is_some() {
+        findings.push(Finding {
+            section: "config",
+            name: "validation".to_string(),
+            status: Status::Warn,
+            detail: "config validation skipped: config could not be parsed".to_string(),
+            remediation: Some(
+                "resolve the config error above, then re-run `routectl doctor`".to_string(),
+            ),
+        });
+        findings.extend(ctx.secret_checks.iter().map(secret_finding));
+        return findings;
+    }
     let report = crate::commands::config::validation_report(&ctx.config, ctx.raw_config.as_deref());
     if report.errors.is_empty() {
         findings.push(Finding {
@@ -2289,6 +2302,50 @@ mod tests {
             f.detail.contains("ghost"),
             "expected the offending provider in the detail, got {:?}",
             f.detail
+        );
+    }
+
+    /// When the typed config load failed, the section must NOT run the
+    /// validator suite against the fallback `Config::default()` -- doing so
+    /// emits a spurious Pass that contradicts the Fail the version section
+    /// reports for the same broken file. It short-circuits to a single Warn
+    /// "validation skipped" finding, still appending the secret checks.
+    #[test]
+    fn config_load_error_short_circuits_to_warn_not_pass() {
+        let cfg = config_referencing_anthropic();
+        let secret_checks = gather_secret_checks(&cfg, &[("anthropic", LocalProbe::Missing)]);
+        assert!(
+            !secret_checks.is_empty(),
+            "fixture must produce at least one secret check"
+        );
+        let mut context = ctx(
+            Config::default(),
+            Some("bogus = \n"),
+            Vec::new(),
+            Vec::new(),
+        );
+        context.config_load_error = Some("config could not be loaded".to_string());
+        context.secret_checks = secret_checks;
+
+        let findings = section_config(&context);
+
+        assert!(
+            !findings.iter().any(|f| f.section == "config"
+                && f.name == "validation"
+                && f.status == Status::Pass),
+            "must not emit a spurious validation Pass against the default config: {findings:?}"
+        );
+        let validation = find(&findings, "config", "validation");
+        assert_eq!(validation.status, Status::Warn);
+        assert!(
+            validation.detail.contains("skipped"),
+            "expected a skipped-validation detail, got {:?}",
+            validation.detail
+        );
+        assert!(validation.remediation.is_some());
+        assert!(
+            findings.iter().any(|f| f.name == "anthropic"),
+            "secret checks must still be appended when validation is skipped: {findings:?}"
         );
     }
 

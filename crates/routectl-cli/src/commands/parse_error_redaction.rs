@@ -50,7 +50,7 @@ pub(crate) fn redact_parse_error(err: &str) -> String {
 /// path-free class message. Any other loader error (version/legacy-key
 /// rejection) carries no path or value and is kept verbatim so it stays
 /// actionable.
-pub(crate) fn redact_config_load_error(err: &str) -> String {
+pub fn redact_config_load_error(err: &str) -> String {
     if let Some(idx) = err.find("TOML parse error") {
         return redact_parse_error(&err[idx..]);
     }

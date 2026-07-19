@@ -965,7 +965,11 @@ fn redact_header_value(value: &str) -> String {
     // accept `Bearer ` followed by either a JWT or an opaque key, and
     // we want both shapes to redact identically.
     let trimmed = value.trim_start();
-    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("Bearer ") {
+    if trimmed
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|b| b.eq_ignore_ascii_case(b"Bearer "))
+    {
         return REDACTED_BEARER.to_string();
     }
     REDACTED_SECRET.to_string()

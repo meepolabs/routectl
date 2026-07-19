@@ -496,7 +496,25 @@ enum RcCmd {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run().await {
+        // Every error that reaches here propagates from a `load_config*`
+        // helper -- the loader inlines the offending config VALUE (a secret
+        // mistyped into a non-string field), user-controlled keys, and local
+        // paths. Route the Display string through the shared fail-safe
+        // redactor, the same one `doctor` and `config edit` use. It preserves
+        // a message it does not recognize as config-parse/IO verbatim, so a
+        // non-loader error stays actionable and its multi-line rendering
+        // survives.
+        eprintln!(
+            "error: {}",
+            commands::parse_error_redaction::redact_config_load_error(&e.to_string())
+        );
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let cli = Cli::parse();
@@ -1164,5 +1182,84 @@ mod tests {
             .is_err(),
             "provider add no longer accepts --force"
         );
+    }
+
+    /// Config-load failures surface as a boxed `String` error (see
+    /// `load_effective_config -> Result<_, String>`, converted by `?`).
+    /// `run`'s `Err` arm prints that error via `Display` (`{e}`), not `Debug`
+    /// (`{e:?}`). The messages are deliberately multi-line and actionable, so
+    /// `Display` must preserve REAL newlines and add no surrounding quotes or
+    /// literal backslash-n -- the escaping `Debug` would introduce.
+    #[test]
+    fn config_load_error_display_keeps_real_newlines_no_escaping() {
+        let message =
+            "failed to load config:\n  alias `fast`: blocked by policy\n  alias `cheap`: no route";
+        let err: Box<dyn std::error::Error> = message.to_string().into();
+
+        let shown = format!("{err}");
+        assert_eq!(
+            shown, message,
+            "Display must render the raw multi-line message unchanged"
+        );
+        assert!(shown.contains('\n'), "Display must preserve real newlines");
+        assert!(
+            !shown.contains("\\n"),
+            "Display must not contain a literal backslash-n"
+        );
+        assert!(
+            !shown.starts_with('"') && !shown.ends_with('"'),
+            "Display must not wrap the message in quotes"
+        );
+
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("\\n") && !debug.contains('\n'),
+            "Debug (the old rendering) escapes newlines to literal backslash-n"
+        );
+    }
+
+    /// `run`'s propagated config-load errors reach `main`'s `Err` arm, whose
+    /// old `eprintln!("error: {e}")` printed the loader diagnostic verbatim --
+    /// inlining the offending config VALUE (a secret mistyped into a
+    /// non-string field) and the local config path. `main` now routes that
+    /// Display string through the shared fail-safe redactor before printing.
+    /// Pin the call shape: the secret and path are gone, the source
+    /// line/column and safe field name survive, and the multi-line rendering
+    /// is preserved with real newlines (no literal backslash-n).
+    #[test]
+    fn main_err_arm_redacts_a_secret_bearing_config_load_error() {
+        let raw = "config parse error in `/home/someone/.config/routectl/config.toml`: \
+                   TOML parse error at line 5, column 8\n  |\n5 | port = \"sk-live-LEAKED\"\n  \
+                   |        ^^^^^^^^^^^^^^^^\ninvalid type: string \"sk-live-LEAKED\", expected u16";
+        let err: Box<dyn std::error::Error> = raw.to_string().into();
+
+        let rendered = commands::parse_error_redaction::redact_config_load_error(&err.to_string());
+
+        assert!(!rendered.contains("sk-live-LEAKED"), "{rendered}");
+        assert!(!rendered.contains("/home/someone"), "{rendered}");
+        assert!(rendered.contains("line 5, column 8"), "{rendered}");
+        assert!(rendered.contains("port"), "{rendered}");
+        assert!(
+            rendered.contains('\n'),
+            "real newlines must survive: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\\n"),
+            "no literal backslash-n: {rendered}"
+        );
+    }
+
+    /// The redactor `main` applies is fail-safe: a message it does not
+    /// recognize as config-parse/IO passes through unchanged, so a legitimate
+    /// multi-line validation error stays actionable and unmangled.
+    #[test]
+    fn main_err_arm_passes_a_non_config_error_through_unchanged() {
+        let message =
+            "failed to load config:\n  alias `fast`: blocked by policy\n  alias `cheap`: no route";
+        let err: Box<dyn std::error::Error> = message.to_string().into();
+
+        let rendered = commands::parse_error_redaction::redact_config_load_error(&err.to_string());
+
+        assert_eq!(rendered, message, "{rendered}");
     }
 }

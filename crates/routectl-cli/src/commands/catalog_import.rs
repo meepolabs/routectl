@@ -30,10 +30,10 @@ use serde_json::Value;
 
 use routectl_router::{
     CandidateOrigin, CatalogOverlay, CatalogRow, ImpactClass, ImportCandidate, ImportDiff,
-    OverlayError, ShrinkVerdict, baked_row_map, baked_shrink_counts, build_import_candidate,
-    candidate_shrink_counts, catalog_import_state_default_path, diff_has_no_effective_change,
-    diff_overlay, load_catalog_import_baseline, load_catalog_overlay, overlay_default_path,
-    persist_catalog_import_baseline, shrink_guard, with_overlay_write_lock,
+    OverlayError, ShrinkVerdict, SkipKind, baked_row_map, baked_shrink_counts,
+    build_import_candidate, candidate_shrink_counts, catalog_import_state_default_path,
+    diff_has_no_effective_change, diff_overlay, load_catalog_import_baseline, load_catalog_overlay,
+    overlay_default_path, persist_catalog_import_baseline, shrink_guard, with_overlay_write_lock,
 };
 
 const LITELLM_URL: &str =
@@ -184,10 +184,15 @@ async fn run_at(
     let baseline = load_catalog_import_baseline(baseline_path, baked_shrink_counts());
     let candidate_counts = candidate_shrink_counts(&candidate);
     let verdict = shrink_guard(&candidate_counts, &baseline);
-    log_shrink_verdict(&verdict, args.allow_shrink);
+    let disagreement_skips = candidate
+        .skipped
+        .iter()
+        .filter(|skip| skip.kind == SkipKind::CrossCheckDisagreement)
+        .count();
+    log_shrink_verdict(&verdict, args.allow_shrink, disagreement_skips);
     if verdict.is_shrunk() {
         println!("shrink guard: the following source(s)/family(ies) fell below their floor:");
-        print_shrink_verdict(&verdict);
+        print_shrink_verdict(&verdict, disagreement_skips);
         if !args.allow_shrink {
             return Err(ImportError::Shrunk);
         }
@@ -369,7 +374,7 @@ const fn body_cap_exceeded(total_len: usize) -> bool {
     total_len as u64 > MAX_FETCH_BYTES
 }
 
-fn log_shrink_verdict(verdict: &ShrinkVerdict, allow_shrink: bool) {
+fn log_shrink_verdict(verdict: &ShrinkVerdict, allow_shrink: bool, disagreement_skips: usize) {
     tracing::info!(
         shrunk = verdict.is_shrunk(),
         allow_shrink,
@@ -377,28 +382,46 @@ fn log_shrink_verdict(verdict: &ShrinkVerdict, allow_shrink: bool) {
         shrunk_sources = verdict.shrunk_sources.len(),
         zero_sources = verdict.zero_sources.len(),
         shrunk_families = verdict.shrunk_families.len(),
+        disagreement_skips,
         "catalog import: shrink guard",
     );
 }
 
-fn print_shrink_verdict(verdict: &ShrinkVerdict) {
+/// The operator-facing shrink-refusal report: one line per shrunk source
+/// / family carrying its `baseline` / `candidate` / floor, plus a
+/// trailing count of selectors skipped for an EXPECTED cross-check
+/// disagreement -- those count as present toward the totals, so surfacing
+/// them lets an operator tell a real shrink from source-refresh
+/// disagreement noise.
+fn shrink_verdict_report(verdict: &ShrinkVerdict, disagreement_skips: usize) -> Vec<String> {
+    let mut lines = Vec::new();
     for s in &verdict.zero_sources {
-        println!(
+        lines.push(format!(
             "  source `{}` dropped to zero rows (baseline {})",
             s.source, s.baseline
-        );
+        ));
     }
     for s in &verdict.shrunk_sources {
-        println!(
+        lines.push(format!(
             "  source `{}` shrank to {} rows (baseline {})",
             s.source, s.candidate, s.baseline
-        );
+        ));
     }
     for f in &verdict.shrunk_families {
-        println!(
+        lines.push(format!(
             "  family `{}` shrank to {} rows (baseline {}, floor {})",
             f.family, f.candidate, f.baseline, f.required
-        );
+        ));
+    }
+    lines.push(format!(
+        "  cross-check disagreement skips (counted as present, not shrink): {disagreement_skips}"
+    ));
+    lines
+}
+
+fn print_shrink_verdict(verdict: &ShrinkVerdict, disagreement_skips: usize) {
+    for line in shrink_verdict_report(verdict, disagreement_skips) {
+        println!("{line}");
     }
 }
 
@@ -766,6 +789,42 @@ mod tests {
             litellm_url: "http://127.0.0.1:0/unused".to_string(),
             models_dev_url: "http://127.0.0.1:0/unused".to_string(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Shrink-refusal report content.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shrink_verdict_report_carries_per_family_counts_and_a_disagreement_skip_count() {
+        // Arrange: one shrunk family plus 2 cross-check disagreement skips.
+        let verdict = ShrinkVerdict {
+            shrunk_families: vec![routectl_router::ShrunkFamily {
+                family: "anthropic-api".to_string(),
+                baseline: 3,
+                candidate: 2,
+                required: 3,
+            }],
+            ..ShrinkVerdict::default()
+        };
+
+        // Act
+        let report = shrink_verdict_report(&verdict, 2);
+
+        // Assert: the family line carries baseline / candidate / floor,
+        // and a distinct line reports the disagreement-skip count.
+        let joined = report.join("\n");
+        assert!(
+            joined.contains("family `anthropic-api`")
+                && joined.contains("baseline 3")
+                && joined.contains("floor 3")
+                && joined.contains("2 rows"),
+            "family line missing counts: {joined}"
+        );
+        assert!(
+            joined.contains("cross-check disagreement skips") && joined.contains(": 2"),
+            "disagreement-skip count missing: {joined}"
+        );
     }
 
     // -----------------------------------------------------------------------

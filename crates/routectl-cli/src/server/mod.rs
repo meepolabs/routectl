@@ -3491,6 +3491,73 @@ default = "claude"
             "the prior router must stay installed on a rejected reload"
         );
     }
+
+    /// Hot-reload containment: an overlay hand-edited to a degenerate cell
+    /// value (rm <= 0) fails the fail-closed load, so the reload is
+    /// rejected and the prior router stays live -- same posture as any
+    /// other reload-time load failure.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
+        // Arrange: a good current-version config and an initial router built
+        // from an empty overlay.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .unwrap();
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let mut initial_config = Config {
+            version: routectl_router::CURRENT_CONFIG_VERSION,
+            ..Default::default()
+        };
+        let _usage_dir = isolate_usage_db(&mut initial_config);
+        let initial_config = Arc::new(initial_config);
+        let (usage, _writer) = build_usage_writer(&initial_config);
+        let router = build_router_from_config_with_overlay(
+            initial_config.clone(),
+            &CatalogOverlay::default(),
+            secrets.clone(),
+        )
+        .await
+        .expect("initial router build");
+        let swap = Arc::new(ArcSwap::from_pointee(router));
+        let router_before = swap.load_full();
+
+        // Act: write a hand-edited overlay carrying a degenerate cell
+        // (rm = 0) at the default overlay path, then reload.
+        let overlay_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&overlay_dir).unwrap();
+        std::fs::write(
+            overlay_dir.join("catalog_overlay.json"),
+            r#"{"schema_version":1,"revision":0,"cells":{"openai-compat:grok-*":{"source":"user","verified_at":"2026-01-01","rm":0.0}}}"#,
+        )
+        .unwrap();
+        let result = handle_config_reload(
+            Some(&cfg_path),
+            &initial_config,
+            secrets,
+            &swap,
+            &usage,
+            ReloadTrigger::CatalogOverlay,
+        )
+        .await;
+
+        // Assert: the reload rejects and the prior router stays installed.
+        assert!(
+            result.is_none(),
+            "a corrupt overlay cell must reject the reload"
+        );
+        let router_after = swap.load_full();
+        assert!(
+            Arc::ptr_eq(&router_before, &router_after),
+            "the prior router must stay installed on a rejected reload"
+        );
+    }
 }
 
 /// Activation-recompute + audit-event tests. Driven on the `#[tokio::test]`

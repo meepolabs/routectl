@@ -1504,6 +1504,44 @@ fn redact_cookie_and_set_cookie_redacted() {
     assert_eq!(arr[1][1].as_str(), Some("[REDACTED]"));
 }
 
+#[test]
+fn redact_header_value_no_panic_when_byte_7_is_continuation_byte() {
+    // Six ASCII digits followed by a 2-byte char places a UTF-8
+    // continuation byte at index 7, so a naive `value[..7]` slice would
+    // panic on a non-char-boundary. The scheme prefix must be compared
+    // over bytes so a crafted header value cannot abort the trace poll.
+    let value = "123456\u{00e9}";
+    assert_eq!(super::redact_header_value(value), "[REDACTED]");
+}
+
+#[test]
+fn redact_header_value_no_panic_when_lossy_replacement_char_straddles_7() {
+    // Header values arrive via `String::from_utf8_lossy`, which turns any
+    // non-UTF-8 byte into U+FFFD (3 bytes). Five ASCII bytes then a U+FFFD
+    // put that 3-byte char across index 7 (bytes 5..8), so byte 7 is a
+    // continuation byte; the byte-compare must not panic.
+    let value = "12345\u{FFFD}x";
+    assert_eq!(super::redact_header_value(value), "[REDACTED]");
+}
+
+#[test]
+fn redact_header_value_bearer_still_redacts_to_scheme_marker() {
+    assert_eq!(
+        super::redact_header_value("Bearer abc.def"),
+        "Bearer [REDACTED]"
+    );
+}
+
+#[test]
+fn redact_header_value_basic_scheme_collapses_to_bare_marker() {
+    // The `Basic` scheme is not `Bearer `; it must not keep a scheme
+    // prefix and collapses to the bare marker.
+    assert_eq!(
+        super::redact_header_value("Basic dXNlcjpwYXNz"),
+        "[REDACTED]"
+    );
+}
+
 // ---------------------------------------------------------------------
 // sanitize_capped / debug body control-char stripping
 // ---------------------------------------------------------------------
