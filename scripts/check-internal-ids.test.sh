@@ -83,6 +83,13 @@ assert_caught "M#.# milestone" "shipped in M99.7 cycle"
 assert_caught "H# fix token" "applies the H42 fix here"
 assert_caught "H# invariant token" "preserves the H7 invariant"
 
+# POSITIVE (planning-shorthand class): the task / feature / decision
+# shorthand forms are caught.
+assert_caught "f<n>.<nn> task shorthand" "landed in f1.02 slice"
+assert_caught "(pre-)f<n> planning commentary" "adjust pre-f2 before merge"
+assert_caught "(post-)f<n> planning commentary" "post-f3 cleanup pass"
+assert_caught "D<nn> decision shorthand" "recorded under D42 rationale"
+
 # NEGATIVE: ordinary content must NOT be caught.
 assert_clean "plain TODO" "TODO: refactor this later"
 assert_clean "issue ref" "fixes #123 in the tracker"
@@ -98,6 +105,15 @@ assert_clean "captured-fixture-like JSON" '{"model":"claude-opus-4-8","usage":{"
 # The boundary intent is whole-token, not substring.
 assert_clean "R2 embedded in identifier" "the xR2-EXAMPLEy symbol"
 assert_clean "RV embedded in identifier" "field myRV-99thing here"
+
+# NEGATIVE (planning-shorthand near-misses): tokens that resemble the
+# task / feature / decision shorthand but must NOT trip.
+assert_clean "genuine float literal near f<n>.<nn>" "let scale = 1.02 as ratio"
+assert_clean "f<n>.<nn> embedded in identifier" "the conf1.02 setting"
+assert_clean "word containing postfix" "apply the postfix operator here"
+assert_clean "word containing prefix" "strip the prefix from the key"
+assert_clean "D-digits inside a longer identifier" "the buildD42tag helper"
+assert_clean "hex byte near D<nn>" "mask with 0xD42F here"
 
 # POSITIVE (boundary still catches standalone tokens at edges): a token
 # bounded by punctuation / line edges must still be caught.
