@@ -50,6 +50,21 @@ impl UsageLedgerReader {
             loaded_rows: AtomicUsize::new(0),
         }
     }
+
+    /// Warn that a best-effort ledger read failed AFTER the bootstrap
+    /// probe had already opened the DB cleanly. `failure_class` separates
+    /// an open failure (`"open"`) from a query failure (`"query"`) so a
+    /// broken ledger is never mistaken downstream for a legitimately empty
+    /// one (both otherwise yield zero rows). Samples still return empty:
+    /// the warm stays best-effort and a read failure never fails bootstrap.
+    fn warn_read_failure(&self, failure_class: &str, error: &dyn std::fmt::Display) {
+        tracing::warn!(
+            db_path = %self.db_path.display(),
+            failure_class,
+            error = %error,
+            "usage ledger read failed during K-estimator startup warm; leaving store cold"
+        );
+    }
 }
 
 impl LedgerReader for UsageLedgerReader {
@@ -60,7 +75,14 @@ impl LedgerReader for UsageLedgerReader {
 
         let db = match open_readonly(&self.db_path) {
             Ok(db) => db,
-            Err(_) => return Vec::new(),
+            // An absent file or a table-less DB is the legitimately-empty
+            // ledger, not a failure: return no samples silently, matching
+            // the cold-start path the bootstrap probe already expects.
+            Err(OpenError::NoData { .. }) => return Vec::new(),
+            Err(e) => {
+                self.warn_read_failure("open", &e);
+                return Vec::new();
+            }
         };
 
         match read_reuse_samples_since(db.conn(), window_start_ms, limit) {
@@ -68,7 +90,10 @@ impl LedgerReader for UsageLedgerReader {
                 self.loaded_rows.store(rows.len(), Ordering::Relaxed);
                 rows.into_iter().map(reuse_row_to_ledger_row).collect()
             }
-            Err(_) => Vec::new(),
+            Err(e) => {
+                self.warn_read_failure("query", &e);
+                Vec::new()
+            }
         }
     }
 }
@@ -249,9 +274,46 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("absent.db");
 
-        // Act + Assert: a missing DB yields no rows, never an error.
+        // Act + Assert: a missing DB is the legitimately-empty ledger --
+        // it yields no rows, never an error, and must NOT warn.
         let reader = UsageLedgerReader::new(path);
-        assert!(reader.read_reuse_samples(UNIX_EPOCH, 100).is_empty());
+        let events = routectl_testkit::capture_events(|| {
+            assert!(reader.read_reuse_samples(UNIX_EPOCH, 100).is_empty());
+        });
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "an empty ledger must not emit a read-failure warning"
+        );
+    }
+
+    #[test]
+    fn reader_warns_and_returns_empty_on_unreadable_db() {
+        // Arrange: a non-DB file at the path. It exists, so the read-only
+        // open clears the existence probe and fails on the first PRAGMA --
+        // a genuine read failure, not an empty ledger.
+        let (_dir, path) = temp_db_path();
+        std::fs::write(&path, b"this is not a sqlite database").expect("write junk");
+
+        // Act
+        let reader = UsageLedgerReader::new(path);
+        let events = routectl_testkit::capture_events(|| {
+            assert!(
+                reader.read_reuse_samples(UNIX_EPOCH, 100).is_empty(),
+                "a read failure yields no samples, never a panic"
+            );
+        });
+
+        // Assert: a WARN fired naming the open failure class, distinct
+        // from the silent empty-ledger path.
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a read failure must emit a WARN");
+        assert_eq!(warn.field("failure_class"), Some("open"));
+        assert!(
+            warn.field("error").is_some(),
+            "the WARN must carry the error Display"
+        );
     }
 
     #[test]
