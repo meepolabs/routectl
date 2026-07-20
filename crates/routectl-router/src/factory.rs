@@ -1090,9 +1090,6 @@ pub async fn build_resolved_models(
         if !entry.effort_levels.is_empty() {
             resolved = resolved.with_effort_levels(entry.effort_levels.clone());
         }
-        if !entry.unsupported_features.is_empty() {
-            resolved = resolved.with_unsupported_features(entry.unsupported_features.clone());
-        }
         if entry.max_thinking_budget > 0 {
             resolved = resolved.with_max_thinking_budget(entry.max_thinking_budget);
         }

@@ -2717,6 +2717,7 @@ dependencies = [
  "regex",
  "reqwest",
  "reqwest_cookie_store",
+ "routectl-auth",
  "routectl-core",
  "routectl-testkit",
  "schemars",

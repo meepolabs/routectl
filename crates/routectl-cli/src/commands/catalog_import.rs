@@ -587,7 +587,15 @@ fn confirm(yes: bool) -> bool {
     if yes {
         return true;
     }
-    use std::io::Write as _;
+    use std::io::{IsTerminal as _, Write as _};
+    // A non-interactive caller with an open-but-silent stdin (a pipe that
+    // never sends a line or EOF) would otherwise block `read_line`
+    // forever. With no TTY there is no one to answer the prompt, so
+    // decline immediately -- the documented non-interactive contract is
+    // `--force`.
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
     print!("apply this import? [y/N] ");
     let _ = std::io::stdout().flush();
     let mut input = String::new();
@@ -751,6 +759,20 @@ mod tests {
     use serial_test::serial;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn confirm_declines_immediately_on_non_tty_without_yes() {
+        // Under the test harness stdin is not a TTY, so the terminal gate
+        // must fire and decline WITHOUT reaching read_line -- a silent
+        // pipe can no longer hang the prompt.
+        use std::io::IsTerminal as _;
+        assert!(
+            !std::io::stdin().is_terminal(),
+            "test harness stdin must be non-interactive for this assertion",
+        );
+        assert!(!confirm(false), "non-TTY without --force must decline");
+        assert!(confirm(true), "--force must still proceed byte-identically");
+    }
 
     const LITELLM_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

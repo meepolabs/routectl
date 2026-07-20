@@ -139,40 +139,7 @@ const fn offer_sort_key(offer: &Offer) -> (u8, &str, &str) {
 mod tests {
     use super::*;
     use routectl_router::MitmConfig;
-
-    /// Restore an env var to its prior value (or absence) on drop, so a
-    /// serial env-touching test leaves the process environment untouched.
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var_os(key);
-            // SAFETY: env-touching tests are serialized via serial_test, so
-            // no other thread reads or writes the environment concurrently.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prev }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let prev = std::env::var_os(key);
-            // SAFETY: see `set`.
-            unsafe { std::env::remove_var(key) };
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                // SAFETY: see `set`.
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use routectl_testkit::ScopedEnv;
 
     /// The conventional var whose presence drives the sole env offer.
     const ANTHROPIC_ENV_VAR: &str = "ANTHROPIC_API_KEY";
@@ -180,7 +147,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn oauth_present_cataloged_kind_yields_an_offer() {
-        let _guard = EnvGuard::unset(ANTHROPIC_ENV_VAR);
+        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
         let offers = detect_offers(&cfg, &[("anthropic", LocalProbe::Present)]);
 
@@ -195,7 +162,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn oauth_missing_expired_or_uncataloged_yields_no_offer() {
-        let _guard = EnvGuard::unset(ANTHROPIC_ENV_VAR);
+        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
         // `codex` missing / `xai` expired -> Unresolved; `antigravity`
         // (gemini) is present but not cataloged -> Unresolved.
@@ -216,7 +183,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn activated_non_anthropic_oauth_id_is_not_offered() {
-        let _guard = EnvGuard::unset(ANTHROPIC_ENV_VAR);
+        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
         // `xai` -> openai-compat and `codex` -> openai-responses are BOTH
         // cataloged, so a `Present` probe activates each. But `provider add`
@@ -237,7 +204,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn env_resolvable_var_yields_an_env_offer() {
-        let _guard = EnvGuard::set(ANTHROPIC_ENV_VAR, "sk-ant-not-a-real-key");
+        let _guard = ScopedEnv::set(ANTHROPIC_ENV_VAR, "sk-ant-not-a-real-key");
         let cfg = Config::default();
         let offers = detect_offers(&cfg, &[]);
 
@@ -251,7 +218,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn env_set_but_empty_var_yields_no_offer() {
-        let _guard = EnvGuard::set(ANTHROPIC_ENV_VAR, "");
+        let _guard = ScopedEnv::set(ANTHROPIC_ENV_VAR, "");
         let cfg = Config::default();
         let offers = detect_offers(&cfg, &[]);
         assert!(offers.is_empty(), "a set-but-empty var must not offer");
@@ -260,7 +227,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn env_unset_var_yields_no_offer() {
-        let _guard = EnvGuard::unset(ANTHROPIC_ENV_VAR);
+        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
         let offers = detect_offers(&cfg, &[]);
         assert!(offers.is_empty(), "an unset var must not offer");
@@ -269,7 +236,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn forwarded_offer_present_only_with_a_mitm_block() {
-        let _guard = EnvGuard::unset(ANTHROPIC_ENV_VAR);
+        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config {
             mitm: Some(MitmConfig::default()),
             ..Config::default()
@@ -286,7 +253,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn no_mitm_block_yields_no_forwarded_offer() {
-        let _guard = EnvGuard::unset(ANTHROPIC_ENV_VAR);
+        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
         let offers = detect_offers(&cfg, &[]);
         assert!(
@@ -298,7 +265,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn result_is_sorted_deterministically_across_repeated_calls() {
-        let _guard = EnvGuard::set(ANTHROPIC_ENV_VAR, "sk-ant-not-a-real-key");
+        let _guard = ScopedEnv::set(ANTHROPIC_ENV_VAR, "sk-ant-not-a-real-key");
         let cfg = Config {
             mitm: Some(MitmConfig::default()),
             ..Config::default()

@@ -88,7 +88,7 @@ fn unique_cert_dir(tag: &str) -> std::path::PathBuf {
 
 /// `[mitm]` block for a test scenario tagged `scenario` (used only to keep
 /// each scenario's cert dir distinct -- `[mitm]` itself is transport-only
-/// post-f3, forwardedness now lives on the `[providers.X]` entry, not
+/// now; forwardedness lives on the `[providers.X]` entry, not
 /// here). `listen_port: 0` (OS-assigned) avoids colliding with the
 /// sentinel `[server] port` these tests use (see `base_server_config`);
 /// the pinned `upstream_origin` / `mitm_host` defaults are left untouched
@@ -179,10 +179,10 @@ async fn e2e_admission_spoofed_seam_header_downgrades_to_seam_absent() {
     );
 }
 
-/// Case 2 (migrated for f3): a bearer + session id, but no MITM seam
+/// Case 2: a bearer + session id, but no MITM seam
 /// header -- a direct :9100 loopback client -- used to 400 as `not_mitm`
-/// whenever `[mitm] credential_source = forwarded` was set. f3 dropped that
-/// request-global rejection: the pre-parse gate now fires ONLY when the
+/// whenever `[mitm] credential_source = forwarded` was set. That
+/// request-global rejection is now dropped: the pre-parse gate now fires ONLY when the
 /// seam header IS present, so this exact traffic shape must be ADMITTED and
 /// dispatch normally to its own-credential provider, even while a forwarded
 /// provider coexists in `[providers]` (`has_forwarded_provider() == true`).
@@ -215,9 +215,9 @@ async fn e2e_admission_admits_own_provider_traffic_without_seam_header() {
     );
 }
 
-/// Case 4a (migrated for f3): the SAME "no seam -> admitted" contract,
-/// driven through the REAL `/v1/chat/completions` route. f3 dropped the
-/// `non_anthropic_dialect` rejection along with `not_mitm` -- both fired on
+/// Case 4a: the SAME "no seam -> admitted" contract,
+/// driven through the REAL `/v1/chat/completions` route. The
+/// `non_anthropic_dialect` rejection was dropped along with `not_mitm` -- both fired on
 /// the removed request-global forwarded flag -- so a non-Anthropic-dialect
 /// request without the seam header must be admitted too, proving the
 /// pre-parse gate no longer discriminates by dialect.
@@ -304,8 +304,8 @@ async fn e2e_admission_spoofed_seam_header_with_bearer_downgrades_to_seam_absent
 
 /// A well-formed forwarded-marked request (seam + bearer + session id,
 /// Anthropic dialect) is ADMITTED past the admission matrix and then
-/// routes exactly like any other request: f3 dissolved the f2 whole-
-/// chain ROUTER gate, so a captured bearer no longer bends routing --
+/// routes exactly like any other request: the whole-chain ROUTER gate was
+/// dissolved, so a captured bearer no longer bends routing --
 /// the alias resolves to its configured (non-Anthropic, OWN-credential)
 /// provider and dispatch proceeds normally, reaching the real upstream
 /// with that provider's own credentials. See `assert_backward_compat_round_trip`
@@ -356,7 +356,7 @@ async fn e2e_forwarded_capture_present_but_alias_routes_to_own_credential_provid
 }
 
 // ---------------------------------------------------------------------------
-// Coexistence dissolved (f3): a captured forwarded bearer no longer bends
+// Coexistence dissolved: a captured forwarded bearer no longer bends
 // routing. An alias to a non-Anthropic, OWN-credential provider dispatches
 // normally with that provider's own credentials -- no whole-chain refusal,
 // no steering. The token-containment invariant (the forwarded bearer never
@@ -412,7 +412,7 @@ fn forwarded_config_with_non_anthropic_provider(upstream_base: &str) -> Arc<Conf
 /// aliased as `heavy`. `Router::has_forwarded_provider()` is `true` here --
 /// used to prove the admission gate no longer 400s own-provider /
 /// non-Anthropic-dialect traffic just because a forwarded provider
-/// coexists (f3's whole point: forwardedness moved off the request-global
+/// coexists (the whole point of the per-provider migration: forwardedness moved off the request-global
 /// `[mitm]` flag onto this per-provider config).
 fn config_with_forwarded_and_own_providers(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();

@@ -1681,28 +1681,7 @@ fast = "sonnet"
     // hand-built inputs.
     // -----------------------------------------------------------------
 
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let prev = std::env::var_os(key);
-            // SAFETY: serialized against every other `#[serial]` env-mutating
-            // test in this crate via `serial_test::serial`.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                // SAFETY: see `set` above.
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use routectl_testkit::ScopedEnv;
 
     /// Write `economics_config()`'s TOML alongside a `catalog_overlay.json`
     /// holding `overlay_json`, under a fresh isolated `XDG_CONFIG_HOME`, and
@@ -1711,9 +1690,9 @@ fast = "sonnet"
     /// var alive for the duration of the test.
     fn load_economics_config_with_overlay_json(
         overlay_json: &str,
-    ) -> (EnvGuard, Config, CatalogOverlay) {
+    ) -> (ScopedEnv, Config, CatalogOverlay) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(&cfg_path, economics_config_toml()).expect("write config.toml");
 

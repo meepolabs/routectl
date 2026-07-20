@@ -12,7 +12,7 @@ description = "Provider implementations for routectl."
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses", "gemini"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
 "anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64", "dep:xxhash-rust"]
-"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store", "dep:tempfile"]
+"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store", "dep:tempfile", "dep:routectl-auth"]
 "gemini" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio"]
 # Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
 # that must not appear in production builds. Required when running integration
@@ -82,6 +82,15 @@ reqwest_cookie_store = { workspace = true, optional = true }
 # truncated jar over the live file. Pulled in only when the
 # `openai-responses` feature is on.
 tempfile = { version = "3", optional = true }
+
+# Shared 0600 atomic-write primitive (`atomic_write::write_0600_atomic_with_policy`)
+# consumed by the openai-responses cookie jar. `default-features = false`
+# drops the crate's `oauth` feature so no reqwest / axum / webbrowser
+# oauth-plane deps leak into the providers graph -- `atomic_write` is
+# std + tempfile only. Gated behind `openai-responses`. Declared as a
+# direct path dep (not `workspace = true`) because inheriting cannot flip
+# `default-features` to false when the workspace root leaves it defaulted.
+routectl-auth = { path = "../routectl-auth", optional = true, default-features = false }
 
 # AWS SDK / signing crates (used only by the `bedrock` feature). Pinned
 # to specific minor versions so cargo update churn is bounded.

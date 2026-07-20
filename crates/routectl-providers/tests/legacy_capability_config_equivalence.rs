@@ -5,8 +5,9 @@
 //! This file proves the OTHER half: the two legacy egress allowlists
 //! (`[bedrock] allowed_betas` and `[bedrock] allowed_body_fields`, plus the
 //! anthropic-egress `allowed_betas`) emit byte-identical wire output to the
-//! pre-f3 baseline. The egress filters were untouched by f3; these tests pin
-//! their absolute output so any accidental f3-adjacent regression is caught.
+//! legacy baseline. The egress filters were untouched by the per-provider
+//! capability migration; these tests pin
+//! their absolute output so any accidental regression is caught.
 //!
 //! Each surface is exercised in BOTH modes the allowlists support:
 //!

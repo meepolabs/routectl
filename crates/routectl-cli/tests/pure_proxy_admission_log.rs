@@ -39,7 +39,7 @@ const FORWARDED_TOKEN: &str = "sk-ant-oat01-FORWARDED-INGRESS-must-never-surface
 const MITM_PROXIED_HEADER: &str = "x-routectl-mitm-proxied";
 
 /// Build a forwarded-mode `AppState` (a present `[mitm]` block, transport
-/// only -- forwardedness is a per-provider config choice post-f3, not a
+/// only -- forwardedness is a per-provider config choice now, not a
 /// `[mitm]` one) with an isolated in-tempdir usage writer. `AppState::
 /// for_test` is `#[cfg(test)]`-only (not visible to an integration crate),
 /// so we build the pub-field struct directly.

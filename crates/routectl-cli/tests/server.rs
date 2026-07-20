@@ -9,6 +9,7 @@ use std::sync::Arc;
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerAuth, ServerConfig,
 };
+use routectl_testkit::ScopedEnv;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -578,35 +579,6 @@ async fn chat_completions_unknown_model_without_default_returns_error() {
     assert_eq!(body["error"]["type"], "unknown_alias");
 }
 
-/// Set an env var for the test's duration and restore the prior value on
-/// drop so an assertion failure cannot leak `XDG_CONFIG_HOME` into sibling
-/// tests.
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-impl EnvGuard {
-    // SAFETY: process-env mutation is unsynchronized, so every test that
-    // constructs an EnvGuard MUST be #[serial_test::serial]; sibling tests
-    // in this binary pass explicit config paths and do not read
-    // XDG_CONFIG_HOME, so no non-serial reader races the mutation.
-    fn set(key: &'static str, value: &std::path::Path) -> Self {
-        let prev = std::env::var_os(key);
-        unsafe { std::env::set_var(key, value) };
-        Self { key, prev }
-    }
-}
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: see EnvGuard::set -- restore runs under the same
-        // #[serial_test::serial] test that created the guard.
-        match self.prev.take() {
-            Some(v) => unsafe { std::env::set_var(self.key, v) },
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
-}
-
 #[tokio::test]
 #[serial_test::serial]
 async fn activated_inventory_never_synthesizes_routes() {
@@ -619,7 +591,7 @@ async fn activated_inventory_never_synthesizes_routes() {
     // construction. This pins that guarantee end-to-end over the HTTP
     // surface.
     let xdg = tempfile::tempdir().unwrap();
-    let _guard = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+    let _guard = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
 
     // Seed <xdg>/routectl/credentials.json with a Present anthropic token so
     // the startup activation compute marks anthropic Activated.
@@ -971,7 +943,7 @@ async fn anthropic_inference_paths_are_all_served_by_build_axum_router() {
 }
 
 // ---------------------------------------------------------------------------
-// Status subtree wiring: auth-exemption + host-allowlist scoping (ui.f1.10).
+// Status subtree wiring: auth-exemption + host-allowlist scoping.
 // ---------------------------------------------------------------------------
 
 /// A config whose ingress `/v1/*` surface requires a listener token, so the

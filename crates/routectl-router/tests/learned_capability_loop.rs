@@ -741,7 +741,7 @@ async fn same_capability_probe_backs_off_on_repeat_rejection() {
 }
 
 // ---------------------------------------------------------------------------
-// Leg 6: D17 route-away-with-floor vs statically-empty 501.
+// The learned-only tail: route-away-with-floor vs a statically-empty 501.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -753,13 +753,13 @@ async fn all_targets_learned_still_attempts_the_tail() {
             Upstream::openai("m_a", "prov_a", &a.uri()),
             Upstream::openai("m_b", "prov_b", &b.uri()),
         ],
-        "d17",
+        "learned_tail",
         &["m_a", "m_b"],
         48,
     )
     .await;
 
-    let d1 = complete(&router, "d17").await;
+    let d1 = complete(&router, "learned_tail").await;
     assert!(matches!(
         d1.result,
         Err(Error::Upstream { status: 400, .. })
@@ -772,7 +772,7 @@ async fn all_targets_learned_still_attempts_the_tail() {
     assert_eq!(hits(&a).await, 1);
     assert_eq!(hits(&b).await, 1);
 
-    let (d2, events) = routectl_testkit::with_capture(complete(&router, "d17")).await;
+    let (d2, events) = routectl_testkit::with_capture(complete(&router, "learned_tail")).await;
     assert!(
         matches!(d2.result, Err(Error::Upstream { status: 400, .. })),
         "a learned-only chain must still attempt (not 501): {:?}",
@@ -789,7 +789,7 @@ async fn all_targets_learned_still_attempts_the_tail() {
     assert!(
         events.iter().any(|e| e.level == tracing::Level::WARN
             && e.message.contains("de-prioritized learned tail")),
-        "entering the D17 tail must emit a WARN",
+        "entering the learned tail must emit a WARN",
     );
 }
 

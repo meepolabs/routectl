@@ -705,6 +705,13 @@ fn strict_translation_on_rejects_canonical_only_fields() {
         msg.contains("cache_control") && msg.contains("anthropic_beta"),
         "expected both dropped fields named in error: {msg}"
     );
+    // The strict-translation rejection is client-facing (HTTP 400), so it
+    // must name the offending feature -- never the internal egress/provider
+    // id, which would leak routing topology to a remote caller.
+    assert!(
+        !msg.contains("openai-compat:strict"),
+        "strict_translation error must not echo the provider id: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -861,25 +861,7 @@ mod tests {
         out
     }
 
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let prev = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use routectl_testkit::ScopedEnv;
 
     const V3_ONE_PROVIDER: &str = "\
 version = 3
@@ -894,7 +876,7 @@ api_key_ref = \"literal:k\"
     #[serial_test::serial]
     async fn run_unknown_name_exits_nonzero_without_probing() {
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
@@ -915,7 +897,7 @@ api_key_ref = \"literal:k\"
     #[serial_test::serial]
     async fn full_run_leaves_config_dir_byte_identical() {
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");

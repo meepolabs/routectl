@@ -1218,32 +1218,7 @@ mod tests {
     use std::path::PathBuf;
 
     use routectl_router::{AliasValue, ModelEntry, ProviderEntry};
-
-    /// RAII guard for env-var mutation in the IO tests; restores the prior
-    /// value on drop so a panic cannot leak into a sibling test.
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-    impl EnvGuard {
-        // SAFETY: process-env mutation is unsynchronized, so every test that
-        // constructs an EnvGuard MUST be #[serial_test::serial]; the two
-        // async tests here that set XDG_CONFIG_HOME both carry that
-        // attribute, and no non-serial sibling reads the var.
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let prev = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use routectl_testkit::ScopedEnv;
 
     fn token_record(expires_at: u64) -> TokenRecord {
         token_record_with_refresh(expires_at, "rtok")
@@ -2192,7 +2167,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
@@ -2221,7 +2196,7 @@ mod tests {
     #[serial_test::serial]
     async fn too_old_config_is_not_stamped_and_reports_fail() {
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
@@ -2247,7 +2222,7 @@ mod tests {
     #[serial_test::serial]
     async fn present_but_unparseable_config_yields_fail_end_to_end() {
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
@@ -2431,7 +2406,7 @@ mod tests {
         );
 
         {
-            let _var = EnvGuard::set("ROUTECTL_DOCTOR_TEST_KEY", "sk-secret-value");
+            let _var = ScopedEnv::set("ROUTECTL_DOCTOR_TEST_KEY", "sk-secret-value");
             let checks = gather_secret_checks(&cfg, &[]);
             let f = secret_finding(&checks[0]);
             assert_eq!(f.status, Status::Pass);
@@ -2513,7 +2488,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let secret_dir = tmp.path().join("routectl").join("secrets");
         std::fs::create_dir_all(&secret_dir).unwrap();
         std::fs::set_permissions(&secret_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2548,7 +2523,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let secret_dir = tmp.path().join("routectl").join("secrets");
         std::fs::create_dir_all(&secret_dir).unwrap();
         std::fs::set_permissions(&secret_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2578,7 +2553,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
@@ -2790,7 +2765,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");
@@ -2863,7 +2838,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
         let cfg_dir = tmp.path().join("routectl");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_path = cfg_dir.join("config.toml");

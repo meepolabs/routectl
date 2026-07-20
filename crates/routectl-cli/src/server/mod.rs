@@ -2562,7 +2562,7 @@ default = "claude"
         // Arrange: an isolated config dir, a minimal config.toml, and NO
         // overlay file yet (first run -> empty overlay).
         let dir = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,
@@ -2649,7 +2649,7 @@ default = "claude"
     async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,
@@ -2732,7 +2732,7 @@ default = "claude"
         // -- the watcher needs the overlay's PARENT directory to exist at
         // watch-install time even though the overlay FILE does not.
         let dir = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let config_dir = dir.path().join("routectl");
         std::fs::create_dir_all(&config_dir).unwrap();
         let cfg_path = config_dir.join("config.toml");
@@ -3063,32 +3063,7 @@ default = "claude"
         }
     }
 
-    /// Temporarily set an env var for the test's duration, restoring the
-    /// prior value (or unsetting it) on drop. Mirrors `secrets.rs`'s
-    /// private `EnvGuard` (not reused across modules -- kept local and
-    /// minimal here).
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let prev = std::env::var_os(key);
-            // SAFETY: serialized against every other `#[serial]` env-mutating
-            // test in this crate via `serial_test::serial`.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                // SAFETY: see `set` above.
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use routectl_testkit::ScopedEnv;
 
     /// A config older than this build writes is REJECTED at load, never
     /// migrated in place. Both the serve/reload loader
@@ -3102,7 +3077,7 @@ default = "claude"
         // Arrange: a v1 config (no explicit `version`) under an isolated
         // temp dir -- never the live config, per the loader learnings.
         let dir = tempfile::tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         let body = "[server]\nhost = \"127.0.0.1\"\nport = 4000\n";
         std::fs::write(&cfg_path, body).expect("write config.toml");
@@ -3141,7 +3116,7 @@ default = "claude"
         // Arrange: a v2 config, plus a sidecar file that the load must NOT
         // fold in (the load no longer merges sidecars at any version).
         let dir = tempfile::tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         let body = "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 4000\n";
         std::fs::write(&cfg_path, body).expect("write config.toml");
@@ -3211,7 +3186,7 @@ default = "claude"
         // Arrange: a current-version config so the load path exercises
         // only the credential-source validator, not the version preflight.
         let dir = tempfile::tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,
@@ -3258,7 +3233,7 @@ default = "claude"
 
         for (name, body) in cases {
             let dir = tempfile::tempdir().expect("tempdir");
-            let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+            let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
             let cfg_path = dir.path().join("config.toml");
             std::fs::write(&cfg_path, body).expect("write config.toml");
 
@@ -3305,7 +3280,7 @@ default = "claude"
     fn serve_load_warns_once_on_legacy_capability_lists() {
         // Arrange
         let dir = tempfile::tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
 
@@ -3349,7 +3324,7 @@ default = "claude"
     fn hot_reload_load_warns_once_on_legacy_capability_lists() {
         // Arrange
         let dir = tempfile::tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
 
@@ -3375,7 +3350,7 @@ default = "claude"
     fn config_check_stays_silent_and_passing_on_legacy_capability_lists() {
         // Arrange
         let dir = tempfile::tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(&cfg_path, LEGACY_LIST_CONFIG).expect("write config.toml");
 
@@ -3412,7 +3387,7 @@ default = "claude"
     fn serve_load_is_silent_without_legacy_capability_lists() {
         // Arrange
         let dir = tempfile::tempdir().expect("tempdir");
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,
@@ -3440,7 +3415,7 @@ default = "claude"
     async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_router() {
         // Arrange: a good current-version config, an initial router built from it.
         let dir = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,
@@ -3502,7 +3477,7 @@ default = "claude"
         // Arrange: a good current-version config and an initial router built
         // from an empty overlay.
         let dir = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
         let cfg_path = dir.path().join("config.toml");
         std::fs::write(
             &cfg_path,

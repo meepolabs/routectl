@@ -3128,7 +3128,7 @@ impl Default for RetryPolicy {
             retry_on_5xx: None,
             retry_on_network: None,
             request_timeout_ms: None,
-            // F1's early-response inversion holds the client warm, so a
+            // The early-response inversion holds the client warm, so a
             // pinging-but-contentless upstream would otherwise be
             // unbounded (the client no longer bails at ~300s). 600000ms
             // mirrors the live deployment and sits well above the 300s

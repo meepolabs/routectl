@@ -973,16 +973,43 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             );
             "requested capability is not implemented".to_string()
         }
-        // Caller-actionable classes: their Display string carries no
-        // internal topology, so the verbose message stays. Kept as
+        // The Display string names an internal provider config id
+        // (routing topology) -- unlike UnknownAlias, whose id echoes
+        // caller input. Log the id server-side and return an opaque
+        // class message so the client learns nothing about the
+        // configured provider set.
+        Error::UnknownProvider(provider) => {
+            let safe_provider = routectl_core::sanitize_detail_for_log(provider);
+            tracing::error!(
+                provider = %safe_provider,
+                "unknown provider suppressed in HTTP response"
+            );
+            "requested target is not configured".to_string()
+        }
+        // A bare std::io::Error Display can embed filesystem paths.
+        Error::Io(io_err) => {
+            let safe_detail = routectl_core::sanitize_detail_for_log(&io_err.to_string());
+            tracing::error!(
+                detail = %safe_detail,
+                "I/O error suppressed in HTTP response"
+            );
+            "internal I/O error".to_string()
+        }
+        // A serde_json::Error Display can embed request payload fragments
+        // and structural detail.
+        Error::Json(json_err) => {
+            let safe_detail = routectl_core::sanitize_detail_for_log(&json_err.to_string());
+            tracing::error!(
+                detail = %safe_detail,
+                "JSON error suppressed in HTTP response"
+            );
+            "invalid JSON in request body".to_string()
+        }
+        // Caller-actionable classes: their Display string carries only
+        // caller-derived input, so the verbose message stays. Kept as
         // explicit arms (no wildcard) so a new core Error variant fails
         // to compile here and forces a client-exposure decision.
-        Error::UnknownProvider(_)
-        | Error::UnknownAlias(_)
-        | Error::Validation(_)
-        | Error::Streaming(_)
-        | Error::Io(_)
-        | Error::Json(_) => e.to_string(),
+        Error::UnknownAlias(_) | Error::Validation(_) | Error::Streaming(_) => e.to_string(),
     };
     // Lift the upstream classifier so an SDK that branches on
     // `error.type` / `error.code` keeps the upstream signal instead of

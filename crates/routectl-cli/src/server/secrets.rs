@@ -556,39 +556,7 @@ mod tests {
         );
     }
 
-    /// RAII helper used by the env-mutating test below so an `assert!`
-    /// failure can't leak modified env into sibling tests.
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-    impl EnvGuard {
-        fn unset(key: &'static str) -> Self {
-            let prev = std::env::var_os(key);
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            unsafe { std::env::remove_var(key) };
-            Self { key, prev }
-        }
-
-        fn set(key: &'static str, val: &std::ffi::OsStr) -> Self {
-            let prev = std::env::var_os(key);
-            // SAFETY: every EnvGuard caller is #[serial_test::serial], so no
-            // concurrent thread reads or writes this process's environment
-            // while set_var runs.
-            unsafe { std::env::set_var(key, val) };
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                // TODO: Audit that the environment access only happens in single-threaded code.
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                // TODO: Audit that the environment access only happens in single-threaded code.
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use routectl_testkit::ScopedEnv;
 
     /// Pin: `routectl config check` and `routectl test` must not require
     /// `HOME` or `XDG_CONFIG_HOME` for configs that use only `env://`,
@@ -600,8 +568,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn open_default_succeeds_when_xdg_and_home_unset() {
-        let _xdg = EnvGuard::unset("XDG_CONFIG_HOME");
-        let _home = EnvGuard::unset("HOME");
+        let _xdg = ScopedEnv::unset("XDG_CONFIG_HOME");
+        let _home = ScopedEnv::unset("HOME");
 
         let store = CompositeStore::open_default()
             .await
@@ -795,7 +763,7 @@ mod tests {
         // Arrange: XDG points at a temp dir whose credentials.json is
         // corrupt; a file:// secret lives alongside.
         let dir = tempfile::tempdir().unwrap();
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path().as_os_str());
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path().as_os_str());
         let creds = dir.path().join("routectl").join("credentials.json");
         std::fs::create_dir_all(creds.parent().unwrap()).unwrap();
         std::fs::write(&creds, b"<<corrupt-json>>").unwrap();

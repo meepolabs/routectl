@@ -161,6 +161,20 @@ struct Inner {
     /// acquire the file lock twice (once for the double-check and
     /// once for the final write).
     reload_gen: std::sync::atomic::AtomicU64,
+    /// Per-seat transient-failure cooldown. During an IdP outage the
+    /// per-seat single-flight gate collapses each request wave to one
+    /// refresh POST, but nothing damps successive waves -- every wave
+    /// re-POSTs the dead token endpoint. This map applies an in-memory
+    /// exponential cooldown per seat: after a transient refresh failure
+    /// the seat is barred from re-POSTing until `next_allowed_unix`,
+    /// failing fast instead. Restart-forgetful by design (single-host
+    /// scale target); guarded by a sync `std::sync::Mutex` because every
+    /// access is a tiny CPU-only critical section that never crosses an
+    /// await. Keyed by SEAT KEY, mirroring `refresh_locks`. A successful
+    /// refresh, a login (`write_record`), a logout (`remove_provider`),
+    /// and any `reload_from_disk` clear it (the last clears the WHOLE
+    /// map so file-watch recovery is never masked by a stale entry).
+    refresh_cooldowns: std::sync::Mutex<BTreeMap<String, SeatCooldown>>,
     /// Test seam: when set, `refresh_under_lock` uses this flow instead
     /// of `providers::lookup`. Lets the unit tests inject a counting
     /// fake without standing up the real token endpoint. The field is
@@ -168,6 +182,31 @@ struct Inner {
     /// override at all.
     #[cfg(test)]
     refresh_flow: Option<Arc<dyn providers::OAuthFlow>>,
+    /// Test seam: overrides the cooldown clock. `0` means "use
+    /// `unix_now()`". Lets a test advance past `next_allowed_unix`
+    /// deterministically instead of sleeping. `cfg(test)`-gated so it
+    /// cannot exist in a production binary.
+    #[cfg(test)]
+    now_override: std::sync::atomic::AtomicU64,
+}
+
+/// In-memory transient-failure cooldown state for one seat. Lives in
+/// `Inner::refresh_cooldowns`; never persisted (restart-forgetful).
+#[derive(Debug, Default)]
+struct SeatCooldown {
+    /// Consecutive transient failures observed since the last success.
+    /// Drives the exponential backoff exponent.
+    consecutive: u32,
+    /// Unix second before which a refresh POST for this seat is barred.
+    next_allowed_unix: u64,
+    /// Count of request-time refresh attempts failed fast by this
+    /// cooldown since it was entered. Reported once on recovery, never
+    /// per suppressed attempt.
+    suppressed: u64,
+    /// Class-only last transient failure reason (e.g. `"token_endpoint
+    /// 503"` / `"network"`, never a URL). Kept for the recovery/entry
+    /// observability only.
+    last_error: String,
 }
 
 impl OAuthStore {
@@ -183,6 +222,16 @@ impl OAuthStore {
     /// router's request-timeout policy is independent; this guards
     /// only the OAuth control plane.
     pub(crate) const HTTP_TOTAL_TIMEOUT_SECS: u64 = 30;
+
+    /// Base cooldown after the first transient refresh failure, in
+    /// seconds. Each further consecutive failure doubles the window
+    /// (`5 << (consecutive - 1)`) up to `COOLDOWN_CAP_SECS`.
+    const COOLDOWN_BASE_SECS: u64 = 5;
+
+    /// Maximum per-seat cooldown window, in seconds. Caps the
+    /// exponential backoff so a long outage settles at one probe per
+    /// minute rather than growing unbounded.
+    const COOLDOWN_CAP_SECS: u64 = 60;
 
     /// Open the store at `path`, loading any existing credentials. A
     /// missing file yields an empty in-memory store -- first run is
@@ -203,8 +252,11 @@ impl OAuthStore {
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
+                refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 refresh_flow: None,
+                #[cfg(test)]
+                now_override: std::sync::atomic::AtomicU64::new(0),
             }),
         })
     }
@@ -232,8 +284,11 @@ impl OAuthStore {
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
+                refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 refresh_flow: None,
+                #[cfg(test)]
+                now_override: std::sync::atomic::AtomicU64::new(0),
             }),
         })
     }
@@ -497,6 +552,7 @@ impl OAuthStore {
         }
         let mut guard = self.inner.file.write().await;
         let provider = provider.to_string();
+        let seat_key = provider.clone();
         let (merged, ()) = file_io::update_under_lock(&self.inner.path, move |cf| {
             cf.upsert(&provider, rec);
             file_io::Mutation {
@@ -506,6 +562,9 @@ impl OAuthStore {
         })
         .await?;
         *guard = merged;
+        // Reset trigger: a login/writeback for this seat supersedes any
+        // stale transient cooldown -- the credential state just changed.
+        self.clear_cooldown(&seat_key);
         Ok(())
     }
 
@@ -523,6 +582,7 @@ impl OAuthStore {
         }
         let mut guard = self.inner.file.write().await;
         let provider = provider.to_string();
+        let seat_key = provider.clone();
         let (merged, was_present) = file_io::update_under_lock(&self.inner.path, move |cf| {
             let was_present = cf.remove(&provider).is_some();
             let directive = if was_present {
@@ -537,6 +597,9 @@ impl OAuthStore {
         })
         .await?;
         *guard = merged;
+        // Reset trigger: a logout for this seat clears any stale
+        // cooldown so a subsequent re-login starts from a clean slate.
+        self.clear_cooldown(&seat_key);
         Ok(was_present)
     }
 
@@ -621,7 +684,12 @@ impl OAuthStore {
     /// freshly-persisted `TokenRecord` so the CLI can report the new
     /// expiry.
     pub async fn force_refresh(&self, provider: &str, label: Option<&str>) -> Result<TokenRecord> {
-        self.force_refresh_seat(provider, &seat_key(provider, label))
+        // The explicit CLI `routectl refresh` is the operator escape
+        // hatch: it BYPASSES the cooldown check (an operator asking for a
+        // refresh during an outage must not be told "temporarily
+        // unavailable") but still records the outcome, so a transient
+        // failure it hits arms the cooldown for the request-time paths.
+        self.force_refresh_seat(provider, &seat_key(provider, label), true)
             .await
     }
 
@@ -631,12 +699,19 @@ impl OAuthStore {
     /// and persistence target (`seat_key(provider, label)`). For an
     /// unlabeled seat the two coincide. Drives both the CLI
     /// `force_refresh` and the trait `on_auth_failure` paths.
-    async fn force_refresh_seat(&self, provider: &str, seat: &str) -> Result<TokenRecord> {
+    /// `bypass_cooldown` is set only by the CLI escape hatch; the
+    /// request-time 401 path (`on_auth_failure`) never bypasses.
+    async fn force_refresh_seat(
+        &self,
+        provider: &str,
+        seat: &str,
+        bypass_cooldown: bool,
+    ) -> Result<TokenRecord> {
         // Validate the provider id up front so an unknown id does not
         // surface as `NotLoggedIn` (which is misleading).
         providers::lookup(provider).map_err(Error::from)?;
         let current = self.read_record(seat).await.map_err(Error::from)?;
-        self.refresh_under_lock(provider, seat, &current, true)
+        self.refresh_under_lock(provider, seat, &current, true, bypass_cooldown)
             .await
     }
 
@@ -686,7 +761,146 @@ impl OAuthStore {
         self.inner
             .reload_gen
             .fetch_add(1, std::sync::atomic::Ordering::Release);
+        // Reset trigger: clear the WHOLE cooldown map. A reload is the
+        // file-watch recovery escape hatch (an operator may have fixed
+        // a revoked credential out-of-band); a stale per-seat cooldown
+        // must never mask that recovery, so every seat gets a clean slate.
+        self.inner
+            .refresh_cooldowns
+            .lock()
+            .expect("refresh_cooldowns mutex poisoned")
+            .clear();
         Ok(())
+    }
+
+    /// Cooldown clock. Production reads the wall clock via `unix_now()`;
+    /// tests may pin it through the `now_override` seam so backoff-window
+    /// expiry is exercised deterministically without sleeping.
+    fn now(&self) -> u64 {
+        #[cfg(test)]
+        {
+            let o = self
+                .inner
+                .now_override
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if o != 0 {
+                return o;
+            }
+        }
+        unix_now()
+    }
+
+    /// Test seam: pin the cooldown clock to `now` unix seconds (`0`
+    /// restores the wall clock). Only compiled into test builds.
+    #[cfg(test)]
+    fn set_test_now(&self, now: u64) {
+        self.inner
+            .now_override
+            .store(now, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: snapshot a seat's cooldown as
+    /// `(consecutive, next_allowed_unix, suppressed)`, or `None` when the
+    /// seat has no active cooldown entry.
+    #[cfg(test)]
+    fn cooldown_snapshot(&self, seat: &str) -> Option<(u32, u64, u64)> {
+        self.inner
+            .refresh_cooldowns
+            .lock()
+            .expect("refresh_cooldowns mutex poisoned")
+            .get(seat)
+            .map(|c| (c.consecutive, c.next_allowed_unix, c.suppressed))
+    }
+
+    /// If `seat` is inside an active cooldown window, bump its suppressed
+    /// counter and return the coarse remaining seconds; otherwise return
+    /// `None` (the caller proceeds to the network POST). A stale entry
+    /// whose window has already elapsed is left in place -- the next
+    /// transient failure re-arms it, a success clears it.
+    fn cooldown_remaining(&self, seat: &str) -> Option<u64> {
+        let now = self.now();
+        let mut map = self
+            .inner
+            .refresh_cooldowns
+            .lock()
+            .expect("refresh_cooldowns mutex poisoned");
+        let cd = map.get_mut(seat)?;
+        if now < cd.next_allowed_unix {
+            cd.suppressed = cd.suppressed.saturating_add(1);
+            Some(cd.next_allowed_unix.saturating_sub(now))
+        } else {
+            None
+        }
+    }
+
+    /// Record a transient refresh failure for `seat`: bump the
+    /// consecutive count, extend the exponential backoff window, and emit
+    /// the entry/extension WARN exactly once (never per suppressed
+    /// attempt). Only called for failures the transient classifier
+    /// accepts; `RefreshExpired` and hard 4xx never reach here.
+    fn record_transient_failure(&self, provider: &str, seat: &str, err: &OAuthError) {
+        let now = self.now();
+        let reason = cooldown_reason(err);
+        let failure_class = refresh_failure_class(err);
+        let mut map = self
+            .inner
+            .refresh_cooldowns
+            .lock()
+            .expect("refresh_cooldowns mutex poisoned");
+        let cd = map.entry(seat.to_string()).or_default();
+        cd.consecutive = cd.consecutive.saturating_add(1);
+        // `5 << (consecutive - 1)` capped at 60: 5, 10, 20, 40, then 60.
+        // The branch (rather than a raw shift) keeps the exponent from
+        // overflowing the shift width once `consecutive` grows large
+        // during a prolonged outage.
+        let cooldown_secs = if cd.consecutive >= 5 {
+            Self::COOLDOWN_CAP_SECS
+        } else {
+            Self::COOLDOWN_BASE_SECS << (cd.consecutive - 1)
+        };
+        cd.next_allowed_unix = now.saturating_add(cooldown_secs);
+        cd.last_error = reason;
+        tracing::warn!(
+            provider = %provider,
+            seat = %seat,
+            failure_class = failure_class,
+            consecutive_failures = cd.consecutive,
+            cooldown_ms = cooldown_secs.saturating_mul(1000),
+            reason = %cd.last_error,
+            "oauth_refresh_cooldown_entered"
+        );
+    }
+
+    /// Clear `seat`'s cooldown after a successful refresh and, if one was
+    /// active, emit the recovery INFO with the accumulated suppressed
+    /// count. No-op (and silent) when the seat had no cooldown.
+    fn clear_cooldown_on_success(&self, provider: &str, seat: &str) {
+        let prev = self
+            .inner
+            .refresh_cooldowns
+            .lock()
+            .expect("refresh_cooldowns mutex poisoned")
+            .remove(seat);
+        if let Some(cd) = prev {
+            tracing::info!(
+                provider = %provider,
+                seat = %seat,
+                consecutive_failures = cd.consecutive,
+                suppressed_attempts = cd.suppressed,
+                "oauth_refresh_recovered"
+            );
+        }
+    }
+
+    /// Drop `seat`'s cooldown without logging. Used by the login/logout
+    /// reset triggers, where the seat's credential state changed out from
+    /// under any in-flight cooldown.
+    fn clear_cooldown(&self, seat: &str) {
+        self.inner
+            .refresh_cooldowns
+            .lock()
+            .expect("refresh_cooldowns mutex poisoned")
+            .remove(seat);
     }
 
     /// Refresh `seat`'s record under the per-seat single-flight mutex.
@@ -718,6 +932,7 @@ impl OAuthStore {
         seat: &str,
         current: &TokenRecord,
         force: bool,
+        bypass_cooldown: bool,
     ) -> Result<TokenRecord> {
         // Step 1: get-or-insert the per-seat tokio mutex. The map is
         // guarded by a `std::sync::Mutex` -- the critical section is
@@ -755,6 +970,20 @@ impl OAuthStore {
             return Ok(rec);
         }
 
+        // Cooldown gate: sits AFTER the reread double-check so a
+        // concurrent successful refresh (which cleared the seat's
+        // cooldown on its commit path) wins over a stale cooldown -- the
+        // double-check above already returned the fresh token in that
+        // case. During a transient IdP outage this fails fast without a
+        // POST until the exponential window elapses. The CLI escape hatch
+        // (`bypass_cooldown`) skips the check but still records outcomes.
+        if !bypass_cooldown && let Some(remaining) = self.cooldown_remaining(seat) {
+            return Err(Error::Auth(format!(
+                "oauth refresh temporarily unavailable for {provider}; \
+                 retry after ~{remaining}s"
+            )));
+        }
+
         // Snapshot the reload generation before the network round-trip.
         // If `reload_from_disk` completes while this POST is in-flight,
         // it bumps this counter (under the file write lock). We re-check
@@ -768,17 +997,28 @@ impl OAuthStore {
             .reload_gen
             .load(std::sync::atomic::Ordering::Acquire);
 
-        // Step 3: actually refresh.
+        // Step 3: actually refresh. Inspect the `OAuthError` variant
+        // BEFORE the blanket `Error::Auth` wrap so a transient failure
+        // (network / 5xx / malformed body) arms the per-seat cooldown,
+        // while a terminal `RefreshExpired` stays entirely outside the
+        // cooldown mechanism (never enters it, never suppressed by it --
+        // re-login semantics preserved).
         let flow = self.resolve_flow(provider)?;
-        let mut new_rec = flow
+        let mut new_rec = match flow
             .refresh_token(self.http(), rec.refresh_token.expose())
             .await
-            .map_err(|e| {
-                Error::Auth(format!(
+        {
+            Ok(rec) => rec,
+            Err(e) => {
+                if is_transient_refresh_error(&e) {
+                    self.record_transient_failure(provider, seat, &e);
+                }
+                return Err(Error::Auth(format!(
                     "oauth refresh failed for {provider}: {e}; \
                      re-run `routectl login {provider}`"
-                ))
-            })?;
+                )));
+            }
+        };
 
         // Preserve the per-credential `session_id` across token
         // rotation. The OAuthFlow trait has no slot for the prior
@@ -861,6 +1101,10 @@ impl OAuthStore {
                 return Err(Error::from(OAuthError::NotLoggedIn(seat.to_string())));
             }
         }
+        // Ok-clear on the commit path: the refresh committed to disk, so
+        // any prior cooldown for this seat is cleared here (after the
+        // write), not on the network return. Recovery is logged once.
+        self.clear_cooldown_on_success(provider, seat);
         Ok(new_rec)
     }
 
@@ -909,6 +1153,71 @@ fn sanitize_open_error(err: &OAuthError) -> String {
     format!("{class}; {RELOAD_HINT}")
 }
 
+/// Classify an OAuth refresh failure as transient (cooldown-eligible)
+/// versus terminal. This is a narrow local read of the existing
+/// `OAuthError` shape -- deliberately NOT a provider-wide typed-error
+/// redesign.
+///
+/// - `Network` -> transient (connection reset, DNS, TLS mid-outage).
+/// - `TokenEndpoint` -> parse a leading HTTP status from the message
+///   (`"429 https://..."`): `429` and `5xx` are transient; `400`/`401`/
+///   `403` are terminal (bad request / dead grant). A message with no
+///   parseable leading status (a malformed-body / UTF-8 error) is
+///   treated as transient -- during an outage a load balancer commonly
+///   returns junk bodies, and damping those is the safe direction.
+/// - Everything else (notably `RefreshExpired`) -> terminal: never
+///   enters the cooldown.
+fn is_transient_refresh_error(err: &OAuthError) -> bool {
+    match err {
+        OAuthError::Network(_) => true,
+        OAuthError::TokenEndpoint(msg) => match leading_http_status(msg) {
+            Some(status) => status == 429 || (500..=599).contains(&status),
+            None => true,
+        },
+        _ => false,
+    }
+}
+
+/// Parse a leading HTTP status code from a `TokenEndpoint` message. The
+/// Anthropic/antigravity flows format these as `"{status} {url}"`, so
+/// the code is the first whitespace-delimited token. Returns `None` when
+/// the leading token is not a plausible status (any non-status message).
+fn leading_http_status(msg: &str) -> Option<u16> {
+    msg.split_whitespace()
+        .next()?
+        .parse::<u16>()
+        .ok()
+        .filter(|s| (100..=599).contains(s))
+}
+
+/// Coarse failure-class label for the cooldown observability fields.
+const fn refresh_failure_class(err: &OAuthError) -> &'static str {
+    match err {
+        OAuthError::Network(_) => "network",
+        OAuthError::TokenEndpoint(_) => "token_endpoint",
+        OAuthError::RefreshExpired(_) => "refresh_expired",
+        _ => "other",
+    }
+}
+
+/// Class-only cooldown failure reason for the retained `last_error` and
+/// the observability log field. Provider refresh errors format as
+/// `"{status} {url}"` (the token-endpoint URL is vendor infrastructure,
+/// not a secret, but the log-hygiene posture is class-only), so this
+/// derives a bounded label from the coarse failure class plus the leading
+/// HTTP status and drops the URL entirely: `"token_endpoint 503"`,
+/// `"network"`. The output is a small fixed vocabulary, so no length cap
+/// or control-char stripping is needed.
+fn cooldown_reason(err: &OAuthError) -> String {
+    match err {
+        OAuthError::TokenEndpoint(msg) => match leading_http_status(msg) {
+            Some(status) => format!("token_endpoint {status}"),
+            None => "token_endpoint".to_string(),
+        },
+        other => refresh_failure_class(other).to_string(),
+    }
+}
+
 #[async_trait]
 impl SecretStore for OAuthStore {
     async fn get(&self, secret_ref: &SecretRef) -> Result<String> {
@@ -940,7 +1249,7 @@ impl SecretStore for OAuthStore {
                 "oauth access token near expiry; entering refresh single-flight"
             );
             let refreshed = self
-                .refresh_under_lock(provider, &seat, &rec, false)
+                .refresh_under_lock(provider, &seat, &rec, false, false)
                 .await?;
             return Ok(refreshed.access_token.expose().to_string());
         }
@@ -994,7 +1303,7 @@ impl SecretStore for OAuthStore {
                 )));
             }
         };
-        self.force_refresh_seat(provider, &seat_key(provider, label.as_deref()))
+        self.force_refresh_seat(provider, &seat_key(provider, label.as_deref()), false)
             .await
             .map(|_| ())
     }
@@ -1151,6 +1460,9 @@ mod tests {
         /// Simulate Anthropic's `invalid_grant` mapping. Drives the
         /// "actionable error" assertion.
         RefreshExpired,
+        /// Simulate a transient upstream failure (network / 5xx) that
+        /// the cooldown classifier accepts. Drives the cooldown tests.
+        Transient,
     }
 
     /// Tracks simultaneous `refresh_token` invocations so a test can
@@ -1194,7 +1506,7 @@ mod tests {
     /// claude.ai token endpoint.
     struct CountingFlow {
         calls: Arc<StdMutex<u32>>,
-        outcome: RefreshOutcome,
+        outcome: StdMutex<RefreshOutcome>,
         /// When true, `refresh_token` yields once before returning so a
         /// concurrent caller (in `tokio::join!`) can park on the
         /// per-seat single-flight mutex while we hold it.
@@ -1222,11 +1534,17 @@ mod tests {
         fn new(outcome: RefreshOutcome) -> Self {
             Self {
                 calls: Arc::new(StdMutex::new(0)),
-                outcome,
+                outcome: StdMutex::new(outcome),
                 yield_once: false,
                 concurrency: None,
                 rendezvous: None,
             }
+        }
+
+        /// Swap the outcome the next `refresh_token` will return. Lets a
+        /// single injected fake model an outage that later recovers.
+        fn set_outcome(&self, outcome: RefreshOutcome) {
+            *self.outcome.lock().unwrap() = outcome;
         }
 
         fn with_yield(mut self) -> Self {
@@ -1315,10 +1633,13 @@ mod tests {
             if let Some(gauge) = &self.concurrency {
                 gauge.leave();
             }
-            match &self.outcome {
-                RefreshOutcome::Mint(at) => Ok(rec_named(at, unix_now() + 3600)),
+            match self.outcome.lock().unwrap().clone() {
+                RefreshOutcome::Mint(at) => Ok(rec_named(&at, unix_now() + 3600)),
                 RefreshOutcome::RefreshExpired => {
                     Err(OAuthError::RefreshExpired("anthropic".into()))
+                }
+                RefreshOutcome::Transient => {
+                    Err(OAuthError::Network("simulated upstream outage".into()))
                 }
             }
         }
@@ -1344,7 +1665,9 @@ mod tests {
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
+                refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
                 refresh_flow: Some(flow),
+                now_override: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -1914,7 +2237,9 @@ mod tests {
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
+                refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
                 refresh_flow: None,
+                now_override: std::sync::atomic::AtomicU64::new(0),
             }),
         };
 
@@ -3542,5 +3867,345 @@ mod tests {
             matches!(outcome.unwrap(), OpenOutcome::NoConfigDir),
             "no HOME/XDG must yield NoConfigDir, not a degraded Present store"
         );
+    }
+
+    /// Helper: seed a near-expiry record on disk, then open a store whose
+    /// refresh path is the injected counting fake. Returns the store.
+    async fn seed_near_expiry_with_flow(
+        path: &std::path::Path,
+        flow: Arc<dyn OAuthFlow>,
+    ) -> OAuthStore {
+        let seed = OAuthStore::open(path).await.unwrap();
+        seed.write_record("anthropic", rec_at(unix_now() + 10))
+            .await
+            .unwrap();
+        drop(seed);
+        open_with_flow(path, flow).await
+    }
+
+    fn anthropic_ref() -> SecretRef {
+        SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_failure_enters_cooldown_second_call_skips_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient));
+        let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
+        store.set_test_now(1_000);
+
+        // First get: the flow fires once and fails transiently, arming
+        // the per-seat cooldown (5s base).
+        let first = store.get(&anthropic_ref()).await;
+        assert!(first.is_err(), "transient refresh failure must surface");
+        assert_eq!(flow.call_count(), 1, "first wave POSTs exactly once");
+
+        // Second get inside the cooldown window: must fail fast WITHOUT a
+        // second POST. The flow count stays 1.
+        let second = store.get(&anthropic_ref()).await;
+        let err = second.expect_err("cooldown must fail fast");
+        assert!(
+            err.to_string().contains("temporarily unavailable"),
+            "suppressed error must be the retryable cooldown message: {err}"
+        );
+        assert_eq!(
+            flow.call_count(),
+            1,
+            "second call within cooldown must not invoke the flow"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooldown_expiry_allows_exactly_one_retry_under_concurrency() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient).with_yield());
+        let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
+        store.set_test_now(1_000);
+
+        // Arm the cooldown: one failed POST -> next_allowed = 1005.
+        let _ = store.get(&anthropic_ref()).await;
+        assert_eq!(flow.call_count(), 1);
+        let (consecutive, next_allowed, _) = store.cooldown_snapshot("anthropic").unwrap();
+        assert_eq!((consecutive, next_allowed), (1, 1_005));
+
+        // Advance to the boundary (window elapsed) and fire two concurrent
+        // callers. The per-seat single-flight lets exactly one through the
+        // POST; the other parks on the lock, re-double-checks, and is then
+        // suppressed by the freshly re-armed cooldown. Net: +1 POST only.
+        store.set_test_now(1_005);
+        let ref_a = anthropic_ref();
+        let ref_b = anthropic_ref();
+        let (a, b) = tokio::join!(store.get(&ref_a), store.get(&ref_b));
+        assert!(a.is_err() && b.is_err());
+        assert_eq!(
+            flow.call_count(),
+            2,
+            "exactly one retry POST fires past the cooldown window"
+        );
+        // The retry re-armed the cooldown at the next exponential step
+        // (consecutive 2 -> 10s window).
+        let (consecutive, next_allowed, _) = store.cooldown_snapshot("anthropic").unwrap();
+        assert_eq!((consecutive, next_allowed), (2, 1_015));
+    }
+
+    #[tokio::test]
+    async fn success_clears_cooldown_and_resets_consecutive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient));
+        let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
+        store.set_test_now(1_000);
+
+        // Fail once to arm the cooldown.
+        let _ = store.get(&anthropic_ref()).await;
+        assert!(store.cooldown_snapshot("anthropic").is_some());
+
+        // Recover: advance past the window, flip the flow to success.
+        store.set_test_now(1_005);
+        flow.set_outcome(RefreshOutcome::Mint("tok-ok".into()));
+        let tok = store.get(&anthropic_ref()).await.unwrap();
+        assert_eq!(tok, "tok-ok");
+        assert_eq!(flow.call_count(), 2);
+        assert!(
+            store.cooldown_snapshot("anthropic").is_none(),
+            "a successful refresh must clear the seat's cooldown"
+        );
+
+        // A subsequent transient failure re-enters at the 5s base, proving
+        // consecutive reset to zero (not carried over from before).
+        store.set_test_now(2_000);
+        store.record_transient_failure("anthropic", "anthropic", &OAuthError::Network("x".into()));
+        let (consecutive, next_allowed, _) = store.cooldown_snapshot("anthropic").unwrap();
+        assert_eq!(
+            (consecutive, next_allowed),
+            (1, 2_005),
+            "post-recovery backoff restarts at the 5s base"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_expired_never_enters_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::RefreshExpired));
+        let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
+        store.set_test_now(1_000);
+
+        // A terminal RefreshExpired must not arm the cooldown, so both
+        // calls attempt a POST (two attempts, no suppression).
+        let first = store.get(&anthropic_ref()).await;
+        let second = store.get(&anthropic_ref()).await;
+        assert!(first.is_err() && second.is_err());
+        assert_eq!(
+            flow.call_count(),
+            2,
+            "RefreshExpired must never be suppressed by a cooldown"
+        );
+        assert!(
+            store.cooldown_snapshot("anthropic").is_none(),
+            "RefreshExpired must never enter the cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_triggers_clear_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        // A plain store is enough; the cooldown is armed directly.
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        drop(seed);
+        let store = OAuthStore::open(&path).await.unwrap();
+        store.set_test_now(1_000);
+        let arm = |s: &OAuthStore| {
+            s.record_transient_failure("anthropic", "anthropic", &OAuthError::Network("x".into()));
+        };
+
+        // reload_from_disk clears the WHOLE map.
+        arm(&store);
+        assert!(store.cooldown_snapshot("anthropic").is_some());
+        store.reload_from_disk().await.unwrap();
+        assert!(
+            store.cooldown_snapshot("anthropic").is_none(),
+            "reload_from_disk must clear the cooldown map"
+        );
+
+        // write_record clears the seat.
+        arm(&store);
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        assert!(
+            store.cooldown_snapshot("anthropic").is_none(),
+            "write_record must clear the seat's cooldown"
+        );
+
+        // remove_provider clears the seat.
+        arm(&store);
+        store.remove_provider("anthropic").await.unwrap();
+        assert!(
+            store.cooldown_snapshot("anthropic").is_none(),
+            "remove_provider must clear the seat's cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_force_refresh_bypasses_active_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient));
+        let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
+        store.set_test_now(1_000);
+
+        // Arm the cooldown via a request-time refresh.
+        let _ = store.get(&anthropic_ref()).await;
+        assert_eq!(flow.call_count(), 1);
+
+        // A request-time get() inside the window is suppressed (no POST).
+        let _ = store.get(&anthropic_ref()).await;
+        assert_eq!(flow.call_count(), 1, "request-time path stays suppressed");
+
+        // The CLI force-refresh escape hatch POSTs despite the cooldown.
+        let forced = store.force_refresh("anthropic", None).await;
+        assert!(forced.is_err(), "the forced POST still failed transiently");
+        assert_eq!(
+            flow.call_count(),
+            2,
+            "CLI force-refresh must bypass the cooldown and attempt the POST"
+        );
+    }
+
+    #[test]
+    fn transient_classifier_matches_decision_taxonomy() {
+        // Network -> transient.
+        assert!(is_transient_refresh_error(&OAuthError::Network(
+            "reset".into()
+        )));
+        // TokenEndpoint 429 / 5xx -> transient.
+        assert!(is_transient_refresh_error(&OAuthError::TokenEndpoint(
+            "429 https://idp.example/token".into()
+        )));
+        assert!(is_transient_refresh_error(&OAuthError::TokenEndpoint(
+            "503 https://idp.example/token".into()
+        )));
+        // TokenEndpoint 4xx (bad request / dead grant) -> terminal.
+        for code in ["400", "401", "403"] {
+            assert!(
+                !is_transient_refresh_error(&OAuthError::TokenEndpoint(format!(
+                    "{code} https://idp.example/token"
+                ))),
+                "{code} must be terminal"
+            );
+        }
+        // Unparseable TokenEndpoint body -> transient (outage-like).
+        assert!(is_transient_refresh_error(&OAuthError::TokenEndpoint(
+            "token response is not valid UTF-8".into()
+        )));
+        // RefreshExpired and other variants -> terminal.
+        assert!(!is_transient_refresh_error(&OAuthError::RefreshExpired(
+            "anthropic".into()
+        )));
+        assert!(!is_transient_refresh_error(&OAuthError::NotLoggedIn(
+            "anthropic".into()
+        )));
+    }
+
+    #[test]
+    fn cooldown_reason_is_class_only_and_drops_urls() {
+        // TokenEndpoint "{status} {url}" -> class + status, no URL.
+        assert_eq!(
+            cooldown_reason(&OAuthError::TokenEndpoint(
+                "503 https://console.anthropic.com/v1/oauth/token".into()
+            )),
+            "token_endpoint 503"
+        );
+        // TokenEndpoint with no parseable leading status -> bare class.
+        assert_eq!(
+            cooldown_reason(&OAuthError::TokenEndpoint(
+                "token response is not valid UTF-8".into()
+            )),
+            "token_endpoint"
+        );
+        // Network errors carry no endpoint detail worth retaining.
+        assert_eq!(
+            cooldown_reason(&OAuthError::Network(
+                "connection reset by peer to https://idp.example/token".into()
+            )),
+            "network"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooldown_observability_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store.set_test_now(1_000);
+        // Provider refresh errors format as "{status} {url}"; the retained
+        // reason and the log field must reduce that to a class-only label
+        // with no URL.
+        let url = "https://console.anthropic.com/v1/oauth/token";
+        let boom = || OAuthError::TokenEndpoint(format!("503 {url}"));
+
+        // Drive the observability surface synchronously through the
+        // private state transitions so the captured subscriber sees every
+        // event on this thread: one entry, two suppressed attempts, one
+        // extension, then recovery.
+        let events = routectl_testkit::capture_events(|| {
+            store.record_transient_failure("anthropic", "anthropic", &boom());
+            assert!(store.cooldown_remaining("anthropic").is_some());
+            assert!(store.cooldown_remaining("anthropic").is_some());
+            store.record_transient_failure("anthropic", "anthropic", &boom());
+            store.clear_cooldown_on_success("anthropic", "anthropic");
+        });
+
+        let entered: Vec<_> = events
+            .iter()
+            .filter(|e| e.message == "oauth_refresh_cooldown_entered")
+            .collect();
+        assert_eq!(
+            entered.len(),
+            2,
+            "WARN fires once per entry/extension, never per suppressed attempt"
+        );
+        for e in &entered {
+            assert_eq!(e.level, tracing::Level::WARN);
+            assert_eq!(e.field("provider"), Some("anthropic"));
+            assert_eq!(e.field("seat"), Some("anthropic"));
+            assert_eq!(e.field("failure_class"), Some("token_endpoint"));
+            assert!(e.field("consecutive_failures").is_some());
+            assert!(e.field("cooldown_ms").is_some());
+            // Class-only reason: the leading status survives, the URL never
+            // reaches the log field.
+            assert_eq!(e.field("reason"), Some("token_endpoint 503"));
+            assert!(
+                !e.field("reason").unwrap().contains(url),
+                "cooldown reason must not carry the token-endpoint URL"
+            );
+        }
+        // Entry then extension: 5s then 10s windows.
+        assert_eq!(entered[0].field("cooldown_ms"), Some("5000"));
+        assert_eq!(entered[1].field("cooldown_ms"), Some("10000"));
+
+        let recovered: Vec<_> = events
+            .iter()
+            .filter(|e| e.message == "oauth_refresh_recovered")
+            .collect();
+        assert_eq!(recovered.len(), 1, "recovery INFO fires exactly once");
+        assert_eq!(recovered[0].level, tracing::Level::INFO);
+        assert_eq!(
+            recovered[0].field("suppressed_attempts"),
+            Some("2"),
+            "recovery reports the accumulated suppressed count"
+        );
+        assert_eq!(recovered[0].field("consecutive_failures"), Some("2"));
     }
 }

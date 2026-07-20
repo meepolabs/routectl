@@ -64,7 +64,7 @@ pub fn reject_or_drop_unrepresentable(
 ) -> Result<()> {
     if strict {
         return Err(Error::Validation(format!(
-            "strict_translation: provider `{id}`: {context}: {what} \
+            "strict_translation: {context}: {what} \
              cannot be represented on the OpenAI-compat wire"
         )));
     }
