@@ -543,14 +543,23 @@ fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, remo
 }
 
 /// Acknowledge the schema change before the write lock. `--yes` bypasses the
-/// prompt; a non-interactive run without `--yes` reads EOF and refuses.
+/// prompt; a non-interactive run (no TTY on stdin) without `--yes` declines
+/// immediately without reading, so a silent pipe cannot hang it.
 /// Never called while the write lock is held. Called for EVERY real write,
 /// including a same-version v3 normalization (`from_version == to_version`).
 fn confirm_migration(from_version: u32, to_version: u32, yes: bool) -> bool {
     if yes {
         return true;
     }
-    use std::io::Write as _;
+    use std::io::{IsTerminal as _, Write as _};
+    // A non-interactive caller with an open-but-silent stdin (a pipe that
+    // never sends a line or EOF) would otherwise block `read_line`
+    // forever. With no TTY there is no one to answer the prompt, so
+    // decline immediately -- the documented non-interactive contract is
+    // `--yes`.
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
     if from_version == to_version {
         println!(
             "this normalizes config.toml at version {to_version}, folding legacy \
@@ -731,8 +740,8 @@ default = \"gpt\"
         let f = fixture(V2_CLEAN);
         let before = std::fs::read(&f.config).unwrap();
 
-        // stdin is not a TTY under the test harness: read_line hits EOF, so
-        // the prompt is declined.
+        // stdin is not a TTY under the test harness, so the prompt is
+        // declined immediately without reading.
         let result = run_at(&f.config, &f.overlay, false, false).expect("decline is not an error");
         assert_eq!(result, MigrateResult::Aborted);
         assert_eq!(
@@ -746,7 +755,7 @@ default = \"gpt\"
     fn v1_non_interactive_without_yes_refuses_before_any_mutation() {
         // A v1 file's migration mutates disk INSIDE the ladder (the v1 rung
         // rewrites config.toml to v2 and folds the overlay). Authorization
-        // runs before the ladder, so a declined non-interactive run (EOF)
+        // runs before the ladder, so a declined non-interactive run (no TTY)
         // must leave the file byte-identical at v1 AND never create the
         // overlay -- the regression the batch gate flagged.
         let f = fixture(V1_WITH_CACHE_PRICING);
@@ -762,6 +771,26 @@ default = \"gpt\"
         assert!(
             !f.overlay.exists(),
             "a declined v1 migration must not fold the overlay"
+        );
+    }
+
+    #[test]
+    fn confirm_migration_declines_immediately_on_non_tty_without_yes() {
+        // Under the test harness stdin is not a TTY, so the terminal gate
+        // must fire and decline WITHOUT reaching read_line -- a silent
+        // pipe can no longer hang the prompt.
+        use std::io::IsTerminal as _;
+        assert!(
+            !std::io::stdin().is_terminal(),
+            "test harness stdin must be non-interactive for this assertion",
+        );
+        assert!(
+            !confirm_migration(2, 3, false),
+            "non-TTY without --yes must decline",
+        );
+        assert!(
+            confirm_migration(2, 3, true),
+            "--yes must still proceed byte-identically",
         );
     }
 

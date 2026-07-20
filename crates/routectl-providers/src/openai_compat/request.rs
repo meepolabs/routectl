@@ -369,9 +369,8 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
 
     if strict && !findings.is_empty() {
         return Err(Error::Validation(format!(
-            "strict_translation: {} canonical-only field(s) cannot be carried by openai-compat egress `{}`: {}",
+            "strict_translation: {} canonical-only field(s) cannot be carried by the openai-compat egress: {}",
             findings.len(),
-            id,
             findings.join("; ")
         )));
     }

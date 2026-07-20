@@ -76,6 +76,14 @@ is_excluded() {
 # `(^|[^[:alnum:]_])(<core>)([^[:alnum:]_]|$)` so a standalone token is
 # caught while a token embedded in a larger identifier (e.g.
 # `xR2-EXAMPLEy`, `myRV-99thing`) is NOT -- identical on GNU and BSD.
+#
+# The last three cores catch the planning-shorthand class (task /
+# feature / decision ids). CAUTION: bare `f<n>` is NOT catchable -- it
+# collides with the Rust float types `f32` / `f64` -- so only the SAFE
+# forms are matched: `f<n>.<nn>` task shorthand (a dotted two-digit
+# suffix a float literal never carries in that boundary), `(pre-|post-)f<n>`
+# planning commentary, and standalone `D<nn>` decision shorthand (the
+# token boundary keeps `d17_tail`-style identifiers and hex bytes clear).
 PATTERNS=(
     'R2-[A-Za-z0-9][A-Za-z0-9_-]*'
     'RV-[0-9]+'
@@ -83,6 +91,9 @@ PATTERNS=(
     'TODO\(M[0-9]{1,3}(-[A-Za-z0-9_-]+)?\)'
     'M[0-9]+\.[0-9]+'
     'H[0-9]{1,3} (fix|invariant)'
+    'f[0-9]+\.[0-9]{2}'
+    '(pre-|post-)f[0-9]+'
+    'D[0-9]{2}'
 )
 
 # Join the cores into one ERE: each core is wrapped in

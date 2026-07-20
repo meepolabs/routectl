@@ -6,12 +6,12 @@
 //! Polling-based timing (50 ms intervals up to ~3 s) keeps the
 //! suite fast and platform-jitter tolerant; no fixed sleeps.
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use routectl_router::Config;
+use routectl_testkit::ScopedEnv;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use wiremock::matchers::{header, method, path as wiremock_path};
@@ -523,33 +523,6 @@ async fn sighup_combined_with_file_rewrite_surfaces_new_config() {
 // Credentials hot-reload (oauth:// path)
 // -----------------------------------------------------------------
 
-/// RAII guard for `std::env::{set,remove}_var` mutations within tests.
-/// Restores the original value (or absence) on `Drop` so a panicking
-/// `assert!` cannot leak modified env into sibling tests. Pair every
-/// guard binding with `let _xdg = EnvGuard::set(..)`.
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let prev = std::env::var_os(key);
-        // TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, prev }
-    }
-}
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match self.prev.take() {
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            Some(v) => unsafe { std::env::set_var(self.key, v) },
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
-}
-
 /// Atomic-rename write of `credentials.json` matching the production
 /// flow in `routectl-auth/src/oauth/file_io.rs::update_under_lock`: write a tempfile
 /// in the same parent dir, set 0o600 perms, rename onto the target.
@@ -647,7 +620,7 @@ async fn spawn_server_with_config_text(config_text: &str) -> (String, tempfile::
 async fn credentials_atomic_rewrite_surfaces_new_bearer_on_next_request() {
     // Arrange: isolated XDG + seeded credentials.
     let xdg = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
     let creds_path = xdg.path().join("routectl").join("credentials.json");
     write_credentials_atomic(&creds_path, "first-access-token");
 
@@ -1169,7 +1142,7 @@ async fn wait_for_oauth_recovery_with_restimulus(
 async fn serve_starts_degraded_on_broken_credentials_then_hot_reloads_recovery() {
     // Arrange: isolated XDG holding a CORRUPT credentials.json.
     let xdg = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
     let creds_path = xdg.path().join("routectl").join("credentials.json");
     write_corrupt_credentials(&creds_path);
 
@@ -1518,7 +1491,7 @@ async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
     // to the same revision-0 (missing) overlay the boot installed -- otherwise
     // an overlay-revision change across the flip clears the learned registry.
     let xdg = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", xdg.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
 
     // Arrange: A rejects the probed feature; B is the clean tail.
     let a = probe_upstream_reject().await;

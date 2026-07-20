@@ -10,32 +10,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 mod common;
 
-/// RAII guard for `std::env::{set,remove}_var` mutations within tests.
-/// Restores the original value (or absence) on `Drop`, so a panicking
-/// `assert!` cannot leak modified env into sibling tests. Pair every
-/// guard binding with `let _xdg = EnvGuard::set(..)`.
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let prev = std::env::var_os(key);
-        // TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, prev }
-    }
-}
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match self.prev.take() {
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            Some(v) => unsafe { std::env::set_var(self.key, v) },
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
-}
+use routectl_testkit::ScopedEnv;
 
 fn config_with(server_url: &str) -> Config {
     let mut providers = BTreeMap::new();
@@ -97,7 +72,7 @@ async fn whoami_returns_exit_code_2_when_empty() {
     // Sandbox the credentials path so this test does not depend on
     // (or pollute) the real home directory.
     let tmp = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
 
     let code = commands::whoami::run()
         .await
@@ -405,7 +380,7 @@ async fn test_command_resolves_oauth_ref_when_logged_in() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
 
     // Seed a synthetic credentials.json under
     // <tmp>/routectl/credentials.json. The OAuth subsystem's `file_io`
@@ -581,7 +556,7 @@ async fn logout_codex_removes_seeded_record() {
     // logout operates entirely on the local credentials file (no
     // network), so a seeded codex record can be removed deterministically.
     let tmp = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     seed_credentials(tmp.path(), &[("codex", "dev@example.com")]);
 
     commands::logout::run("codex", None)
@@ -606,7 +581,7 @@ async fn refresh_codex_without_record_reports_not_logged_in() {
     // hint BEFORE any network call -- force_refresh validates the
     // provider id, then short-circuits on the missing record.
     let tmp = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
 
     let err = commands::refresh::run("codex", None)
         .await
@@ -634,7 +609,7 @@ async fn whoami_lists_both_anthropic_and_codex_when_present() {
     // from the store. The email + account_id rendering is covered by the
     // command body; here we pin the multi-provider exit contract.
     let tmp = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     seed_credentials(
         tmp.path(),
         &[
@@ -664,7 +639,7 @@ async fn logout_label_removes_only_that_seat() {
     // `logout <provider> --label <name>` must remove ONLY the labeled
     // seat and leave the default seat intact.
     let tmp = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     seed_credentials(
         tmp.path(),
         &[
@@ -696,7 +671,7 @@ async fn logout_no_label_removes_default_seat() {
     // and leave labeled seats intact -- a bare logout must not surprise an
     // operator who added a pool by wiping every seat.
     let tmp = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     seed_credentials(
         tmp.path(),
         &[
@@ -728,7 +703,7 @@ async fn whoami_lists_seats_grouped_by_provider() {
     // each as its own block. Exit 0 (at least one seat logged in); the
     // store sees both keys whoami iterates.
     let tmp = tempfile::tempdir().unwrap();
-    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     seed_credentials(
         tmp.path(),
         &[

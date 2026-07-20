@@ -3680,3 +3680,111 @@ async fn map_error_validation_preserves_exact_message_after_exhaustive_match() {
         "validation: max_tokens must be positive",
     );
 }
+
+// -------- map_error: residual leak arms (UnknownProvider / Io / Json) --
+
+#[tokio::test]
+async fn map_error_unknown_provider_redacts_config_id_both_dialects() {
+    // The provider id is config-derived routing topology, not caller
+    // input: the client body must carry only the opaque class message.
+    for shape in [ErrorEnvelopeShape::OpenAi, ErrorEnvelopeShape::Anthropic] {
+        let err = Error::UnknownProvider(LEAK_PROVIDER.into());
+        let resp = map_error(shape, err);
+        assert_body_redacts_leaks(
+            resp,
+            StatusCode::NOT_FOUND,
+            "requested target is not configured",
+        )
+        .await;
+    }
+}
+
+#[test]
+fn map_error_unknown_provider_logs_id_server_side() {
+    let events = routectl_testkit::capture_events(|| {
+        let err = Error::UnknownProvider(LEAK_PROVIDER.into());
+        let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    });
+
+    let logged = events
+        .iter()
+        .find(|e| e.level == tracing::Level::ERROR)
+        .expect("unknown-provider must emit a server-side ERROR log");
+    assert_eq!(logged.field("provider"), Some(LEAK_PROVIDER));
+}
+
+#[tokio::test]
+async fn map_error_io_redacts_detail_both_dialects() {
+    // A bare io::Error Display can embed a filesystem path; the client
+    // body must carry only the opaque class message.
+    for shape in [ErrorEnvelopeShape::OpenAi, ErrorEnvelopeShape::Anthropic] {
+        let err = Error::Io(std::io::Error::other(LEAK_DETAIL));
+        let resp = map_error(shape, err);
+        assert_body_redacts_leaks(
+            resp,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal I/O error",
+        )
+        .await;
+    }
+}
+
+#[test]
+fn map_error_io_logs_detail_server_side_through_sanitizer() {
+    // A control char in the io detail proves the logged field flowed
+    // through sanitize_detail_for_log rather than being logged raw: the
+    // sanitizer replaces it with '?', so a future refactor that dropped
+    // the sanitizer on this leak boundary would fail here.
+    let raw = "disk error\x07detail";
+    let events = routectl_testkit::capture_events(|| {
+        let err = Error::Io(std::io::Error::other(raw));
+        let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    });
+
+    let logged = events
+        .iter()
+        .find(|e| e.level == tracing::Level::ERROR)
+        .expect("io error must emit a server-side ERROR log");
+    let detail = logged.field("detail").expect("detail field logged");
+    assert!(
+        !detail.contains('\x07'),
+        "control char must be filtered by the sanitizer: {detail:?}"
+    );
+    assert!(
+        detail.contains("disk error") && detail.contains("detail"),
+        "printable content must survive sanitization: {detail:?}"
+    );
+}
+
+#[tokio::test]
+async fn map_error_json_redacts_payload_both_dialects() {
+    // A serde_json::Error Display can embed a request payload fragment;
+    // the client body must carry only the opaque class message.
+    for shape in [ErrorEnvelopeShape::OpenAi, ErrorEnvelopeShape::Anthropic] {
+        let json_err = serde_json::from_str::<u64>("\"serde detail xyz\"").unwrap_err();
+        let err = Error::Json(json_err);
+        let resp = map_error(shape, err);
+        assert_body_redacts_leaks(
+            resp,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid JSON in request body",
+        )
+        .await;
+    }
+}
+
+#[test]
+fn map_error_json_logs_detail_server_side() {
+    let json_err = serde_json::from_str::<u64>("\"serde detail xyz\"").unwrap_err();
+    let expected = json_err.to_string();
+    let events = routectl_testkit::capture_events(|| {
+        let err = Error::Json(json_err);
+        let _resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    });
+
+    let logged = events
+        .iter()
+        .find(|e| e.level == tracing::Level::ERROR)
+        .expect("json error must emit a server-side ERROR log");
+    assert_eq!(logged.field("detail"), Some(expected.as_str()));
+}

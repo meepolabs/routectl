@@ -1826,6 +1826,46 @@ mod tests {
     }
 
     #[test]
+    fn restore_round_trips_an_exported_overlay_through_the_fs_load_path() {
+        // The documented restore is contract-free: place the exported JSON
+        // at the overlay path and the next load picks it up. Prior coverage
+        // proved only the serde round-trip; this pins the FILESYSTEM seam --
+        // export, write to `catalog_overlay.json`, reload via the real
+        // fail-closed load path.
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "anthropic-api:claude-opus-4-8*".to_string(),
+            Some(user_cell_with_capability()),
+        );
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                min_prefix_tokens: Some(512),
+                ..blank_user_cell()
+            }),
+        );
+        cells.insert("openai-compat:disabled-model".to_string(), None);
+        let source = save_catalog_overlay(&source_path, 0, cells).expect("seed source overlay");
+
+        // Export, then restore by writing the JSON verbatim at a fresh
+        // overlay path -- byte-for-byte what the `export` verb emits.
+        let exported = export_at(&source_path).expect("export");
+        let restore_path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&restore_path, format!("{exported}\n"))
+            .expect("write exported JSON to the overlay path");
+
+        // Reload through the real fail-closed fs load path.
+        let restored = load_catalog_overlay(&restore_path).expect("load restored overlay");
+
+        // Cell equality with the source overlay: every present, user, and
+        // disabled cell survives the disk round-trip.
+        assert_eq!(restored.cells, source.cells);
+        assert_eq!(restored, source);
+    }
+
+    #[test]
     fn export_at_is_read_only_and_leaves_the_overlay_byte_identical() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();

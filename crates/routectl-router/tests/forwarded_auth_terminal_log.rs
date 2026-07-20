@@ -122,7 +122,7 @@ fn forwarded_req(with_session: bool) -> ChatRequest {
     req
 }
 
-/// The single f2.09 surfaced-verbatim WARN in `events`, if present.
+/// The single surfaced-verbatim forwarded-credential terminal WARN in `events`, if present.
 fn terminal_warn(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
     events
         .iter()

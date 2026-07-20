@@ -9430,13 +9430,12 @@ mod resolved_models_tests {
         Arc::new(config)
     }
 
-    fn learned_target(router: &Router, nickname: &str, unsupported: &[&str]) -> DispatchTarget {
+    fn learned_target(router: &Router, nickname: &str) -> DispatchTarget {
         let p: Arc<dyn Provider> = Arc::new(CountedProvider {
             id: "test-prov".into(),
             calls: AtomicUsize::new(0),
         });
-        let model = ResolvedModel::new(nickname, "test-prov", p, "claude-x")
-            .with_unsupported_features(unsupported.iter().map(|s| (*s).to_string()).collect());
+        let model = ResolvedModel::new(nickname, "test-prov", p, "claude-x");
         router
             .expand_chain_to_targets(vec![Arc::new(model)], None)
             .pop()
@@ -9451,8 +9450,8 @@ mod resolved_models_tests {
     #[test]
     fn learned_negative_deprioritizes_target_to_tail() {
         let router = Router::new(learned_provider_config());
-        let front = learned_target(&router, "front", &[]);
-        let back = learned_target(&router, "back", &[]);
+        let front = learned_target(&router, "front");
+        let back = learned_target(&router, "back");
         router.learned_capabilities.observe(
             "front",
             "web_search",
@@ -9498,8 +9497,7 @@ mod resolved_models_tests {
     #[test]
     fn static_unsupported_emptying_chain_returns_not_implemented() {
         // The model-static list lives in config.models: the override
-        // registry is built from config (mirroring build_resolved_models,
-        // which copies the same list onto each ResolvedModel).
+        // registry is built from config.
         let mut config = Config::default();
         config.providers.insert(
             "test-prov".into(),
@@ -9511,7 +9509,7 @@ mod resolved_models_tests {
                 .with_unsupported_features(vec!["web_search".to_string()]),
         );
         let router = Router::new(Arc::new(config));
-        let only = learned_target(&router, "only", &["web_search"]);
+        let only = learned_target(&router, "only");
         let features = vec!["web_search".to_string()];
 
         let result =
@@ -9526,7 +9524,7 @@ mod resolved_models_tests {
     #[test]
     fn sole_learned_tail_target_still_attempts_and_counts_d17() {
         let router = Router::new(learned_provider_config());
-        let only = learned_target(&router, "only", &[]);
+        let only = learned_target(&router, "only");
         router.learned_capabilities.observe(
             "only",
             "web_search",
@@ -9563,8 +9561,8 @@ mod resolved_models_tests {
             ProviderEntry::anthropic_api("literal:k"),
         );
         let router = Router::new(Arc::new(config));
-        let front = learned_target(&router, "front", &[]);
-        let back = learned_target(&router, "back", &[]);
+        let front = learned_target(&router, "front");
+        let back = learned_target(&router, "back");
         router.learned_capabilities.observe(
             "front",
             "web_search",
@@ -9595,7 +9593,7 @@ mod resolved_models_tests {
             ProviderEntry::anthropic_api("literal:k"),
         );
         let router = Router::new(Arc::new(config));
-        let only = learned_target(&router, "only", &[]);
+        let only = learned_target(&router, "only");
         router.learned_capabilities.observe(
             "only",
             "web_search",
@@ -12308,16 +12306,16 @@ mod feature_filter_tests {
         );
         // Model-static lists live in config.models: the override registry
         // is built from config, mirroring the factory's
-        // build_resolved_models (which copies these onto each ResolvedModel).
+        // build_resolved_models.
         config.models.insert(
             "mA".into(),
             crate::config::ModelEntry::new("shared-prov", "upstream-a")
-                .with_unsupported_features(unsupported_model_a.clone()),
+                .with_unsupported_features(unsupported_model_a),
         );
         config.models.insert(
             "mB".into(),
             crate::config::ModelEntry::new("shared-prov", "upstream-b")
-                .with_unsupported_features(unsupported_model_b.clone()),
+                .with_unsupported_features(unsupported_model_b),
         );
 
         let mut router = Router::new(Arc::new(config));
@@ -12334,17 +12332,11 @@ mod feature_filter_tests {
         let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
         models.insert(
             "mA".into(),
-            Arc::new(
-                ResolvedModel::new("mA", "shared-prov", p_a, "upstream-a")
-                    .with_unsupported_features(unsupported_model_a),
-            ),
+            Arc::new(ResolvedModel::new("mA", "shared-prov", p_a, "upstream-a")),
         );
         models.insert(
             "mB".into(),
-            Arc::new(
-                ResolvedModel::new("mB", "shared-prov", p_b, "upstream-b")
-                    .with_unsupported_features(unsupported_model_b),
-            ),
+            Arc::new(ResolvedModel::new("mB", "shared-prov", p_b, "upstream-b")),
         );
         router.install_resolved_models(models);
         (router, captured_a, captured_b)
@@ -12479,10 +12471,7 @@ mod feature_filter_tests {
             id: "prov-blocks-ws".into(),
             captured: Arc::new(ParkingMutex::new(Vec::new())),
         });
-        let model = Arc::new(
-            ResolvedModel::new("m", "prov-blocks-ws", stub, "u")
-                .with_unsupported_features(vec!["structured_output".into()]),
-        );
+        let model = Arc::new(ResolvedModel::new("m", "prov-blocks-ws", stub, "u"));
         let target = into_one_dispatch_target(model);
 
         // Provider-scoped match.
@@ -13300,6 +13289,73 @@ mod feature_filter_tests {
         assert_eq!(router.metrics.strip_total(), 0);
         assert_eq!(router.metrics.strip_strict_rejected_total(), 0);
         assert_eq!(router.metrics.strip_rollback_total(), 0);
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_target_threads_kind_so_dotted_capability_resolves_to_head() {
+        use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
+        use routectl_core::capability::SignalTier;
+        use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy};
+
+        // A bedrock provider entry keyed by the name the resolved model
+        // targets: chain expansion looks it up and threads the kind onto the
+        // DispatchTarget. The provider_kind=None regression was that missing
+        // thread, which left a dotted Converse field path un-normalized on
+        // the learning seam.
+        let mut config = Config::default();
+        config.providers.insert(
+            "bedrock-prov".into(),
+            ProviderEntry::Bedrock {
+                region: "us-east-1".into(),
+                api_shape: BedrockApiShapeConfig::default(),
+                creds: BedrockCredsConfig::DefaultChain,
+                user_agent: None,
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                anthropic_beta: vec![],
+                cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
+                runtime: ProviderRuntimePolicy::default(),
+            },
+        );
+        let router = Router::new(Arc::new(config));
+        let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "bedrock-prov".into(),
+            captured: Arc::new(ParkingMutex::new(Vec::new())),
+        });
+        let model = Arc::new(ResolvedModel::new(
+            "bedrock-haiku",
+            "bedrock-prov",
+            provider,
+            "anthropic.claude-x",
+        ));
+
+        let targets = router.expand_chain_to_targets(vec![model], None);
+        let target = targets.first().expect("one target for a non-seat model");
+
+        // Anti-regression: expansion threaded the concrete kind, not None.
+        assert_eq!(target.provider_kind, Some("bedrock"));
+
+        // Resolve-side contract: under the threaded bedrock kind, a dotted
+        // request-bag field path reduces to the capability head.
+        let err = Error::upstream_full("bedrock-prov", 400, "{}", None, None, None);
+        let cf = ClassifiedFailure {
+            class: FailureClass::FeatureUnsupported {
+                capability: "additionalModelRequestFields.anthropic_beta".into(),
+            },
+            matched_by: MatchedBy::Status,
+        };
+        let resolved = resolve_requested_capability(
+            target.provider_kind.expect("bedrock kind threaded"),
+            &err,
+            &cf,
+        );
+        assert_eq!(
+            resolved,
+            Some(("anthropic_beta".to_string(), SignalTier::SelfIdentifying)),
+        );
     }
 }
 

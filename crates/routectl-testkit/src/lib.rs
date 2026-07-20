@@ -27,6 +27,9 @@ use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
 
+mod scoped_env;
+pub use scoped_env::ScopedEnv;
+
 /// One captured `tracing` event: its level, target (module path), the
 /// special `message` field, and every other structured field rendered
 /// to a string.

@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reqwest_cookie_store::CookieStoreMutex;
+use routectl_auth::atomic_write::{FsyncPolicy, write_0600_atomic_with_policy};
 
 /// Allowlisted Cloudflare cookie names. Mirrors the codex CLI's
 /// `is_allowed_cloudflare_cookie_name` (commit pin documented in
@@ -169,9 +170,6 @@ fn filter_persisted_json(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
 /// in-memory jar somehow accumulated more (defense-in-depth on the
 /// write path).
 pub fn save_jar(jar: &CookieStoreMutex, path: &Path) -> std::io::Result<usize> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let store = jar
         .lock()
         .map_err(|_| std::io::Error::other("cookie jar mutex poisoned"))?;
@@ -181,48 +179,14 @@ pub fn save_jar(jar: &CookieStoreMutex, path: &Path) -> std::io::Result<usize> {
     drop(store);
 
     let filtered = filter_persisted_json(&buf)?;
-    write_file_0600(path, &filtered)?;
+    // The jar is a soft-fail reachability cache, not a secret store, so a
+    // parent-directory fsync failure is tolerable: BestEffort keeps the
+    // temp-file fsync + atomic rename while swallowing the weaker
+    // dir-fsync guarantee. Strict is reserved for the OAuth credentials
+    // writer this primitive is shared with.
+    write_0600_atomic_with_policy(path, &filtered, FsyncPolicy::BestEffort)
+        .map_err(std::io::Error::other)?;
     Ok(filtered.len())
-}
-
-/// Atomic 0600 write. Serializes to a tempfile in the SAME directory as
-/// `path`, fsyncs it, then persists it onto `path` via rename so a
-/// crashed or concurrent save can never promote a half-written jar into
-/// the persistence slot. Mirrors the OAuth credentials writer.
-fn write_file_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "cookie path has no parent",
-        )
-    })?;
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".chatgpt.tmp.")
-        .suffix(".json")
-        .tempfile_in(parent)?;
-    // On Unix, force 0o600 BEFORE writing so a partial write never has
-    // wider permissions than the final file (defense-in-depth; mkstemp
-    // already creates the tempfile 0600).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tmp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    tmp.write_all(bytes)?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    // Re-assert 0o600 on the renamed file as defense-in-depth in case a
-    // paranoid umask stripped bits during persist. Best-effort: the
-    // rename preserves the temp's mode in practice, so a failure here is
-    // not fatal. Mirrors the OAuth credentials writer.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -346,11 +310,11 @@ mod tests {
         save_jar(&jar, &path).expect("second save");
 
         // Assert: the atomic-rename write must not leave a sibling
-        // `.chatgpt.tmp.` file in the persistence directory.
+        // tempfile in the persistence directory.
         let leftover: Vec<_> = std::fs::read_dir(dir.path())
             .expect("read_dir")
             .filter_map(std::result::Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().contains(".chatgpt.tmp."))
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(
             leftover.is_empty(),

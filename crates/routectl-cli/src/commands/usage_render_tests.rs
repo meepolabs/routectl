@@ -401,8 +401,8 @@ fn render_footer_shows_cache_hit_rate() {
     // token-weighted formula, a row reporting cache_read=100 and no fresh input /
     // cache-write has hit rate 100/100 = 100.0%.
     let (_dir, _path, db) = temp_db();
-    insert_stream_row(&db, "f1", 1000, "m", 100, 600, Some(10), None, Some(100));
-    paid_model_row(&db, "f2", "m", "upstream_error", 0, 0);
+    insert_stream_row(&db, "r1", 1000, "m", 100, 600, Some(10), None, Some(100));
+    paid_model_row(&db, "r2", "m", "upstream_error", 0, 0);
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
@@ -417,7 +417,7 @@ fn render_footer_shows_cache_hit_rate() {
 fn render_footer_na_rate_when_no_tokens() {
     // Arrange: NULL input, no cache => denominator 0 => rate None => "n/a".
     let (_dir, _path, db) = temp_db();
-    paid_row(&db, "f3", None, None);
+    paid_row(&db, "r3", None, None);
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act

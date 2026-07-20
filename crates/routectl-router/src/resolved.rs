@@ -63,13 +63,6 @@ pub struct ResolvedModel {
     /// `Arc<[String]>` so cloning at dispatch time is a refcount bump
     /// rather than a heap allocation.
     pub effort_levels: Arc<[String]>,
-    /// Operator-declared feature keys this model does not support,
-    /// unioned with the provider-side list at filter time. Empty when
-    /// not configured. Projected from `[models.X] unsupported_features`.
-    ///
-    /// `Arc<[String]>` so cloning at dispatch time is a refcount bump
-    /// rather than a heap allocation (mirrors `effort_levels`).
-    pub unsupported_features: Arc<[String]>,
     /// Maximum thinking budget in tokens. `0` means no explicit cap
     /// configured. Projected from `[models.X] max_thinking_budget`.
     pub max_thinking_budget: u32,
@@ -153,7 +146,6 @@ impl ResolvedModel {
             upstream: upstream.into(),
             supports_adaptive_thinking: false,
             effort_levels: Arc::default(),
-            unsupported_features: Arc::default(),
             max_thinking_budget: 0,
             reasoning_dialect: None,
             history_reasoning: None,
@@ -176,14 +168,6 @@ impl ResolvedModel {
 
     pub fn with_effort_levels(mut self, levels: Vec<String>) -> Self {
         self.effort_levels = Arc::from(levels.as_slice());
-        self
-    }
-
-    /// Set the per-model `unsupported_features` list. Unioned with the
-    /// provider-side list at filter time; empty (the default) preserves
-    /// provider-only behavior.
-    pub fn with_unsupported_features(mut self, features: Vec<String>) -> Self {
-        self.unsupported_features = features.into();
         self
     }
 
@@ -288,7 +272,6 @@ impl std::fmt::Debug for ResolvedModel {
                 &self.supports_adaptive_thinking,
             )
             .field("effort_levels", &self.effort_levels)
-            .field("unsupported_features", &self.unsupported_features)
             .field("max_thinking_budget", &self.max_thinking_budget)
             .field("reasoning_dialect", &self.reasoning_dialect)
             .field("history_reasoning", &self.history_reasoning)
