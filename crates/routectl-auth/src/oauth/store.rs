@@ -977,6 +977,14 @@ impl OAuthStore {
         // case. During a transient IdP outage this fails fast without a
         // POST until the exponential window elapses. The CLI escape hatch
         // (`bypass_cooldown`) skips the check but still records outcomes.
+        //
+        // Accepted bounded delay: if the credential has since expired
+        // terminally, the armed transient cooldown still short-circuits
+        // here, so the failure reads as "temporarily unavailable" until the
+        // window (capped at COOLDOWN_CAP_SECS) elapses and the next attempt
+        // discovers the terminal state. This staleness is bounded and
+        // accepted; the CLI force-refresh path is the escape hatch that
+        // bypasses this gate to surface the terminal state immediately.
         if !bypass_cooldown && let Some(remaining) = self.cooldown_remaining(seat) {
             return Err(Error::Auth(format!(
                 "oauth refresh temporarily unavailable for {provider}; \
@@ -4080,6 +4088,16 @@ mod tests {
             flow.call_count(),
             2,
             "CLI force-refresh must bypass the cooldown and attempt the POST"
+        );
+
+        // The forced call's transient outcome must still re-arm the
+        // cooldown for the request-time paths: consecutive advances 1 -> 2
+        // (10s window) at the pinned clock (1_000 + 10 = 1_010).
+        let (consecutive, next_allowed, _) = store.cooldown_snapshot("anthropic").unwrap();
+        assert_eq!(
+            (consecutive, next_allowed),
+            (2, 1_010),
+            "the bypassed force-refresh still records its transient outcome"
         );
     }
 
