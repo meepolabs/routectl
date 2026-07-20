@@ -754,3 +754,78 @@ fn build_usage_draft_header_wins_over_metadata_in_session_id() {
     // Assert
     assert_eq!(draft.session_id.as_deref(), Some("sid-from-header"));
 }
+
+#[test]
+fn mark_stream_http_committed_stamps_200_when_unset() {
+    // Arrange: a fresh capture with no http_status yet.
+    let (mut cap, _w, _dir) = capture();
+    assert_eq!(cap.record.http_status, None);
+
+    // Act
+    cap.mark_stream_http_committed();
+
+    // Assert: the committed SSE head records the client 200.
+    assert_eq!(cap.record.http_status, Some(200));
+}
+
+#[test]
+fn mark_stream_http_committed_is_idempotent() {
+    // Arrange
+    let (mut cap, _w, _dir) = capture();
+
+    // Act: repeated over the stream lifetime (once per successful send).
+    cap.mark_stream_http_committed();
+    cap.mark_stream_http_committed();
+    cap.mark_stream_http_committed();
+
+    // Assert: still exactly 200, never disturbed by the repeats.
+    assert_eq!(cap.record.http_status, Some(200));
+}
+
+#[test]
+fn observe_error_preserves_committed_200() {
+    // Arrange: the SSE head already committed to 200.
+    let (mut cap, _w, _dir) = capture();
+    cap.mark_stream_http_committed();
+
+    // Act: a mid-stream upstream failure arrives after the head committed.
+    cap.observe_error(&Error::upstream("p", 503, "mid-stream boom"));
+
+    // Assert: the transport status stays 200 (the failure rides
+    // outcome / error_class, not http_status), and the class is recorded.
+    assert_eq!(
+        cap.record.http_status,
+        Some(200),
+        "observe_error must not overwrite a committed 200"
+    );
+    assert!(
+        cap.record.error_class.is_some(),
+        "error_class still recorded"
+    );
+}
+
+#[test]
+fn observe_error_stamps_upstream_status_when_uncommitted() {
+    // Arrange: no head committed yet (pre-head failure).
+    let (mut cap, _w, _dir) = capture();
+    assert_eq!(cap.record.http_status, None);
+
+    // Act
+    cap.observe_error(&Error::upstream("p", 529, "overloaded"));
+
+    // Assert: with no committed head, the pre-head recorder stamps the
+    // real upstream transport status.
+    assert_eq!(cap.record.http_status, Some(529));
+}
+
+#[test]
+fn observe_error_status_zero_sentinel_stays_none() {
+    // Arrange: a status-0 upstream error is a local gate / timeout sentinel.
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_error(&Error::upstream("p", 0, "local timeout"));
+
+    // Assert: no real HTTP code -> http_status stays None.
+    assert_eq!(cap.record.http_status, None);
+}

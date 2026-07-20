@@ -309,6 +309,12 @@ and inherit no `request_id` span (the writer runs on a dedicated OS thread).
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage channel full -- dropping record (capture lags writer)"` (rate-limited: first drop + every 1024 thereafter) |
 | WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` |
 
+The usage ledger's `http_status` column records the transport status the
+client received: 200 for a delivered non-streaming body and once the SSE
+head commits, while a mid-stream provider failure keeps 200 and is carried
+by `outcome` / `error_class` / `stream_stage` instead (streaming rows
+written before this rule was in force are NULL and are not back-migrated).
+
 ## Config-edit audit shape
 
 `routectl config set` emits exactly one audit event on a successful

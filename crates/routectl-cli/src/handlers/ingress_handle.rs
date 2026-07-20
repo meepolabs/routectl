@@ -591,6 +591,10 @@ async fn warm_render_task<A: IngressAdapter>(
             // `client_disconnect`.
             return;
         }
+        // The early frame flushed as the first body byte: the SSE head is
+        // now client-visible, so the transport status the client received
+        // is 200 regardless of how the pending dispatch resolves.
+        capture.mark_stream_http_committed();
     }
     // Now await the SAME dispatch that outran the grace window.
     let dispatched = fut.await;
@@ -715,6 +719,11 @@ async fn drive_stream<A: IngressAdapter>(
                                 // explicit call needed.
                                 return;
                             }
+                            // First successful body send: the SSE head is
+                            // client-visible, so the client's transport
+                            // status is 200. Idempotent -- a later mid-
+                            // stream upstream fault will not overwrite it.
+                            capture.mark_stream_http_committed();
                         }
                     }
                     Err(e) => {
@@ -787,6 +796,10 @@ async fn drive_stream<A: IngressAdapter>(
             // un-finalized, so Drop stamps `client_disconnect`.
             return;
         }
+        // Covers an EOS-only stream (no content chunk ever sent): the
+        // terminal frame is the first client-visible byte, so the head
+        // commits here. Idempotent for the common has-content case.
+        capture.mark_stream_http_committed();
     }
     // Natural EOS reached. Record the observed cache-reuse into the per-
     // session K-estimator store BEFORE finalizing -- best-effort, never

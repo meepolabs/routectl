@@ -186,11 +186,12 @@ pub fn propose_steady_state_trim(
     let span_start = params.head_keep_messages;
     let span_end = marks.last().map(|m| m.message_index + 1)?;
 
-    // `c_after` = cached tokens from the FIRST elided position to the end of the
+    // `c_after` = cached tokens from the FIRST elided message to the end of the
     // cached prefix (the one-time re-write suffix). The trimmer treats the whole
-    // request as the cacheable prefix (no separate frozen-prefix slice offline),
-    // so c_after is the token footprint of messages[span_start..].
-    let c_after = estimate_messages_tokens(req, span_start..n);
+    // request as the cacheable prefix, so nothing before the first byte that
+    // changes belongs in the rewrite cost -- hence the first mark, not the head
+    // boundary. The `span` field below still documents the full elision span.
+    let c_after = c_after_from_first_mark(req, &marks)?;
 
     let candidate = PrefixReductionCandidate::new(d, c_after, c);
     Some(SteadyStateTrimPlan {
@@ -339,6 +340,20 @@ fn estimate_messages_tokens(req: &ChatRequest, range: Range<usize>) -> u64 {
     req.messages.get(range).map_or(0, |msgs| {
         msgs.iter().map(serialized_len).sum::<u64>() / BYTES_PER_TOKEN_ESTIMATE
     })
+}
+
+/// The one-time re-write suffix cost (`c_after`): the cached-token footprint
+/// from the FIRST elided message to the end of the request. The rewrite starts
+/// at the first byte that changes, so the fixed head and any un-elided messages
+/// before the first mark are excluded. SINGLE source of this computation for
+/// both trim-candidate builders (and any later producer that feeds the same
+/// cost gate). Returns `None` when there are no marks to price.
+fn c_after_from_first_mark(req: &ChatRequest, marks: &[ElisionMark]) -> Option<u64> {
+    let first_marked = marks.iter().map(|m| m.message_index).min()?;
+    Some(estimate_messages_tokens(
+        req,
+        first_marked..req.messages.len(),
+    ))
 }
 
 /// Rough token estimate of a single JSON value's serialized length / 4.
@@ -724,8 +739,6 @@ pub fn near_lossless_candidate(
     req: &ChatRequest,
     marks: &[ElisionMark],
 ) -> Option<PrefixReductionCandidate> {
-    let first_marked = marks.iter().map(|m| m.message_index).min()?;
-
     let elided_tokens: u64 = marks.iter().map(|m| m.original_tokens).sum();
     let placeholder_tokens = estimate_str_tokens(ELISION_PLACEHOLDER);
     // M1 marks carry `replacement: None`, so every mark is replaced by the
@@ -735,9 +748,9 @@ pub fn near_lossless_candidate(
 
     // `c_after` = the cached-token footprint from the FIRST marked position to
     // the end of the request (the one-time re-write suffix); `c` = the whole
-    // request. Identical helpers to the shipped path.
-    let n = req.messages.len();
-    let c_after = estimate_messages_tokens(req, first_marked..n);
+    // request. Same shared helper as the shipped path -- returns `None` (with
+    // this whole builder) when there is nothing to price.
+    let c_after = c_after_from_first_mark(req, marks)?;
     let c = estimate_total_tokens(req);
 
     Some(PrefixReductionCandidate::new(d, c_after, c))
@@ -1270,6 +1283,78 @@ mod tests {
                 delta_tokens: plan.candidate.d
             }
         );
+    }
+
+    /// A conversation where non-elidable TEXT turns sit between the fixed head
+    /// and the first elidable tool turn, so the first elision mark lands at a
+    /// message index strictly greater than `head_keep_messages`.
+    fn conversation_with_text_gap_before_tools() -> ChatRequest {
+        let payload = payload_of_tokens(12_000);
+        let mut messages = vec![
+            user_msg("head one"),      // 0 (head)
+            assistant_msg("head two"), // 1 (head)
+            user_msg("plain turn a"),  // 2 non-elidable text
+            assistant_msg("plain b"),  // 3
+            user_msg("plain turn c"),  // 4
+        ];
+        for _ in 0..8 {
+            messages.push(tool_use_msg(&payload)); // first at index 5
+            messages.push(tool_result_msg(&payload));
+        }
+        for i in 0..6 {
+            messages.push(user_msg(&format!("recent turn {i}")));
+        }
+        ChatRequest {
+            model: "claude-opus-4-8".into(),
+            messages,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn c_after_starts_at_first_mark_not_head_keep() {
+        // Arrange: head_keep=2, but the first elidable mark sits at index 5.
+        let req = conversation_with_text_gap_before_tools();
+        let params = SteadyStateTrimParams::default();
+
+        // Act
+        let plan = propose_steady_state_trim(&req, &params).expect("plan");
+
+        // Assert: c_after is priced from the FIRST elided message, not the
+        // fixed head boundary. The text turns at [head_keep, first_mark) must
+        // not be counted into the one-time rewrite suffix.
+        let n = req.messages.len();
+        let first_mark = plan
+            .marks
+            .iter()
+            .map(|m| m.message_index)
+            .min()
+            .expect("marks");
+        assert_eq!(first_mark, 5, "fixture places first mark after head_keep");
+        assert_eq!(
+            plan.candidate.c_after,
+            estimate_messages_tokens(&req, first_mark..n)
+        );
+        // The head-boundary count is strictly larger (the gap turns add tokens),
+        // so the old span_start-based c_after was an overstatement.
+        assert!(
+            estimate_messages_tokens(&req, params.head_keep_messages..n) > plan.candidate.c_after
+        );
+    }
+
+    #[test]
+    fn both_builders_agree_on_c_after_for_identical_marks() {
+        // Arrange: identical marks fed to both trim-candidate builders.
+        let req = conversation_with_text_gap_before_tools();
+        let params = SteadyStateTrimParams::default();
+        let plan = propose_steady_state_trim(&req, &params).expect("plan");
+
+        // Act: price the SAME marks through the sibling builder.
+        let sibling = near_lossless_candidate(&req, &plan.marks).expect("candidate");
+
+        // Assert: the shared helper makes both c_after values identical -- a
+        // tripwire that a future third computation path must also satisfy.
+        assert_eq!(plan.candidate.c_after, sibling.c_after);
     }
 
     // ================================================================
