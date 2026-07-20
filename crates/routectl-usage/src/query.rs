@@ -699,18 +699,25 @@ pub struct ReuseSampleRow {
 }
 
 const REUSE_SAMPLES_SQL: &str = "\
-SELECT ts_start, session_id, provider_kind, model, COALESCE(cache_read, 0)
-FROM requests
-WHERE ts_start >= ?1
-  AND session_id IS NOT NULL
-  AND provider_kind IS NOT NULL
-  AND model IS NOT NULL
-  AND outcome = 'ok'
-ORDER BY ts_start ASC
-LIMIT ?2";
+SELECT ts_start, session_id, provider_kind, model, cache_read
+FROM (
+  SELECT ts_start, session_id, provider_kind, model, COALESCE(cache_read, 0) AS cache_read
+  FROM requests
+  WHERE ts_start >= ?1
+    AND session_id IS NOT NULL
+    AND provider_kind IS NOT NULL
+    AND model IS NOT NULL
+    AND outcome = 'ok'
+  ORDER BY ts_start DESC
+  LIMIT ?2
+)
+ORDER BY ts_start ASC";
 
-/// Raw reuse samples whose request start time is at or after `window_start_ms`,
-/// ordered oldest-first, capped at `limit`.
+/// Raw reuse samples whose request start time is at or after `window_start_ms`.
+/// Selects the most recent `limit` qualifying rows in the window (newest-N,
+/// via an inner `ORDER BY ts_start DESC LIMIT`), then returns them oldest-first
+/// (the outer `ORDER BY ts_start ASC`). When qualifying rows exceed `limit` the
+/// oldest are dropped, not the newest.
 ///
 /// Admission contract: `outcome = 'ok'` ONLY, matching the live sample path
 /// (the live K-store write fires only on the non-streaming success finalize
@@ -1892,9 +1899,41 @@ mod tests {
         // Act: cap at 3.
         let rows = read_reuse_samples_since(db.conn(), 0, 3).expect("read");
 
-        // Assert: the three OLDEST (ascending order, then LIMIT).
+        // Assert: the three NEWEST rows in the window, returned ascending
+        // (newest-N selection, then re-ordered oldest-first).
         let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
-        assert_eq!(ids, vec![100, 101, 102]);
+        assert_eq!(ids, vec![102, 103, 104]);
+    }
+
+    #[test]
+    fn read_reuse_samples_selects_newest_within_window() {
+        // Arrange: limit + 2 eligible rows with ascending distinct ts_start,
+        // all inside the window.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        let limit = 3usize;
+        let total = limit + 2;
+        for i in 0..total as i64 {
+            insert_reuse_row(
+                &db,
+                &format!("r{i}"),
+                1000 + i,
+                Some("s1"),
+                Some("anthropic-api"),
+                Some("opus"),
+                Some(1),
+                "ok",
+            );
+        }
+
+        // Act: window admits all rows; cap below the eligible count.
+        let rows = read_reuse_samples_since(db.conn(), 1000, limit).expect("read");
+
+        // Assert: the returned set is the NEWEST `limit` rows (largest
+        // timestamps), returned oldest-first. Under the oldest-first ASC
+        // LIMIT this returned [1000, 1001, 1002] and fails.
+        let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
+        assert_eq!(ids, vec![1002, 1003, 1004]);
     }
 
     #[test]

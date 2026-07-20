@@ -474,6 +474,12 @@ struct Acc {
     cache_read_avg_weighted: i64,
     /// Running SUM of the fine rows' billed cache-read volume (a flow).
     cache_read_billed: i64,
+    /// Cache-inclusive prompt-token denominator for the hit%, summed over the
+    /// fine rows that report cache reads (`cache_read_present > 0`) via the one
+    /// shared `cache_prompt_den` rule. Numerator is `cache_read_billed`
+    /// (non-reporting rows contribute 0 there), so this pairs with it to give a
+    /// per-group rate that matches the footer by construction.
+    cache_hit_den: i64,
     cache_write_5m: i64,
     cache_write_1h: i64,
     server_tool_calls: i64,
@@ -503,6 +509,9 @@ impl Acc {
         // safe in i64: ~200k-token ceiling * realistic per-window turn counts << i64::MAX
         self.cache_read_avg_weighted += row.cache_read_avg * row.cache_read_present;
         self.cache_read_billed += row.cache_read_billed;
+        if row.cache_read_present > 0 {
+            self.cache_hit_den += cache_prompt_den(row);
+        }
         self.cache_write_5m += row.cache_write_5m;
         self.cache_write_1h += row.cache_write_1h;
         self.server_tool_calls += row.server_tool_calls;
@@ -616,13 +625,7 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
     } else {
         0
     };
-    let cache_hit_rate = cache_hit_pct(
-        acc.cache_read_present,
-        acc.input_tokens,
-        acc.cache_read_billed,
-        acc.cache_write_5m,
-        acc.cache_write_1h,
-    );
+    let cache_hit_rate = cache_hit_ratio(acc.cache_read_billed, acc.cache_hit_den);
     DisplayRow {
         ttft_p50_ms,
         ttft_p95_ms,
@@ -658,30 +661,29 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
     }
 }
 
-/// Token-weighted cache-hit rate: the fraction of prompt tokens served from
-/// cache, `cache_read_billed / (input + cache_read_billed + cache_write_5m +
-/// cache_write_1h)`. The DB stores input / cache_read / cache_write as DISJOINT
-/// prompt dimensions, so that denominator is the cache-INCLUSIVE prompt total.
-/// This is a FLOW ratio: `cache_read_billed` is already the SUM of the per-turn
-/// cache-read volume, so summing here is correct (unlike the display SIZE figure
-/// `cache_read_peak`, where summing was the bug). Returns `None` when the
-/// provider does not report cache reads (`present == 0`) or the denominator is
-/// degenerate (0) -- the caller renders `-`, never `0%`.
-fn cache_hit_pct(
-    cache_read_present: i64,
-    input_tokens: i64,
-    cache_read_billed: i64,
-    cache_write_5m: i64,
-    cache_write_1h: i64,
-) -> Option<f64> {
-    if cache_read_present == 0 {
-        return None;
-    }
-    let den = input_tokens + cache_read_billed + cache_write_5m + cache_write_1h;
+/// Cache-inclusive prompt-token denominator for one aggregate row:
+/// `input + cache_read_billed + cache_write_5m + cache_write_1h`. The DB stores
+/// input / cache_read / cache_write as DISJOINT prompt dimensions, so their sum
+/// is the cache-INCLUSIVE prompt total against which billed cache reads are
+/// weighed. This is the ONE denominator rule -- consumed by both the per-group
+/// accumulator (`Acc::add`) and the footer, so a mixed-provider window can never
+/// show two contradictory hit%. A row with `cache_read_present > 0` but
+/// `input_tokens == 0` still contributes its reads/writes here.
+const fn cache_prompt_den(row: &AggRow) -> i64 {
+    row.input_tokens + row.cache_read_billed + row.cache_write_5m + row.cache_write_1h
+}
+
+/// The token-weighted cache-hit ratio `num / den`, or `None` when the
+/// denominator is degenerate (`<= 0`) -- the caller renders `-`, never `0%`.
+/// `cache_read_billed` is a summed FLOW, so both the per-group and footer paths
+/// legitimately accumulate their own `(num, den)` pair (weighted aggregation is
+/// not mean-of-means) and feed it through this one ratio rule; they differ only
+/// in HOW they accumulate, never in the ratio.
+fn cache_hit_ratio(num: i64, den: i64) -> Option<f64> {
     if den <= 0 {
         return None;
     }
-    Some(cache_read_billed as f64 / den as f64)
+    Some(num as f64 / den as f64)
 }
 
 /// Window-wide footer: cache-hit-rate, the total error count, and the
@@ -710,14 +712,10 @@ fn footer(rows: &[AggRow]) -> (Option<f64>, i64, i64, i64) {
         client_disconnects_pre_dispatch += r.client_disconnect_pre_dispatch;
         if r.cache_read_present > 0 {
             num += r.cache_read_billed;
-            den += r.input_tokens + r.cache_read_billed + r.cache_write_5m + r.cache_write_1h;
+            den += cache_prompt_den(r);
         }
     }
-    let rate = if den > 0 {
-        Some(num as f64 / den as f64)
-    } else {
-        None
-    };
+    let rate = cache_hit_ratio(num, den);
     (
         rate,
         errors,

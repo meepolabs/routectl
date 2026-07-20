@@ -96,6 +96,11 @@ struct PersistedRow {
     fallback_count: i64,
     provider: Option<String>,
     alias: String,
+    /// `http_status` column: the client-transport status. `Some(200)` once
+    /// the SSE head commits; the pre-head upstream status when a dispatch
+    /// fails before any byte flushes; `None` when the head never committed
+    /// (e.g. a disconnect before the first successful send).
+    http_status: Option<i64>,
     /// `extra.stream_stage`, parsed from the JSON `extra` column. `None`
     /// when no stage marker was stamped (fast HTTP-status failures, clean
     /// completions). Distinguishes a warm-hold pre-content dispatch failure
@@ -108,13 +113,13 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
         .conn()
         .prepare(
             "SELECT request_id, outcome, ttfb_ms, input_tokens, output_tokens, \
-             attempt_count, fallback_count, provider, alias, extra FROM requests \
+             attempt_count, fallback_count, provider, alias, http_status, extra FROM requests \
              ORDER BY rowid",
         )
         .expect("prepare select");
 
     stmt.query_map([], |r| {
-        let extra: Option<String> = r.get(9)?;
+        let extra: Option<String> = r.get(10)?;
         let stream_stage = extra
             .as_deref()
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
@@ -133,6 +138,7 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
             fallback_count: r.get(6)?,
             provider: r.get(7)?,
             alias: r.get(8)?,
+            http_status: r.get(9)?,
             stream_stage,
         })
     })
@@ -1016,6 +1022,15 @@ async fn drive_stream_cancels_immediately_on_client_disconnect() {
         rows[0].stream_stage, None,
         "client cancel is not an upstream stage failure"
     );
+    // Truth-table row 6 (RED before the commit-point fix): the first event
+    // drained successfully BEFORE the receiver was dropped, so the SSE head
+    // committed to 200. A later disconnect does not un-commit that status --
+    // the client did receive a 200 transport head.
+    assert_eq!(
+        rows[0].http_status,
+        Some(200),
+        "a disconnect AFTER a successful send keeps the committed 200"
+    );
 
     // Exactly one DEBUG breadcrumb for the disconnect.
     let disconnects: Vec<&routectl_testkit::CapturedEvent> = events
@@ -1405,6 +1420,45 @@ async fn capture_non_stream_render_failure_emits_upstream_error_row() {
     );
     assert_eq!(rows[0].request_id, "req-render-502");
 }
+
+/// Truth-table row 7: a streaming render failure AFTER the SSE head has
+/// committed keeps http_status=200. Mirrors `drive_stream`'s render-Err
+/// ordering exactly (the render-failure arm is not cheaply reachable end-
+/// to-end -- it needs an adapter that fails `render_chunk` on a canonical
+/// chunk -- so this pins the ordering directly, as the non-streaming
+/// render-failure test above does): a prior successful send committed the
+/// head (`mark_stream_http_committed`), then a later chunk fails to render,
+/// so `observe_error` records the class WITHOUT overwriting the 200, and the
+/// row finalizes `upstream_error` carrying the 200 transport status.
+#[tokio::test]
+async fn capture_stream_render_failure_after_head_commit_keeps_200() {
+    // Arrange
+    let rig = CaptureRig::new();
+    let req = sample_request("a", true);
+    let mut capture = rig.capture("anthropic", &req, "req-stream-render-502");
+
+    // Act: first content chunk rendered + sent (head committed to 200), then
+    // a later chunk fails to render -> observe_error + finalize(UpstreamError).
+    capture.mark_first_byte();
+    capture.mark_stream_http_committed();
+    let render_err = Error::Streaming("chunk render failed".into());
+    capture.observe_error(&render_err);
+    capture.finalize(Outcome::UpstreamError);
+    drop(capture);
+    let rows = rig.flush_and_read().await;
+
+    // Assert: one upstream_error row whose transport status stays 200.
+    assert_eq!(rows.len(), 1, "exactly one row per request");
+    assert_eq!(
+        rows[0].outcome, "upstream_error",
+        "render failure finalizes upstream_error"
+    );
+    assert_eq!(
+        rows[0].http_status,
+        Some(200),
+        "a render failure after head commit keeps the client's 200 transport status"
+    );
+}
 #[tokio::test]
 async fn capture_finalize_then_drop_does_not_double_send() {
     // Arrange
@@ -1491,6 +1545,14 @@ async fn capture_stream_natural_eos_emits_single_ok_row() {
     assert_eq!(rows[0].input_tokens, Some(9));
     assert_eq!(rows[0].output_tokens, Some(4));
     assert!(rows[0].ttfb_ms.is_some(), "first chunk sets ttfb");
+    // Truth-table row 3 (RED before the commit-point fix): a clean stream
+    // committed its SSE head at the first successful send, so the client's
+    // transport status is 200 (previously left NULL for streaming success).
+    assert_eq!(
+        rows[0].http_status,
+        Some(200),
+        "clean natural EOS records the committed 200 transport status"
+    );
 }
 
 /// Streaming mid-stream upstream error through `render_stream_task` ->
@@ -1531,6 +1593,15 @@ async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
         rows[0].stream_stage.as_deref(),
         Some("mid_stream"),
         "a genuine mid-stream cut must not collapse into the pre_content_dispatch stage"
+    );
+    // Truth-table row 4 (RED before the commit-point fix): the first content
+    // chunk sent successfully committed the SSE head to 200; the later
+    // mid-stream 503 is carried by outcome + stream_stage=mid_stream and must
+    // NOT overwrite the client's 200 transport status back to 503.
+    assert_eq!(
+        rows[0].http_status,
+        Some(200),
+        "a post-head mid-stream upstream error keeps http_status 200"
     );
 }
 
@@ -2094,6 +2165,14 @@ async fn stream_gate_fast_err_returns_http_status_not_in_stream_frame() {
         rows[0].stream_stage, None,
         "an HTTP-status failure carries no stream stage marker"
     );
+    // Truth-table row 1 (regression guard): a pre-head fast dispatch error
+    // never committed an SSE head, so http_status carries the REAL upstream
+    // transport status the client received (529), not a fabricated 200.
+    assert_eq!(
+        rows[0].http_status,
+        Some(529),
+        "pre-head dispatch error records the upstream transport status"
+    );
 }
 
 /// Branch 3 (GRACE-warm-byte): on warm-hold the FIRST body byte is the
@@ -2220,6 +2299,16 @@ async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row()
         "observe_meta stamped the resolved alias in the render task"
     );
     assert!(row.ttfb_ms.is_none(), "no content ever flowed -> ttfb None");
+    // Truth-table row 2 (RED before the commit-point fix): the early frame
+    // (message_start) flushed as the first body byte, committing the SSE head
+    // to a 200 status line BEFORE the dispatch resolved Err. The mid-flight
+    // upstream failure is carried by outcome / stream_stage; the client's
+    // transport status stays 200 and must not be overwritten to 529.
+    assert_eq!(
+        row.http_status,
+        Some(200),
+        "a committed SSE head keeps http_status 200 even when the dispatch then fails"
+    );
 }
 
 /// Grace-expiry SELECTION: a dispatch that never resolves must make the grace
@@ -2454,6 +2543,13 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     assert_eq!(
         rows[0].stream_stage, None,
         "the Drop fallback path never calls mark_stream_stage"
+    );
+    // Truth-table row 5 (regression guard): the early-frame send failed, so
+    // NO byte ever flushed and the SSE head never committed. http_status must
+    // stay NULL -- the client received no transport status from us.
+    assert_eq!(
+        rows[0].http_status, None,
+        "a disconnect before any successful send leaves http_status NULL"
     );
 }
 

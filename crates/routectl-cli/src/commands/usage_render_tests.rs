@@ -493,6 +493,69 @@ fn render_footer_excludes_non_cache_reporting_rows() {
 }
 
 #[test]
+fn per_group_cache_hit_matches_footer_in_mixed_provider_group() {
+    // Arrange: ONE display group (--by alias, shared alias "al") mixing a
+    // cache-reporting aggregate (present>0, cache_read 900, input 100) with a
+    // non-reporting aggregate (present==0, input 500). The per-group hit% must
+    // count prompt tokens ONLY from the reporting aggregate -- 900/1000 = 90.0%
+    // -- exactly the footer's rate. The pre-fix per-group rule summed input over
+    // ALL rows in the group: 900/(600+900) = 60.0%, showing a diluted per-group
+    // rate beside the footer's correct one in the same report.
+    let (_dir, _path, db) = temp_db();
+    // Reporting aggregate (model "rep"): a stream row carries the billed
+    // cache-read volume (900); a paid row carries the fresh input (100). Both
+    // share (provider "paid", upstream "up-paid", alias "al").
+    insert_stream_row(&db, "rep_s", 1000, "rep", 100, 600, Some(5), None, Some(900));
+    paid_model_row(&db, "rep_i", "rep", "ok", 100, 0);
+    // Non-reporting aggregate (model "norep"): input 500, NULL cache_read.
+    paid_model_row(&db, "norep_i", "norep", "ok", 500, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Alias), false);
+
+    // Act
+    let group = find(&report, "al").cache_hit_rate;
+    let total = find(&report, "total").cache_hit_rate;
+    let footer = report.cache_hit_rate;
+
+    // Assert: per-group agrees with the footer (90.0%), never the diluted 60.0%.
+    assert_eq!(footer, Some(0.9), "footer rate over reporting rows only");
+    assert_eq!(
+        group, footer,
+        "per-group rate must equal the footer, not the input-diluted rate"
+    );
+    // By-construction pin: the total row mirrors the footer exactly.
+    assert_eq!(total, footer, "total row must equal the footer");
+}
+
+#[test]
+fn non_reporting_only_group_renders_no_data_marker() {
+    // Arrange: a group whose only rows never report cache reads (present==0).
+    // The shared denominator stays 0, so the rate is None and the hit% cell is
+    // the "-" no-data marker -- never "0.0%".
+    let (_dir, _path, db) = temp_db();
+    paid_model_row(&db, "nr1", "norep", "ok", 500, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let group = find(&report, "norep");
+    let out = render_report(&report);
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("norep"))
+        .expect("norep row present");
+
+    // Assert: no rate on the struct; the row renders the "-" marker, not 0.0%.
+    assert_eq!(group.cache_hit_rate, None);
+    assert!(
+        row_line.contains(" - "),
+        "hit% cell should be '-' for a non-reporting-only group: {row_line:?}"
+    );
+    assert!(
+        !row_line.contains("0.0%"),
+        "non-reporting-only group must not render 0.0%: {row_line:?}"
+    );
+}
+
+#[test]
 fn render_footer_not_equal_to_old_peak_based_value() {
     // Arrange: a regression guard for the footer-formula rewrite. The OLD footer
     // was a per-group mean of peak/(peak+input). For ONE group with two stream

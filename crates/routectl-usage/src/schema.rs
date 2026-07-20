@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS requests (
                         'cancelled',
                         'gate_blocked'
                     )),
+    -- http_status is the client-transport status: 200 for a delivered
+    -- non-streaming body and for a committed SSE head; a mid-stream
+    -- provider failure keeps 200 and is carried by outcome / error_class /
+    -- stream_stage, never by this column. Streaming rows written before the
+    -- commit-point fix are NULL and are not back-migrated.
     http_status     INTEGER,
     error_class     TEXT,
     finish_reason   TEXT,

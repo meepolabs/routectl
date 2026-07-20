@@ -539,15 +539,41 @@ impl UsageCapture {
     /// Stamp the outcome-detail columns from a dispatch / stream error:
     /// the upstream HTTP status (when the error carries one) and the short
     /// error-class token. Never the Display string.
+    ///
+    /// `http_status` is the transport status the CLIENT received. Once the
+    /// SSE head has committed (`mark_stream_http_committed` stamped 200), a
+    /// later mid-stream upstream failure must not overwrite it: the client
+    /// already saw a 200 status line, and the provider failure is carried by
+    /// outcome / error_class / stream_stage instead. So the upstream status
+    /// is recorded only while `http_status` is still unset -- this is the
+    /// pre-head status recorder.
     pub(crate) fn observe_error(&mut self, e: &Error) {
-        if let Error::Upstream { status, .. } = e {
-            // A status-0 upstream error is a local gate / timeout sentinel,
-            // not a real HTTP code; leave http_status None in that case.
-            if *status != 0 {
-                self.record.http_status = Some(*status);
-            }
+        // Record the upstream status only while http_status is still unset
+        // (pre-head), and only for a real HTTP code -- a status-0 upstream
+        // error is a local gate / timeout sentinel, not a transport status.
+        if self.record.http_status.is_none()
+            && let Error::Upstream { status, .. } = e
+            && *status != 0
+        {
+            self.record.http_status = Some(*status);
         }
         self.record.error_class = Some(error_class_of(e).to_string());
+    }
+
+    /// Stamp `http_status = 200` at the point the SSE head becomes
+    /// client-visible (the first successful event send). Idempotent: only
+    /// writes when `http_status` is still unset, so a repeat call over the
+    /// stream lifetime is a no-op and a status recorded earlier is preserved.
+    ///
+    /// This is the streaming counterpart of `observe_response`'s fixed 200:
+    /// http_status reflects the transport status the client received, which
+    /// is 200 the moment the head commits. Call it only from a first-
+    /// successful-send site, never at spawn: a disconnect before any byte
+    /// flushed leaves the head uncommitted and http_status stays NULL.
+    pub(crate) const fn mark_stream_http_committed(&mut self) {
+        if self.record.http_status.is_none() {
+            self.record.http_status = Some(200);
+        }
     }
 
     /// Merge one string key into the record's `extra` JSON object,

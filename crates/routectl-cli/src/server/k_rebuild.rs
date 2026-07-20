@@ -13,6 +13,7 @@
 //! fresher live samples with older ledger history.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use routectl_router::{KSessionStore, LedgerReader, LedgerSampleRow, rebuild_into};
@@ -39,11 +40,15 @@ const REBUILD_ROW_LIMIT: usize = 5000;
 /// daemon's whole life.
 struct UsageLedgerReader {
     db_path: PathBuf,
+    loaded_rows: AtomicUsize,
 }
 
 impl UsageLedgerReader {
     const fn new(db_path: PathBuf) -> Self {
-        Self { db_path }
+        Self {
+            db_path,
+            loaded_rows: AtomicUsize::new(0),
+        }
     }
 }
 
@@ -59,7 +64,10 @@ impl LedgerReader for UsageLedgerReader {
         };
 
         match read_reuse_samples_since(db.conn(), window_start_ms, limit) {
-            Ok(rows) => rows.into_iter().map(reuse_row_to_ledger_row).collect(),
+            Ok(rows) => {
+                self.loaded_rows.store(rows.len(), Ordering::Relaxed);
+                rows.into_iter().map(reuse_row_to_ledger_row).collect()
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -111,8 +119,27 @@ pub(crate) fn warm_k_store_from_ledger(db_path: &Path, store: &KSessionStore) {
         .checked_sub(REBUILD_WINDOW)
         .unwrap_or(UNIX_EPOCH);
     rebuild_into(&reader, store, window_start, REBUILD_ROW_LIMIT);
+    emit_rebuild_log(store.len(), reader.loaded_rows.load(Ordering::Relaxed));
+}
+
+/// Report the rebuild outcome: an `info` with the loaded-row count, the row
+/// cap, and the window size, plus a one-shot `warn` when the load hit the cap
+/// (warm state may then be truncated to the newest `REBUILD_ROW_LIMIT` rows).
+fn emit_rebuild_log(tracked_sessions: usize, loaded_rows: usize) {
+    let window_hours = REBUILD_WINDOW.as_secs() / 3600;
+    if loaded_rows == REBUILD_ROW_LIMIT {
+        tracing::warn!(
+            loaded_rows,
+            row_cap = REBUILD_ROW_LIMIT,
+            window_hours,
+            "K-estimator warm rebuild hit the row cap; warm state may be truncated"
+        );
+    }
     tracing::info!(
-        tracked_sessions = store.len(),
+        tracked_sessions,
+        loaded_rows,
+        row_cap = REBUILD_ROW_LIMIT,
+        window_hours,
         "warmed K-estimator session store from usage ledger"
     );
 }
@@ -360,6 +387,52 @@ mod tests {
                 .is_none(),
             "a triple with only a failed row must not warm at all"
         );
+    }
+
+    #[test]
+    fn rebuild_log_carries_loaded_rows_and_no_warn_under_cap() {
+        // Arrange + Act: a normal rebuild outcome, loaded_rows below the cap.
+        let events = routectl_testkit::capture_events(|| {
+            emit_rebuild_log(4, REBUILD_ROW_LIMIT - 1);
+        });
+
+        // Assert: the info line carries loaded_rows, row_cap, and window_hours,
+        // and no cap-hit warning fires.
+        let info = events
+            .iter()
+            .find(|e| e.level == tracing::Level::INFO)
+            .expect("info rebuild log emitted");
+        assert_eq!(info.field("loaded_rows"), Some("4999"));
+        assert_eq!(info.field("row_cap"), Some("5000"));
+        assert_eq!(info.field("window_hours"), Some("192"));
+        assert_eq!(info.field("tracked_sessions"), Some("4"));
+        assert!(
+            !events.iter().any(|e| e.level == tracing::Level::WARN),
+            "no cap-hit warning under the row cap"
+        );
+    }
+
+    #[test]
+    fn rebuild_log_warns_when_row_cap_hit() {
+        // Arrange + Act: loaded_rows exactly at the cap -- the truncation risk.
+        let events = routectl_testkit::capture_events(|| {
+            emit_rebuild_log(7, REBUILD_ROW_LIMIT);
+        });
+
+        // Assert: a WARN fires carrying the loaded-row count and cap, and the
+        // info line still reports the loaded rows.
+        let warn = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("cap-hit warning emitted");
+        assert!(warn.message.contains("hit the row cap"));
+        assert_eq!(warn.field("loaded_rows"), Some("5000"));
+        assert_eq!(warn.field("row_cap"), Some("5000"));
+        let info = events
+            .iter()
+            .find(|e| e.level == tracing::Level::INFO)
+            .expect("info rebuild log emitted");
+        assert_eq!(info.field("loaded_rows"), Some("5000"));
     }
 
     #[test]
