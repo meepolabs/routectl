@@ -701,23 +701,26 @@ pub struct ReuseSampleRow {
 const REUSE_SAMPLES_SQL: &str = "\
 SELECT ts_start, session_id, provider_kind, model, cache_read
 FROM (
-  SELECT ts_start, session_id, provider_kind, model, COALESCE(cache_read, 0) AS cache_read
+  SELECT rowid AS rid, ts_start, session_id, provider_kind, model, COALESCE(cache_read, 0) AS cache_read
   FROM requests
   WHERE ts_start >= ?1
     AND session_id IS NOT NULL
     AND provider_kind IS NOT NULL
     AND model IS NOT NULL
     AND outcome = 'ok'
-  ORDER BY ts_start DESC
+  ORDER BY ts_start DESC, rowid DESC
   LIMIT ?2
 )
-ORDER BY ts_start ASC";
+ORDER BY ts_start ASC, rid ASC";
 
 /// Raw reuse samples whose request start time is at or after `window_start_ms`.
 /// Selects the most recent `limit` qualifying rows in the window (newest-N,
-/// via an inner `ORDER BY ts_start DESC LIMIT`), then returns them oldest-first
-/// (the outer `ORDER BY ts_start ASC`). When qualifying rows exceed `limit` the
-/// oldest are dropped, not the newest.
+/// via an inner `ORDER BY ts_start DESC, rowid DESC LIMIT`), then returns them
+/// oldest-first (the outer `ORDER BY ts_start ASC, rowid ASC`). When qualifying
+/// rows exceed `limit` the oldest are dropped, not the newest. `rowid` breaks
+/// ties: it tracks insertion order, so among rows sharing an identical
+/// `ts_start` the most recently inserted win the cap and survivors emit in
+/// stable insertion order -- selection at the boundary is deterministic.
 ///
 /// Admission contract: `outcome = 'ok'` ONLY, matching the live sample path
 /// (the live K-store write fires only on the non-streaming success finalize
@@ -1934,6 +1937,46 @@ mod tests {
         // LIMIT this returned [1000, 1001, 1002] and fails.
         let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
         assert_eq!(ids, vec![1002, 1003, 1004]);
+    }
+
+    #[test]
+    fn read_reuse_samples_breaks_cap_boundary_ties_by_insertion_order() {
+        // Arrange: more qualifying rows than the limit, where the rows
+        // straddling the cap boundary share an identical ts_start. Insertion
+        // order (rowid) is the only signal distinguishing them, so it must
+        // decide which survive and how survivors are ordered. Each tied row
+        // carries a distinct cache_read so the public row shape reveals both
+        // which rows survived and in what order.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        let limit = 3usize;
+        // Four rows at the SAME ts_start, inserted earliest-first with
+        // ascending cache_read markers (10, 20, 30, 40).
+        for (i, marker) in [10i64, 20, 30, 40].into_iter().enumerate() {
+            insert_reuse_row(
+                &db,
+                &format!("tie{i}"),
+                500,
+                Some("s1"),
+                Some("anthropic-api"),
+                Some("opus"),
+                Some(marker),
+                "ok",
+            );
+        }
+
+        // Act: cap below the count of tied rows.
+        let rows = read_reuse_samples_since(db.conn(), 0, limit).expect("read");
+
+        // Assert: the three most-recently-inserted tied rows survive (markers
+        // 20, 30, 40 -- dropping the earliest-inserted 10), emitted in stable
+        // insertion order (oldest-first, rowid ascending) despite the shared
+        // ts_start.
+        assert_eq!(rows.len(), limit);
+        let ts: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
+        assert_eq!(ts, vec![500, 500, 500]);
+        let markers: Vec<i64> = rows.iter().map(|r| r.cache_read).collect();
+        assert_eq!(markers, vec![20, 30, 40]);
     }
 
     #[test]
