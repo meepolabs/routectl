@@ -39,7 +39,6 @@ use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value};
 
 use crate::catalog::{CachePricingOverride, CachePricingSelector};
 use crate::catalog_overlay::{self, OverlayCell, OverlaySource};
-use crate::class_policy::ConfigFailureClass;
 use crate::config::CURRENT_CONFIG_VERSION;
 
 /// Seconds in a day, for epoch-day arithmetic off the system clock.
@@ -571,21 +570,13 @@ fn render_entry(value: &toml_edit::Value) -> String {
     }
 }
 
-/// Render a [`ConfigFailureClass`] as the kebab-case token it spells in
-/// `[retry.classes.<token>]`, via its own `Serialize` impl so the spelling
-/// cannot drift from the config surface.
-fn class_token(class: ConfigFailureClass) -> String {
-    serde_json::to_string(&class)
-        .expect("ConfigFailureClass serialization is infallible")
-        .trim_matches('"')
-        .to_string()
-}
-
 /// The `[retry.classes.<token>]` spelling for a canonical [`FailureClass`],
 /// or `None` for a class with no operator-nameable config token (`Unknown`
-/// or a future `#[non_exhaustive]` variant).
+/// or a future `#[non_exhaustive]` variant). Delegates to the canonical
+/// [`FailureClass::class_token`] so the migrator's guidance shares the one
+/// vocabulary source.
 fn nearest_class_token(class: &FailureClass) -> Option<String> {
-    ConfigFailureClass::from_failure_class(class).map(class_token)
+    class.class_token().map(str::to_string)
 }
 
 /// Build one guidance line for `code`, naming the nearest class token(s)

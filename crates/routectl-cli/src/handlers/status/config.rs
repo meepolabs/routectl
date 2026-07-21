@@ -128,21 +128,17 @@ const fn class_source_token(source: ClassPolicySource) -> &'static str {
     }
 }
 
-/// The kebab-case class token, owned here so a new failure class is a compile
-/// error rather than a silent wire change.
-const fn class_token(class: ConfigFailureClass) -> &'static str {
-    match class {
-        ConfigFailureClass::RateLimited => "rate-limited",
-        ConfigFailureClass::Auth => "auth",
-        ConfigFailureClass::BadRequest => "bad-request",
-        ConfigFailureClass::ContentPolicy => "content-policy",
-        ConfigFailureClass::ContextWindow => "context-window",
-        ConfigFailureClass::ServerError => "server-error",
-        ConfigFailureClass::Timeout => "timeout",
-        ConfigFailureClass::NetworkError => "network-error",
-        ConfigFailureClass::Overloaded => "overloaded",
-        ConfigFailureClass::FeatureUnsupported => "feature-unsupported",
-    }
+/// The kebab-case class token, delegated to the canonical
+/// [`FailureClass::class_token`] so the wire vocabulary has a single source.
+/// Every config-facing class names a canonical class, so the token is always
+/// present.
+///
+/// [`FailureClass::class_token`]: routectl_core::failure_class::FailureClass::class_token
+fn class_token(class: ConfigFailureClass) -> &'static str {
+    class
+        .to_failure_class()
+        .class_token()
+        .expect("a config-facing failure class always has a canonical token")
 }
 
 /// The capability verdict token.
@@ -192,7 +188,7 @@ fn map_model(cell: ModelCell) -> ModelCellWire {
     }
 }
 
-const fn map_class(cell: ClassPolicyCell) -> ClassPolicyWire {
+fn map_class(cell: ClassPolicyCell) -> ClassPolicyWire {
     ClassPolicyWire {
         class: class_token(cell.class),
         retry_cap: cell.retry_cap,

@@ -485,6 +485,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn class_token_tripwire_agrees_with_config_serde_kebab() {
+        // The canonical FailureClass::class_token must emit the EXACT string
+        // ConfigFailureClass's kebab-case serde rename produces, for every
+        // operator-nameable class. Compared against live serde_json output
+        // (not a restated literal), so a drift on either surface fails here.
+        for (variant, _key) in all_kebab_pairs() {
+            let serde_token = serde_json::to_string(&variant)
+                .expect("ConfigFailureClass serialization is infallible");
+            let serde_token = serde_token.trim_matches('"');
+            let core = variant.to_failure_class();
+            assert_eq!(core.class_token(), Some(serde_token), "variant {variant:?}");
+        }
+    }
+
     // --- resolved_class: baked matrix over an empty overlay ---
 
     /// A policy whose per-class retry caps are all set to distinct values,
