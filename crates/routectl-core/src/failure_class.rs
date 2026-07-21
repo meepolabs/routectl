@@ -12,6 +12,8 @@
 //! [`Error::Upstream`] and pulls in no config, router, or provider-crate
 //! types.
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Error;
 
 /// A coarse, stable failure category derived from a canonical [`Error`].
@@ -57,6 +59,109 @@ pub enum FailureClass {
     },
     /// No confident classification.
     Unknown,
+}
+
+impl FailureClass {
+    /// The kebab-case token for this class -- THE single vocabulary source
+    /// for the ledger `resolved_class` column, the `/status`
+    /// `errors_by_class` JSON keys, and the `[retry.classes.<token>]`
+    /// config keys. Each token matches the kebab-case `serde` rename of the
+    /// config-facing failure class exactly (a tripwire test pins that
+    /// agreement).
+    ///
+    /// `Unknown` returns `None`, which downstream readers store as NULL and
+    /// render as "unclassified". A new `#[non_exhaustive]` variant is a
+    /// compile error here until it is given a token or routed to `None` --
+    /// the audit this class's doc comment mandates.
+    #[must_use]
+    pub const fn class_token(&self) -> Option<&'static str> {
+        match self {
+            Self::RateLimited => Some("rate-limited"),
+            Self::Auth => Some("auth"),
+            Self::BadRequest => Some("bad-request"),
+            Self::ContentPolicy => Some("content-policy"),
+            Self::ContextWindow => Some("context-window"),
+            Self::ServerError => Some("server-error"),
+            Self::Timeout => Some("timeout"),
+            Self::NetworkError => Some("network-error"),
+            Self::Overloaded => Some("overloaded"),
+            Self::FeatureUnsupported { .. } => Some("feature-unsupported"),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// The coarse outcome of the most recent dispatch attempt against a target,
+/// recorded on the router's per-target accounting state and surfaced on the
+/// health panel.
+///
+/// A thin wrapper derived from [`FailureClass`] (via [`from_failure_class`])
+/// plus the success and gate-refusal cases the classifier never produces --
+/// deliberately co-located here so a second, drifting outcome taxonomy never
+/// grows elsewhere. Serializes in snake_case.
+///
+/// [`from_failure_class`]: LastOutcome::from_failure_class
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LastOutcome {
+    /// The attempt succeeded.
+    Ok,
+    /// Upstream rate limit.
+    RateLimited,
+    /// Deadline exceeded.
+    Timeout,
+    /// Transport-level failure with no HTTP status.
+    TransportError,
+    /// A 4xx client-side rejection family. Renamed explicitly because
+    /// `rename_all = "snake_case"` inserts no separator before a digit
+    /// (`Http4xx` -> `http4xx`), and the wire token is `http_4xx`.
+    #[serde(rename = "http_4xx")]
+    Http4xx,
+    /// A 5xx server-side failure family. Renamed for the same reason as
+    /// [`Http4xx`]; the wire token is `http_5xx`.
+    ///
+    /// [`Http4xx`]: LastOutcome::Http4xx
+    #[serde(rename = "http_5xx")]
+    Http5xx,
+    /// The circuit breaker refused the attempt. Never produced by
+    /// [`from_failure_class`]; derived only from the circuit phase at
+    /// DTO-build time.
+    ///
+    /// [`from_failure_class`]: LastOutcome::from_failure_class
+    CircuitOpen,
+}
+
+impl LastOutcome {
+    /// Derive the outcome of a failed attempt from its [`FailureClass`].
+    ///
+    /// Collapses the taxonomy into HTTP families: the client-error classes
+    /// (`Auth`, `BadRequest`, `ContentPolicy`, `ContextWindow`,
+    /// `FeatureUnsupported`) become [`Http4xx`]; the server-side classes
+    /// (`ServerError`, `Overloaded`) and the unclassified catch-all
+    /// (`Unknown`) become [`Http5xx`], the conservative server-side
+    /// default. Never returns [`Ok`] or [`CircuitOpen`]. A new
+    /// `#[non_exhaustive]` variant is a compile error here until it is
+    /// mapped to its closest family.
+    ///
+    /// [`Http4xx`]: LastOutcome::Http4xx
+    /// [`Http5xx`]: LastOutcome::Http5xx
+    /// [`Ok`]: LastOutcome::Ok
+    /// [`CircuitOpen`]: LastOutcome::CircuitOpen
+    #[must_use]
+    pub const fn from_failure_class(class: &FailureClass) -> Self {
+        match class {
+            FailureClass::RateLimited => Self::RateLimited,
+            FailureClass::Timeout => Self::Timeout,
+            FailureClass::NetworkError => Self::TransportError,
+            FailureClass::Auth
+            | FailureClass::BadRequest
+            | FailureClass::ContentPolicy
+            | FailureClass::ContextWindow
+            | FailureClass::FeatureUnsupported { .. } => Self::Http4xx,
+            FailureClass::ServerError | FailureClass::Overloaded => Self::Http5xx,
+            FailureClass::Unknown => Self::Http5xx,
+        }
+    }
 }
 
 /// Which signal on the [`Error`] decided the [`FailureClass`].
@@ -350,7 +455,8 @@ fn union_lift_tokens() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClassifiedFailure, FailureClass, MatchedBy, class_guidance_for_status, classify, tables,
+        ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, class_guidance_for_status,
+        classify, tables,
     };
     use crate::error::Error;
 
@@ -868,6 +974,138 @@ mod tests {
 
             // Assert: the status round-trips onto the guidance.
             assert_eq!(got.status, status);
+        }
+    }
+
+    // --- class_token + LastOutcome vocabulary ---
+
+    /// Every current canonical variant. Constructed explicitly so a new
+    /// `#[non_exhaustive]` variant forces a compile-time revisit here.
+    fn all_variants() -> Vec<FailureClass> {
+        vec![
+            FailureClass::RateLimited,
+            FailureClass::Auth,
+            FailureClass::BadRequest,
+            FailureClass::ContentPolicy,
+            FailureClass::ContextWindow,
+            FailureClass::ServerError,
+            FailureClass::Timeout,
+            FailureClass::NetworkError,
+            FailureClass::Overloaded,
+            FailureClass::FeatureUnsupported {
+                capability: "some_upstream_token".to_string(),
+            },
+            FailureClass::Unknown,
+        ]
+    }
+
+    #[test]
+    fn class_token_is_some_kebab_for_every_variant_except_unknown() {
+        for class in all_variants() {
+            // Act
+            let token = class.class_token();
+
+            // Assert
+            match class {
+                FailureClass::Unknown => {
+                    assert_eq!(token, None, "Unknown must have no token");
+                }
+                _ => {
+                    let token = token.expect("classified variant has a token");
+                    assert!(!token.is_empty(), "empty token for {class:?}");
+                    assert!(
+                        token.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                        "token {token:?} for {class:?} is not kebab-case"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn class_token_emits_the_expected_kebab_tokens() {
+        let cases = [
+            (FailureClass::RateLimited, Some("rate-limited")),
+            (FailureClass::Auth, Some("auth")),
+            (FailureClass::BadRequest, Some("bad-request")),
+            (FailureClass::ContentPolicy, Some("content-policy")),
+            (FailureClass::ContextWindow, Some("context-window")),
+            (FailureClass::ServerError, Some("server-error")),
+            (FailureClass::Timeout, Some("timeout")),
+            (FailureClass::NetworkError, Some("network-error")),
+            (FailureClass::Overloaded, Some("overloaded")),
+            (
+                FailureClass::FeatureUnsupported {
+                    capability: "x".to_string(),
+                },
+                Some("feature-unsupported"),
+            ),
+            (FailureClass::Unknown, None),
+        ];
+        for (class, expected) in cases {
+            assert_eq!(class.class_token(), expected, "class {class:?}");
+        }
+    }
+
+    #[test]
+    fn from_failure_class_maps_each_variant_to_its_family() {
+        let cases = [
+            (FailureClass::RateLimited, LastOutcome::RateLimited),
+            (FailureClass::Timeout, LastOutcome::Timeout),
+            (FailureClass::NetworkError, LastOutcome::TransportError),
+            (FailureClass::Auth, LastOutcome::Http4xx),
+            (FailureClass::BadRequest, LastOutcome::Http4xx),
+            (FailureClass::ContentPolicy, LastOutcome::Http4xx),
+            (FailureClass::ContextWindow, LastOutcome::Http4xx),
+            (
+                FailureClass::FeatureUnsupported {
+                    capability: "x".to_string(),
+                },
+                LastOutcome::Http4xx,
+            ),
+            (FailureClass::ServerError, LastOutcome::Http5xx),
+            (FailureClass::Overloaded, LastOutcome::Http5xx),
+            (FailureClass::Unknown, LastOutcome::Http5xx),
+        ];
+        for (class, expected) in cases {
+            assert_eq!(
+                LastOutcome::from_failure_class(&class),
+                expected,
+                "class {class:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_failure_class_is_total_and_never_ok_or_circuit_open() {
+        // Totality: every current variant yields a value, and the two cases
+        // the classifier never produces (success, gate-refusal) stay out.
+        for class in all_variants() {
+            let outcome = LastOutcome::from_failure_class(&class);
+            assert_ne!(outcome, LastOutcome::Ok, "{class:?}");
+            assert_ne!(outcome, LastOutcome::CircuitOpen, "{class:?}");
+        }
+    }
+
+    #[test]
+    fn last_outcome_serializes_snake_case_with_http_family_underscores() {
+        let cases = [
+            (LastOutcome::Ok, "\"ok\""),
+            (LastOutcome::RateLimited, "\"rate_limited\""),
+            (LastOutcome::Timeout, "\"timeout\""),
+            (LastOutcome::TransportError, "\"transport_error\""),
+            (LastOutcome::Http4xx, "\"http_4xx\""),
+            (LastOutcome::Http5xx, "\"http_5xx\""),
+            (LastOutcome::CircuitOpen, "\"circuit_open\""),
+        ];
+        for (outcome, expected) in cases {
+            // Act
+            let got = serde_json::to_string(&outcome).expect("serialize");
+
+            // Assert: round-trips through the same wire token.
+            assert_eq!(got, expected, "outcome {outcome:?}");
+            let back: LastOutcome = serde_json::from_str(&got).expect("deserialize");
+            assert_eq!(back, outcome);
         }
     }
 }
