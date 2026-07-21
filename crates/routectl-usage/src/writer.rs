@@ -509,12 +509,13 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.would_trim_recorder_version,
             would_trim_raw_marks,
             r.would_trim_context_fraction,
+            r.resolved_class,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?56` positions match the params list above.
+/// `schema.rs` exactly; `?1..?57` positions match the params list above.
 const INSERT_SQL: &str = "\
 INSERT OR IGNORE INTO requests (
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
@@ -541,7 +542,8 @@ INSERT OR IGNORE INTO requests (
     would_trim_path_extractable,
     would_trim_recorder_version,
     would_trim_raw_marks,
-    would_trim_context_fraction
+    would_trim_context_fraction,
+    resolved_class
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -567,7 +569,8 @@ INSERT OR IGNORE INTO requests (
     ?53,
     ?54,
     ?55,
-    ?56
+    ?56,
+    ?57
 )";
 
 #[cfg(test)]
@@ -605,6 +608,7 @@ mod tests {
             outcome: Outcome::Ok,
             http_status: None,
             error_class: None,
+            resolved_class: None,
             finish_reason: None,
             attempt_count: 1,
             fallback_count: 0,
@@ -766,6 +770,32 @@ mod tests {
         assert_eq!(recorder_version, 1);
         assert_eq!(raw_marks, "[{\"index\":0,\"kind\":\"dedup\"}]");
         assert_eq!(context_fraction, 0.25);
+    }
+
+    #[tokio::test]
+    async fn try_send_round_trips_resolved_class() {
+        // Arrange: a row carrying the v12 resolved_class token.
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let mut rec = record("rt-v12");
+        rec.outcome = Outcome::UpstreamError;
+        rec.resolved_class = Some("rate-limited".to_string());
+
+        // Act
+        handle.try_send(rec);
+        assert!(wait_persisted(handle.counters(), 1), "row not persisted");
+        writer.shutdown();
+
+        // Assert: the token binds at the last column position and reads back.
+        let conn = Connection::open(&path).expect("read");
+        let resolved_class: Option<String> = conn
+            .query_row(
+                "SELECT resolved_class FROM requests WHERE request_id='rt-v12'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(resolved_class, Some("rate-limited".to_string()));
     }
 
     #[test]

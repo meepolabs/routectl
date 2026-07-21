@@ -16,6 +16,7 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use routectl_core::Error;
+use routectl_core::failure_class::classify;
 use routectl_router::DispatchMeta;
 use routectl_usage::{CapabilityLearnEvent, Outcome, UsageHandle, UsageRecord};
 use serde_json::Value;
@@ -67,6 +68,7 @@ pub(crate) fn build_usage_draft(
         outcome: Outcome::ClientDisconnect,
         http_status: None,
         error_class: None,
+        resolved_class: None,
         finish_reason: None,
         attempt_count: 0,
         fallback_count: 0,
@@ -537,8 +539,10 @@ impl UsageCapture {
     }
 
     /// Stamp the outcome-detail columns from a dispatch / stream error:
-    /// the upstream HTTP status (when the error carries one) and the short
-    /// error-class token. Never the Display string.
+    /// the upstream HTTP status (when the error carries one), the short
+    /// error-class token, and -- gated on the request having reached a
+    /// dispatch attempt -- the canonical `resolved_class` failure token.
+    /// Never the Display string.
     ///
     /// `http_status` is the transport status the CLIENT received. Once the
     /// SSE head has committed (`mark_stream_http_committed` stamped 200), a
@@ -547,6 +551,12 @@ impl UsageCapture {
     /// outcome / error_class / stream_stage instead. So the upstream status
     /// is recorded only while `http_status` is still unset -- this is the
     /// pre-head status recorder.
+    ///
+    /// `resolved_class` is stamped ONLY when `provider_kind` is already set
+    /// (i.e. `observe_meta` ran, so the request reached a dispatch attempt).
+    /// A pre-dispatch / validation / local-gate failure leaves it NULL so it
+    /// reads back "unclassified" rather than getting a fake network-ish class.
+    /// A class with no token (`Unknown`) also stores NULL.
     pub(crate) fn observe_error(&mut self, e: &Error) {
         // Record the upstream status only while http_status is still unset
         // (pre-head), and only for a real HTTP code -- a status-0 upstream
@@ -558,6 +568,12 @@ impl UsageCapture {
             self.record.http_status = Some(*status);
         }
         self.record.error_class = Some(error_class_of(e).to_string());
+        if let Some(provider_kind) = self.record.provider_kind.as_deref() {
+            self.record.resolved_class = classify(e, Some(provider_kind))
+                .class
+                .class_token()
+                .map(str::to_string);
+        }
     }
 
     /// Stamp `http_status = 200` at the point the SSE head becomes

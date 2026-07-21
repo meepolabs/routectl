@@ -1387,6 +1387,26 @@ mod tests {
              INSERT INTO meta (key, value) VALUES ('schema_version', '9');",
         )
         .expect("seed meta");
+        // A genuine v9 DB also carries a `requests` table; the later ladder
+        // steps (v11 -> v12 ALTER) touch it, so a minimal shape must exist.
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                 ts_start        INTEGER NOT NULL,
+                 ts_end          INTEGER NOT NULL,
+                 request_id      TEXT    NOT NULL UNIQUE,
+                 ingress_dialect TEXT    NOT NULL,
+                 requested_model TEXT    NOT NULL,
+                 alias           TEXT    NOT NULL,
+                 stream          INTEGER NOT NULL,
+                 outcome         TEXT    NOT NULL,
+                 latency_ms      INTEGER NOT NULL,
+                 tool_count      INTEGER NOT NULL,
+                 msg_count       INTEGER NOT NULL,
+                 attempt_count   INTEGER NOT NULL,
+                 fallback_count  INTEGER NOT NULL
+             )",
+        )
+        .expect("create v9 requests table");
         conn.execute_batch(
             "CREATE TABLE capability_learn_events (
                  ts               INTEGER NOT NULL,
@@ -1450,6 +1470,26 @@ mod tests {
              INSERT INTO meta (key, value) VALUES ('schema_version', '10');",
         )
         .expect("seed meta");
+        // A genuine v10 DB also carries a `requests` table; the later ladder
+        // steps (v11 -> v12 ALTER) touch it, so a minimal shape must exist.
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                 ts_start        INTEGER NOT NULL,
+                 ts_end          INTEGER NOT NULL,
+                 request_id      TEXT    NOT NULL UNIQUE,
+                 ingress_dialect TEXT    NOT NULL,
+                 requested_model TEXT    NOT NULL,
+                 alias           TEXT    NOT NULL,
+                 stream          INTEGER NOT NULL,
+                 outcome         TEXT    NOT NULL,
+                 latency_ms      INTEGER NOT NULL,
+                 tool_count      INTEGER NOT NULL,
+                 msg_count       INTEGER NOT NULL,
+                 attempt_count   INTEGER NOT NULL,
+                 fallback_count  INTEGER NOT NULL
+             )",
+        )
+        .expect("create v10 requests table");
         conn.execute_batch(
             "CREATE TABLE capability_learn_events (
                  ts               INTEGER NOT NULL,
@@ -1489,6 +1529,152 @@ mod tests {
         // Idempotent: re-running the ladder is a no-op.
         let again = migrate_to_current(&conn, 0).expect("re-run migrate");
         assert_eq!(again, SCHEMA_VERSION);
+    }
+
+    /// A v11 DB (created before the `resolved_class` column existed) must
+    /// migrate to v12: the column is added via ALTER, `user_version` reaches
+    /// the current version, any pre-existing row survives with
+    /// `resolved_class` NULL (no backfill), and a second migrate pass is a
+    /// no-op. Builds a genuine minimal v11 `requests` table so the ALTER path
+    /// -- not the fresh-schema path -- is exercised.
+    #[test]
+    fn v11_to_v12_adds_resolved_class_idempotently_preserving_rows() {
+        // Arrange: a v11-shaped DB with a pre-migration row. The minimal
+        // column subset is enough to prove the ALTER + row-survival contract.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                ts_start INTEGER NOT NULL,
+                ts_end INTEGER NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                ingress_dialect TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                stream INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                msg_count INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                fallback_count INTEGER NOT NULL
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '11');
+            INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                msg_count, attempt_count, fallback_count) \
+                VALUES (1, 2, 'v11-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0);
+            PRAGMA user_version = 11;",
+        )
+        .expect("build v11 db");
+        assert_eq!(user_version(&conn), 11);
+
+        let has_resolved_class = |c: &Connection| -> bool {
+            c.prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name='resolved_class'")
+                .expect("prepare")
+                .exists([])
+                .expect("query")
+        };
+        assert!(
+            !has_resolved_class(&conn),
+            "sanity: v11 table has no resolved_class yet"
+        );
+
+        // Act
+        let version = migrate_to_current(&conn, 0).expect("migrate v11->v12");
+
+        // Assert: landed at the current version, the column was added, and the
+        // old row survives reading back NULL (no backfill).
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert!(has_resolved_class(&conn), "v12 must add resolved_class");
+        let resolved_class: Option<String> = conn
+            .query_row(
+                "SELECT resolved_class FROM requests WHERE request_id='v11-row'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("old row survives");
+        assert!(
+            resolved_class.is_none(),
+            "migrated v11 row must have NULL resolved_class"
+        );
+        let meta_version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("meta schema_version");
+        assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+
+        // Idempotent: a second pass over an already-current DB is a no-op and
+        // does not error on the pre-existing column.
+        let again = migrate_to_current(&conn, 0).expect("re-run migrate");
+        assert_eq!(again, SCHEMA_VERSION);
+        assert!(has_resolved_class(&conn));
+    }
+
+    /// A concurrent read-only viewer opening an un-migrated v11 DB must fail
+    /// closed with `VersionTooOld` rather than reading a mixed schema (a
+    /// `requests` table lacking the v12 `resolved_class` column). This is the
+    /// status-surface poller's fail-closed guard against a live pre-migration
+    /// file.
+    #[test]
+    fn open_readonly_on_unmigrated_v11_db_fails_closed() {
+        // Arrange: a genuine v11 DB (user_version 11, no resolved_class).
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                ts_start INTEGER NOT NULL,
+                ts_end INTEGER NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                ingress_dialect TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                stream INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                msg_count INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                fallback_count INTEGER NOT NULL
+            );
+            PRAGMA user_version = 11;",
+        )
+        .expect("build v11 db");
+        drop(conn);
+
+        // Act
+        let result = open_readonly(&path);
+
+        // Assert: fails closed on the version check, before any query that
+        // would hit the missing column.
+        assert!(
+            matches!(result, Err(OpenError::VersionTooOld { found: 11, supported }) if supported == SCHEMA_VERSION),
+            "un-migrated v11 DB must fail closed as VersionTooOld"
+        );
+    }
+
+    /// A fresh DB opens directly at the current version with the v12
+    /// `resolved_class` column present.
+    #[test]
+    fn fresh_db_opens_at_v12_with_resolved_class_column() {
+        // Arrange + Act
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open fresh");
+
+        // Assert
+        assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+        let present: bool = db
+            .conn()
+            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name='resolved_class'")
+            .expect("prepare")
+            .exists([])
+            .expect("query");
+        assert!(present, "fresh v12 DB must carry the resolved_class column");
     }
 
     /// A fresh DB opens directly at the current version with the
@@ -1686,6 +1872,7 @@ mod tests {
             ("would_trim_recorder_version", false),
             ("would_trim_raw_marks", false),
             ("would_trim_context_fraction", false),
+            ("resolved_class", false),
         ];
 
         let (_dir, path) = temp_db_path();

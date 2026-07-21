@@ -829,3 +829,88 @@ fn observe_error_status_zero_sentinel_stays_none() {
     // Assert: no real HTTP code -> http_status stays None.
     assert_eq!(cap.record.http_status, None);
 }
+
+// -------- observe_error: gated resolved_class stamp -----------------------
+
+#[test]
+fn observe_error_stamps_kebab_class_when_dispatch_reached() {
+    // Arrange: the request reached a dispatch attempt, so provider_kind is
+    // set (as observe_meta would have set it).
+    let (mut cap, _w, _dir) = capture();
+    cap.record.provider_kind = Some("openai-compat".to_string());
+
+    // Act: a classifiable upstream failure (429 -> RateLimited).
+    cap.observe_error(&Error::upstream("p", 429, "rate limited"));
+
+    // Assert: the canonical kebab token lands in resolved_class.
+    assert_eq!(cap.record.resolved_class, Some("rate-limited".to_string()));
+}
+
+#[test]
+fn observe_error_leaves_resolved_class_null_pre_dispatch() {
+    // Arrange: a pre-dispatch failure -- provider_kind was never set because
+    // no dispatch attempt was reached (validation / local gate).
+    let (mut cap, _w, _dir) = capture();
+    assert!(
+        cap.record.provider_kind.is_none(),
+        "sanity: no dispatch reached"
+    );
+
+    // Act
+    cap.observe_error(&Error::Validation("bad body".into()));
+
+    // Assert: no fake class is stamped; the row reads back "unclassified".
+    assert!(
+        cap.record.resolved_class.is_none(),
+        "pre-dispatch failure must persist NULL resolved_class"
+    );
+}
+
+#[test]
+fn observe_error_stores_none_when_class_has_no_token() {
+    // Arrange: dispatch reached, but the error classifies as Unknown (a
+    // non-upstream, non-streaming variant), whose class_token is None.
+    let (mut cap, _w, _dir) = capture();
+    cap.record.provider_kind = Some("openai-compat".to_string());
+
+    // Act
+    cap.observe_error(&Error::Internal("boom".into()));
+
+    // Assert: an unclassifiable failure stores NULL, not a fabricated token.
+    assert!(
+        cap.record.resolved_class.is_none(),
+        "Unknown class (no token) must store NULL"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_drop_emits_single_row_with_null_resolved_class() {
+    // Arrange: a live capture that never finalizes explicitly.
+    let (cap, handle, writer, dir) = capture_with_handle();
+    let path = dir.path().join("usage.db");
+
+    // Act: drop without finalize -- the Drop guard finalizes the abnormal
+    // exit as ClientDisconnect. observe_error never ran, so resolved_class
+    // was never stamped.
+    drop(cap);
+
+    // Assert: exactly one row, outcome client_disconnect, resolved_class NULL.
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    writer.shutdown();
+    assert_eq!(
+        handle.counters().persisted(),
+        1,
+        "disconnect Drop must emit exactly one row"
+    );
+    let conn = rusqlite::Connection::open(&path).expect("read open");
+    let (outcome, resolved_class): (String, Option<String>) = conn
+        .query_row("SELECT outcome, resolved_class FROM requests", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .expect("row");
+    assert_eq!(outcome, "client_disconnect");
+    assert!(
+        resolved_class.is_none(),
+        "disconnect row must carry NULL resolved_class"
+    );
+}

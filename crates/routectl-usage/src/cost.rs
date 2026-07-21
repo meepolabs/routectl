@@ -181,6 +181,7 @@ mod tests {
             outcome: Outcome::Ok,
             http_status: None,
             error_class: None,
+            resolved_class: None,
             finish_reason: None,
             attempt_count: 1,
             fallback_count: 0,
