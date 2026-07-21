@@ -6,7 +6,7 @@ fn unlimited_state_always_allows() {
     let mut s = ProviderState::new(&policy);
     for _ in 0..100 {
         assert_eq!(s.try_dispatch(Instant::now()), GateDecision::Allow);
-        s.record_success();
+        s.record_success(Instant::now());
     }
 }
 
@@ -19,9 +19,9 @@ fn rpm_bucket_drains_and_refills() {
     let mut s = ProviderState::new(&policy);
     let t0 = Instant::now();
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    s.record_success();
+    s.record_success(Instant::now());
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    s.record_success();
+    s.record_success(Instant::now());
     assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
     let t1 = t0 + Duration::from_mins(1);
     assert_eq!(s.try_dispatch(t1), GateDecision::Allow);
@@ -37,9 +37,9 @@ fn circuit_opens_after_threshold_and_skips_until_cooldown() {
     let mut s = ProviderState::new(&policy);
     let t0 = Instant::now();
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
     let t_mid = t0 + Duration::from_millis(500);
     assert_eq!(s.try_dispatch(t_mid), GateDecision::CircuitOpen);
@@ -63,7 +63,7 @@ fn breaker_opens_on_own_threshold_below_class_retry_cap() {
     let t0 = Instant::now();
     for _ in 0..3 {
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_failure(t0);
+        s.record_failure(t0, LastOutcome::Http5xx);
     }
     // The 4th attempt is refused although the class retry cap (5) is
     // not yet reached.
@@ -86,7 +86,7 @@ fn release_probe_slot_frees_slot_without_recording_outcome() {
     let t0 = Instant::now();
     // Trip the breaker (threshold = 1).
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
     // After cooldown, the first dispatch claims the half-open slot.
     let t_after = t0 + Duration::from_millis(600);
@@ -127,9 +127,9 @@ fn half_open_is_single_probe_under_concurrent_dispatches() {
     let t0 = Instant::now();
     // Trip the breaker.
     s.try_dispatch(t0);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     s.try_dispatch(t0);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
     // Cooldown elapsed: first dispatch claims the half-open slot.
     let t_after = t0 + Duration::from_millis(1_500);
@@ -138,7 +138,7 @@ fn half_open_is_single_probe_under_concurrent_dispatches() {
     // CircuitOpen because someone already has the probe slot.
     assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
     // Probe fails -> breaker re-trips.
-    s.record_failure(t_after);
+    s.record_failure(t_after, LastOutcome::Http5xx);
     // Subsequent calls in the new cooldown window also see CircuitOpen.
     assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
 }
@@ -153,12 +153,12 @@ fn half_open_probe_success_closes_the_breaker() {
     let mut s = ProviderState::new(&policy);
     let t0 = Instant::now();
     s.try_dispatch(t0);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     s.try_dispatch(t0);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     let t_after = t0 + Duration::from_millis(600);
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-    s.record_success();
+    s.record_success(Instant::now());
     // Closed -- subsequent dispatch is Allow without needing another cooldown.
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
 }
@@ -178,7 +178,7 @@ fn half_open_slot_released_when_rpm_refuses_the_probe() {
     let t0 = Instant::now();
     // Trip the breaker.
     s.try_dispatch(t0);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     // Consume the RPM token in the next cycle so the next
     // try_dispatch hits RPM-limited.
     let t_after = t0 + Duration::from_millis(700);
@@ -189,10 +189,10 @@ fn half_open_slot_released_when_rpm_refuses_the_probe() {
     //  half_open_slot is reclaimable when RPM refuses.)
     // Force RPM empty: drain whatever is left.
     while matches!(s.try_dispatch(t_after), GateDecision::Allow) {
-        s.record_success();
+        s.record_success(Instant::now());
     }
     // Now circuit is Closed (we just succeeded). Re-trip it.
-    s.record_failure(t_after);
+    s.record_failure(t_after, LastOutcome::Http5xx);
     // Wait cooldown; RPM still depleted in this instant.
     let t_probe = t_after + Duration::from_millis(700);
     // RPM may have refilled by t_probe; if so this test's pre-condition
@@ -218,15 +218,15 @@ fn success_resets_failure_counter() {
     let mut s = ProviderState::new(&policy);
     let t = Instant::now();
     s.try_dispatch(t);
-    s.record_failure(t);
+    s.record_failure(t, LastOutcome::Http5xx);
     s.try_dispatch(t);
-    s.record_failure(t);
+    s.record_failure(t, LastOutcome::Http5xx);
     s.try_dispatch(t);
-    s.record_success();
+    s.record_success(Instant::now());
     s.try_dispatch(t);
-    s.record_failure(t);
+    s.record_failure(t, LastOutcome::Http5xx);
     s.try_dispatch(t);
-    s.record_failure(t);
+    s.record_failure(t, LastOutcome::Http5xx);
     assert_eq!(s.try_dispatch(t), GateDecision::Allow);
 }
 
@@ -287,7 +287,7 @@ fn force_open_releases_inflight_probe_slot() {
     let mut s = ProviderState::new(&policy);
     let t0 = Instant::now();
     s.try_dispatch(t0);
-    s.record_failure(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
     let t_after = t0 + Duration::from_millis(600);
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
     assert!(s.half_open_probe_in_flight(), "probe slot must be claimed");
@@ -319,12 +319,12 @@ fn force_open_then_probe_success_resets_to_default() {
     // Act: the custom park elapses, the single probe succeeds.
     let t_probe = t0 + Duration::from_secs(61);
     assert_eq!(s.try_dispatch(t_probe), GateDecision::Allow);
-    s.record_success();
+    s.record_success(Instant::now());
 
     // Assert: a NORMAL threshold trip now uses the DEFAULT cooldown
     // (1s), not the stale 60s custom park.
     s.try_dispatch(t_probe);
-    s.record_failure(t_probe);
+    s.record_failure(t_probe, LastOutcome::Http5xx);
     assert_eq!(s.try_dispatch(t_probe), GateDecision::CircuitOpen);
     // Still open just before the 1s default elapses.
     assert_eq!(
@@ -381,7 +381,7 @@ fn snapshot_reflects_drained_bucket() {
     // Drain 3 tokens via real dispatch+success.
     for _ in 0..3 {
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_success();
+        s.record_success(Instant::now());
     }
     let snap = s.capacity_snapshot(t0);
     // 5 - 3 = 2 tokens remaining (no refill at the same instant).
@@ -403,7 +403,7 @@ fn snapshot_projects_refill_without_storing_it() {
     // Drain the bucket fully.
     for _ in 0..4 {
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_success();
+        s.record_success(Instant::now());
     }
     // Project a full window into the future WITHOUT any try_dispatch
     // in between -- the snapshot must compute the refilled level itself.
@@ -437,7 +437,7 @@ fn snapshot_does_not_consume_tokens() {
     // The bucket is still full: three real dispatches succeed.
     for _ in 0..3 {
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_success();
+        s.record_success(Instant::now());
     }
     assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
 }
@@ -545,7 +545,7 @@ fn snapshot_rpm_exhausted_with_closed_circuit_is_not_dispatchable() {
     let t0 = Instant::now();
     // Drain the single token; circuit stays Closed.
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    s.record_success();
+    s.record_success(Instant::now());
     let snap = s.capacity_snapshot(t0);
     assert_eq!(snap.circuit, CircuitPhase::Closed);
     let available = snap.rpm_available.expect("limited policy has Some");
@@ -594,4 +594,124 @@ fn snapshot_at_exact_cooldown_instant_is_half_open_ready() {
     s.force_open(t0, cooldown);
     let snap = s.capacity_snapshot(t0 + cooldown);
     assert_eq!(snap.circuit, CircuitPhase::HalfOpenReady);
+}
+
+#[test]
+fn fresh_state_has_no_last_outcome_or_open_elapsed() {
+    // Post-restart / never-dispatched: every new field reads None.
+    let policy = ProviderRuntimePolicy::default();
+    let s = ProviderState::new(&policy);
+    let status = s.gate_status(Instant::now());
+    assert_eq!(status.last_outcome, None);
+    assert_eq!(status.last_outcome_elapsed, None);
+    assert_eq!(status.circuit_open_elapsed, None);
+}
+
+#[test]
+fn record_success_stamps_ok_outcome() {
+    let policy = ProviderRuntimePolicy::default();
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    s.record_success(t0);
+    let status = s.gate_status(t0);
+    assert_eq!(status.last_outcome, Some(LastOutcome::Ok));
+    assert_eq!(status.last_outcome_elapsed, Some(Duration::ZERO));
+    // Success never trips the circuit: open-elapsed stays None.
+    assert_eq!(status.circuit_open_elapsed, None);
+}
+
+#[test]
+fn record_failure_stamps_the_derived_kind() {
+    let policy = ProviderRuntimePolicy::default();
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    s.record_failure(t0, LastOutcome::RateLimited);
+    let status = s.gate_status(t0);
+    assert_eq!(status.last_outcome, Some(LastOutcome::RateLimited));
+    assert_eq!(status.last_outcome_elapsed, Some(Duration::ZERO));
+}
+
+#[test]
+fn last_outcome_elapsed_grows_with_the_clock() {
+    let policy = ProviderRuntimePolicy::default();
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    s.record_failure(t0, LastOutcome::Timeout);
+    let later = t0 + Duration::from_secs(5);
+    let status = s.gate_status(later);
+    assert_eq!(status.last_outcome, Some(LastOutcome::Timeout));
+    assert_eq!(status.last_outcome_elapsed, Some(Duration::from_secs(5)));
+}
+
+#[test]
+fn circuit_open_elapsed_some_when_open_none_when_closed() {
+    let policy = ProviderRuntimePolicy {
+        circuit_failures: Some(1),
+        circuit_cooldown_ms: Some(1_000),
+        ..Default::default()
+    };
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    // Closed: no open-elapsed.
+    assert_eq!(s.gate_status(t0).circuit_open_elapsed, None);
+    // Trip it (threshold = 1).
+    s.try_dispatch(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
+    let later = t0 + Duration::from_millis(400);
+    assert_eq!(
+        s.gate_status(later).circuit_open_elapsed,
+        Some(Duration::from_millis(400)),
+    );
+    // A successful probe closes the circuit -> back to None.
+    let t_probe = t0 + Duration::from_millis(1_100);
+    assert_eq!(s.try_dispatch(t_probe), GateDecision::Allow);
+    s.record_success(t_probe);
+    assert_eq!(s.gate_status(t_probe).circuit_open_elapsed, None);
+}
+
+#[test]
+fn stored_outcome_never_holds_circuit_open() {
+    // The stored last_outcome is only ever Ok or a from_failure_class kind;
+    // a gate refusal (CircuitOpen) is derived downstream, never stored here.
+    let policy = ProviderRuntimePolicy {
+        circuit_failures: Some(1),
+        circuit_cooldown_ms: Some(1_000),
+        ..Default::default()
+    };
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    s.try_dispatch(t0);
+    s.record_failure(t0, LastOutcome::Http5xx);
+    // The circuit is open, so the gate refuses -- but the STORED outcome is
+    // still the failure kind, not CircuitOpen.
+    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    let status = s.gate_status(t0);
+    assert_ne!(status.last_outcome, Some(LastOutcome::CircuitOpen));
+    assert_eq!(status.last_outcome, Some(LastOutcome::Http5xx));
+}
+
+#[test]
+fn gate_status_does_not_perturb_new_fields() {
+    // Non-perturbation posture extended over the new fields: repeated reads
+    // return identical outcome/elapsed values and never settle stored state.
+    let policy = ProviderRuntimePolicy {
+        circuit_failures: Some(1),
+        circuit_cooldown_ms: Some(1_000),
+        ..Default::default()
+    };
+    let mut s = ProviderState::new(&policy);
+    let t0 = Instant::now();
+    s.try_dispatch(t0);
+    s.record_failure(t0, LastOutcome::RateLimited);
+    let read_at = t0 + Duration::from_millis(200);
+    let first = s.gate_status(read_at);
+    let second = s.gate_status(read_at);
+    let third = s.gate_status(read_at);
+    assert_eq!(first, second);
+    assert_eq!(second, third);
+    assert_eq!(first.last_outcome, Some(LastOutcome::RateLimited));
+    assert_eq!(first.circuit_open_elapsed, Some(Duration::from_millis(200)));
+    // The reads did not advance or settle any stored state: a real gate
+    // decision at the same instant is unchanged.
+    assert_eq!(s.try_dispatch(read_at), GateDecision::CircuitOpen);
 }
