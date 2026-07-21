@@ -19,180 +19,587 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>routectl status</title>
   <style>
+    /*
+      Design tokens. Every color, space, type, radius, and motion value
+      is defined once here and referenced by rules below -- no raw hex/px
+      sprinkled in components. The dark theme (the primary console look)
+      overrides the same token names under prefers-color-scheme.
+
+      Fonts are a deliberate SYSTEM stack, not a web font: the page is
+      self-contained with zero external dependencies, so a web font is
+      impossible by constraint. UI text uses the platform sans; every
+      numeral and code-like token uses the platform monospace so figures
+      align in tabular columns.
+    */
     :root {
       color-scheme: light dark;
-      --fg: #1b1b1b;
-      --muted: #666;
-      --border: #d0d0d0;
-      --panel-bg: #fafafa;
+
+      --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+
+      --sp-1: 4px;
+      --sp-2: 8px;
+      --sp-3: 12px;
+      --sp-4: 16px;
+      --sp-5: 24px;
+      --sp-6: 32px;
+
+      --fs-xs: 0.72rem;
+      --fs-sm: 0.8rem;
+      --fs-md: 0.9rem;
+      --fs-lg: 1.05rem;
+      --fs-xl: 1.3rem;
+      --fs-stat: 1.9rem;
+
+      --r-sm: 4px;
+      --r-md: 8px;
+      --r-pill: 999px;
+
+      --dur: 160ms;
+      --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+
+      --tabbar-h: 48px;
+
+      --bg: #eef0f3;
+      --surface: #ffffff;
+      --surface-2: #f3f5f8;
+      --border: #dde1e7;
+      --border-strong: #c3c9d2;
+      --fg: #131720;
+      --muted: #4d5666;
+      --faint: #79828f;
+      --accent: #1f6feb;
+      --accent-fg: #ffffff;
+      --neg: #b42318;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 2px 10px rgba(0, 0, 0, 0.05);
+
+      --pill-neutral-bg: #e7eaef; --pill-neutral-fg: #2b3240;
+      --pill-ok-bg: #d8f0dd;      --pill-ok-fg: #12592b;
+      --pill-err-bg: #fbdedb;     --pill-err-fg: #8a1c14;
+      --pill-warn-bg: #fbeecb;    --pill-warn-fg: #6b4e05;
+      --pill-info-bg: #dbe8fb;    --pill-info-fg: #123a6b;
+      --pill-accent-bg: #e7e0f5;  --pill-accent-fg: #3d2a6b;
+      --pill-teal-bg: #d6efe8;    --pill-teal-fg: #0f4f42;
+      --pill-pink-bg: #f6deea;    --pill-pink-fg: #6b2140;
+      --pill-brown-bg: #ece0cf;   --pill-brown-fg: #5a3d12;
     }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1017;
+        --surface: #161b24;
+        --surface-2: #1c2330;
+        --border: #2a323f;
+        --border-strong: #3a4453;
+        --fg: #e6eaf0;
+        --muted: #9aa5b5;
+        --faint: #6b7484;
+        --accent: #4d90ff;
+        --accent-fg: #0d1017;
+        --neg: #ff6b5e;
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 18px rgba(0, 0, 0, 0.35);
+
+        --pill-neutral-bg: #262e3b; --pill-neutral-fg: #c3ccd9;
+        --pill-ok-bg: #16351f;      --pill-ok-fg: #7ee0a0;
+        --pill-err-bg: #3a1714;     --pill-err-fg: #ff9a90;
+        --pill-warn-bg: #392c0e;    --pill-warn-fg: #f0c96a;
+        --pill-info-bg: #12294a;    --pill-info-fg: #8fbaff;
+        --pill-accent-bg: #2a2145;  --pill-accent-fg: #c3b0f0;
+        --pill-teal-bg: #0f332c;    --pill-teal-fg: #6fd8c2;
+        --pill-pink-bg: #3a1a2a;    --pill-pink-fg: #f0a0c0;
+        --pill-brown-bg: #33260f;   --pill-brown-fg: #e0b877;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
     body {
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-family: var(--font-ui);
       margin: 0;
-      padding: 1.5rem;
+      padding: 0 var(--sp-5) var(--sp-6);
+      background: var(--bg);
       color: var(--fg);
-      line-height: 1.4;
+      line-height: 1.45;
+      font-size: var(--fs-md);
     }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* ---- header ---- */
     header {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 1rem;
+      flex-wrap: wrap;
+      gap: var(--sp-4);
+      padding: var(--sp-5) 0 var(--sp-3);
     }
     h1 {
-      font-size: 1.25rem;
+      font-size: var(--fs-xl);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       margin: 0;
+    }
+    h1 .mark {
+      font-family: var(--font-mono);
+      color: var(--accent);
     }
     .controls {
       display: flex;
       align-items: center;
-      gap: 1rem;
+      gap: var(--sp-4);
+      flex-wrap: wrap;
+    }
+    .windowsel {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      overflow: hidden;
+      background: var(--surface);
     }
     .windowsel button {
       font: inherit;
-      padding: 0.25rem 0.6rem;
-      border: 1px solid var(--border);
-      background: #fff;
-      color: #1b1b1b;
+      font-size: var(--fs-sm);
+      padding: var(--sp-1) var(--sp-3);
+      border: 0;
+      border-right: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
       cursor: pointer;
-      border-radius: 4px;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
     }
-    .windowsel button.active {
-      background: #1b1b1b;
-      color: #fff;
-      border-color: #1b1b1b;
+    .windowsel button:last-child { border-right: 0; }
+    .windowsel button:hover { background: var(--surface-2); color: var(--fg); }
+    .windowsel button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+    .windowsel button:active { transform: translateY(1px); }
+    .windowsel button[aria-pressed="true"] {
+      background: var(--accent);
+      color: var(--accent-fg);
     }
     .windowsel button:disabled {
-      opacity: 0.5;
+      opacity: 0.45;
       cursor: default;
     }
     .clock {
+      color: var(--faint);
+      font-family: var(--font-mono);
+      font-size: var(--fs-xs);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ---- sticky tab bar ---- */
+    .tabbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      gap: var(--sp-1);
+      min-height: var(--tabbar-h);
+      align-items: stretch;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border-strong);
+      margin-bottom: var(--sp-4);
+    }
+    .tab {
+      font: inherit;
+      font-size: var(--fs-md);
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: var(--sp-2);
+      padding: var(--sp-2) var(--sp-4);
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
       color: var(--muted);
-      font-size: 0.8rem;
+      cursor: pointer;
+      transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease), background var(--dur) var(--ease);
     }
+    .tab:hover { color: var(--fg); background: var(--surface-2); }
+    .tab:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+    .tab[aria-selected="true"] {
+      color: var(--fg);
+      border-bottom-color: var(--accent);
+    }
+    .tab-badge {
+      font-family: var(--font-mono);
+      font-size: var(--fs-xs);
+      padding: 0.05em 0.5em;
+      border-radius: var(--r-pill);
+      background: var(--pill-neutral-bg);
+      color: var(--pill-neutral-fg);
+    }
+    .tab-badge--warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+    .tab-badge--error { background: var(--pill-err-bg); color: var(--pill-err-fg); }
+    .tab-badge--muted { background: var(--pill-neutral-bg); color: var(--faint); }
+
+    /* ---- banner ---- */
     .banner {
-      padding: 0.5rem 0.75rem;
-      border-radius: 6px;
-      margin-bottom: 1rem;
-      font-size: 0.85rem;
+      padding: var(--sp-2) var(--sp-3);
+      border-radius: var(--r-md);
+      margin-bottom: var(--sp-4);
+      font-size: var(--fs-sm);
+      border: 1px solid transparent;
     }
-    .banner--warn { background: #fbeecb; color: #7a5b00; border: 1px solid #e6cf87; }
-    .banner--error { background: #f5d0d0; color: #7a1414; border: 1px solid #e0a0a0; }
-    .banner--terminal { background: #e6e0f0; color: #3a2a5a; border: 1px solid #b8a8d8; }
-    .panels {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 1rem;
-    }
+    .banner--warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); border-color: var(--pill-warn-fg); }
+    .banner--error { background: var(--pill-err-bg); color: var(--pill-err-fg); border-color: var(--pill-err-fg); }
+    .banner--terminal { background: var(--pill-accent-bg); color: var(--pill-accent-fg); border-color: var(--pill-accent-fg); }
+
+    /* ---- panels (one visible tabpanel at a time; the page scrolls) ---- */
     .panel {
       border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--panel-bg);
-      padding: 1rem;
+      border-radius: var(--r-md);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      padding: var(--sp-4);
+      min-width: 0;
     }
+    .panel[hidden] { display: none; }
     .panel h2 {
-      font-size: 1rem;
-      margin: 0 0 0.25rem;
+      font-size: var(--fs-lg);
+      font-weight: 600;
+      margin: 0;
     }
     .panel h3 {
-      font-size: 0.8rem;
-      margin: 0.6rem 0 0.2rem;
-      color: var(--muted);
+      font-size: var(--fs-xs);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin: var(--sp-5) 0 var(--sp-2);
+      padding-bottom: var(--sp-1);
+      border-bottom: 1px solid var(--border);
+      color: var(--faint);
     }
     .panel-status {
-      font-size: 0.72rem;
-      color: var(--muted);
-      margin-bottom: 0.4rem;
-      min-height: 1em;
+      font-family: var(--font-mono);
+      font-size: var(--fs-xs);
+      color: var(--faint);
+      min-height: 1.2em;
+      margin-top: var(--sp-1);
+      display: flex;
+      align-items: center;
+      gap: var(--sp-2);
+    }
+    .panel-status.pulse { animation: statuspulse 180ms var(--ease); }
+    @keyframes statuspulse { from { opacity: 0.3; } to { opacity: 1; } }
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex: 0 0 auto;
     }
     .panel-body {
-      font-size: 0.85rem;
-      overflow-x: auto;
+      font-size: var(--fs-sm);
+      margin-top: var(--sp-3);
     }
-    .panel--stale .panel-body { opacity: 0.4; }
-    .panel--dead .panel-body { opacity: 0.5; }
-    .unavailable-msg { color: #7a1414; font-size: 0.85rem; }
-    .meta { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.3rem; }
+    .panel--stale .panel-body { opacity: 0.45; }
+    .panel--dead .panel-body { opacity: 0.55; }
+    .unavailable-msg {
+      color: var(--pill-err-fg);
+      background: var(--pill-err-bg);
+      border: 1px solid var(--pill-err-fg);
+      border-radius: var(--r-sm);
+      padding: var(--sp-2) var(--sp-3);
+      font-size: var(--fs-sm);
+    }
+    .meta {
+      font-family: var(--font-mono);
+      font-size: var(--fs-xs);
+      color: var(--muted);
+      margin-bottom: var(--sp-3);
+    }
+    .none {
+      color: var(--faint);
+      font-style: italic;
+      font-size: var(--fs-sm);
+      padding: var(--sp-2) 0;
+    }
+
+    /* ---- hero stat cards (usage totals) ---- */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: var(--sp-3);
+      margin-bottom: var(--sp-3);
+    }
+    .stat {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: var(--sp-3) var(--sp-4);
+    }
+    .stat--flow {
+      border-left: 3px solid var(--accent);
+    }
+    .stat-value {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      font-size: var(--fs-stat);
+      font-weight: 600;
+      line-height: 1.1;
+      color: var(--fg);
+    }
+    .stat-label {
+      font-size: var(--fs-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--faint);
+      margin-top: var(--sp-1);
+    }
+    .neg { color: var(--neg); }
+
+    /* ---- tables (full-height, sticky thead against the page scroll) ---- */
     table {
       border-collapse: collapse;
       width: 100%;
-      font-size: 0.8rem;
-      margin-bottom: 0.5rem;
+      font-size: var(--fs-sm);
+      margin-bottom: var(--sp-3);
     }
-    th, td {
-      border: 1px solid var(--border);
-      padding: 2px 6px;
+    thead th {
+      position: sticky;
+      top: var(--tabbar-h);
+      z-index: 5;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: var(--fs-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
       text-align: left;
+      padding: var(--sp-2) var(--sp-3);
+      border-bottom: 1px solid var(--border-strong);
       white-space: nowrap;
     }
-    th { background: rgba(0, 0, 0, 0.04); }
+    tbody th, tbody td {
+      padding: var(--sp-2) var(--sp-3);
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      white-space: nowrap;
+      vertical-align: top;
+    }
+    tbody th[scope="row"] {
+      font-weight: 600;
+      color: var(--fg);
+      font-family: var(--font-mono);
+    }
+    tbody td { color: var(--muted); }
+    tbody tr:hover th, tbody tr:hover td { background: var(--surface-2); }
+    th.num, td.num {
+      text-align: right;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      color: var(--fg);
+    }
+    td.wrap {
+      white-space: normal;
+      min-width: 12rem;
+      max-width: 24rem;
+    }
+
+    /* ---- expandable rows ---- */
+    .exp-cell { width: 1.6rem; text-align: center; }
+    .exp-btn {
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: var(--fs-sm);
+      width: 1.5rem;
+      height: 1.5rem;
+      line-height: 1;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-sm);
+      background: var(--surface);
+      color: var(--muted);
+      cursor: pointer;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+    }
+    .exp-btn:hover { background: var(--surface-2); color: var(--fg); }
+    .exp-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+    .exp-btn:active { transform: translateY(1px); }
+    .detail-row > td {
+      background: var(--surface-2);
+      padding: var(--sp-3) var(--sp-4);
+    }
+    .deflist {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: var(--sp-2) var(--sp-5);
+      margin: 0;
+    }
+    .deflist .def {
+      display: flex;
+      justify-content: space-between;
+      gap: var(--sp-3);
+      border-bottom: 1px dotted var(--border);
+      padding-bottom: 2px;
+    }
+    .deflist dt {
+      color: var(--faint);
+      font-size: var(--fs-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .deflist dd {
+      margin: 0;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      color: var(--fg);
+    }
+
     /*
       Value-domain tokens are rendered as their RAW wire string and styled
       by a class keyed on the EXACT per-field string (three casings:
       snake_case, PascalCase, kebab-case -- never normalized). `.tok` is the
       default fallback, so a newly-added or unknown token renders as
-      readable neutral text rather than crashing or hiding.
+      readable neutral text rather than crashing or hiding. Each family maps
+      to a semantic pill token so both themes stay in contrast.
     */
     .tok {
       display: inline-block;
-      padding: 0 0.4em;
-      border-radius: 0.5em;
-      font-size: 0.8em;
-      background: #e8e8e8;
-      color: #222;
+      padding: 0.05em 0.55em;
+      border-radius: var(--r-pill);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      background: var(--pill-neutral-bg);
+      color: var(--pill-neutral-fg);
     }
-    .circuit-closed, .reach-reachable, .status-Pass { background: #d7f0d7; color: #155724; }
-    .circuit-open, .reach-degraded, .status-Fail { background: #f5d0d0; color: #7a1414; }
-    .circuit-half_open_ready, .status-Warn { background: #fbeecb; color: #7a5b00; }
-    .verdict-route-away { background: #f5d0d0; color: #7a1414; }
-    .verdict-force-supported { background: #d7e6f5; color: #123a5a; }
-    .tier-self-identifying { background: #d7e6f5; color: #123a5a; }
-    .tier-inferred { background: #eee2d0; color: #5a3a12; }
-    .prov-provider, .prov-model { background: #e6e0f0; color: #3a2a5a; }
-    .prov-override { background: #f0e0e6; color: #5a2a3a; }
-    .prov-learned { background: #e0f0ea; color: #155040; }
-    .src-baked { background: #e0e8f0; color: #1b1b1b; }
-    .src-import { background: #e8e0f0; color: #1b1b1b; }
-    .src-user { background: #d7f0d7; color: #155724; }
-    .src-disabled { background: #eee; color: #777; }
-    .src-missing { background: #f5d0d0; color: #7a1414; }
+    .circuit-closed, .reach-reachable, .status-Pass, .src-user {
+      background: var(--pill-ok-bg); color: var(--pill-ok-fg);
+    }
+    .circuit-open, .reach-degraded, .status-Fail, .verdict-route-away, .src-missing {
+      background: var(--pill-err-bg); color: var(--pill-err-fg);
+    }
+    .circuit-half_open_ready, .status-Warn {
+      background: var(--pill-warn-bg); color: var(--pill-warn-fg);
+    }
+    .verdict-force-supported, .tier-self-identifying, .prov-provider, .prov-model, .src-import {
+      background: var(--pill-info-bg); color: var(--pill-info-fg);
+    }
+    .tier-inferred, .src-baked {
+      background: var(--pill-brown-bg); color: var(--pill-brown-fg);
+    }
+    .prov-override {
+      background: var(--pill-pink-bg); color: var(--pill-pink-fg);
+    }
+    .prov-learned {
+      background: var(--pill-teal-bg); color: var(--pill-teal-fg);
+    }
+    .src-disabled {
+      background: var(--pill-neutral-bg); color: var(--faint);
+    }
+
+    /* ---- loading skeleton ---- */
+    .skeleton { display: flex; flex-direction: column; gap: var(--sp-2); }
+    .skeleton span {
+      display: block;
+      height: 0.9rem;
+      border-radius: var(--r-sm);
+      background: linear-gradient(90deg, var(--surface-2), var(--border), var(--surface-2));
+      background-size: 200% 100%;
+      animation: shimmer 1.2s var(--ease) infinite;
+    }
+    .skeleton span:nth-child(1) { width: 80%; }
+    .skeleton span:nth-child(2) { width: 55%; }
+    .skeleton span:nth-child(3) { width: 68%; }
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+      .skeleton span { animation: none; }
+      .panel-status.pulse { animation: none; }
+      .windowsel button:active, .exp-btn:active { transform: none; }
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1>routectl status</h1>
+    <h1><span class="mark">$</span> routectl status</h1>
     <div class="controls">
       <div class="windowsel" id="windowsel" role="group" aria-label="Usage window">
-        <button type="button" data-window="today">Today</button>
-        <button type="button" data-window="week">Week</button>
-        <button type="button" data-window="month">Month</button>
-        <button type="button" data-window="all">All</button>
+        <button type="button" data-window="today" aria-pressed="true">Today</button>
+        <button type="button" data-window="week" aria-pressed="false">Week</button>
+        <button type="button" data-window="month" aria-pressed="false">Month</button>
+        <button type="button" data-window="all" aria-pressed="false">All</button>
       </div>
-      <div class="clock" id="clock"></div>
+      <div class="clock" id="clock" aria-hidden="true"></div>
     </div>
   </header>
-  <div id="banner" class="banner" hidden></div>
-  <main class="panels">
-    <section class="panel" id="panel-usage">
+
+  <div class="tabbar" id="tabbar" role="tablist" aria-label="Status panels">
+    <button type="button" class="tab" id="tab-usage" role="tab" data-tab="usage"
+      aria-controls="panel-usage" aria-selected="true" tabindex="0">
+      Usage<span class="tab-badge" id="badge-usage" hidden></span>
+    </button>
+    <button type="button" class="tab" id="tab-health" role="tab" data-tab="health"
+      aria-controls="panel-health" aria-selected="false" tabindex="-1">
+      Health<span class="tab-badge" id="badge-health" hidden></span>
+    </button>
+    <button type="button" class="tab" id="tab-config" role="tab" data-tab="config"
+      aria-controls="panel-config" aria-selected="false" tabindex="-1">
+      Config<span class="tab-badge" id="badge-config" hidden></span>
+    </button>
+    <button type="button" class="tab" id="tab-doctor" role="tab" data-tab="doctor"
+      aria-controls="panel-doctor" aria-selected="false" tabindex="-1">
+      Doctor<span class="tab-badge" id="badge-doctor" hidden></span>
+    </button>
+  </div>
+
+  <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+
+  <main>
+    <section class="panel" id="panel-usage" role="tabpanel" aria-labelledby="tab-usage" tabindex="0">
       <h2>Usage</h2>
       <div class="panel-status" id="status-usage"></div>
-      <div class="panel-body" id="body-usage">Loading...</div>
+      <div class="panel-body" id="body-usage">
+        <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+        <span class="sr-only">Loading usage</span>
+      </div>
     </section>
-    <section class="panel" id="panel-health">
+    <section class="panel" id="panel-health" role="tabpanel" aria-labelledby="tab-health" tabindex="0" hidden>
       <h2>Health</h2>
       <div class="panel-status" id="status-health"></div>
-      <div class="panel-body" id="body-health">Loading...</div>
+      <div class="panel-body" id="body-health">
+        <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+        <span class="sr-only">Loading health</span>
+      </div>
     </section>
-    <section class="panel" id="panel-config">
+    <section class="panel" id="panel-config" role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden>
       <h2>Config</h2>
       <div class="panel-status" id="status-config"></div>
-      <div class="panel-body" id="body-config">Loading...</div>
+      <div class="panel-body" id="body-config">
+        <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+        <span class="sr-only">Loading config</span>
+      </div>
     </section>
-    <section class="panel" id="panel-doctor">
+    <section class="panel" id="panel-doctor" role="tabpanel" aria-labelledby="tab-doctor" tabindex="0" hidden>
       <h2>Doctor</h2>
       <div class="panel-status" id="status-doctor"></div>
-      <div class="panel-body" id="body-doctor">Loading...</div>
+      <div class="panel-body" id="body-doctor">
+        <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+        <span class="sr-only">Loading doctor</span>
+      </div>
     </section>
   </main>
 
@@ -219,7 +626,110 @@
     var lastSuccess = null;          // wall time of the last good aggregate round
     var windowCtrl = null;           // single-flights the extra usage window fetch
 
+    var activeTab = 'usage';         // controls panel VISIBILITY only; all poll
+    var countdownTimer = null;       // 1s interval driving the live clock
+    var remainingSec = 0;            // seconds until the next scheduled round
+    var backingOff = false;          // reflects backoff state in the clock text
+
+    // Expansion state keyed by table caption -> { rowKey: true }. Survives the
+    // per-poll DOM rebuild so an operator's expanded row stays open across
+    // refreshes.
+    var expanded = {};
+    var uid = 0;
+
     var el = function (id) { return document.getElementById(id); };
+
+    // ---- number + time humanizers (match the CLI's usage formatters) -----
+
+    // Compact a count exactly as the CLI's `human_count`: below 10000 the
+    // plain integer; else one decimal with a K/M/B suffix, trimming ".0".
+    // Null/undefined/non-finite render as "-".
+    function humanCount(n) {
+      if (n === null || n === undefined) { return '-'; }
+      var x = Number(n);
+      if (!isFinite(x)) { return '-'; }
+      var neg = x < 0, a = Math.abs(x);
+      if (a < 10000) { return (neg ? '-' : '') + String(Math.trunc(a)); }
+      var v, s;
+      if (a >= 1e9) { v = a / 1e9; s = 'B'; }
+      else if (a >= 1e6) { v = a / 1e6; s = 'M'; }
+      else { v = a / 1e3; s = 'K'; }
+      var body = v.toFixed(1);
+      if (body.slice(-2) === '.0') { body = body.slice(0, -2); }
+      return (neg ? '-' : '') + body + s;
+    }
+
+    function num0(x) { var n = Number(x); return isFinite(n) ? n : 0; }
+
+    // The CLI's `cache_hit_ratio` rendered as a percentage: `-` when the
+    // denominator is degenerate (never "0%"), else one decimal + "%".
+    function hitPct(num, den) {
+      if (den <= 0) { return '-'; }
+      return (num / den * 100).toFixed(1) + '%';
+    }
+
+    // Per-group cache-inclusive prompt-token denominator (the CLI's
+    // `cache_prompt_den`): input + cache_read_billed + cache_write_5m +
+    // cache_write_1h. The group carries all four fields.
+    function groupDen(g) {
+      return num0(g.input_tokens) + num0(g.cache_read_billed) +
+        num0(g.cache_write_5m) + num0(g.cache_write_1h);
+    }
+
+    function groupHit(g) {
+      return hitPct(num0(g.cache_read_billed), groupDen(g));
+    }
+
+    // Totals hit%: sum numerator and denominator across the groups (the
+    // totals object lacks the cache_write fields), same ratio rule.
+    function totalsHit(groups) {
+      var num = 0, den = 0;
+      groups.forEach(function (g) {
+        num += num0(g.cache_read_billed);
+        den += groupDen(g);
+      });
+      return hitPct(num, den);
+    }
+
+    // Totals cache-write: the totals wire object lacks the cache_write
+    // fields, so sum them across the groups (same technique as the hit%
+    // denominator).
+    function totalsCacheWrite(groups) {
+      var sum = 0;
+      groups.forEach(function (g) {
+        sum += num0(g.cache_write_5m) + num0(g.cache_write_1h);
+      });
+      return sum;
+    }
+
+    // Compact absolute local timestamp for an epoch-ms instant.
+    function fmtTs(ms) {
+      if (ms === null || ms === undefined) { return '-'; }
+      var d = new Date(ms);
+      return isNaN(d.getTime()) ? String(ms) : d.toLocaleString();
+    }
+
+    // Timestamp cell that treats a non-positive epoch as absent ("-").
+    // Guards the quota-reset field (a real reset is always well in the future).
+    function fmtTsPos(ms) {
+      if (ms === null || ms === undefined || Number(ms) <= 0) { return '-'; }
+      return fmtTs(ms);
+    }
+
+    // Relative age of an as_of instant in seconds -> humane phrase.
+    function relAge(sec) {
+      if (sec < 10) { return 'just now'; }
+      if (sec < 60) { return sec + 's ago'; }
+      if (sec < 3600) { return Math.floor(sec / 60) + 'm ago'; }
+      return Math.floor(sec / 3600) + 'h ago';
+    }
+
+    // Percentage from a 0..1 fraction (quota utilization), rounded to whole.
+    function pctFrac(f) {
+      if (f === null || f === undefined) { return '-'; }
+      var x = Number(f);
+      return isFinite(x) ? Math.round(x * 100) + '%' : '-';
+    }
 
     // ---- transport -------------------------------------------------------
 
@@ -277,7 +787,8 @@
       if (terminal) { return; }
       backoffIndex = ok ? -1 : Math.min(backoffIndex + 1, BACKOFF_MS.length - 1);
       var delay = backoffIndex < 0 ? BASE_MS : BACKOFF_MS[backoffIndex];
-      updateClock(delay, backoffIndex >= 0);
+      backingOff = backoffIndex >= 0;
+      startCountdown(Math.round(delay / 1000));
       clearTimeout(timer);
       timer = setTimeout(tick, delay);
     }
@@ -386,7 +897,16 @@
       }
 
       panel.classList.add('panel--ok');
-      status.textContent = formatAsOf(env.as_of);
+      setTabState(name, null);
+      // Fresh data: an accent dot + relative/absolute as_of, with a brief
+      // opacity pulse so a live poll is visibly landing (Fix 3).
+      status.replaceChildren();
+      var dot = document.createElement('span');
+      dot.className = 'live-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      status.appendChild(dot);
+      status.appendChild(document.createTextNode(formatAsOf(env.as_of)));
+      pulse(status);
       body.replaceChildren(BUILDERS[name](env.data || {}));
     }
 
@@ -396,6 +916,7 @@
       var body = el('body-' + name);
       panel.classList.remove('panel--ok', 'panel--stale', 'panel--dead');
       panel.classList.add('panel--unavailable');
+      setTabState(name, { label: 'n/a', kind: 'muted' });
       status.textContent = '';
       var div = document.createElement('div');
       div.className = 'unavailable-msg';
@@ -407,18 +928,28 @@
       return (agg && agg.panels) ? agg.panels[name] : undefined;
     }
 
-    // as_of age. If as_of is in the future beyond a small tolerance, clamp
-    // and label clock skew rather than showing a negative age.
+    // Brief opacity pulse to signal a fresh poll landed. Re-triggered each
+    // round by clearing and re-adding the class (a reflow read restarts the
+    // animation); prefers-reduced-motion nulls the animation in CSS.
+    function pulse(node) {
+      node.classList.remove('pulse');
+      void node.offsetWidth;
+      node.classList.add('pulse');
+    }
+
+    // as_of age as a humane relative phrase plus a compact absolute local
+    // time. If as_of is in the future beyond a small tolerance, label clock
+    // skew rather than showing a negative age.
     function formatAsOf(asOf) {
       if (!asOf) { return ''; }
       var then = new Date(asOf);
       if (isNaN(then.getTime())) { return 'as of ' + asOf; }
       var ageSec = Math.round((Date.now() - then.getTime()) / 1000);
       if (ageSec < -SKEW_TOLERANCE_SEC) {
-        return 'as of ' + asOf + ' (clock skew: source clock ahead)';
+        return 'clock skew: source clock ahead (' + then.toLocaleTimeString() + ')';
       }
       if (ageSec < 0) { ageSec = 0; }
-      return 'as of ' + asOf + ' (' + ageSec + ' s ago)';
+      return relAge(ageSec) + ' - ' + then.toLocaleTimeString();
     }
 
     // ---- transport-failure presentation ---------------------------------
@@ -453,9 +984,11 @@
         : 'no successful poll yet';
       if (mode === 'stale') {
         panel.classList.add('panel--stale');
+        setTabState(name, { label: 'stale', kind: 'warn' });
         status.textContent = 'stale: ' + note;
       } else {
         panel.classList.add('panel--dead');
+        setTabState(name, { label: 'offline', kind: 'error' });
         status.textContent = 'no current data: ' + note;
         var div = document.createElement('div');
         div.className = 'unavailable-msg';
@@ -467,6 +1000,8 @@
     function enterTerminal() {
       terminal = true;
       clearTimeout(timer);
+      clearInterval(countdownTimer);
+      el('clock').textContent = 'polling stopped';
       setBanner('terminal',
         'This dashboard must be opened via the loopback or bound address ' +
         '(for example http://127.0.0.1:8787). Polling has stopped.');
@@ -488,36 +1023,164 @@
       b.className = 'banner';
     }
 
+    // ---- tab state badges ------------------------------------------------
+
+    // Surface a small badge on the tab when its panel is stale / offline /
+    // unavailable, so a problem is visible without switching to that tab.
+    function setTabState(name, state) {
+      var badge = el('badge-' + name);
+      if (!badge) { return; }
+      if (!state) {
+        badge.hidden = true;
+        badge.textContent = '';
+        badge.className = 'tab-badge';
+        return;
+      }
+      badge.hidden = false;
+      badge.textContent = state.label;
+      badge.className = 'tab-badge tab-badge--' + state.kind;
+    }
+
+    // ---- expansion state -------------------------------------------------
+
+    function getExpanded(tableKey, rowKey) {
+      return !!(expanded[tableKey] && expanded[tableKey][rowKey]);
+    }
+
+    function setExpanded(tableKey, rowKey, open) {
+      if (!expanded[tableKey]) { expanded[tableKey] = {}; }
+      if (open) { expanded[tableKey][rowKey] = true; }
+      else { delete expanded[tableKey][rowKey]; }
+    }
+
     // ---- DOM table helpers (textContent only, never innerHTML) -----------
 
-    function table(headers) {
+    // Column descriptors: C = text, N = numeric (right-aligned, mono,
+    // tabular), R = row-header identifier column (<th scope="row">),
+    // W = wrapping prose column.
+    function C(label) { return { label: label }; }
+    function N(label) { return { label: label, num: true }; }
+    function R(label) { return { label: label, row: true }; }
+    function W(label) { return { label: label, wrap: true }; }
+
+    // Build a table with a visually-hidden caption, `scope="col"` headers,
+    // and per-column alignment metadata. `expandable` prepends a leading
+    // control column whose cells carry a disclosure button.
+    function mkTable(caption, cols, expandable) {
       var t = document.createElement('table');
+      var cap = document.createElement('caption');
+      cap.className = 'sr-only';
+      cap.textContent = caption;
+      t.appendChild(cap);
       var thead = document.createElement('thead');
       var hr = document.createElement('tr');
-      headers.forEach(function (h) {
+      if (expandable) {
+        var eth = document.createElement('th');
+        eth.scope = 'col';
+        var sr = document.createElement('span');
+        sr.className = 'sr-only';
+        sr.textContent = 'Details';
+        eth.appendChild(sr);
+        hr.appendChild(eth);
+      }
+      cols.forEach(function (col) {
         var th = document.createElement('th');
-        th.textContent = h;
+        th.scope = 'col';
+        th.textContent = col.label;
+        if (col.num) { th.className = 'num'; }
         hr.appendChild(th);
       });
       thead.appendChild(hr);
       t.appendChild(thead);
       var tb = document.createElement('tbody');
       t.appendChild(tb);
-      return { t: t, tb: tb };
+      return { t: t, tb: tb, cols: cols, key: caption, expandable: !!expandable };
     }
 
-    function row(tb, cells) {
+    function cellNode(col, cell) {
+      var node = document.createElement(col.row ? 'th' : 'td');
+      if (col.row) { node.scope = 'row'; }
+      if (col.num) { node.className = 'num'; }
+      if (col.wrap) { node.className = 'wrap'; }
+      if (cell instanceof Node) {
+        node.appendChild(cell);
+      } else {
+        node.textContent = (cell === null || cell === undefined) ? '-' : String(cell);
+      }
+      return node;
+    }
+
+    // Append one plain row. Cells are parallel to the table's columns; a cell
+    // may be a raw value (rendered via textContent) or a Node (a pill).
+    function trow(tbl, cells) {
       var tr = document.createElement('tr');
-      cells.forEach(function (c) {
-        var td = document.createElement('td');
-        if (c instanceof Node) {
-          td.appendChild(c);
-        } else {
-          td.textContent = (c === null || c === undefined) ? '-' : String(c);
-        }
-        tr.appendChild(td);
+      tbl.cols.forEach(function (col, i) { tr.appendChild(cellNode(col, cells[i])); });
+      tbl.tb.appendChild(tr);
+    }
+
+    // Append an expandable row: the primary cells plus a hidden detail row
+    // (a definition grid of the secondary fields) toggled by a keyboard-
+    // accessible disclosure button. Expansion persists across poll rebuilds
+    // via the `expanded` map keyed by (table caption, rowKey).
+    function xrow(tbl, rowKey, cells, detailPairs) {
+      var tr = document.createElement('tr');
+
+      var detailRow = document.createElement('tr');
+      detailRow.className = 'detail-row';
+      var did = 'detail-' + (uid++);
+      detailRow.id = did;
+      var dcell = document.createElement('td');
+      dcell.colSpan = tbl.cols.length + 1;
+      dcell.appendChild(buildDefList(detailPairs));
+      detailRow.appendChild(dcell);
+      var open = getExpanded(tbl.key, rowKey);
+      detailRow.hidden = !open;
+
+      var extd = document.createElement('td');
+      extd.className = 'exp-cell';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'exp-btn';
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.setAttribute('aria-controls', did);
+      btn.setAttribute('aria-label', 'Toggle row details');
+      btn.textContent = open ? 'v' : '>';
+      btn.addEventListener('click', function () {
+        var nowOpen = !getExpanded(tbl.key, rowKey);
+        setExpanded(tbl.key, rowKey, nowOpen);
+        btn.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
+        btn.textContent = nowOpen ? 'v' : '>';
+        detailRow.hidden = !nowOpen;
       });
-      tb.appendChild(tr);
+      extd.appendChild(btn);
+      tr.appendChild(extd);
+
+      tbl.cols.forEach(function (col, i) { tr.appendChild(cellNode(col, cells[i])); });
+      tbl.tb.appendChild(tr);
+      tbl.tb.appendChild(detailRow);
+    }
+
+    // A definition grid of label:value pairs. Values may be humanized
+    // strings or Nodes (pills). textContent only.
+    function buildDefList(pairs) {
+      var dl = document.createElement('dl');
+      dl.className = 'deflist';
+      pairs.forEach(function (p) {
+        var wrap = document.createElement('div');
+        wrap.className = 'def';
+        var dt = document.createElement('dt');
+        dt.textContent = p[0];
+        var dd = document.createElement('dd');
+        if (p[1] instanceof Node) {
+          dd.appendChild(p[1]);
+        } else {
+          dd.textContent = (p[1] === null || p[1] === undefined) ? '-' : String(p[1]);
+        }
+        wrap.appendChild(dt);
+        wrap.appendChild(dd);
+        dl.appendChild(wrap);
+      });
+      return dl;
     }
 
     // Value-domain token cell: raw wire string as textContent, styled by a
@@ -530,6 +1193,19 @@
       return span;
     }
 
+    // A humanized numeric cell that carries the error color only when the
+    // value is positive (errors / negative signals), else a plain figure.
+    function negCell(n) {
+      var s = humanCount(n);
+      if (num0(n) > 0) {
+        var span = document.createElement('span');
+        span.className = 'neg';
+        span.textContent = s;
+        return span;
+      }
+      return s;
+    }
+
     function subhead(container, text) {
       var h = document.createElement('h3');
       h.textContent = text;
@@ -538,15 +1214,24 @@
 
     function none() {
       var d = document.createElement('div');
-      d.className = 'meta';
+      d.className = 'none';
       d.textContent = '(none)';
       return d;
     }
 
-    function fmtMs(ms) {
-      if (ms === null || ms === undefined) { return '-'; }
-      var d = new Date(ms);
-      return isNaN(d.getTime()) ? String(ms) : d.toISOString();
+    function statCard(label, value, opts) {
+      var o = opts || {};
+      var card = document.createElement('div');
+      card.className = 'stat' + (o.flow ? ' stat--flow' : '');
+      var v = document.createElement('div');
+      v.className = 'stat-value' + (o.neg ? ' neg' : '');
+      v.textContent = value;
+      var l = document.createElement('div');
+      l.className = 'stat-label';
+      l.textContent = label;
+      card.appendChild(v);
+      card.appendChild(l);
+      return card;
     }
 
     // ---- four panel-specific builders ------------------------------------
@@ -555,27 +1240,64 @@
       var c = document.createElement('div');
       var meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = 'window: ' + d.window + '  (' + fmtMs(d.from_ms) + ' to ' + fmtMs(d.to_ms) + ')';
+      meta.textContent = 'window: ' + d.window + '   ' + fmtTs(d.from_ms) + ' -> ' + fmtTs(d.to_ms);
       c.appendChild(meta);
 
-      subhead(c, 'Totals');
       var to = d.totals || {};
-      var tt = table(['requests', 'ok', 'errors', 'input', 'output', 'reasoning', 'cache read billed', 'tool calls']);
-      row(tt.tb, [to.requests, to.ok, to.errors, to.input_tokens, to.output_tokens,
-        to.reasoning_tokens, to.cache_read_billed, to.server_tool_calls]);
-      c.appendChild(tt.t);
+      var groups = d.groups || [];
+      var cacheWrite = totalsCacheWrite(groups);
+      var reasoning = num0(to.reasoning_tokens);
+
+      // Hero stat cards. The token-flow figures (Input / Output / Cache read /
+      // Cache write) are clustered visually. Input is RAW input, kept SEPARATE
+      // from the cache-write buckets rather than bundled (Fix 4b/5).
+      var stats = document.createElement('div');
+      stats.className = 'stats';
+      stats.appendChild(statCard('Requests', humanCount(to.requests)));
+      stats.appendChild(statCard('Input (raw)', humanCount(to.input_tokens), { flow: true }));
+      stats.appendChild(statCard('Output', humanCount(to.output_tokens), { flow: true }));
+      stats.appendChild(statCard('Cache read', humanCount(to.cache_read_billed), { flow: true }));
+      stats.appendChild(statCard('Cache write', humanCount(cacheWrite), { flow: true }));
+      stats.appendChild(statCard('Cache hit', totalsHit(groups)));
+      if (reasoning > 0) {
+        stats.appendChild(statCard('Reasoning', humanCount(to.reasoning_tokens)));
+      }
+      stats.appendChild(statCard('Errors', humanCount(to.errors), { neg: num0(to.errors) > 0 }));
+      c.appendChild(stats);
 
       subhead(c, 'Groups');
-      var groups = d.groups || [];
       if (!groups.length) {
         c.appendChild(none());
       } else {
-        var gt = table(['alias', 'provider', 'model', 'upstream', 'req', 'ok', 'err', 'in', 'out',
-          'reasoning', 'cr peak', 'cr billed', 'cw 5m', 'cw 1h', 'tools', 'streams', 'disc']);
+        // Alias is the row identifier (the panel groups per alias/provider/
+        // model/upstream, so aliases are the disambiguating key); model is a
+        // normal column (Fix 4c). Secondary counters live in the expandable
+        // detail (Fix 1).
+        var gt = mkTable('Usage by alias group', [
+          R('alias'), C('model'), C('provider'), N('req'), N('ok'), N('err'),
+          N('input'), N('output'), N('cache read'), N('hit%')
+        ], true);
         groups.forEach(function (g) {
-          row(gt.tb, [g.alias, g.provider, g.model, g.upstream, g.requests, g.ok, g.errors,
-            g.input_tokens, g.output_tokens, g.reasoning_tokens, g.cache_read_peak, g.cache_read_billed,
-            g.cache_write_5m, g.cache_write_1h, g.server_tool_calls, g.stream_count, g.client_disconnect_total]);
+          var rowKey = g.alias + '|' + (g.provider || '') + '|' + (g.model || '');
+          xrow(gt, rowKey, [
+            g.alias, g.model, g.provider,
+            humanCount(g.requests), humanCount(g.ok), negCell(g.errors),
+            humanCount(g.input_tokens), humanCount(g.output_tokens),
+            humanCount(g.cache_read_billed), groupHit(g)
+          ], [
+            ['upstream', g.upstream],
+            ['ok', humanCount(g.ok)],
+            ['errors', humanCount(g.errors)],
+            ['reasoning tokens', humanCount(g.reasoning_tokens)],
+            ['cache read (billed)', humanCount(g.cache_read_billed)],
+            ['cache read peak', humanCount(g.cache_read_peak)],
+            ['cache write 5m', humanCount(g.cache_write_5m)],
+            ['cache write 1h', humanCount(g.cache_write_1h)],
+            ['server tool calls', humanCount(g.server_tool_calls)],
+            ['stream count', humanCount(g.stream_count)],
+            ['client disconnects', humanCount(g.client_disconnect_total)],
+            ['hit% denominator', humanCount(groupDen(g))]
+          ]);
         });
         c.appendChild(gt.t);
       }
@@ -583,19 +1305,34 @@
       if (d.quota) {
         subhead(c, 'Quota');
         var q = d.quota;
-        var qt = table(['window start', 'claim', 'status', 'overage', 'utilization', 'overage util', 'reset']);
-        row(qt.tb, [fmtMs(q.ts_start_ms), q.claim, q.status, q.overage_status, q.utilization, q.overage_utilization, fmtMs(q.reset_ms)]);
+        var qt = mkTable('Latest quota snapshot', [
+          R('window start'), C('claim'), C('status'), C('overage'),
+          N('utilization'), N('overage util'), C('reset')
+        ]);
+        trow(qt, [
+          fmtTs(q.ts_start_ms), q.claim, q.status, q.overage_status,
+          pctFrac(q.utilization), pctFrac(q.overage_utilization), fmtTsPos(q.reset_ms)
+        ]);
         c.appendChild(qt.t);
       }
 
       subhead(c, 'Would-trim');
-      var wt = d.would_trim || {};
-      var wtt = table(['candidates', 'trim tokens', 'met', 'unmet', 'cold', 'unpriced']);
-      row(wtt.tb, [wt.candidate_requests, wt.would_trim_tokens, wt.verdict_met,
-        wt.verdict_unmet, wt.verdict_cold, wt.verdict_unpriced]);
-      c.appendChild(wtt.t);
+      c.appendChild(wouldTrimTable(d.would_trim || {}));
 
       return c;
+    }
+
+    // Shared would-trim table (usage panel + doctor panel).
+    function wouldTrimTable(wt) {
+      var wtt = mkTable('Would-trim opportunity', [
+        N('candidates'), N('trim tokens'), N('met'), N('unmet'), N('cold'), N('unpriced')
+      ]);
+      trow(wtt, [
+        humanCount(wt.candidate_requests), humanCount(wt.would_trim_tokens),
+        humanCount(wt.verdict_met), humanCount(wt.verdict_unmet),
+        humanCount(wt.verdict_cold), humanCount(wt.verdict_unpriced)
+      ]);
+      return wtt.t;
     }
 
     function buildHealth(d) {
@@ -605,10 +1342,21 @@
       if (!targets.length) {
         c.appendChild(none());
       } else {
-        var t = table(['state key', 'nickname', 'provider', 'upstream', 'seat', 'circuit', 'rpm avail', 'probe in flight']);
+        // Primary columns kept lean; upstream / seat / probe move to the
+        // expandable detail so the table needs no inner x-scroll (Fix 2).
+        var t = mkTable('Health targets', [
+          R('state key'), C('nickname'), C('provider'), C('circuit'), N('rpm avail')
+        ], true);
         targets.forEach(function (x) {
-          row(t.tb, [x.state_key, x.nickname, x.provider_name, x.upstream, x.seat_label,
-            tok('circuit', x.circuit), x.rpm_available, String(x.half_open_probe_in_flight)]);
+          var rowKey = x.state_key + '|' + (x.provider_name || '');
+          xrow(t, rowKey, [
+            x.state_key, x.nickname, x.provider_name,
+            tok('circuit', x.circuit), humanCount(x.rpm_available)
+          ], [
+            ['upstream', x.upstream],
+            ['seat', x.seat_label],
+            ['probe in flight', String(x.half_open_probe_in_flight)]
+          ]);
         });
         c.appendChild(t.t);
       }
@@ -618,9 +1366,12 @@
       if (!ln.length) {
         c.appendChild(none());
       } else {
-        var lt = table(['state key', 'capability', 'signal tier', 'observations']);
+        var lt = mkTable('Learned negatives', [
+          R('state key'), C('capability'), C('signal tier'), N('observations')
+        ]);
         ln.forEach(function (x) {
-          row(lt.tb, [x.state_key, x.capability_key, tok('tier', x.signal_tier), x.observations]);
+          trow(lt, [x.state_key, x.capability_key, tok('tier', x.signal_tier),
+            humanCount(x.observations)]);
         });
         c.appendChild(lt.t);
       }
@@ -634,11 +1385,22 @@
       if (!models.length) {
         c.appendChild(none());
       } else {
-        var mt = table(['nickname', 'provider', 'kind', 'upstream', 'source', 'verified', 'wm', 'rm', 'max ctx']);
+        // upstream / verified / wm / rm move to the expandable detail (Fix 2).
+        var mt = mkTable('Configured models', [
+          R('nickname'), C('provider'), C('kind'), C('source'), N('max ctx')
+        ], true);
         models.forEach(function (m) {
           var e = m.economics || {};
-          row(mt.tb, [m.nickname, m.provider, m.provider_kind, m.upstream,
-            tok('src', m.source), m.verified_at, e.wm, e.rm, e.max_context_tokens]);
+          var rowKey = m.nickname + '|' + (m.provider || '');
+          xrow(mt, rowKey, [
+            m.nickname, m.provider, m.provider_kind,
+            tok('src', m.source), humanCount(e.max_context_tokens)
+          ], [
+            ['upstream', m.upstream],
+            ['verified', m.verified_at],
+            ['wm', humanCount(e.wm)],
+            ['rm', humanCount(e.rm)]
+          ]);
         });
         c.appendChild(mt.t);
       }
@@ -648,9 +1410,11 @@
       if (!classes.length) {
         c.appendChild(none());
       } else {
-        var ct = table(['class', 'retry cap', 'fallback', 'source']);
+        var ct = mkTable('Request classes', [
+          R('class'), N('retry cap'), C('fallback'), C('source')
+        ]);
         classes.forEach(function (x) {
-          row(ct.tb, [x.class, x.retry_cap, String(x.fallback), x.source]);
+          trow(ct, [x.class, humanCount(x.retry_cap), String(x.fallback), x.source]);
         });
         c.appendChild(ct.t);
       }
@@ -660,9 +1424,12 @@
       if (!caps.length) {
         c.appendChild(none());
       } else {
-        var pt = table(['target', 'capability', 'verdict', 'provenance']);
+        var pt = mkTable('Capability verdicts', [
+          R('target'), C('capability'), C('verdict'), C('provenance')
+        ]);
         caps.forEach(function (x) {
-          row(pt.tb, [x.target_spec, x.capability_key, tok('verdict', x.verdict), tok('prov', x.provenance)]);
+          trow(pt, [x.target_spec, x.capability_key, tok('verdict', x.verdict),
+            tok('prov', x.provenance)]);
         });
         c.appendChild(pt.t);
       }
@@ -672,9 +1439,12 @@
       if (!act.length) {
         c.appendChild(none());
       } else {
-        var at = table(['provider', 'kind', 'status', 'reason', 'referenced']);
+        var at = mkTable('Provider activation', [
+          R('provider'), C('kind'), C('status'), W('reason'), C('referenced')
+        ]);
         act.forEach(function (x) {
-          row(at.tb, [x.provider_id, x.provider_kind, x.status, x.reason, String(x.referenced_by_aliases)]);
+          trow(at, [x.provider_id, x.provider_kind, x.status, x.reason,
+            String(x.referenced_by_aliases)]);
         });
         c.appendChild(at.t);
       }
@@ -690,9 +1460,11 @@
       if (!findings.length) {
         c.appendChild(none());
       } else {
-        var ft = table(['section', 'name', 'status', 'detail', 'remediation']);
+        var ft = mkTable('Doctor findings', [
+          R('section'), C('name'), C('status'), W('detail'), W('remediation')
+        ]);
         findings.forEach(function (f) {
-          row(ft.tb, [f.section, f.name, tok('status', f.status), f.detail, f.remediation]);
+          trow(ft, [f.section, f.name, tok('status', f.status), f.detail, f.remediation]);
         });
         c.appendChild(ft.t);
       }
@@ -700,10 +1472,7 @@
       var wt = report.panels && report.panels.would_trim;
       if (wt) {
         subhead(c, 'Would-trim');
-        var wtt = table(['candidates', 'trim tokens', 'met', 'unmet', 'cold', 'unpriced']);
-        row(wtt.tb, [wt.candidate_requests, wt.would_trim_tokens, wt.verdict_met,
-          wt.verdict_unmet, wt.verdict_cold, wt.verdict_unpriced]);
-        c.appendChild(wtt.t);
+        c.appendChild(wouldTrimTable(wt));
       }
 
       subhead(c, 'Reachability');
@@ -711,9 +1480,9 @@
       if (!reach.length) {
         c.appendChild(none());
       } else {
-        var rt = table(['state key', 'reachability']);
+        var rt = mkTable('Target reachability', [R('state key'), C('reachability')]);
         reach.forEach(function (x) {
-          row(rt.tb, [x.state_key, tok('reach', x.reachability)]);
+          trow(rt, [x.state_key, tok('reach', x.reachability)]);
         });
         c.appendChild(rt.t);
       }
@@ -727,18 +1496,34 @@
       doctor: buildDoctor
     };
 
-    // ---- chrome ----------------------------------------------------------
+    // ---- chrome: live countdown clock ------------------------------------
 
-    function updateClock(delayMs, backingOff) {
-      var txt = 'next update in ' + Math.round(delayMs / 1000) + ' s';
+    function renderClock() {
+      if (terminal) { el('clock').textContent = 'polling stopped'; return; }
+      var txt = 'next update in ' + remainingSec + 's';
       if (backingOff) { txt += ' (backing off)'; }
       el('clock').textContent = txt;
     }
 
+    // Start (or restart) the 1s countdown toward the next scheduled round so
+    // the clock visibly decrements (5,4,3,2,1) instead of looking frozen.
+    function startCountdown(sec) {
+      remainingSec = sec;
+      renderClock();
+      clearInterval(countdownTimer);
+      countdownTimer = setInterval(function () {
+        remainingSec = Math.max(0, remainingSec - 1);
+        renderClock();
+      }, 1000);
+    }
+
+    // ---- chrome: window selector -----------------------------------------
+
     function updateSelectorUI() {
       var buttons = el('windowsel').querySelectorAll('button');
       Array.prototype.forEach.call(buttons, function (b) {
-        b.classList.toggle('active', b.getAttribute('data-window') === selectedWindow);
+        var active = b.getAttribute('data-window') === selectedWindow;
+        b.setAttribute('aria-pressed', active ? 'true' : 'false');
         b.disabled = terminal;
       });
     }
@@ -751,8 +1536,46 @@
       updateSelectorUI();
     }
 
+    // ---- chrome: tabs (visibility only; every panel keeps polling) -------
+
+    function selectTab(name) {
+      activeTab = name;
+      PANELS.forEach(function (n) {
+        var tab = el('tab-' + n);
+        var panel = el('panel-' + n);
+        var sel = n === name;
+        tab.setAttribute('aria-selected', sel ? 'true' : 'false');
+        tab.tabIndex = sel ? 0 : -1;
+        panel.hidden = !sel;
+      });
+    }
+
+    function onTabKey(e, tabs, i) {
+      var n = tabs.length;
+      var next = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { next = (i + 1) % n; }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { next = (i - 1 + n) % n; }
+      else if (e.key === 'Home') { next = 0; }
+      else if (e.key === 'End') { next = n - 1; }
+      if (next >= 0) {
+        e.preventDefault();
+        tabs[next].focus();
+        selectTab(tabs[next].getAttribute('data-tab'));
+      }
+    }
+
+    function initTabs() {
+      var tabs = el('tabbar').querySelectorAll('[role="tab"]');
+      Array.prototype.forEach.call(tabs, function (t, i) {
+        t.addEventListener('click', function () { selectTab(t.getAttribute('data-tab')); });
+        t.addEventListener('keydown', function (e) { onTabKey(e, tabs, i); });
+      });
+      selectTab(activeTab);
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
       initSelector();
+      initTabs();
       tick();
     });
   })();
