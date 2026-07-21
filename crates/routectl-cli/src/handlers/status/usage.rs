@@ -100,6 +100,10 @@ struct UsageQuota {
     overage_status: Option<String>,
     utilization: Option<f64>,
     overage_utilization: Option<f64>,
+    /// Quota-reset instant in epoch MILLISECONDS. The ledger stamps quota
+    /// resets in epoch SECONDS (see the observer), so the seconds value is
+    /// scaled by 1000 here to make the `_ms` name truthful and keep it
+    /// consistent with `ts_start_ms`.
     reset_ms: Option<i64>,
 }
 
@@ -255,7 +259,9 @@ fn map_quota(snapshot: QuotaSnapshot) -> UsageQuota {
         overage_status: snapshot.overage_status,
         utilization: snapshot.utilization,
         overage_utilization: snapshot.overage_utilization,
-        reset_ms: snapshot.reset,
+        // Ledger quota resets are epoch SECONDS; scale to ms so the `_ms`
+        // field name is truthful and the client's ms formatter is correct.
+        reset_ms: snapshot.reset.map(|s| s * 1000),
     }
 }
 
@@ -495,6 +501,47 @@ mod tests {
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["unavailable"], "db_unavailable");
+    }
+
+    #[test]
+    fn quota_reset_seconds_scaled_to_milliseconds() {
+        // The ledger stamps quota resets in epoch SECONDS; the panel field is
+        // named `reset_ms`, so the seconds value must be scaled by 1000. A
+        // `None` reset stays `None`.
+        let snapshot = QuotaSnapshot {
+            ts_start: 1_700_000_000_000,
+            claim: None,
+            status: Some("ok".into()),
+            overage_status: None,
+            utilization: Some(0.5),
+            overage_utilization: None,
+            reset: Some(9_000),
+        };
+        let mapped = map_quota(snapshot);
+        assert_eq!(
+            mapped.reset_ms,
+            Some(9_000_000),
+            "9000s must map to 9_000_000ms"
+        );
+        assert_eq!(
+            mapped.ts_start_ms, 1_700_000_000_000,
+            "ts_start passes through as ms"
+        );
+
+        let no_reset = QuotaSnapshot {
+            ts_start: 0,
+            claim: None,
+            status: None,
+            overage_status: None,
+            utilization: None,
+            overage_utilization: None,
+            reset: None,
+        };
+        assert_eq!(
+            map_quota(no_reset).reset_ms,
+            None,
+            "absent reset stays absent"
+        );
     }
 
     #[test]
