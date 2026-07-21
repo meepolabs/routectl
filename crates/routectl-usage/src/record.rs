@@ -119,6 +119,13 @@ pub struct UsageRecord {
     pub outcome: Outcome,
     pub http_status: Option<u16>,
     pub error_class: Option<String>,
+    /// Canonical kebab failure-class token (`FailureClass::class_token`) for a
+    /// request that reached a dispatch attempt and failed. `None` for a
+    /// success, for any pre-dispatch / validation / local-gate failure that
+    /// never reached an upstream, and when the class carries no token
+    /// (`Unknown`). A `None` reads back as "unclassified"; there is no
+    /// backfill of rows written before this column existed.
+    pub resolved_class: Option<String>,
     pub finish_reason: Option<String>,
     pub attempt_count: u32,
     pub fallback_count: u32,
@@ -330,6 +337,7 @@ mod tests {
             outcome: Outcome::Ok,
             http_status: Some(200),
             error_class: None,
+            resolved_class: None,
             finish_reason: Some("stop".to_string()),
             attempt_count: 1,
             fallback_count: 0,
@@ -397,6 +405,7 @@ mod tests {
             outcome: Outcome::UpstreamError,
             http_status: None,
             error_class: None,
+            resolved_class: None,
             finish_reason: None,
             attempt_count: 1,
             fallback_count: 0,

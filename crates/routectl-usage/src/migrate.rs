@@ -337,6 +337,32 @@ fn migrate_v10_to_v11(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v11 -> v12 step atomically: add the nullable `resolved_class`
+/// column (the canonical kebab failure-class token for a dispatch-reached
+/// failure, stamped by the CLI capture), bump `PRAGMA user_version` to 12,
+/// and update the human-readable `meta.schema_version` row. All in one
+/// transaction so a crash mid-step rolls back rather than landing a
+/// column-without-version state. Existing rows survive with `resolved_class`
+/// NULL -- no backfill.
+///
+/// On a FRESH DB the v0 -> v1 step created `requests` from the current schema,
+/// which already carries the column. The loop still enters this arm
+/// (v0->v1 stamps user_version=1, not SCHEMA_VERSION), so guard the
+/// `ADD COLUMN` against a pre-existing column to keep the fresh path safe.
+fn migrate_v11_to_v12(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if !column_exists(&tx, "requests", "resolved_class")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN resolved_class TEXT")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 12")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "12"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -392,6 +418,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             8 => migrate_v8_to_v9(conn)?,
             9 => migrate_v9_to_v10(conn)?,
             10 => migrate_v10_to_v11(conn)?,
+            11 => migrate_v11_to_v12(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

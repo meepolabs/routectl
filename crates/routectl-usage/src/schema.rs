@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -168,7 +168,18 @@ CREATE TABLE IF NOT EXISTS requests (
     would_trim_path_extractable INTEGER,
     would_trim_recorder_version INTEGER,
     would_trim_raw_marks TEXT,
-    would_trim_context_fraction REAL
+    would_trim_context_fraction REAL,
+
+    -- RESOLVED FAILURE CLASS (v12): the canonical kebab failure-class token
+    -- (FailureClass::class_token) for a request that reached a dispatch
+    -- attempt and failed, stamped by the CLI capture. NULL for a success and
+    -- for any pre-dispatch / validation / local-gate failure that never
+    -- reached an upstream (those read back as unclassified), and NULL when the
+    -- class has no token (Unknown). Appended last so this column lands in the
+    -- same ordinal position whether the DB was created fresh at v12 or migrated
+    -- from v11 via ALTER TABLE ... ADD COLUMN resolved_class (which always
+    -- appends). No backfill -- older rows stay NULL.
+    resolved_class  TEXT
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query
