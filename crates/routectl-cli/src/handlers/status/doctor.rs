@@ -149,6 +149,9 @@ mod tests {
                 rpm_available: Some(12.0),
                 circuit,
                 half_open_probe_in_flight: false,
+                circuit_open_elapsed: None,
+                last_outcome: None,
+                last_outcome_elapsed: None,
             },
         }
     }

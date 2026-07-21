@@ -7,6 +7,8 @@
 
 use std::time::{Duration, Instant};
 
+use routectl_core::failure_class::LastOutcome;
+
 use crate::config::ProviderRuntimePolicy;
 
 const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
@@ -50,6 +52,15 @@ pub struct ProviderState {
     /// to wait (return CircuitOpen) so the breaker only sees ONE
     /// probe per cooldown cycle.
     half_open_in_flight: bool,
+
+    /// Kind of the most recent settled dispatch outcome, stamped only by
+    /// `record_success` / `record_failure` under the per-target lock.
+    /// Never holds `LastOutcome::CircuitOpen` -- gate refusals are derived
+    /// from the circuit phase downstream, not stored here.
+    last_outcome: Option<LastOutcome>,
+    /// Monotonic instant `last_outcome` was stamped, for elapsed-age
+    /// exposure via `gate_status`.
+    last_outcome_at: Option<Instant>,
 }
 
 /// Decision returned from the dispatch gate.
@@ -83,6 +94,8 @@ impl ProviderState {
             consecutive_failures: 0,
             circuit_opened_at: None,
             half_open_in_flight: false,
+            last_outcome: None,
+            last_outcome_at: None,
         }
     }
 
@@ -127,21 +140,27 @@ impl ProviderState {
     /// Mark the most recent dispatch as successful. Resets the
     /// circuit-breaker failure counter and closes a tripped circuit
     /// if this was a half-open probe.
-    pub const fn record_success(&mut self) {
+    pub const fn record_success(&mut self, now: Instant) {
         self.consecutive_failures = 0;
         self.circuit_opened_at = None;
         self.half_open_in_flight = false;
         self.active_cooldown = self.circuit_cooldown;
+        self.last_outcome = Some(LastOutcome::Ok);
+        self.last_outcome_at = Some(now);
     }
 
     /// Mark the most recent dispatch as failed. Trips the breaker
     /// when consecutive failures hit the configured threshold. If
     /// this was a half-open probe, re-trip the breaker by setting
     /// a fresh `circuit_opened_at = now`. Returns whether this call
-    /// opened (tripped) the breaker.
-    pub const fn record_failure(&mut self, now: Instant) -> bool {
+    /// opened (tripped) the breaker. The caller supplies the derived
+    /// `outcome` (via `LastOutcome::from_failure_class`); it is stamped
+    /// regardless of whether the breaker trips.
+    pub const fn record_failure(&mut self, now: Instant, outcome: LastOutcome) -> bool {
         let was_half_open_probe = self.half_open_in_flight;
         self.half_open_in_flight = false;
+        self.last_outcome = Some(outcome);
+        self.last_outcome_at = Some(now);
 
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         if let Some(threshold) = self.circuit_failure_threshold {
@@ -270,6 +289,11 @@ impl ProviderState {
             rpm_available: snapshot.rpm_available,
             circuit: snapshot.circuit,
             half_open_probe_in_flight: self.half_open_in_flight,
+            circuit_open_elapsed: self
+                .circuit_opened_at
+                .map(|opened_at| now.duration_since(opened_at)),
+            last_outcome: self.last_outcome,
+            last_outcome_elapsed: self.last_outcome_at.map(|at| now.duration_since(at)),
         }
     }
 }
@@ -289,6 +313,17 @@ pub struct ProviderGateStatus {
     pub circuit: CircuitPhase,
     /// Whether a half-open probe is currently claimed by a live dispatch.
     pub half_open_probe_in_flight: bool,
+    /// Elapsed time since the circuit last opened; `None` when the circuit
+    /// is closed (never tripped, or closed by a successful probe). Monotonic
+    /// -- the DTO layer converts it to an epoch-ms `open_since` downstream.
+    pub circuit_open_elapsed: Option<Duration>,
+    /// Kind of the most recent settled outcome; `None` when no dispatch has
+    /// settled yet (fresh state / post-restart). Never `CircuitOpen` -- that
+    /// variant is derived from the circuit phase at DTO-build time.
+    pub last_outcome: Option<LastOutcome>,
+    /// Elapsed time since `last_outcome` was stamped; `None` when no dispatch
+    /// has settled yet.
+    pub last_outcome_elapsed: Option<Duration>,
 }
 
 /// Read-only classification of the circuit breaker, mirroring the decision

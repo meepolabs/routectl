@@ -17,7 +17,7 @@ use routectl_core::{
     cache_control::{MAX_BREAKPOINTS, compute_frozen_floor, validate_source},
     capability::{SignalTier, normalize_capability_key},
     context_reduction::{ReductionOutcome, apply_json_minify},
-    failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify},
+    failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
     sanitize_for_log, scan_volatile,
 };
 use serde_json::Value;
@@ -1391,6 +1391,9 @@ impl Router {
                 rpm_available: None,
                 circuit: CircuitPhase::Open,
                 half_open_probe_in_flight: false,
+                circuit_open_elapsed: None,
+                last_outcome: None,
+                last_outcome_elapsed: None,
             },
             |s| s.lock().gate_status(now),
         )
@@ -2776,7 +2779,10 @@ impl Router {
                                     breaker_effect = "parked";
                                 }
                                 _ => {
-                                    if self.record_failure_opened(state_key) {
+                                    if self.record_failure_opened(
+                                        state_key,
+                                        LastOutcome::from_failure_class(&cf.class),
+                                    ) {
                                         breaker_effect = "opened";
                                     }
                                 }
@@ -3236,7 +3242,10 @@ impl Router {
                     if debit {
                         match reset_hint {
                             Some(h) => self.park_provider(&target.state_key, h),
-                            None => self.record_failure(&target.state_key),
+                            None => self.record_failure(
+                                &target.state_key,
+                                LastOutcome::from_failure_class(&cf.class),
+                            ),
                         }
                         probe_guard.disarm();
                     } else {
@@ -3533,7 +3542,7 @@ impl Router {
                         // (see runtime_state.rs).
                         let state = self.state.get(state_key).cloned();
                         if was_half_open_probe && let Some(st) = state.as_ref() {
-                            st.lock().record_success();
+                            st.lock().record_success(Instant::now());
                         }
                         // The probe (if any) is settled; the wrapped stream's
                         // BreakerAccounting owns the tail. Disarm so a drop here
@@ -3557,7 +3566,11 @@ impl Router {
                             }
                             Err(e) => Err(e),
                         });
-                        return Ok(wrap_with_breaker_accounting(relabeled.boxed(), state));
+                        return Ok(wrap_with_breaker_accounting(
+                            relabeled.boxed(),
+                            state,
+                            target.provider_kind,
+                        ));
                     }
                     Err(e) => {
                         let native_cf = classify(&e, target.provider_kind);
@@ -3672,7 +3685,10 @@ impl Router {
                         if debits {
                             match reset_hint {
                                 Some(h) if !is_probe => self.park_provider(state_key, h),
-                                _ => self.record_failure(state_key),
+                                _ => self.record_failure(
+                                    state_key,
+                                    LastOutcome::from_failure_class(&cf.class),
+                                ),
                             }
                             probe_guard.disarm();
                         }
@@ -4048,22 +4064,22 @@ impl Router {
 
     fn record_success(&self, state_key: &str) {
         if let Some(state) = self.state.get(state_key) {
-            state.lock().record_success();
+            state.lock().record_success(Instant::now());
         }
     }
 
-    fn record_failure(&self, state_key: &str) {
-        self.record_failure_opened(state_key);
+    fn record_failure(&self, state_key: &str, outcome: LastOutcome) {
+        self.record_failure_opened(state_key, outcome);
     }
 
     /// Debit one breaker failure for `state_key`, returning whether this
     /// debit tripped (opened) the breaker on this call. The `record_failure`
     /// wrapper discards that signal; a caller that must report the breaker
     /// effect of the debit uses this directly.
-    fn record_failure_opened(&self, state_key: &str) -> bool {
+    fn record_failure_opened(&self, state_key: &str, outcome: LastOutcome) -> bool {
         self.state
             .get(state_key)
-            .is_some_and(|state| state.lock().record_failure(Instant::now()))
+            .is_some_and(|state| state.lock().record_failure(Instant::now(), outcome))
     }
 
     /// Park the provider's breaker open for `cooldown`, bypassing the
@@ -5127,6 +5143,7 @@ async fn run_with_timeout(
 fn wrap_with_breaker_accounting(
     inner: BoxStream<'static, Result<ChatChunk>>,
     state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+    provider_kind: Option<&'static str>,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     use futures::stream::StreamExt as _;
     struct BreakerAccounting {
@@ -5154,16 +5171,16 @@ fn wrap_with_breaker_accounting(
                 return;
             }
             self.settled = true;
-            self.with_state(super::runtime_state::ProviderState::record_success);
+            self.with_state(|state| state.record_success(Instant::now()));
         }
 
-        fn record_failure(&mut self) {
+        fn record_failure(&mut self, outcome: LastOutcome) {
             if self.settled {
                 return;
             }
             self.settled = true;
             self.with_state(|state| {
-                state.record_failure(Instant::now());
+                state.record_failure(Instant::now(), outcome);
             });
         }
     }
@@ -5185,8 +5202,10 @@ fn wrap_with_breaker_accounting(
     let s = async_stream::stream! {
         let mut inner = inner;
         while let Some(item) = inner.next().await {
-            if item.is_err() {
-                accounting.record_failure();
+            if let Err(e) = &item {
+                accounting.record_failure(LastOutcome::from_failure_class(
+                    &classify(e, provider_kind).class,
+                ));
             }
             yield item;
         }
@@ -14348,7 +14367,8 @@ mod circuit_breaker_slot_release_tests {
         // Trip the breaker directly (threshold = 1 failure).
         {
             let st = router.state.get("m").expect("per-model state slot exists");
-            st.lock().record_failure(Instant::now());
+            st.lock()
+                .record_failure(Instant::now(), LastOutcome::Http5xx);
         }
 
         // First probe after the trip: the breaker is half-open, the gate
@@ -14659,7 +14679,8 @@ mod circuit_breaker_slot_release_tests {
     /// half-open (zero cooldown).
     fn trip_breaker(router: &Router) {
         let st = router.state.get("m").expect("per-model state slot exists");
-        st.lock().record_failure(Instant::now());
+        st.lock()
+            .record_failure(Instant::now(), LastOutcome::Http5xx);
     }
 
     fn slot_in_flight(router: &Router) -> bool {
