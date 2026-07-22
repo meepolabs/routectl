@@ -950,3 +950,7 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
 
     ConfigValidation { errors, warnings }
 }
+
+#[cfg(test)]
+#[path = "validate_tests.rs"]
+mod validate_tests;
