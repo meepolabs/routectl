@@ -6,7 +6,7 @@
 //! capability) through [`gather_context_no_network`] +
 //! [`build_report_no_network`] -- the `probe` section and its
 //! `gather_probe_results` dial are never reached. Reachability is DERIVED from
-//! the already-observed circuit phase read once through the read-only facade,
+//! the last settled dispatch outcome read once through the read-only facade,
 //! not from a fresh probe.
 //!
 //! The no-network gather is disk I/O (config read, credential-store probe,
@@ -24,18 +24,18 @@ use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
 
+use routectl_core::failure_class::LastOutcome;
 use routectl_router::DoctorReport;
 use routectl_router::router::RouteTargetStatus;
-use routectl_router::runtime_state::CircuitPhase;
 
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{build_report_no_network, gather_context_no_network};
 
 /// Wire-shape version of the doctor panel payload. Reuses the no-network
-/// [`DoctorReport`]'s own `schema_version` (2): the panel embeds that report
+/// [`DoctorReport`]'s own `schema_version` (3): the panel embeds that report
 /// verbatim, so it must not invent a parallel number.
-const DOCTOR_SCHEMA_VERSION: u32 = 2;
+const DOCTOR_SCHEMA_VERSION: u32 = 3;
 
 /// The no-network doctor report plus the circuit-derived reachability summary.
 #[derive(Debug, Clone, Serialize)]
@@ -47,29 +47,32 @@ pub(super) struct DoctorPanel {
     reachability: Vec<TargetReachability>,
 }
 
-/// One dispatch target's reachability, derived from its circuit phase.
+/// One dispatch target's reachability, derived from its last settled outcome.
 #[derive(Debug, Clone, Serialize)]
 struct TargetReachability {
     state_key: String,
-    /// `reachable` (circuit closed) or `degraded` (open / half-open).
+    /// `reachable` (last outcome ok), `unknown` (nothing settled yet), or
+    /// `degraded` (any failure family / gate refusal).
     reachability: &'static str,
 }
 
-/// Fold a circuit phase into a reachability verdict. An open OR half-open
-/// breaker means the target is currently not freely dispatchable, so both map
-/// to `degraded`; only a closed breaker is `reachable`. Owned here so a new
-/// breaker phase is a compile error rather than a silent wire change.
-const fn reachability_token(circuit: CircuitPhase) -> &'static str {
-    match circuit {
-        CircuitPhase::Closed => "reachable",
-        CircuitPhase::Open | CircuitPhase::HalfOpenReady => "degraded",
+/// Fold the last settled outcome into a reachability verdict. A successful
+/// last outcome is `reachable`; no settled outcome yet (fresh state /
+/// post-restart) is `unknown`; any failure family or gate refusal is
+/// `degraded`. Owned here so a new outcome variant is a compile error rather
+/// than a silent wire change.
+const fn reachability_token(outcome: Option<LastOutcome>) -> &'static str {
+    match outcome {
+        Some(LastOutcome::Ok) => "reachable",
+        None => "unknown",
+        Some(_) => "degraded",
     }
 }
 
 fn map_reachability(target: RouteTargetStatus) -> TargetReachability {
     TargetReachability {
         state_key: target.state_key,
-        reachability: reachability_token(target.gate.circuit),
+        reachability: reachability_token(target.gate.last_outcome),
     }
 }
 
@@ -127,7 +130,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use routectl_router::runtime_state::ProviderGateStatus;
+    use routectl_router::runtime_state::{CircuitPhase, ProviderGateStatus};
     use routectl_router::{Config, Router};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -138,7 +141,7 @@ mod tests {
         Arc::new(StatusState::from_app(&app, config_path))
     }
 
-    fn sample_target(circuit: CircuitPhase) -> RouteTargetStatus {
+    fn sample_target(last_outcome: Option<LastOutcome>) -> RouteTargetStatus {
         RouteTargetStatus {
             state_key: "opus#seat-a".into(),
             nickname: "opus".into(),
@@ -147,27 +150,44 @@ mod tests {
             seat_label: Some("seat-a".into()),
             gate: ProviderGateStatus {
                 rpm_available: Some(12.0),
-                circuit,
+                circuit: CircuitPhase::Closed,
                 half_open_probe_in_flight: false,
                 circuit_open_elapsed: None,
-                last_outcome: None,
+                last_outcome,
                 last_outcome_elapsed: None,
             },
         }
     }
 
     #[test]
-    fn reachability_token_folds_open_and_half_open_to_degraded() {
-        assert_eq!(reachability_token(CircuitPhase::Closed), "reachable");
-        assert_eq!(reachability_token(CircuitPhase::Open), "degraded");
-        assert_eq!(reachability_token(CircuitPhase::HalfOpenReady), "degraded");
+    fn reachability_token_maps_the_three_states() {
+        assert_eq!(reachability_token(Some(LastOutcome::Ok)), "reachable");
+        assert_eq!(reachability_token(None), "unknown");
+        assert_eq!(reachability_token(Some(LastOutcome::Http5xx)), "degraded");
+        assert_eq!(
+            reachability_token(Some(LastOutcome::RateLimited)),
+            "degraded"
+        );
+        assert_eq!(
+            reachability_token(Some(LastOutcome::CircuitOpen)),
+            "degraded"
+        );
     }
 
     #[test]
-    fn map_reachability_derives_from_circuit_phase_not_a_dial() {
-        let mapped = map_reachability(sample_target(CircuitPhase::Open));
+    fn map_reachability_derives_from_last_outcome_not_a_dial() {
+        let mapped = map_reachability(sample_target(Some(LastOutcome::Http5xx)));
         assert_eq!(mapped.state_key, "opus#seat-a");
         assert_eq!(mapped.reachability, "degraded");
+    }
+
+    /// Wire-shape golden: reachability serializes under its stable key with the
+    /// unknown state for a never-seen (no settled outcome) target.
+    #[test]
+    fn reachability_serializes_unknown_for_never_seen_target() {
+        let value = serde_json::to_value(map_reachability(sample_target(None))).unwrap();
+        assert_eq!(value["state_key"], Value::from("opus#seat-a"));
+        assert_eq!(value["reachability"], Value::from("unknown"));
     }
 
     /// The production source must never CALL the probe dial: the panel is a
@@ -190,7 +210,7 @@ mod tests {
     #[test]
     fn no_config_path_yields_unavailable_panel() {
         let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-        assert_eq!(panel.schema_version, 2);
+        assert_eq!(panel.schema_version, 3);
         assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
         assert!(panel.data.is_none());
     }
@@ -211,10 +231,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn handler_returns_schema_two_report_with_no_probe_section() {
+    async fn handler_returns_report_with_no_probe_section() {
         // A config with an unknown field carrying a secret-shaped value: the
         // typed load fails, and the gather redacts the loader error before it
-        // reaches any finding. The report still builds (schema 2, no probe).
+        // reaches any finding. The report still builds (schema 3, no probe).
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         std::fs::write(
@@ -239,12 +259,12 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
         assert!(json["unavailable"].is_null());
         let as_of = json["as_of"].as_str().expect("as_of present");
         assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-        assert_eq!(json["data"]["report"]["schema_version"], 2);
+        assert_eq!(json["data"]["report"]["schema_version"], 3);
         let findings = json["data"]["report"]["findings"].as_array().unwrap();
         assert!(
             !findings.is_empty(),

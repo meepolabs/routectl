@@ -10,12 +10,13 @@
 //! mutation: `route_targets` is non-mutating by construction.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
 
+use routectl_core::failure_class::LastOutcome;
 use routectl_router::LearnedRegistryEntry;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
@@ -25,7 +26,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the health panel payload.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Per-target health plus learned negatives for the routing surface.
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +49,20 @@ struct TargetHealth {
     /// Projected available RPM tokens; `None` under an unlimited policy.
     rpm_available: Option<f64>,
     half_open_probe_in_flight: bool,
+    /// Epoch-ms the circuit last opened, or `None` when the circuit is closed
+    /// (never tripped, or closed by a probe). Derived at DTO build from the
+    /// gate's monotonic open-elapsed age; `None` is the honest closed state --
+    /// never a `0`/epoch sentinel.
+    open_since_ms: Option<i64>,
+    /// Snake_case token of the most recent settled outcome (see
+    /// [`last_outcome_token`]), or `None` before any dispatch has settled
+    /// (fresh state / post-restart). Renders `circuit_open` when the circuit
+    /// phase is open -- derived from the phase, never a stored value.
+    last_outcome: Option<String>,
+    /// Epoch-ms the last outcome was stamped, or `None` before any dispatch
+    /// has settled. Derived from the gate's monotonic outcome-elapsed age;
+    /// `None` is the honest never-seen state, never a `0`/epoch sentinel.
+    last_outcome_at_ms: Option<i64>,
 }
 
 /// One resident learned-capability negative. Field names are the
@@ -73,7 +88,42 @@ const fn circuit_token(phase: CircuitPhase) -> &'static str {
     }
 }
 
-fn map_target(target: RouteTargetStatus) -> TargetHealth {
+/// Map a [`LastOutcome`] to its snake_case wire token. Owned by the status
+/// module (not the router enum's `Serialize` derive) so a new outcome variant
+/// is a compile error here rather than a silent wire change. A tripwire test
+/// pins each token to the core enum's `serde` output.
+const fn last_outcome_token(outcome: LastOutcome) -> &'static str {
+    match outcome {
+        LastOutcome::Ok => "ok",
+        LastOutcome::RateLimited => "rate_limited",
+        LastOutcome::Timeout => "timeout",
+        LastOutcome::TransportError => "transport_error",
+        LastOutcome::Http4xx => "http_4xx",
+        LastOutcome::Http5xx => "http_5xx",
+        LastOutcome::CircuitOpen => "circuit_open",
+    }
+}
+
+/// Render the DTO's `last_outcome` token. An open circuit yields the derived
+/// `circuit_open` (the stored value never holds it, per the runtime-state
+/// contract); otherwise the stored outcome's token, or `None` when nothing
+/// has settled yet.
+fn last_outcome_wire(circuit: CircuitPhase, stored: Option<LastOutcome>) -> Option<String> {
+    let outcome = match circuit {
+        CircuitPhase::Open => Some(LastOutcome::CircuitOpen),
+        CircuitPhase::Closed | CircuitPhase::HalfOpenReady => stored,
+    };
+    outcome.map(|o| last_outcome_token(o).to_string())
+}
+
+/// Convert a monotonic elapsed age into an epoch-ms instant relative to
+/// `now_ms`. The caller keeps the `Option`, so a `None` age (closed /
+/// never-seen) stays `None` -- never a `0`/epoch sentinel.
+fn epoch_ms_of(now_ms: i64, elapsed: Duration) -> i64 {
+    now_ms - i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn map_target(target: RouteTargetStatus, now_ms: i64) -> TargetHealth {
     TargetHealth {
         state_key: target.state_key,
         nickname: target.nickname,
@@ -83,6 +133,15 @@ fn map_target(target: RouteTargetStatus) -> TargetHealth {
         circuit: circuit_token(target.gate.circuit),
         rpm_available: target.gate.rpm_available,
         half_open_probe_in_flight: target.gate.half_open_probe_in_flight,
+        open_since_ms: target
+            .gate
+            .circuit_open_elapsed
+            .map(|d| epoch_ms_of(now_ms, d)),
+        last_outcome: last_outcome_wire(target.gate.circuit, target.gate.last_outcome),
+        last_outcome_at_ms: target
+            .gate
+            .last_outcome_elapsed
+            .map(|d| epoch_ms_of(now_ms, d)),
     }
 }
 
@@ -99,10 +158,14 @@ fn map_learned(entry: LearnedRegistryEntry) -> LearnedNegative {
 /// reads, so the target health and the learned negatives are internally
 /// consistent (no interleaved hot-swap).
 fn build_from_view(view: &StatusRouterView) -> HealthPanel {
+    // Pin a single monotonic read time and its epoch-ms anchor together, so
+    // every target's elapsed-age conversion shares one clock reading.
+    let now = Instant::now();
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let targets = view
-        .route_targets(Instant::now())
+        .route_targets(now)
         .into_iter()
-        .map(map_target)
+        .map(|target| map_target(target, now_ms))
         .collect();
     let learned_negatives = view
         .learned_capabilities()
@@ -170,6 +233,31 @@ mod tests {
         }
     }
 
+    /// A target with the outcome/open ages populated for the epoch-ms and
+    /// derivation tests.
+    fn target_with_ages(
+        circuit: CircuitPhase,
+        circuit_open_elapsed: Option<Duration>,
+        last_outcome: Option<LastOutcome>,
+        last_outcome_elapsed: Option<Duration>,
+    ) -> RouteTargetStatus {
+        RouteTargetStatus {
+            state_key: "opus#seat-a".into(),
+            nickname: "opus".into(),
+            provider_name: "anthropic".into(),
+            upstream: "claude-opus-wire".into(),
+            seat_label: Some("seat-a".into()),
+            gate: ProviderGateStatus {
+                rpm_available: Some(12.0),
+                circuit,
+                half_open_probe_in_flight: false,
+                circuit_open_elapsed,
+                last_outcome,
+                last_outcome_elapsed,
+            },
+        }
+    }
+
     #[test]
     fn circuit_token_pins_every_phase_to_snake_case() {
         assert_eq!(circuit_token(CircuitPhase::Closed), "closed");
@@ -180,9 +268,122 @@ mod tests {
         );
     }
 
+    /// Tripwire: the module-owned `last_outcome_token` must match the core
+    /// enum's `serde` output for EVERY variant, byte for byte. A rename on
+    /// either side drifts the wire away from the taxonomy and trips here.
+    #[test]
+    fn last_outcome_token_matches_core_enum_serde() {
+        for outcome in [
+            LastOutcome::Ok,
+            LastOutcome::RateLimited,
+            LastOutcome::Timeout,
+            LastOutcome::TransportError,
+            LastOutcome::Http4xx,
+            LastOutcome::Http5xx,
+            LastOutcome::CircuitOpen,
+        ] {
+            let serde_token = serde_json::to_value(outcome).unwrap();
+            assert_eq!(
+                Value::String(last_outcome_token(outcome).to_string()),
+                serde_token,
+                "token drift for {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_circuit_derives_circuit_open_and_open_since() {
+        let target = target_with_ages(
+            CircuitPhase::Open,
+            Some(Duration::from_millis(400)),
+            Some(LastOutcome::Http5xx),
+            Some(Duration::from_millis(400)),
+        );
+        let mapped = map_target(target, 10_000);
+        // The phase overrides the stored kind: an open circuit renders
+        // `circuit_open`, never the stored failure family.
+        assert_eq!(mapped.last_outcome.as_deref(), Some("circuit_open"));
+        assert_eq!(mapped.open_since_ms, Some(9_600));
+        assert_eq!(mapped.last_outcome_at_ms, Some(9_600));
+    }
+
+    #[test]
+    fn closed_never_seen_target_has_all_none() {
+        let target = target_with_ages(CircuitPhase::Closed, None, None, None);
+        let mapped = map_target(target, 10_000);
+        assert_eq!(mapped.open_since_ms, None);
+        assert_eq!(mapped.last_outcome, None);
+        assert_eq!(mapped.last_outcome_at_ms, None);
+    }
+
+    #[test]
+    fn closed_target_renders_stored_outcome_not_circuit_open() {
+        let target = target_with_ages(
+            CircuitPhase::Closed,
+            None,
+            Some(LastOutcome::RateLimited),
+            Some(Duration::from_secs(2)),
+        );
+        let mapped = map_target(target, 10_000);
+        // Closed circuit: the stored outcome surfaces verbatim, open_since
+        // stays None.
+        assert_eq!(mapped.last_outcome.as_deref(), Some("rate_limited"));
+        assert_eq!(mapped.open_since_ms, None);
+        assert_eq!(mapped.last_outcome_at_ms, Some(8_000));
+    }
+
+    #[test]
+    fn half_open_target_renders_stored_outcome() {
+        let target = target_with_ages(
+            CircuitPhase::HalfOpenReady,
+            Some(Duration::from_millis(100)),
+            Some(LastOutcome::Timeout),
+            Some(Duration::from_millis(100)),
+        );
+        let mapped = map_target(target, 10_000);
+        // Only an OPEN phase derives circuit_open; half-open surfaces the
+        // stored kind while still exposing its open-since age.
+        assert_eq!(mapped.last_outcome.as_deref(), Some("timeout"));
+        assert_eq!(mapped.open_since_ms, Some(9_900));
+    }
+
+    /// Wire-shape golden: the new fields serialize under their exact snake_case
+    /// keys with the derived values, and the closed/never-seen state serializes
+    /// each to JSON `null` (never a `0`/epoch sentinel).
+    #[test]
+    fn new_fields_serialize_under_stable_keys_with_null_semantics() {
+        let open = serde_json::to_value(map_target(
+            target_with_ages(
+                CircuitPhase::Open,
+                Some(Duration::from_millis(400)),
+                Some(LastOutcome::Http5xx),
+                Some(Duration::from_millis(400)),
+            ),
+            10_000,
+        ))
+        .unwrap();
+        assert_eq!(open["open_since_ms"], Value::from(9_600));
+        assert_eq!(open["last_outcome"], Value::from("circuit_open"));
+        assert_eq!(open["last_outcome_at_ms"], Value::from(9_600));
+
+        let closed = serde_json::to_value(map_target(
+            target_with_ages(CircuitPhase::Closed, None, None, None),
+            10_000,
+        ))
+        .unwrap();
+        let obj = closed.as_object().unwrap();
+        // The keys are present on the wire (stable shape), each carrying null.
+        assert!(obj.contains_key("open_since_ms"));
+        assert!(obj.contains_key("last_outcome"));
+        assert!(obj.contains_key("last_outcome_at_ms"));
+        assert!(closed["open_since_ms"].is_null());
+        assert!(closed["last_outcome"].is_null());
+        assert!(closed["last_outcome_at_ms"].is_null());
+    }
+
     #[test]
     fn map_target_carries_event_surface_fields() {
-        let mapped = map_target(sample_target(CircuitPhase::HalfOpenReady));
+        let mapped = map_target(sample_target(CircuitPhase::HalfOpenReady), 1_000);
         assert_eq!(mapped.state_key, "opus#seat-a");
         assert_eq!(mapped.nickname, "opus");
         assert_eq!(mapped.provider_name, "anthropic");
@@ -330,7 +531,7 @@ mod tests {
     #[test]
     fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
         let panel = HealthPanel {
-            targets: vec![map_target(sample_target(CircuitPhase::Open))],
+            targets: vec![map_target(sample_target(CircuitPhase::Open), 1_000)],
             learned_negatives: vec![map_learned(LearnedRegistryEntry {
                 state_key: "opus".into(),
                 feature_key: "web_search".into(),
