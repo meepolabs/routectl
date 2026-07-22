@@ -118,7 +118,8 @@ listed at the bottom of each crate.
 
 ### openai_responses
 
-- `src/openai_responses/mod.rs` -- `OpenAiResponsesProvider`; force-streams `complete()`, drains to `response.completed`
+- `src/openai_responses/mod.rs` -- `impl Provider` orchestration: force-streams `complete()`, drains to `response.completed`; upstream-error mapping helpers
+- `src/openai_responses/client.rs` -- provider construction, config, and auth wiring: `OpenAiResponsesConfig`, `OpenAiResponsesProvider` (client build + cookie-jar Drop persistence), header assembly
 - `src/openai_responses/types.rs` -- request wire types: `ResponsesRequest`, `ResponseInputItem` union, `ResponsesTool` flat shape
 - `src/openai_responses/response_types.rs` -- response + SSE event wire types (`ResponsesResponse`, output-item union, stream events)
 - `src/openai_responses/auth.rs` -- header injection per `AuthKind` (ChatgptOauth Bearer+Account-Id+originator + codex identity headers `version`/`session-id`/`x-codex-installation-id`/`x-codex-window-id`/`thread-id`/`x-client-request-id`/residency, ApiKey Bearer, BedrockMantle Bearer)
