@@ -472,6 +472,12 @@
       default fallback, so a newly-added or unknown token renders as
       readable neutral text rather than crashing or hiding. Each family maps
       to a semantic pill token so both themes stay in contrast.
+
+      CROSS-POINTER: the HUMANIZED labels + tooltips for these same token
+      families live in the script's `// ---- label maps ----` block (the
+      `LABELS` object). The families here and there are the SAME set -- a new
+      token gets a color rule HERE and a label entry THERE, two adjacent
+      mutually-pointing places, so neither drifts silently.
     */
     .tok {
       display: inline-block;
@@ -505,6 +511,70 @@
     }
     .src-disabled {
       background: var(--pill-neutral-bg); color: var(--faint);
+    }
+    /* Quota STATUS / OVERAGE token colors. These values pass through from the
+       upstream ratelimit headers, so an unrecognized value keeps the neutral
+       `.tok` fallback rather than a wrong color. */
+    .qstatus-allowed { background: var(--pill-ok-bg); color: var(--pill-ok-fg); }
+    .qstatus-rejected { background: var(--pill-err-bg); color: var(--pill-err-fg); }
+    .qstatus-queued, .qstatus-allowed_warning, .qstatus-triggered {
+      background: var(--pill-warn-bg); color: var(--pill-warn-fg);
+    }
+
+    /* ---- render-layer affordances (f2 UX pass) ---- */
+
+    /* A zero-traffic group stays in the sorted table but dims (data floor --
+       de-emphasis, never collapse). */
+    .row--muted > th, .row--muted > td { opacity: 0.5; }
+
+    /* Whole-row expand: the entire primary row toggles its detail; the
+       disclosure button stays the visible affordance indicator. */
+    tr.exp-row { cursor: pointer; }
+
+    /* Usage totals reconciliation line (REQ = OK + ERR + DISC). */
+    .footnote {
+      font-family: var(--font-mono);
+      font-size: var(--fs-xs);
+      color: var(--faint);
+      margin: 0 0 var(--sp-3);
+    }
+
+    /* Doctor findings summary strip (N pass / N warn / N fail). */
+    .doctor-summary {
+      font-family: var(--font-mono);
+      font-size: var(--fs-sm);
+      color: var(--muted);
+      margin-bottom: var(--sp-3);
+    }
+
+    /* Default-collapsed disclosure for list-shaped detail (doctor
+       reachability full list + catalog priors). Native <details>, no JS. */
+    details { margin-bottom: var(--sp-3); }
+    details > summary {
+      cursor: pointer;
+      color: var(--accent);
+      font-size: var(--fs-sm);
+      padding: var(--sp-1) 0;
+    }
+    details > summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .stacklist {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sp-1);
+      padding: var(--sp-2) 0;
+      font-family: var(--font-mono);
+      font-size: var(--fs-xs);
+      color: var(--fg);
+    }
+
+    /* Clickable hero tile: the Errors tile scrolls to the groups table. */
+    .stat--link { cursor: pointer; }
+    .stat--link:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
 
     /* ---- loading skeleton ---- */
@@ -637,6 +707,13 @@
     var expanded = {};
     var uid = 0;
 
+    // Server clock for the CURRENT render round: Date.parse(env.as_of),
+    // refreshed per panel in renderPanel. All data-age arithmetic (circuit
+    // "open for", quota reset elapsed-flagging) reads THIS, never Date.now(),
+    // so client clock skew can neither invent a negative age nor un-elapse a
+    // reset. NaN when as_of is absent/unparseable -- callers degrade to "-".
+    var serverNowMs = NaN;
+
     var el = function (id) { return document.getElementById(id); };
 
     // ---- number + time humanizers (match the CLI's usage formatters) -----
@@ -731,6 +808,142 @@
       return isFinite(x) ? Math.round(x * 100) + '%' : '-';
     }
 
+    // Humane duration for a millisecond span (circuit "open for"). Coarse by
+    // design: whole seconds under a minute, whole minutes under an hour, else
+    // whole hours. Negative spans are clamped by the caller.
+    function humanDuration(ms) {
+      var sec = Math.floor(ms / 1000);
+      if (sec < 60) { return sec + 's'; }
+      if (sec < 3600) { return Math.floor(sec / 60) + 'm'; }
+      return Math.floor(sec / 3600) + 'h';
+    }
+
+    // ---- label maps ------------------------------------------------------
+
+    // Humanized labels + hover tooltips for the value-domain wire tokens,
+    // keyed by token FAMILY. The families here MIRROR the `.tok` CSS families
+    // in the <style> block above (search "Value-domain tokens"): a new token
+    // is added in BOTH adjacent, mutually-pointing places -- a color rule
+    // there, a label entry here.
+    //
+    // Each entry is `{ label, title }`. `label` is the humanized VISIBLE text
+    // (falls back to the raw token when omitted, so cramped wire tokens like
+    // `five_hour` stay verbatim); `title` is the hover tooltip, which always
+    // preserves the raw token or its meaning so nothing is lost. An unknown
+    // token (or unknown family) passes through as its raw string with no
+    // tooltip -- parity with the neutral `.tok` CSS fallback.
+    var LABELS = {
+      circuit: {
+        closed: { label: 'ok', title: 'closed - healthy, requests flow' },
+        open: { label: 'open', title: 'open - failing fast, requests shed' },
+        half_open_ready: { label: 'half-open', title: 'half_open_ready - probing recovery' }
+      },
+      reach: {
+        reachable: { label: 'reachable', title: 'last dispatch outcome was ok' },
+        degraded: { label: 'degraded', title: 'last dispatch outcome was a failure family or gate refusal' },
+        unknown: { label: 'unknown', title: 'no settled outcome yet (fresh state or post-restart)' }
+      },
+      status: {
+        Pass: { label: 'pass', title: 'Pass' },
+        Warn: { label: 'warn', title: 'Warn' },
+        Fail: { label: 'fail', title: 'Fail' }
+      },
+      verdict: {
+        'route-away': { label: 'route away', title: 'route-away - capability filtered out for this target' },
+        'force-supported': { label: 'force supported', title: 'force-supported - capability forced on for this target' }
+      },
+      prov: {
+        provider: { label: 'provider', title: 'provider - legacy per-provider unsupported_features' },
+        model: { label: 'model', title: 'model - legacy per-model unsupported_features' },
+        override: { label: 'override', title: 'override - a [capability.overrides.<spec>] entry' },
+        learned: { label: 'learned', title: 'learned - a non-expired acting negative in the learned registry' }
+      },
+      src: {
+        user: { label: 'user', title: 'user - operator catalog layer' },
+        import: { label: 'import', title: 'import - imported catalog layer' },
+        baked: { label: 'baked', title: 'baked - built-in catalog layer' },
+        disabled: { label: 'disabled', title: 'disabled - row present but disabled' },
+        missing: { label: 'missing', title: 'missing - no catalog row resolved' }
+      },
+      tier: {
+        'self-identifying': { label: 'self-identifying', title: 'the upstream declared the capability itself' },
+        inferred: { label: 'inferred', title: 'inferred from observed behavior' }
+      },
+      // Quota representative-claim. The raw token stays visible (no label
+      // override for five_hour); the window meaning goes in the tooltip.
+      claim: {
+        five_hour: { title: 'five_hour - 5-hour rolling subscription window' },
+        overage: { label: 'overage', title: 'overage - billing past the included subscription quota' }
+      },
+      // Quota STATUS / OVERAGE pass-through values (color families in CSS as
+      // `.qstatus-*`). Tooltips are light; unknown values pass through raw.
+      qstatus: {
+        allowed: { title: 'within quota' },
+        allowed_warning: { title: 'approaching the quota limit' },
+        rejected: { title: 'quota exhausted, requests rejected' },
+        queued: { title: 'requests queued behind the quota' },
+        triggered: { title: 'overage billing engaged' }
+      },
+      // Provider auto-activation reason codes. Raw token stays visible where
+      // space is tight; the meaning goes in the tooltip.
+      activation: {
+        oauth_missing: { title: 'oauth_missing - no OAuth credential on file' },
+        oauth_expired: { title: 'oauth_expired - OAuth token expired, no refresh available' },
+        oauth_store_unavailable: { title: 'oauth_store_unavailable - no OAuth store to probe (HOME or XDG absent)' },
+        not_cataloged: { title: 'not_cataloged - own-credential provider has no baked catalog rows yet' },
+        unknown: { title: 'unknown - an activation state this build does not recognize' }
+      },
+      // Health last-settled-outcome tokens.
+      outcome: {
+        ok: { label: 'ok' },
+        rate_limited: { label: 'rate limited', title: 'rate_limited' },
+        timeout: { label: 'timeout' },
+        transport_error: { label: 'transport error', title: 'transport_error' },
+        http_4xx: { label: 'http 4xx', title: 'http_4xx - a 4xx client-side rejection' },
+        http_5xx: { label: 'http 5xx', title: 'http_5xx - a 5xx server-side failure' },
+        circuit_open: { label: 'circuit open', title: 'circuit_open - derived from an open breaker' }
+      },
+      // Resolved failure-class names for the usage error breakdown.
+      class: {
+        'rate-limited': { label: 'rate limited' },
+        auth: { label: 'auth' },
+        'bad-request': { label: 'bad request' },
+        'content-policy': { label: 'content policy' },
+        'context-window': { label: 'context window' },
+        'server-error': { label: 'server error' },
+        timeout: { label: 'timeout' },
+        'network-error': { label: 'network error' },
+        overloaded: { label: 'overloaded' },
+        'feature-unsupported': { label: 'feature unsupported' },
+        unclassified: { label: 'unclassified', title: 'errors with no resolved failure class' }
+      }
+    };
+
+    // Resolve a wire token to { label, title } for a family. Unknown token or
+    // unknown family -> raw passthrough (label = raw, no tooltip), mirroring
+    // the neutral `.tok` CSS fallback so nothing crashes or hides.
+    function labelFor(family, raw) {
+      var key = (raw === null || raw === undefined) ? '' : String(raw);
+      var fam = LABELS[family];
+      var entry = fam ? fam[key] : undefined;
+      if (!entry) { return { label: key || '-', title: null }; }
+      return { label: (entry.label === undefined) ? key : entry.label, title: entry.title || null };
+    }
+
+    // A humanized text cell (a plain value, or a titled span when the family
+    // carries a tooltip) for tokens that are NOT `.tok` color pills: quota
+    // claim, activation reasons, health last-outcomes, error-class names.
+    // Returns a string when there is no tooltip (rendered via textContent) or
+    // a titled span Node otherwise.
+    function labelCell(family, raw) {
+      var lab = labelFor(family, raw);
+      if (!lab.title) { return lab.label; }
+      var span = document.createElement('span');
+      span.textContent = lab.label;
+      span.title = lab.title;
+      return span;
+    }
+
     // ---- transport -------------------------------------------------------
 
     // GET a status URL under a 2s abort budget. Returns a tagged outcome:
@@ -768,17 +981,31 @@
 
     // ---- poll loop -------------------------------------------------------
 
+    // f3 seam: callbacks fired after each completed render round (a future
+    // push / animation layer registers here via onPollTick). Empty today; the
+    // invocation stays wired so the hook cannot silently rot. A throwing
+    // callback is isolated so it never wedges the loop.
+    var pollTickCbs = [];
+    function onPollTick(cb) { pollTickCbs.push(cb); }
+    function firePollTick() {
+      pollTickCbs.forEach(function (cb) {
+        try { cb(); } catch (e) { /* a hook must not break the loop */ }
+      });
+    }
+
     function tick() {
       if (terminal || running) { return; }
       running = true;
       runRound().then(function (res) {
         running = false;
+        firePollTick();
         if (res && res.terminal) { return; }
         scheduleNext(!!(res && res.ok));
       }).catch(function () {
         // A bug in rendering must not wedge the loop; treat as a failed
         // round and keep polling with backoff.
         running = false;
+        firePollTick();
         scheduleNext(false);
       });
     }
@@ -867,9 +1094,11 @@
         // so this chain carries its own error boundary.
         fetchWindow(w).then(function (win) {
           var res = applyWindowResult(win, w);
+          firePollTick();
           if (res.terminal) { return; }
           scheduleNext(!!res.ok);
         }).catch(function () {
+          firePollTick();
           scheduleNext(false);
         });
       }
@@ -898,6 +1127,9 @@
 
       panel.classList.add('panel--ok');
       setTabState(name, null);
+      // Pin the server clock for this panel's render round so all data-age
+      // arithmetic in the builder uses as_of, never the client's Date.now().
+      serverNowMs = Date.parse(env.as_of);
       // Fresh data: an accent dot + relative/absolute as_of, with a brief
       // opacity pulse so a live poll is visibly landing (Fix 3).
       status.replaceChildren();
@@ -1063,6 +1295,15 @@
     function R(label) { return { label: label, row: true }; }
     function W(label) { return { label: label, wrap: true }; }
 
+    // Attach a header tooltip to a column descriptor, returning a NEW
+    // descriptor (the base C/N/R/W factories stay single-purpose).
+    function withTitle(col, title) {
+      var next = {};
+      Object.keys(col).forEach(function (k) { next[k] = col[k]; });
+      next.title = title;
+      return next;
+    }
+
     // Build a table with a visually-hidden caption, `scope="col"` headers,
     // and per-column alignment metadata. `expandable` prepends a leading
     // control column whose cells carry a disclosure button.
@@ -1087,6 +1328,7 @@
         var th = document.createElement('th');
         th.scope = 'col';
         th.textContent = col.label;
+        if (col.title) { th.title = col.title; }
         if (col.num) { th.className = 'num'; }
         hr.appendChild(th);
       });
@@ -1120,10 +1362,15 @@
 
     // Append an expandable row: the primary cells plus a hidden detail row
     // (a definition grid of the secondary fields) toggled by a keyboard-
-    // accessible disclosure button. Expansion persists across poll rebuilds
-    // via the `expanded` map keyed by (table caption, rowKey).
-    function xrow(tbl, rowKey, cells, detailPairs) {
+    // accessible disclosure button. The WHOLE primary row is clickable (the
+    // button stays the visible affordance); a single toggle closure drives
+    // both, with the button stopping propagation so a button click does not
+    // also fire the row handler and double-toggle. Expansion persists across
+    // poll rebuilds via the `expanded` map keyed by (table caption, rowKey).
+    // An optional `rowClass` de-emphasizes the primary row (zero-traffic).
+    function xrow(tbl, rowKey, cells, detailPairs, rowClass) {
       var tr = document.createElement('tr');
+      tr.className = 'exp-row' + (rowClass ? ' ' + rowClass : '');
 
       var detailRow = document.createElement('tr');
       detailRow.className = 'detail-row';
@@ -1145,13 +1392,22 @@
       btn.setAttribute('aria-controls', did);
       btn.setAttribute('aria-label', 'Toggle row details');
       btn.textContent = open ? 'v' : '>';
-      btn.addEventListener('click', function () {
+
+      function toggle() {
         var nowOpen = !getExpanded(tbl.key, rowKey);
         setExpanded(tbl.key, rowKey, nowOpen);
         btn.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
         btn.textContent = nowOpen ? 'v' : '>';
         detailRow.hidden = !nowOpen;
+      }
+
+      btn.addEventListener('click', function (e) {
+        // The row-level handler also toggles; stop here so a button click is
+        // not counted twice.
+        e.stopPropagation();
+        toggle();
       });
+      tr.addEventListener('click', toggle);
       extd.appendChild(btn);
       tr.appendChild(extd);
 
@@ -1191,6 +1447,70 @@
       span.className = 'tok ' + prefix + '-' + raw;
       span.textContent = (raw === null || raw === undefined) ? '-' : String(raw);
       return span;
+    }
+
+    // A `.tok` pill whose COLOR class stays keyed on the raw wire token (so
+    // styling is unaffected) but whose VISIBLE text is the humanized label
+    // and whose title preserves the raw token / meaning. Unknown token ->
+    // raw passthrough with no tooltip, exactly like `tok`.
+    function tokLabeled(prefix, family, raw) {
+      var span = tok(prefix, raw);
+      var lab = labelFor(family, raw);
+      span.textContent = lab.label;
+      if (lab.title) { span.title = lab.title; }
+      return span;
+    }
+
+    // A native default-collapsed disclosure: a summary line plus arbitrary
+    // content. No JS state and no mutation affordance -- used for list-shaped
+    // detail (doctor reachability full list, catalog priors) that must stay
+    // reachable (data floor) without dominating the panel.
+    function buildExpander(summaryText, contentNode) {
+      var det = document.createElement('details');
+      var sum = document.createElement('summary');
+      sum.textContent = summaryText;
+      det.appendChild(sum);
+      det.appendChild(contentNode);
+      return det;
+    }
+
+    // Circuit "open for" duration from the SERVER clock: max(0, serverNowMs -
+    // open_since_ms). A null open_since (closed / post-restart) or an unusable
+    // server clock renders "-" -- never a negative age, never invented
+    // pre-restart history.
+    function circuitOpenFor(openSinceMs) {
+      if (openSinceMs === null || openSinceMs === undefined || !isFinite(serverNowMs)) {
+        return '-';
+      }
+      return humanDuration(Math.max(0, serverNowMs - Number(openSinceMs)));
+    }
+
+    // Quota reset cell: a reset instant at or before the server's as_of has
+    // already passed, so it renders "elapsed" (with the absolute time in the
+    // title) rather than as a live countdown target. Compared to serverNowMs,
+    // never Date.now(). Non-positive / absent -> "-".
+    function quotaResetCell(resetMs) {
+      if (resetMs === null || resetMs === undefined || Number(resetMs) <= 0) { return '-'; }
+      if (isFinite(serverNowMs) && Number(resetMs) <= serverNowMs) {
+        var span = document.createElement('span');
+        span.textContent = 'elapsed';
+        span.title = 'reset time already passed: ' + fmtTs(resetMs);
+        return span;
+      }
+      return fmtTs(resetMs);
+    }
+
+    // Error breakdown as buildDefList pairs: one [humanized-class, count] pair
+    // per resolved failure class (incl. the "unclassified" bucket). The counts
+    // sum to the group's `errors` by construction, so an operator can eyeball
+    // the reconciliation against the "errors" entry above them.
+    function errorClassPairs(byClass) {
+      var pairs = [];
+      if (!byClass) { return pairs; }
+      Object.keys(byClass).forEach(function (k) {
+        pairs.push([labelFor('class', k).label, humanCount(byClass[k])]);
+      });
+      return pairs;
     }
 
     // A humanized numeric cell that carries the error color only when the
@@ -1244,7 +1564,10 @@
       c.appendChild(meta);
 
       var to = d.totals || {};
-      var groups = d.groups || [];
+      // Immutable copy sorted by REQ descending; the busiest group leads.
+      var groups = (d.groups || []).slice().sort(function (a, b) {
+        return num0(b.requests) - num0(a.requests);
+      });
       var cacheWrite = totalsCacheWrite(groups);
       var reasoning = num0(to.reasoning_tokens);
 
@@ -1262,10 +1585,14 @@
       if (reasoning > 0) {
         stats.appendChild(statCard('Reasoning', humanCount(to.reasoning_tokens)));
       }
-      stats.appendChild(statCard('Errors', humanCount(to.errors), { neg: num0(to.errors) > 0 }));
+      // The Errors tile doubles as a jump-to-groups affordance (wired below,
+      // only when there are groups to scroll to).
+      var errorsCard = statCard('Errors', humanCount(to.errors), { neg: num0(to.errors) > 0 });
+      stats.appendChild(errorsCard);
       c.appendChild(stats);
 
       subhead(c, 'Groups');
+      var groupsTable = null;
       if (!groups.length) {
         c.appendChild(none());
       } else {
@@ -1279,15 +1606,17 @@
         ], true);
         groups.forEach(function (g) {
           var rowKey = g.alias + '|' + (g.provider || '') + '|' + (g.model || '');
-          xrow(gt, rowKey, [
-            g.alias, g.model, g.provider,
-            humanCount(g.requests), humanCount(g.ok), negCell(g.errors),
-            humanCount(g.input_tokens), humanCount(g.output_tokens),
-            humanCount(g.cache_read_billed), groupHit(g)
-          ], [
+          // A zero-traffic group dims but stays in the sorted table.
+          var rowClass = num0(g.requests) === 0 ? 'row--muted' : null;
+          var detail = [
             ['upstream', g.upstream],
             ['ok', humanCount(g.ok)],
-            ['errors', humanCount(g.errors)],
+            ['errors', humanCount(g.errors)]
+          ];
+          // The by-class breakdown sits directly under the errors entry and
+          // sums to it (incl. the unclassified bucket).
+          detail = detail.concat(errorClassPairs(g.errors_by_class));
+          detail = detail.concat([
             ['reasoning tokens', humanCount(g.reasoning_tokens)],
             ['cache read (billed)', humanCount(g.cache_read_billed)],
             ['cache read peak', humanCount(g.cache_read_peak)],
@@ -1298,8 +1627,35 @@
             ['client disconnects', humanCount(g.client_disconnect_total)],
             ['hit% denominator', humanCount(groupDen(g))]
           ]);
+          xrow(gt, rowKey, [
+            g.alias, g.model, g.provider,
+            humanCount(g.requests), humanCount(g.ok), negCell(g.errors),
+            humanCount(g.input_tokens), humanCount(g.output_tokens),
+            humanCount(g.cache_read_billed), groupHit(g)
+          ], detail, rowClass);
         });
         c.appendChild(gt.t);
+        groupsTable = gt.t;
+        // Totals reconciliation: REQ = OK + ERR + DISC (disconnects are
+        // usually zero; a footnote rather than a new column).
+        c.appendChild(reconcileFootnote(to));
+      }
+
+      // Errors tile jumps to the groups table (where errors are actionable).
+      if (groupsTable) {
+        errorsCard.classList.add('stat--link');
+        errorsCard.setAttribute('role', 'button');
+        errorsCard.setAttribute('tabindex', '0');
+        errorsCard.title = 'jump to groups';
+        errorsCard.addEventListener('click', function () {
+          groupsTable.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+        errorsCard.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            groupsTable.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        });
       }
 
       if (d.quota) {
@@ -1310,29 +1666,54 @@
           N('utilization'), N('overage util'), C('reset')
         ]);
         trow(qt, [
-          fmtTs(q.ts_start_ms), q.claim, q.status, q.overage_status,
-          pctFrac(q.utilization), pctFrac(q.overage_utilization), fmtTsPos(q.reset_ms)
+          fmtTs(q.ts_start_ms), labelCell('claim', q.claim),
+          tokLabeled('qstatus', 'qstatus', q.status),
+          tokLabeled('qstatus', 'qstatus', q.overage_status),
+          pctFrac(q.utilization), pctFrac(q.overage_utilization), quotaResetCell(q.reset_ms)
         ]);
         c.appendChild(qt.t);
       }
 
       subhead(c, 'Would-trim');
-      c.appendChild(wouldTrimTable(d.would_trim || {}));
+      c.appendChild(wouldTrimTable(d.would_trim || {}, d.window));
 
       return c;
     }
 
-    // Shared would-trim table (usage panel + doctor panel).
-    function wouldTrimTable(wt) {
+    // Totals reconciliation footnote: REQ = OK + ERR + DISC.
+    function reconcileFootnote(to) {
+      var d = document.createElement('div');
+      d.className = 'footnote';
+      d.textContent = 'REQ ' + humanCount(to.requests) + ' = OK ' + humanCount(to.ok) +
+        ' + ERR ' + humanCount(to.errors) + ' + DISC ' + humanCount(to.client_disconnect_total);
+      return d;
+    }
+
+    // Shared would-trim table (usage panel + doctor panel). `windowLabel`
+    // states which window the figures cover ("today" on usage, "all time" on
+    // doctor). The verdict headers carry tooltips (raw header stays visible).
+    function wouldTrimTable(wt, windowLabel) {
+      var wrap = document.createElement('div');
+      if (windowLabel) {
+        var cap = document.createElement('div');
+        cap.className = 'meta';
+        cap.textContent = 'window: ' + windowLabel;
+        wrap.appendChild(cap);
+      }
       var wtt = mkTable('Would-trim opportunity', [
-        N('candidates'), N('trim tokens'), N('met'), N('unmet'), N('cold'), N('unpriced')
+        N('candidates'), N('trim tokens'),
+        withTitle(N('met'), 'MET - candidates whose trim savings cleared the floor'),
+        withTitle(N('unmet'), 'UNMET - candidates below the trim floor'),
+        withTitle(N('cold'), 'COLD - no calibrated estimate yet'),
+        withTitle(N('unpriced'), 'UNPRICED - no pricing data for the model')
       ]);
       trow(wtt, [
         humanCount(wt.candidate_requests), humanCount(wt.would_trim_tokens),
         humanCount(wt.verdict_met), humanCount(wt.verdict_unmet),
         humanCount(wt.verdict_cold), humanCount(wt.verdict_unpriced)
       ]);
-      return wtt.t;
+      wrap.appendChild(wtt.t);
+      return wrap;
     }
 
     function buildHealth(d) {
@@ -1351,8 +1732,11 @@
           var rowKey = x.state_key + '|' + (x.provider_name || '');
           xrow(t, rowKey, [
             x.state_key, x.nickname, x.provider_name,
-            tok('circuit', x.circuit), humanCount(x.rpm_available)
+            tokLabeled('circuit', 'circuit', x.circuit), humanCount(x.rpm_available)
           ], [
+            ['open for', circuitOpenFor(x.open_since_ms)],
+            ['last outcome', labelCell('outcome', x.last_outcome)],
+            ['last outcome at', fmtTsPos(x.last_outcome_at_ms)],
             ['upstream', x.upstream],
             ['seat', x.seat_label],
             ['probe in flight', String(x.half_open_probe_in_flight)]
@@ -1370,7 +1754,7 @@
           R('state key'), C('capability'), C('signal tier'), N('observations')
         ]);
         ln.forEach(function (x) {
-          trow(lt, [x.state_key, x.capability_key, tok('tier', x.signal_tier),
+          trow(lt, [x.state_key, x.capability_key, tokLabeled('tier', 'tier', x.signal_tier),
             humanCount(x.observations)]);
         });
         c.appendChild(lt.t);
@@ -1394,7 +1778,7 @@
           var rowKey = m.nickname + '|' + (m.provider || '');
           xrow(mt, rowKey, [
             m.nickname, m.provider, m.provider_kind,
-            tok('src', m.source), humanCount(e.max_context_tokens)
+            tokLabeled('src', 'src', m.source), humanCount(e.max_context_tokens)
           ], [
             ['upstream', m.upstream],
             ['verified', m.verified_at],
@@ -1428,8 +1812,8 @@
           R('target'), C('capability'), C('verdict'), C('provenance')
         ]);
         caps.forEach(function (x) {
-          trow(pt, [x.target_spec, x.capability_key, tok('verdict', x.verdict),
-            tok('prov', x.provenance)]);
+          trow(pt, [x.target_spec, x.capability_key, tokLabeled('verdict', 'verdict', x.verdict),
+            tokLabeled('prov', 'prov', x.provenance)]);
         });
         c.appendChild(pt.t);
       }
@@ -1443,12 +1827,43 @@
           R('provider'), C('kind'), C('status'), W('reason'), C('referenced')
         ]);
         act.forEach(function (x) {
-          trow(at, [x.provider_id, x.provider_kind, x.status, x.reason,
-            String(x.referenced_by_aliases)]);
+          trow(at, [x.provider_id, x.provider_kind, x.status,
+            labelCell('activation', x.reason), String(x.referenced_by_aliases)]);
         });
         c.appendChild(at.t);
       }
       return c;
+    }
+
+    // Sort rank so Fail then Warn sort above Pass; unknown statuses last.
+    function findingRank(status) {
+      if (status === 'Fail') { return 0; }
+      if (status === 'Warn') { return 1; }
+      if (status === 'Pass') { return 2; }
+      return 3;
+    }
+
+    // The detail cell for a finding. The "catalog priors" Pass row carries a
+    // "; "-joined list of model cells (each `nickname (selector) [source]:
+    // caps`, so the "]:" marker is present on a model line but not on the two
+    // prose variants -- "no priors present" / "unavailable"). A model list --
+    // even a single line -- renders one-per-line behind a default-collapsed
+    // expander (data floor: reachable, not dominant); every other finding
+    // renders its detail as plain wrapping text.
+    function findingDetailCell(f) {
+      if (f.name === 'catalog priors' && typeof f.detail === 'string' && f.detail.indexOf(']:') >= 0) {
+        var parts = f.detail.split('; ');
+        var list = document.createElement('div');
+        list.className = 'stacklist';
+        parts.forEach(function (p) {
+          var line = document.createElement('div');
+          line.textContent = p;
+          list.appendChild(line);
+        });
+        var noun = parts.length === 1 ? ' catalog prior' : ' catalog priors';
+        return buildExpander(parts.length + noun, list);
+      }
+      return f.detail;
     }
 
     function buildDoctor(d) {
@@ -1456,15 +1871,28 @@
       var report = d.report || {};
 
       subhead(c, 'Findings');
-      var findings = report.findings || [];
+      // Immutable copy: Fail/Warn sorted above Pass.
+      var findings = (report.findings || []).slice().sort(function (a, b) {
+        return findingRank(a.status) - findingRank(b.status);
+      });
       if (!findings.length) {
         c.appendChild(none());
       } else {
+        var counts = { Pass: 0, Warn: 0, Fail: 0 };
+        findings.forEach(function (f) {
+          if (counts[f.status] !== undefined) { counts[f.status] += 1; }
+        });
+        var strip = document.createElement('div');
+        strip.className = 'doctor-summary';
+        strip.textContent = counts.Pass + ' pass / ' + counts.Warn + ' warn / ' + counts.Fail + ' fail';
+        c.appendChild(strip);
+
         var ft = mkTable('Doctor findings', [
           R('section'), C('name'), C('status'), W('detail'), W('remediation')
         ]);
         findings.forEach(function (f) {
-          trow(ft, [f.section, f.name, tok('status', f.status), f.detail, f.remediation]);
+          trow(ft, [f.section, f.name, tokLabeled('status', 'status', f.status),
+            findingDetailCell(f), f.remediation]);
         });
         c.appendChild(ft.t);
       }
@@ -1472,7 +1900,7 @@
       var wt = report.panels && report.panels.would_trim;
       if (wt) {
         subhead(c, 'Would-trim');
-        c.appendChild(wouldTrimTable(wt));
+        c.appendChild(wouldTrimTable(wt, 'all time'));
       }
 
       subhead(c, 'Reachability');
@@ -1480,11 +1908,31 @@
       if (!reach.length) {
         c.appendChild(none());
       } else {
+        var total = reach.length;
+        var reachableCount = reach.filter(function (x) {
+          return x.reachability === 'reachable';
+        }).length;
+        var summary = document.createElement('div');
+        summary.className = 'meta';
+        summary.textContent = reachableCount + ' / ' + total + ' reachable';
+        c.appendChild(summary);
+
+        // Exceptions (non-reachable) enumerated inline; they are the signal.
+        var exceptions = reach.filter(function (x) { return x.reachability !== 'reachable'; });
+        if (exceptions.length) {
+          var et = mkTable('Reachability exceptions', [R('state key'), C('reachability')]);
+          exceptions.forEach(function (x) {
+            trow(et, [x.state_key, tokLabeled('reach', 'reach', x.reachability)]);
+          });
+          c.appendChild(et.t);
+        }
+
+        // Full list stays reachable behind a default-collapsed expander.
         var rt = mkTable('Target reachability', [R('state key'), C('reachability')]);
         reach.forEach(function (x) {
-          trow(rt, [x.state_key, tok('reach', x.reachability)]);
+          trow(rt, [x.state_key, tokLabeled('reach', 'reach', x.reachability)]);
         });
-        c.appendChild(rt.t);
+        c.appendChild(buildExpander('Full reachability list (' + total + ')', rt.t));
       }
       return c;
     }
