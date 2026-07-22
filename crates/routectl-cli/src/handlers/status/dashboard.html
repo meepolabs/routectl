@@ -1105,11 +1105,12 @@
     function drain(p) { return p ? p.then(function () {}) : Promise.resolve(); }
 
     // Apply a window-fetch outcome to the usage panel and report whether the
-    // round succeeded. The window fetch SHARES the loop's backoff: a transport
-    // failure (503 / network / timeout) returns { ok: false } so the caller
-    // backs off exactly like an aggregate transport failure. A per-panel
-    // `unavailable` arrives over HTTP 200 as kind 'ok' and is handled by
-    // renderPanel below, so it renders without backing off.
+    // round succeeded. Only the AGGREGATE loop consumes the ok flag for its
+    // backoff; the selector's out-of-band fetch (onWindowChange) deliberately
+    // ignores it, so a live /status/usage can never clear a backoff caused by
+    // a dead /status. A per-panel `unavailable` arrives over HTTP 200 as kind
+    // 'ok' and is handled by renderPanel below, so it renders without a
+    // transport mark.
     function applyWindowResult(win, w) {
       if (win.kind === 'forbidden') { enterTerminal(); return { terminal: true }; }
       if (win.kind === 'ok') {
@@ -1129,24 +1130,32 @@
       writeHash();
       if (w === 'today') {
         kickRefresh();
-      } else {
-        // Fire the window fetch immediately, not only on the next tick. It
-        // feeds the SAME backoff/scheduleNext path as a poll round, so a
-        // window transport failure here backs the loop off just as a failed
-        // aggregate round would; tick()'s outer .catch() has no reach here,
-        // so this chain carries its own error boundary.
+      } else if (!backingOff) {
+        // A live selection repaints the usage panel at once (not only on the
+        // next tick). This fetch repaints ONLY the usage panel; it must NOT
+        // touch the aggregate loop's backoff or schedule. Recovery from a
+        // transport failure is owned solely by a fresh AGGREGATE round (the
+        // favicon truthfulness invariant), so a succeeding window fetch may
+        // not clear backingOff or re-arm nextDueAtMs -- otherwise a live
+        // /status/usage could mask a dead /status. The countdown clock keeps
+        // reflecting the untouched aggregate schedule, so nothing display-
+        // local needs re-rendering here either.
         fetchWindow(w).then(function (win) {
-          var res = applyWindowResult(win, w);
+          applyWindowResult(win, w);
           firePollTick();
-          if (res.terminal) { updateFavicon(); return; }
-          scheduleNext(!!res.ok);
           updateFavicon();
         }).catch(function () {
+          // fetchStatus resolves every transport failure to a kind (handled
+          // in applyWindowResult -> muteUsageOnly), so this only fires on an
+          // unexpected render throw. Isolate it; leave the loop untouched.
           firePollTick();
-          scheduleNext(false);
           updateFavicon();
         });
       }
+      // While backing off (or terminal, returned above) the selection switches
+      // the VIEW only -- selectedWindow and the hash are already updated. The
+      // next successful aggregate round reads selectedWindow and renders it
+      // (see runRound), so no out-of-band fetch bypasses the backoff cadence.
     }
 
     // ---- render dispatch -------------------------------------------------
