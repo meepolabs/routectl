@@ -1,0 +1,398 @@
+//! Doctor data collection (context, probes, auth, secret classification).
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use chrono::Local;
+use routectl_auth::LocalProbe;
+use routectl_auth::oauth::types::{TokenRecord, unix_now};
+use routectl_auth::{OAuthError, OAuthStore};
+use routectl_auth::{SecretRef, default_secret_dir};
+use routectl_core::ProbeOutcome;
+use routectl_router::{
+    CatalogOverlay, Config, EffectiveRow, OverrideRegistry, derive_effective_view, is_stale_today,
+};
+
+use crate::commands::capability_legacy::present_legacy_capability_keys;
+use crate::commands::doctor_panels::compute_would_trim_panel;
+use crate::commands::parse_error_redaction::redact_config_load_error;
+use crate::commands::probe::{PROBE_DEADLINE, probe_all};
+use crate::server::CompositeStore;
+
+use super::{CapabilityConfig, CapabilityInputs, DoctorContext, PriorCell, PriorLayer};
+
+/// The network doctor gather: the no-network context PLUS one upstream
+/// reachability pass. Building the whole context in exactly ONE place
+/// ([`gather_context_no_network`]) is what keeps the two entry points from
+/// drifting -- a new context field is added once and both paths carry it; the
+/// only difference between the paths is this `probe_results` assignment.
+pub(super) async fn gather_context(config_path: &Path) -> DoctorContext {
+    let ctx = gather_context_no_network(config_path).await;
+    let probe_results = gather_probe_results(&ctx.config).await;
+    DoctorContext {
+        probe_results,
+        ..ctx
+    }
+}
+
+/// Gather every read-only input the no-network sections draw from, WITHOUT
+/// any upstream dial: `probe_results` is left empty and
+/// [`gather_probe_results`] (the only caller of `CompositeStore`/`probe_all`)
+/// is never reached. Everything else -- per-layer config/overlay load, auth
+/// via `probe_local` (no network, no refresh), secret presence checks, the
+/// orphan scan, and the would-trim panel -- is retained.
+pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
+    let raw_config = std::fs::read_to_string(config_path).ok();
+    // Read-only, per-layer load: the config and the catalog overlay load
+    // independently so the capability panel can degrade one without the
+    // other. The version section keeps its coupled "config could not be
+    // loaded" semantics -- a config parse error wins, else an overlay error
+    // -- so a present-but-broken config still never reports all-Pass. On a
+    // config failure the other sections run against defaults.
+    let config_layer = crate::server::parse_config_only(config_path);
+    let overlay_layer = crate::server::load_overlay_default();
+
+    let (config, config_parse_error) = match config_layer {
+        Ok(config) => (config, None),
+        Err(e) => (Config::default(), Some(redact_config_load_error(&e))),
+    };
+    let config_load_error = config_parse_error.clone().or_else(|| {
+        overlay_layer
+            .as_ref()
+            .err()
+            .map(|e| redact_config_load_error(e))
+    });
+
+    let capability = build_capability_inputs(&config, config_parse_error, overlay_layer.ok());
+
+    let (probes, seats, auth_store_error) = gather_auth().await;
+    let secret_checks = gather_secret_checks(&config, &probes);
+    let orphan_secrets = gather_orphan_secrets(&config);
+    let would_trim = compute_would_trim_panel(&config, Local::now());
+
+    DoctorContext {
+        config,
+        raw_config,
+        config_load_error,
+        probes,
+        seats,
+        auth_store_error,
+        secret_checks,
+        orphan_secrets,
+        probe_results: Vec::new(),
+        would_trim,
+        now_unix: unix_now(),
+        binary_version: env!("CARGO_PKG_VERSION"),
+        capability,
+    }
+}
+
+/// Build the capability section's per-layer inputs. A config parse error
+/// (already redacted) yields the "panel unavailable" state -- NOT an
+/// empty-from-default-config view. Otherwise the override rows and legacy
+/// keys come from the parsed config, and the prior cells from the overlay
+/// (or unavailable when the overlay could not be read).
+pub(super) fn build_capability_inputs(
+    config: &Config,
+    config_parse_error: Option<String>,
+    overlay: Option<CatalogOverlay>,
+) -> CapabilityInputs {
+    if let Some(err) = config_parse_error {
+        return CapabilityInputs {
+            config: None,
+            panel_unavailable: Some(err),
+        };
+    }
+
+    let override_rows = OverrideRegistry::build(config).snapshot();
+    let legacy_keys = present_legacy_capability_keys(config);
+    let priors = match overlay {
+        Some(overlay) => PriorLayer::Present(derive_prior_cells(config, &overlay)),
+        None => PriorLayer::Unavailable,
+    };
+
+    CapabilityInputs {
+        config: Some(CapabilityConfig {
+            override_rows,
+            legacy_keys,
+            priors,
+        }),
+        panel_unavailable: None,
+    }
+}
+
+/// Derive the catalog/overlay capability prior cells: one per `[models.X]`
+/// entry whose resolved catalog row is `Present`, is NOT stale, AND carries
+/// capability data. A `Missing` / `Disabled` cell (absent or explicitly
+/// disabled), a stale cell (its `verified_at` older than the catalog
+/// staleness horizon, or unparseable), or a row with no capability keys all
+/// yield NO prior -- the conservative "unknown" baseline, never a fabricated
+/// or falsely-unsupported row. Staleness uses the live clock, matching this
+/// one-shot tool's fresh-process reads.
+pub(super) fn derive_prior_cells(config: &Config, overlay: &CatalogOverlay) -> Vec<PriorCell> {
+    derive_effective_view(config, overlay)
+        .models
+        .into_iter()
+        .filter_map(|cell| {
+            let EffectiveRow::Present {
+                row,
+                source,
+                verified_at,
+            } = cell.row
+            else {
+                return None;
+            };
+            if is_stale_today(&verified_at) || row.capabilities.is_empty() {
+                return None;
+            }
+            let capabilities = row.capabilities.into_iter().collect();
+            Some(PriorCell {
+                nickname: cell.nickname,
+                selector: format!("{}/{}", cell.provider_kind, cell.upstream),
+                source,
+                capabilities,
+            })
+        })
+        .collect()
+}
+
+/// Probe every configured provider read-only through the shared `probe_all`
+/// orchestration, under the same bounded deadline the standalone `provider
+/// probe` uses. Fail-closed: if the composite credential store cannot open,
+/// every provider collapses to an `Unreachable` outcome (a WARN/FAIL finding
+/// with a reason) rather than being dropped to a silent pass. That `Err` arm is
+/// defensive and currently unreachable -- `CompositeStore::open_default`
+/// degrades a store failure to an in-memory store (with a warning) and always
+/// returns `Ok` -- but it is kept so a future non-degrading open path still
+/// fails closed here.
+async fn gather_probe_results(config: &Config) -> Vec<(String, ProbeOutcome)> {
+    match CompositeStore::open_default().await {
+        Ok(store) => probe_all(config, &store, PROBE_DEADLINE).await,
+        Err(_) => config
+            .providers
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    ProbeOutcome::Unreachable("credential store unavailable".into()),
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Probe every routectl-owned OAuth id and list stored seats through the
+/// default store. Read-only: `probe_local` performs no network or refresh
+/// and `list` no writes. A store that fails to OPEN (schema mismatch,
+/// corrupted file) returns a sanitized, path-free error string (see
+/// [`sanitize_store_open_error`]) rather than being masked as an absent
+/// store; probes then read `StoreUnavailable`.
+async fn gather_auth() -> (
+    Vec<(&'static str, LocalProbe)>,
+    Vec<(String, TokenRecord)>,
+    Option<String>,
+) {
+    let ids = routectl_auth::oauth::known_provider_ids();
+    match OAuthStore::open_default().await {
+        Ok(store) => {
+            let mut probes = Vec::with_capacity(ids.len());
+            for id in ids {
+                probes.push((*id, store.probe_local(id).await));
+            }
+            (probes, store.list().await, None)
+        }
+        Err(e) => (
+            ids.iter()
+                .map(|id| (*id, LocalProbe::StoreUnavailable))
+                .collect(),
+            Vec::new(),
+            Some(sanitize_store_open_error(&e)),
+        ),
+    }
+}
+
+/// Map an OAuth-store OPEN failure to a path-free message. Multiple
+/// [`OAuthError`] variants embed the FULL credentials-store path in their
+/// Display -- `SchemaMismatch`/`CorruptedFile` carry a `path` field, and every
+/// `Io` open failure interpolates the path mid-message (`open <path>: ...`,
+/// `credentials file <path> has permissions ...`). The doctor auth section
+/// prints this verbatim, disclosing a filesystem path. Keep only the failure
+/// CLASS and the store basename (`credentials.json`); never forward a variant's
+/// raw Display. The enum is `#[non_exhaustive]`, so the catch-all is itself a
+/// path-free class message rather than a passthrough -- fail-safe against a
+/// future path-bearing variant.
+pub(super) fn sanitize_store_open_error(err: &OAuthError) -> String {
+    const STORE_BASENAME: &str = "credentials.json";
+    match err {
+        OAuthError::SchemaMismatch {
+            found, expected, ..
+        } => format!(
+            "credentials store schema is v{found}; this binary expects v{expected}; \
+             upgrade routectl or delete {STORE_BASENAME} and re-run `routectl login`"
+        ),
+        OAuthError::CorruptedFile { .. } => {
+            format!("oauth credentials file ({STORE_BASENAME}) is corrupted")
+        }
+        OAuthError::Io(_) => {
+            format!("oauth credentials file ({STORE_BASENAME}) could not be read")
+        }
+        _ => format!("oauth credentials store ({STORE_BASENAME}) could not be opened"),
+    }
+}
+
+/// Read-only presence classification of one provider secret reference.
+/// Carries only the scheme label and a discriminant -- never a secret
+/// value, an env var name, or a full `file://` / `literal:` ref string.
+pub(super) struct SecretCheck {
+    pub(super) provider: String,
+    pub(super) scheme: &'static str,
+    pub(super) presence: SecretPresence,
+    pub(super) oauth_id: Option<String>,
+}
+
+/// Outcome of a read-only presence check. Discriminants only.
+#[derive(Clone, Copy)]
+pub(super) enum SecretPresence {
+    Present,
+    Missing,
+    Expired,
+    Unreadable,
+    StoreUnavailable,
+    UnknownOauthProvider,
+    Invalid,
+}
+
+/// The leak-safe scheme prefix of a secret URI. A bare, unprefixed value
+/// IS secret material, so it collapses to `"unknown"` rather than echoing
+/// any of its bytes.
+fn scheme_label(uri: &str) -> &'static str {
+    if uri.starts_with("oauth://") {
+        "oauth://"
+    } else if uri.starts_with("env://") {
+        "env://"
+    } else if uri.starts_with("file://") {
+        "file://"
+    } else if uri.starts_with("literal:") {
+        "literal:"
+    } else {
+        "unknown"
+    }
+}
+
+/// Classify one secret ref without resolving its value or refreshing any
+/// credential. `oauth://` reads the pre-gathered local probes (no network,
+/// no token refresh); `env://` / `file://` / `literal:` do a non-mutating
+/// existence / parse check.
+fn classify_secret_ref(
+    uri: &str,
+    probes: &[(&'static str, LocalProbe)],
+) -> (SecretPresence, Option<String>) {
+    match SecretRef::parse(uri) {
+        Ok(SecretRef::OAuth { provider, .. }) => {
+            let presence = match probes.iter().find(|p| p.0 == provider.as_str()) {
+                Some((_, LocalProbe::Present)) => SecretPresence::Present,
+                Some((_, LocalProbe::Expired)) => SecretPresence::Expired,
+                Some((_, LocalProbe::Missing)) => SecretPresence::Missing,
+                Some((_, LocalProbe::StoreUnavailable)) => SecretPresence::StoreUnavailable,
+                Some(_) | None => SecretPresence::UnknownOauthProvider,
+            };
+            (presence, Some(provider))
+        }
+        Ok(SecretRef::Env(var)) => {
+            let present = std::env::var(&var).is_ok_and(|v| !v.is_empty());
+            let presence = if present {
+                SecretPresence::Present
+            } else {
+                SecretPresence::Missing
+            };
+            (presence, None)
+        }
+        Ok(SecretRef::File(path)) => (classify_file(&path), None),
+        // A future `SecretRef` variant (the enum is `#[non_exhaustive]`)
+        // whose presence this build cannot confirm: treat conservatively as
+        // unresolved rather than assume it is usable. A `literal:` ref no
+        // longer parses (rejected at the resolver), so it lands in `Err`
+        // below and reports as Invalid.
+        Ok(_) => (SecretPresence::Missing, None),
+        Err(_) => (SecretPresence::Invalid, None),
+    }
+}
+
+/// Read-only existence + readability check of a `file://` secret path.
+fn classify_file(path: &Path) -> SecretPresence {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {
+            if std::fs::File::open(path).is_ok() {
+                SecretPresence::Present
+            } else {
+                SecretPresence::Unreadable
+            }
+        }
+        Ok(_) => SecretPresence::Unreadable,
+        Err(_) => SecretPresence::Missing,
+    }
+}
+
+pub(super) fn gather_secret_checks(
+    config: &Config,
+    probes: &[(&'static str, LocalProbe)],
+) -> Vec<SecretCheck> {
+    let mut out = Vec::new();
+    for (name, entry) in &config.providers {
+        for uri in entry.secret_uris() {
+            let scheme = scheme_label(uri);
+            let (presence, oauth_id) = classify_secret_ref(uri, probes);
+            out.push(SecretCheck {
+                provider: name.clone(),
+                scheme,
+                presence,
+                oauth_id,
+            });
+        }
+    }
+    out
+}
+
+/// Canonical paths of every `file://` secret the config references.
+fn referenced_secret_files(config: &Config) -> BTreeSet<PathBuf> {
+    let mut set = BTreeSet::new();
+    for entry in config.providers.values() {
+        for uri in entry.secret_uris() {
+            if let Ok(SecretRef::File(path)) = SecretRef::parse(uri) {
+                let canon = std::fs::canonicalize(&path).unwrap_or(path);
+                set.insert(canon);
+            }
+        }
+    }
+    set
+}
+
+/// Read-only diff of the managed secret directory against the `file://`
+/// refs the config references. Never opens a `ManagedSecretStore` (which
+/// would create the directory) and never removes a file -- it only reads
+/// the directory listing. Returns the basenames of unreferenced files.
+pub(super) fn gather_orphan_secrets(config: &Config) -> Vec<String> {
+    let Ok(dir) = default_secret_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let referenced = referenced_secret_files(config);
+    let mut orphans = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if referenced.contains(&canon) {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            orphans.push(name.to_string());
+        }
+    }
+    orphans.sort();
+    orphans
+}
