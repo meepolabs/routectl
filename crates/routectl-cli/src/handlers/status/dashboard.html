@@ -753,6 +753,98 @@
          it here too. Sparklines / bars / rings are static by design. */
       .cell-flash { animation: none; }
     }
+
+    /* ============================================================
+       Ambience, chrome finish + motion (f3, DROPPABLE)
+       Additive polish layered over the glanceability floor: sliding
+       tab indicator, frosted tab bar, breathing live-dot, ambient
+       radial tint, themed scrollbar + selection, colorblind-safe
+       status-pill dots. SEVERABLE: this whole banner plus the
+       initAmbience() call can be deleted and the glanceability + f2
+       layers stay intact -- nothing above references anything here.
+       ============================================================ */
+
+    /* Ambient tint token derived from the live accent so it tracks the
+       theme with a single definition (no per-theme block needed). */
+    :root { --ambient-tint: color-mix(in srgb, var(--accent) 7%, transparent); }
+
+    /* V-13: a fixed, subtle radial wash over the flat background. */
+    body {
+      background:
+        radial-gradient(120% 80% at 50% -10%, var(--ambient-tint), transparent 70%),
+        var(--bg);
+      background-attachment: fixed;
+    }
+
+    /* V-11: frosted translucent sticky tab bar. */
+    .tabbar {
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+
+    /* V-9: one sliding underline replaces the per-tab active border.
+       Positioned + sized in JS (initAmbience) via translateX + scaleX;
+       its transition is killed under reduced motion by the global rule
+       above, and the JS jump reads the cached reducedMotion flag. */
+    .tab[aria-selected="true"] { border-bottom-color: transparent; }
+    .tab-underline {
+      position: absolute;
+      left: 0;
+      bottom: -1px;
+      height: 2px;
+      width: 1px;
+      background: var(--accent);
+      transform-origin: left center;
+      transform: translateX(0) scaleX(0);
+      transition: transform var(--dur) var(--ease);
+      pointer-events: none;
+    }
+
+    /* V-12: the live-dot breathes while a panel is healthy; a panel in
+       a transport-down state (stale / dead / terminal) shows a solid
+       negative dot with no motion. Reads the existing panel state
+       classes only -- no new timers or flags. */
+    .live-dot { animation: livebreathe 3.4s var(--ease) infinite; }
+    @keyframes livebreathe {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.78); }
+    }
+    .panel--stale .live-dot,
+    .panel--dead .live-dot {
+      animation: none;
+      background: var(--neg);
+    }
+
+    /* V-14: themed scrollbar + accent selection. */
+    html { scrollbar-color: var(--accent) var(--surface-2); }
+    ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+    /* V-15 / V-17: colorblind-safe leading dot on status-family pills
+       (circuit / reach / status / qstatus) in the pill's own fg color.
+       Attribute-substring match keeps this self-contained -- no marker
+       class threaded through the glanceability token builder. The
+       "status-" match also covers "qstatus-". Non-status token families
+       (verdict / tier / prov / src) intentionally carry no dot. */
+    .tok[class*="circuit-"]::before,
+    .tok[class*="reach-"]::before,
+    .tok[class*="status-"]::before {
+      content: "";
+      display: inline-block;
+      width: var(--dot-size);
+      height: var(--dot-size);
+      border-radius: 50%;
+      background: currentColor;
+      margin-right: 0.4em;
+      vertical-align: 0.04em;
+    }
+
+    /* Reduced-motion: null the only new CSS animation here (the sliding
+       underline's transition is already killed by the global rule
+       above; the JS jump reads the cached reducedMotion flag). */
+    @media (prefers-reduced-motion: reduce) {
+      .live-dot { animation: none; }
+    }
   </style>
 </head>
 <body>
@@ -1424,10 +1516,7 @@
       // Fresh data: an accent dot + relative/absolute as_of, with a brief
       // opacity pulse so a live poll is visibly landing (Fix 3).
       status.replaceChildren();
-      var dot = document.createElement('span');
-      dot.className = 'live-dot';
-      dot.setAttribute('aria-hidden', 'true');
-      status.appendChild(dot);
+      status.appendChild(makeLiveDot());
       status.appendChild(document.createTextNode(formatAsOf(env.as_of)));
       pulse(status);
       body.replaceChildren(BUILDERS[name](data));
@@ -1453,6 +1542,16 @@
 
     function getPanel(agg, name) {
       return (agg && agg.panels) ? agg.panels[name] : undefined;
+    }
+
+    // The small round status indicator shared by the fresh-render and
+    // transport-down status lines. Its motion / down-state color is CSS
+    // (ambience banner); this only builds the neutral element.
+    function makeLiveDot() {
+      var dot = document.createElement('span');
+      dot.className = 'live-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      return dot;
     }
 
     // Brief opacity pulse to signal a fresh poll landed. Re-triggered each
@@ -1512,11 +1611,15 @@
       if (mode === 'stale') {
         panel.classList.add('panel--stale');
         setTabState(name, { label: 'stale', kind: 'warn' });
-        status.textContent = 'stale: ' + note;
+        status.replaceChildren();
+        status.appendChild(makeLiveDot());
+        status.appendChild(document.createTextNode('stale: ' + note));
       } else {
         panel.classList.add('panel--dead');
         setTabState(name, { label: 'offline', kind: 'error' });
-        status.textContent = 'no current data: ' + note;
+        status.replaceChildren();
+        status.appendChild(makeLiveDot());
+        status.appendChild(document.createTextNode('no current data: ' + note));
         var div = document.createElement('div');
         div.className = 'unavailable-msg';
         div.textContent = 'unavailable (transport failure)';
@@ -2685,6 +2788,48 @@
       selectTab(activeTab);
     }
 
+    // ---- ambience: sliding tab indicator (droppable) ---------------------
+
+    // The one JS entry point for the ambience banner. Creates the sliding
+    // underline and keeps it under the selected tab by OBSERVING aria-selected
+    // (set by selectTab) rather than hooking selectTab -- so the chrome layer
+    // carries no reference back to this droppable layer. Deleting the ambience
+    // CSS banner + this call fully removes the feature.
+    function initAmbience() {
+      var bar = el('tabbar');
+      if (!bar) { return; }
+      var underline = document.createElement('span');
+      underline.className = 'tab-underline';
+      underline.setAttribute('aria-hidden', 'true');
+      bar.appendChild(underline);
+
+      function position(animate) {
+        var active = bar.querySelector('[role="tab"][aria-selected="true"]');
+        if (!active) { underline.style.opacity = '0'; return; }
+        var barRect = bar.getBoundingClientRect();
+        var tabRect = active.getBoundingClientRect();
+        var still = !animate || reducedMotion;
+        if (still) { underline.style.transition = 'none'; }
+        underline.style.opacity = '1';
+        underline.style.transform =
+          'translateX(' + (tabRect.left - barRect.left) + 'px) scaleX(' + tabRect.width + ')';
+        if (still) {
+          void underline.offsetWidth; // commit the jump, then restore transition
+          underline.style.transition = '';
+        }
+      }
+
+      position(false);
+      if (window.MutationObserver) {
+        new MutationObserver(function () { position(true); }).observe(bar, {
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['aria-selected']
+        });
+      }
+      window.addEventListener('resize', function () { position(false); });
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
       // Cache the reduced-motion preference ONCE: the JS-driven count-up tween
       // and change flash read this flag (CSS animations stay in the reduced-
@@ -2697,6 +2842,7 @@
       initSelector();
       initTabs();
       initRefresh();
+      initAmbience();
       updateFavicon();
       // Back/forward or a manual hash edit re-applies view state; the sync
       // path canonicalizes any bogus hash. This never touches fetch state.
