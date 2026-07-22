@@ -83,6 +83,17 @@
       --pill-teal-bg: #d6efe8;    --pill-teal-fg: #0f4f42;
       --pill-pink-bg: #f6deea;    --pill-pink-fg: #6b2140;
       --pill-brown-bg: #ece0cf;   --pill-brown-fg: #5a3d12;
+
+      /* Glanceability visuals (f3): dedicated tokens so the quantitative
+         ramps stay independent of the semantic pill colors above. */
+      --bar-fill: #cfe0fb;
+      --ring-track: #e2e6ec;
+      --ring-fill: var(--accent);
+      --cell-flash: #d7e6ff;
+      --heat-lo: #f7dcd8;
+      --heat-mid: #fbeccb;
+      --heat-hi: #d8f0dd;
+      --dot-size: 8px;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -109,6 +120,15 @@
         --pill-teal-bg: #0f332c;    --pill-teal-fg: #6fd8c2;
         --pill-pink-bg: #3a1a2a;    --pill-pink-fg: #f0a0c0;
         --pill-brown-bg: #33260f;   --pill-brown-fg: #e0b877;
+
+        --bar-fill: #24344f;
+        --ring-track: #2a323f;
+        --ring-fill: var(--accent);
+        --cell-flash: #223047;
+        --heat-lo: #3d1a16;
+        --heat-mid: #3a2c0e;
+        --heat-hi: #14351f;
+        --dot-size: 8px;
       }
     }
 
@@ -599,6 +619,112 @@
       outline-offset: 2px;
     }
 
+    /* ============================================================
+       Glanceability visuals (f3): per-card trend sparklines,
+       proportion bars, ring gauges, magnitude-unit typography,
+       change flash, heat bands. Every color/dimension is a token
+       (above); this section carries no raw hex. All additive over
+       the numerals -- every figure still renders as text (data
+       floor), so deleting this section degrades to the f2 look.
+       ============================================================ */
+
+    /* Per-card trend sparkline under the numeral. Stroke + geometry
+       come from tokens / numeric SVG attributes; the numeral stays
+       the primary read. */
+    .spark {
+      display: block;
+      width: 100%;
+      height: 24px;
+      margin-top: var(--sp-1);
+      overflow: visible;
+    }
+    .spark polyline {
+      fill: none;
+      stroke: var(--ring-fill);
+      stroke-width: 1.5;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+      vector-effect: non-scaling-stroke;
+    }
+
+    /* Magnitude-unit suffix (K/M/B): smaller + muted so the body
+       number dominates. A zero / absent value de-emphasizes whole. */
+    .stat-value .unit, td.num .unit, th.num .unit {
+      font-size: 0.62em;
+      font-weight: 500;
+      color: var(--faint);
+      margin-left: 0.08em;
+    }
+    .mag-zero { color: var(--faint); }
+
+    /* Proportion bar behind a numeric cell (REQ / INPUT / CACHE READ):
+       a left-anchored fill sized by --pct set via style.setProperty;
+       the numeral rides on top, right-aligned by the cell. */
+    .barcell {
+      --pct: 0;
+      display: block;
+      border-radius: var(--r-sm);
+      padding: 0 var(--sp-1);
+      background: linear-gradient(to right,
+        var(--bar-fill) 0,
+        var(--bar-fill) calc(var(--pct) * 1%),
+        transparent calc(var(--pct) * 1%));
+    }
+
+    /* Ring gauge: a conic-gradient donut (the ring drawn on ::before
+       so the mask never touches the centered numeral). The mask cuts
+       a transparent center via currentColor -- an opaque alpha anchor,
+       not a theme color, so no token is spent there. Static: no motion.
+       Used for CACHE HIT and quota UTILIZATION. */
+    .ring {
+      --pct: 0;
+      position: relative;
+      display: inline-grid;
+      place-items: center;
+      width: 46px;
+      height: 46px;
+    }
+    .ring--sm { width: 34px; height: 34px; }
+    .ring::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: conic-gradient(var(--ring-fill) calc(var(--pct) * 1%), var(--ring-track) 0);
+      -webkit-mask: radial-gradient(circle at center, transparent 56%, currentColor 57%);
+      mask: radial-gradient(circle at center, transparent 56%, currentColor 57%);
+    }
+    .ring-center {
+      position: relative;
+      z-index: 1;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      font-size: var(--fs-xs);
+      font-weight: 600;
+      color: var(--fg);
+    }
+    .ring--sm .ring-center { font-size: 0.62rem; }
+
+    /* Cache-hit heat: 3 fixed bands on the hit% cell. */
+    .hitcell {
+      display: block;
+      border-radius: var(--r-sm);
+      padding: 0 var(--sp-1);
+    }
+    .hit-lo { background: var(--heat-lo); }
+    .hit-mid { background: var(--heat-mid); }
+    .hit-hi { background: var(--heat-hi); }
+
+    /* One-shot change flash on a numeric cell whose value moved on a
+       live poll. Fires only when the JS motion gate allows it (added
+       to a fresh node, so it plays exactly once); nulled under
+       reduced motion below. */
+    .cell-flash { animation: cellflash 600ms var(--ease); }
+    @keyframes cellflash {
+      from { background-color: var(--cell-flash); }
+      to { background-color: transparent; }
+    }
+
     /* ---- loading skeleton ---- */
     .skeleton { display: flex; flex-direction: column; gap: var(--sp-2); }
     .skeleton span {
@@ -622,6 +748,10 @@
       .skeleton span { animation: none; }
       .panel-status.pulse { animation: none; }
       .windowsel button:active, .exp-btn:active, .refresh:active { transform: none; }
+      /* f3 motion: the count-up tween is JS-gated on the cached
+         reducedMotion flag; the cell flash is a CSS animation, so null
+         it here too. Sparklines / bars / rings are static by design. */
+      .cell-flash { animation: none; }
     }
   </style>
 </head>
@@ -785,21 +915,6 @@
     function groupDen(g) {
       return num0(g.input_tokens) + num0(g.cache_read_billed) +
         num0(g.cache_write_5m) + num0(g.cache_write_1h);
-    }
-
-    function groupHit(g) {
-      return hitPct(num0(g.cache_read_billed), groupDen(g));
-    }
-
-    // Totals hit%: sum numerator and denominator across the groups (the
-    // totals object lacks the cache_write fields), same ratio rule.
-    function totalsHit(groups) {
-      var num = 0, den = 0;
-      groups.forEach(function (g) {
-        num += num0(g.cache_read_billed);
-        den += groupDen(g);
-      });
-      return hitPct(num, den);
     }
 
     // Totals cache-write: the totals wire object lacks the cache_write
@@ -1027,6 +1142,114 @@
       });
     }
 
+    // ---- glanceability viz store (f3) ------------------------------------
+
+    // Six hero metrics tracked as per-poll DELTAS of their cumulative totals,
+    // sampled ONLY from the today-window poll path (the hero totals are
+    // window-cumulative, so raw plots are ramps and cross-window samples
+    // fabricate trends -- deltas are the honest rate proxy). A sample is
+    // {t: Date.now(), v: delta}; a negative delta (ledger reset / midnight
+    // rollover) appends NO sample and rebaselines, so the resulting time hole
+    // renders the discontinuity. Non-today windows pause both sampling and
+    // display. Buffers are bounded to SPARK_CAP; prevRaw / renderedNum are
+    // one-per-key. GAP_MS (~2.5x cadence) is the sparkline split + no-recovery-
+    // tween threshold: a failed / skipped round leaves a time hole wider than
+    // this, which reads as a break rather than a connected line.
+    var HERO_KEYS = ['requests', 'input', 'output', 'cache_read', 'cache_write', 'reasoning'];
+    var SPARK_CAP = 60;
+    var GAP_MS = Math.round(BASE_MS * 2.5);
+
+    var sparkBuf = {};    // key -> [{t, v}] bounded delta samples
+    var prevRaw = {};     // key -> last raw cumulative total (delta basis)
+    var renderedNum = {}; // key -> last displayed cumulative (tween basis)
+    var tweenRAF = {};    // key -> in-flight requestAnimationFrame id
+    HERO_KEYS.forEach(function (k) { sparkBuf[k] = []; });
+
+    var lastPollSampleT = 0;   // wall time of the last committed sample round
+    var reducedMotion = false; // prefers-reduced-motion, cached ONCE at init
+    var prevGroupCell = {};    // "rowKey|col" -> last displayed group-cell string
+
+    // Per-render motion context, set immediately before every usage render so
+    // buildUsage can tell a today-window poll commit (fresh sparkline point +
+    // count-up tween + change flash) from a view-only repaint (a window switch,
+    // which must not animate). `gap` true suppresses the recovery tween.
+    var vizCtx = { today: false, motion: false, gap: true, tween: null };
+    function viewOnlyCtx() { return { today: false, motion: false, gap: true, tween: null }; }
+
+    function pushSpark(key, sample) {
+      var buf = sparkBuf[key];
+      buf.push(sample);
+      if (buf.length > SPARK_CAP) { buf.splice(0, buf.length - SPARK_CAP); }
+    }
+
+    // The raw cumulative total feeding each hero key (totalsCacheWrite sums the
+    // cache-write buckets the totals object omits; see below).
+    function heroRaw(data, key) {
+      var to = data.totals || {};
+      if (key === 'requests') { return num0(to.requests); }
+      if (key === 'input') { return num0(to.input_tokens); }
+      if (key === 'output') { return num0(to.output_tokens); }
+      if (key === 'cache_read') { return num0(to.cache_read_billed); }
+      if (key === 'cache_write') { return totalsCacheWrite(data.groups || []); }
+      if (key === 'reasoning') { return num0(to.reasoning_tokens); }
+      return 0;
+    }
+
+    // Prepare the viz context for a today-window poll render and, when the
+    // panel carries live usage data, commit one delta sample per hero metric.
+    // Called ONLY from the aggregate poll path (runRound, today selected) --
+    // the sole source of today-window data (a switch back to today re-enters
+    // via kickRefresh -> runRound), so a committed sample is always genuine
+    // poll data, never the selector's out-of-band fetch.
+    function prepareTodaySample(env) {
+      vizCtx = { today: true, motion: false, gap: true, tween: null };
+      var live = env && env.schema_version === EXPECTED.usage && !env.unavailable && env.data;
+      if (!live) { return; }
+      var now = Date.now();
+      var gap = (lastPollSampleT === 0) || (now - lastPollSampleT > GAP_MS);
+      var motion = !reducedMotion && !document.hidden;
+      var tween = {};
+      HERO_KEYS.forEach(function (key) {
+        var cur = heroRaw(env.data, key);
+        var prev = prevRaw[key];
+        prevRaw[key] = cur;
+        if (prev === undefined || cur < prev) { return; } // rebaseline: no sample
+        pushSpark(key, { t: now, v: cur - prev });
+        if (!gap && motion && renderedNum[key] !== undefined && renderedNum[key] !== cur) {
+          tween[key] = { from: renderedNum[key], to: cur };
+        }
+      });
+      vizCtx.motion = motion;
+      vizCtx.gap = gap;
+      vizCtx.tween = tween;
+      lastPollSampleT = now;
+    }
+
+    // rAF count-up: interpolate the raw cumulative from -> to over ~300ms,
+    // re-formatting through magSpan each frame so the K/M/B suffix transitions
+    // fall out. Cancel-on-replace keeps at most one rAF per key.
+    function tweenValue(node, from, to, key) {
+      var dur = 300;
+      var start = null;
+      function frame(ts) {
+        if (start === null) { start = ts; }
+        var p = (ts - start) / dur;
+        if (p >= 1) { p = 1; }
+        node.replaceChildren(magSpan(Math.round(from + (to - from) * p)));
+        if (p < 1) { tweenRAF[key] = requestAnimationFrame(frame); }
+        else { delete tweenRAF[key]; }
+      }
+      tweenRAF[key] = requestAnimationFrame(frame);
+    }
+
+    function cancelTween(key) {
+      if (tweenRAF[key]) { cancelAnimationFrame(tweenRAF[key]); delete tweenRAF[key]; }
+    }
+
+    function cancelAllTweens() {
+      Object.keys(tweenRAF).forEach(function (k) { cancelTween(k); });
+    }
+
     function tick() {
       if (terminal || running) { return; }
       running = true;
@@ -1092,7 +1315,11 @@
         renderPanel('config', getPanel(agg.json, 'config'));
         renderPanel('doctor', getPanel(agg.json, 'doctor'));
         if (w === 'today' && selectedWindow === 'today') {
-          renderPanel('usage', getPanel(agg.json, 'usage'));
+          var usageEnv = getPanel(agg.json, 'usage');
+          // Sample the today-window deltas BEFORE the render so the fresh
+          // point is in the buffer when buildUsage draws the sparklines.
+          prepareTodaySample(usageEnv);
+          renderPanel('usage', usageEnv);
         }
         lastSuccess = new Date();
         clearBanner();
@@ -1114,7 +1341,10 @@
     function applyWindowResult(win, w) {
       if (win.kind === 'forbidden') { enterTerminal(); return { terminal: true }; }
       if (win.kind === 'ok') {
-        if (selectedWindow === w) { renderPanel('usage', win.json); }
+        // A window fetch is never today-window data (today re-enters via the
+        // aggregate poll path), so this repaint is view-only: no sampling, no
+        // tween, no flash.
+        if (selectedWindow === w) { vizCtx = viewOnlyCtx(); renderPanel('usage', win.json); }
         return { ok: true };
       }
       if (selectedWindow === w) { muteUsageOnly(win.kind); }
@@ -1613,15 +1843,144 @@
 
     // A humanized numeric cell that carries the error color only when the
     // value is positive (errors / negative signals), else a plain figure.
+    // Renders through magSpan so its K/M/B suffix stays muted like the rest.
     function negCell(n) {
-      var s = humanCount(n);
-      if (num0(n) > 0) {
-        var span = document.createElement('span');
-        span.className = 'neg';
-        span.textContent = s;
+      var span = magSpan(n);
+      if (num0(n) > 0) { span.classList.add('neg'); }
+      return span;
+    }
+
+    // ---- glanceability render helpers (f3) -------------------------------
+
+    // Magnitude number with a smaller, muted K/M/B suffix in its own span.
+    // Number formatting is IDENTICAL to humanCount (humanCount stays untouched
+    // for deflists / footnotes); this only splits the suffix for typography and
+    // de-emphasizes a zero / absent value. Returns a span (used in stat cards
+    // and the main numeric table cells).
+    function magSpan(n) {
+      var span = document.createElement('span');
+      if (n === null || n === undefined || !isFinite(Number(n))) {
+        span.className = 'mag-zero';
+        span.textContent = '-';
         return span;
       }
-      return s;
+      var x = Number(n), neg = x < 0, a = Math.abs(x);
+      if (x === 0) { span.className = 'mag-zero'; }
+      if (a < 10000) {
+        span.appendChild(document.createTextNode((neg ? '-' : '') + String(Math.trunc(a))));
+        return span;
+      }
+      var v, s;
+      if (a >= 1e9) { v = a / 1e9; s = 'B'; }
+      else if (a >= 1e6) { v = a / 1e6; s = 'M'; }
+      else { v = a / 1e3; s = 'K'; }
+      var body = v.toFixed(1);
+      if (body.slice(-2) === '.0') { body = body.slice(0, -2); }
+      span.appendChild(document.createTextNode((neg ? '-' : '') + body));
+      var unit = document.createElement('span');
+      unit.className = 'unit';
+      unit.textContent = s;
+      span.appendChild(unit);
+      return span;
+    }
+
+    // SVG namespace for the sparklines. All sparkline SVG is built with
+    // createElementNS + setAttribute ONLY -- every attribute value is numeric-
+    // by-construction (viewBox, polyline points) or a static literal, so no
+    // wire / user string is ever written into the DOM as markup. This keeps the
+    // page's textContent-only posture (innerHTML is never used) and the
+    // page.rs mutation-channel scan intact (this namespace literal opens with a
+    // quote-then-letter, not a quote-then-slash, so it is not a path literal).
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+
+    // A short trend sparkline from a metric's delta buffer. The polyline is
+    // split into independent segments wherever the inter-sample time gap
+    // exceeds GAP_MS, so a poll hole (transport failure, hidden tab, sleep,
+    // window pause) renders as a break, never a line drawn across it. The
+    // vertical scale is fit to the buffer's min/max with a div-by-zero guard
+    // (a flat buffer draws a centered line).
+    function sparkline(samples) {
+      var W = 120, H = 24;
+      var svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('class', 'spark');
+      svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+      svg.setAttribute('preserveAspectRatio', 'none');
+      svg.setAttribute('aria-hidden', 'true');
+      if (!samples || samples.length < 2) { return svg; }
+      var min = samples[0].v, max = samples[0].v;
+      samples.forEach(function (s) {
+        if (s.v < min) { min = s.v; }
+        if (s.v > max) { max = s.v; }
+      });
+      var vspan = max - min;
+      var t0 = samples[0].t, t1 = samples[samples.length - 1].t, tspan = t1 - t0;
+      function px(s) {
+        var x = tspan > 0 ? (s.t - t0) / tspan * W : W;
+        var y = vspan > 0 ? (H - 2) - ((s.v - min) / vspan) * (H - 4) : H / 2;
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }
+      var seg = [];
+      function flush() {
+        if (seg.length >= 2) {
+          var pl = document.createElementNS(SVG_NS, 'polyline');
+          pl.setAttribute('points', seg.join(' '));
+          svg.appendChild(pl);
+        }
+        seg = [];
+      }
+      for (var i = 0; i < samples.length; i++) {
+        if (i > 0 && (samples[i].t - samples[i - 1].t) > GAP_MS) { flush(); }
+        seg.push(px(samples[i]));
+      }
+      flush();
+      return svg;
+    }
+
+    // A conic-gradient ring gauge with a centered numeral (data floor: the
+    // numeral is primary; the ring is a static gauge of the current value).
+    // pct is clamped to 0..100; --pct drives the CSS conic-gradient.
+    function ringGauge(pct, centerText, small) {
+      var clamped = Math.max(0, Math.min(100, isFinite(pct) ? pct : 0));
+      var ring = document.createElement('div');
+      ring.className = 'ring' + (small ? ' ring--sm' : '');
+      ring.style.setProperty('--pct', clamped);
+      var center = document.createElement('span');
+      center.className = 'ring-center';
+      center.textContent = centerText;
+      ring.appendChild(center);
+      return ring;
+    }
+
+    // A numeric cell wrapped in a proportion bar sized by value/max. The
+    // content node (a magSpan) rides on top; --pct is the fill fraction.
+    function barCell(contentNode, value, max) {
+      var span = document.createElement('span');
+      span.className = 'barcell';
+      var pct = max > 0 ? Math.max(0, Math.min(100, (num0(value) / max) * 100)) : 0;
+      span.style.setProperty('--pct', pct);
+      span.appendChild(contentNode);
+      return span;
+    }
+
+    // Three fixed heat bands for a cache-hit ratio (higher is better): hi >=
+    // 70%, mid 40-70%, lo < 40%. A degenerate denominator gets no band (the
+    // ratio itself renders "-"). Thresholds are fixed and theme-checkable.
+    function heatBand(num, den) {
+      if (den <= 0) { return ''; }
+      var pct = num / den * 100;
+      if (pct >= 70) { return 'hit-hi'; }
+      if (pct >= 40) { return 'hit-mid'; }
+      return 'hit-lo';
+    }
+
+    // The hit% cell: the ratio string on a fixed heat band.
+    function hitCell(num, den) {
+      var span = document.createElement('span');
+      span.className = 'hitcell';
+      var band = heatBand(num, den);
+      if (band) { span.classList.add(band); }
+      span.textContent = hitPct(num, den);
+      return span;
     }
 
     function subhead(container, text) {
@@ -1652,6 +2011,50 @@
       return card;
     }
 
+    // A hero stat card carrying a magSpan numeral, a trend sparkline (today
+    // window only -- non-today pauses display), and the count-up tween on a
+    // today-window poll commit. renderedNum tracks the displayed cumulative so
+    // the next commit tweens from it; cancelTween keeps at most one rAF per key
+    // (cancel-on-replace, since the card DOM is rebuilt each render).
+    function heroCard(key, label, rawVal, flow) {
+      var card = document.createElement('div');
+      card.className = 'stat' + (flow ? ' stat--flow' : '');
+      var v = document.createElement('div');
+      v.className = 'stat-value';
+      cancelTween(key);
+      var tw = vizCtx.tween && vizCtx.tween[key];
+      if (tw && vizCtx.motion) {
+        v.appendChild(magSpan(Math.round(tw.from)));
+        tweenValue(v, tw.from, tw.to, key);
+      } else {
+        v.appendChild(magSpan(rawVal));
+      }
+      renderedNum[key] = num0(rawVal);
+      card.appendChild(v);
+      if (selectedWindow === 'today') { card.appendChild(sparkline(sparkBuf[key])); }
+      var l = document.createElement('div');
+      l.className = 'stat-label';
+      l.textContent = label;
+      card.appendChild(l);
+      return card;
+    }
+
+    // A hero stat card whose value is a ring gauge (CACHE HIT): the numeral is
+    // centered in the ring, no sparkline (a ratio gauge, not a rate series).
+    function statCardRing(label, pctNum, centerText) {
+      var card = document.createElement('div');
+      card.className = 'stat';
+      var v = document.createElement('div');
+      v.className = 'stat-value';
+      v.appendChild(ringGauge(pctNum, centerText, false));
+      card.appendChild(v);
+      var l = document.createElement('div');
+      l.className = 'stat-label';
+      l.textContent = label;
+      card.appendChild(l);
+      return card;
+    }
+
     // ---- four panel-specific builders ------------------------------------
 
     function buildUsage(d) {
@@ -1669,19 +2072,30 @@
       var cacheWrite = totalsCacheWrite(groups);
       var reasoning = num0(to.reasoning_tokens);
 
+      // Cumulative cache-hit ratio for the ring gauge: sum numerator and
+      // denominator across groups (the totals object lacks the cache_write
+      // fields), then the shared hitPct ratio rule renders the centered text.
+      var hitNum = 0, hitDen = 0;
+      groups.forEach(function (g) { hitNum += num0(g.cache_read_billed); hitDen += groupDen(g); });
+      var hitStr = hitPct(hitNum, hitDen);
+      var hitPctNum = hitDen > 0 ? (hitNum / hitDen * 100) : 0;
+
       // Hero stat cards. The token-flow figures (Input / Output / Cache read /
       // Cache write) are clustered visually. Input is RAW input, kept SEPARATE
-      // from the cache-write buckets rather than bundled (Fix 4b/5).
+      // from the cache-write buckets rather than bundled (Fix 4b/5). The six
+      // flow/count metrics carry a delta sparkline + count-up tween; Cache hit
+      // is a ratio ring; Errors keeps its jump affordance and is excluded from
+      // the trend series.
       var stats = document.createElement('div');
       stats.className = 'stats';
-      stats.appendChild(statCard('Requests', humanCount(to.requests)));
-      stats.appendChild(statCard('Input (raw)', humanCount(to.input_tokens), { flow: true }));
-      stats.appendChild(statCard('Output', humanCount(to.output_tokens), { flow: true }));
-      stats.appendChild(statCard('Cache read', humanCount(to.cache_read_billed), { flow: true }));
-      stats.appendChild(statCard('Cache write', humanCount(cacheWrite), { flow: true }));
-      stats.appendChild(statCard('Cache hit', totalsHit(groups)));
+      stats.appendChild(heroCard('requests', 'Requests', num0(to.requests), false));
+      stats.appendChild(heroCard('input', 'Input (raw)', num0(to.input_tokens), true));
+      stats.appendChild(heroCard('output', 'Output', num0(to.output_tokens), true));
+      stats.appendChild(heroCard('cache_read', 'Cache read', num0(to.cache_read_billed), true));
+      stats.appendChild(heroCard('cache_write', 'Cache write', cacheWrite, true));
+      stats.appendChild(statCardRing('Cache hit', hitPctNum, hitStr));
       if (reasoning > 0) {
-        stats.appendChild(statCard('Reasoning', humanCount(to.reasoning_tokens)));
+        stats.appendChild(heroCard('reasoning', 'Reasoning', reasoning, false));
       }
       // The Errors tile doubles as a jump-to-groups affordance (wired below,
       // only when there are groups to scroll to).
@@ -1702,6 +2116,19 @@
           R('alias'), C('model'), C('provider'), N('req'), N('ok'), N('err'),
           N('input'), N('output'), N('cache read'), N('hit%')
         ], true);
+        // Per-column maxima for the proportion bars (REQ / INPUT / CACHE READ),
+        // computed per table build.
+        var maxReq = 0, maxInput = 0, maxCacheRead = 0;
+        groups.forEach(function (g) {
+          maxReq = Math.max(maxReq, num0(g.requests));
+          maxInput = Math.max(maxInput, num0(g.input_tokens));
+          maxCacheRead = Math.max(maxCacheRead, num0(g.cache_read_billed));
+        });
+        // Change-flash baseline: only today-window poll commits update it, so a
+        // window switch (different data) never flashes. Rebuilt each commit so
+        // the store stays bounded to the current groups.
+        var flashOn = vizCtx.today && vizCtx.motion && !vizCtx.gap;
+        var nextFlash = {};
         groups.forEach(function (g) {
           var rowKey = g.alias + '|' + (g.provider || '') + '|' + (g.model || '');
           // A zero-traffic group dims but stays in the sorted table.
@@ -1725,13 +2152,30 @@
             ['client disconnects', humanCount(g.client_disconnect_total)],
             ['hit% denominator', humanCount(groupDen(g))]
           ]);
+          // Flash a numeric cell whose display string moved since the last
+          // commit; update the baseline regardless so it never goes stale.
+          function flashCell(node, col, str) {
+            var fk = rowKey + '|' + col;
+            if (vizCtx.today) {
+              if (flashOn && prevGroupCell[fk] !== undefined && prevGroupCell[fk] !== str) {
+                node.classList.add('cell-flash');
+              }
+              nextFlash[fk] = str;
+            }
+            return node;
+          }
           xrow(gt, rowKey, [
             g.alias, g.model, g.provider,
-            humanCount(g.requests), humanCount(g.ok), negCell(g.errors),
-            humanCount(g.input_tokens), humanCount(g.output_tokens),
-            humanCount(g.cache_read_billed), groupHit(g)
+            flashCell(barCell(magSpan(g.requests), num0(g.requests), maxReq), 'req', humanCount(g.requests)),
+            flashCell(magSpan(g.ok), 'ok', humanCount(g.ok)),
+            flashCell(negCell(g.errors), 'err', humanCount(g.errors)),
+            flashCell(barCell(magSpan(g.input_tokens), num0(g.input_tokens), maxInput), 'input', humanCount(g.input_tokens)),
+            flashCell(magSpan(g.output_tokens), 'output', humanCount(g.output_tokens)),
+            flashCell(barCell(magSpan(g.cache_read_billed), num0(g.cache_read_billed), maxCacheRead), 'cread', humanCount(g.cache_read_billed)),
+            hitCell(num0(g.cache_read_billed), groupDen(g))
           ], detail, rowClass);
         });
+        if (vizCtx.today) { prevGroupCell = nextFlash; }
         c.appendChild(gt.t);
         groupsTable = gt.t;
         // Totals reconciliation: REQ = OK + ERR + DISC (disconnects are
@@ -1763,11 +2207,14 @@
           R('window start'), C('claim'), C('status'), C('overage'),
           N('utilization'), N('overage util'), C('reset')
         ]);
+        var utilNum = (q.utilization === null || q.utilization === undefined)
+          ? NaN : Number(q.utilization) * 100;
         trow(qt, [
           fmtTs(q.ts_start_ms), labelCell('claim', q.claim),
           tokLabeled('qstatus', 'qstatus', q.status),
           tokLabeled('qstatus', 'qstatus', q.overage_status),
-          pctFrac(q.utilization), pctFrac(q.overage_utilization), quotaResetCell(q.reset_ms)
+          ringGauge(utilNum, pctFrac(q.utilization), true),
+          pctFrac(q.overage_utilization), quotaResetCell(q.reset_ms)
         ]);
         c.appendChild(qt.t);
       }
@@ -2239,6 +2686,11 @@
     }
 
     document.addEventListener('DOMContentLoaded', function () {
+      // Cache the reduced-motion preference ONCE: the JS-driven count-up tween
+      // and change flash read this flag (CSS animations stay in the reduced-
+      // motion block); no live listener, so the read never re-runs mid-session.
+      reducedMotion = !!(window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches);
       // Restore view state from the hash BEFORE the first tick so the initial
       // render lands on the requested tab/window.
       applyHash();
@@ -2254,8 +2706,13 @@
         updateSelectorUI();
       });
       // A hidden tab throttles the poll timer, so re-evaluate staleness (and
-      // the icon) whenever the tab regains attention.
-      document.addEventListener('visibilitychange', updateFavicon);
+      // the icon) whenever the tab regains attention. A hidden tab also cancels
+      // any in-flight count-up (no replay on resume -- the next poll commit
+      // renders the settled value directly).
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) { cancelAllTweens(); }
+        updateFavicon();
+      });
       window.addEventListener('focus', updateFavicon);
       window.addEventListener('pageshow', updateFavicon);
       tick();
