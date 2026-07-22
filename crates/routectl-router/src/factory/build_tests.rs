@@ -681,7 +681,6 @@ mod build_resolved_models_tests {
     }
 }
 
-
 #[cfg(test)]
 mod managed_token_tests {
     //! Pin the v0.7 OAuth-aware `resolve_token_source` semantics:
@@ -770,7 +769,6 @@ mod managed_token_tests {
         );
     }
 }
-
 
 #[cfg(test)]
 #[cfg(feature = "openai-responses")]
@@ -959,7 +957,6 @@ mod openai_responses_account_id_tests {
     }
 }
 
-
 #[cfg(test)]
 mod anthropic_api_config_propagation_tests {
     //! Pin that `context_management` flows from `ProviderEntry::AnthropicApi`
@@ -1109,7 +1106,6 @@ mod anthropic_api_config_propagation_tests {
     }
 }
 
-
 #[cfg(test)]
 mod forwarded_provider_build_tests {
     //! Regression coverage for the gap `validate_provider_credential_sources`
@@ -1172,7 +1168,6 @@ mod forwarded_provider_build_tests {
         );
     }
 }
-
 
 #[cfg(all(test, feature = "gemini"))]
 mod gemini_cloud_code_factory_tests {
@@ -1388,4 +1383,3 @@ mod gemini_cloud_code_factory_tests {
         }
     }
 }
-

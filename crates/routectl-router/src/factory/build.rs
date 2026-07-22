@@ -1288,3 +1288,7 @@ fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "build_tests.rs"]
+mod build_tests;

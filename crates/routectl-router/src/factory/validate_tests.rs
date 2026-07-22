@@ -317,7 +317,6 @@ mod base_url_validation_tests {
     }
 }
 
-
 #[cfg(test)]
 #[cfg(feature = "bedrock")]
 mod bedrock_validation_tests {
@@ -549,7 +548,6 @@ mod bedrock_validation_tests {
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 }
-
 
 #[cfg(test)]
 mod validate_alias_chain_targets_tests {
@@ -830,7 +828,6 @@ mod validate_alias_chain_targets_tests {
     }
 }
 
-
 #[cfg(test)]
 mod validate_reasoning_defaults_tests {
     //! Unit tests for `validate_reasoning_defaults`.
@@ -953,7 +950,6 @@ mod validate_reasoning_defaults_tests {
     }
 }
 
-
 #[cfg(test)]
 mod validate_registry_patterns_tests {
     //! Tests for the `[registry]` glob-key validator: a malformed glob
@@ -995,7 +991,6 @@ mod validate_registry_patterns_tests {
         validate_registry_patterns(&cfg).expect("clean registry keys must validate");
     }
 }
-
 
 #[cfg(test)]
 mod validate_alias_patterns_tests {
@@ -1041,7 +1036,6 @@ mod validate_alias_patterns_tests {
         validate_alias_patterns(&cfg).expect("clean alias keys must validate");
     }
 }
-
 
 #[cfg(test)]
 mod validate_mitm_config_tests {
@@ -1226,7 +1220,6 @@ mod validate_mitm_config_tests {
     }
 }
 
-
 #[cfg(test)]
 mod validate_provider_credential_sources_tests {
     //! Config-BOUNDARY tests (parse via `toml::from_str`, not bare-struct
@@ -1314,7 +1307,6 @@ kind = "anthropic-api"
         assert!(msg.contains("own"), "msg: {msg}");
     }
 }
-
 
 #[cfg(test)]
 mod collect_config_validation_tests {
