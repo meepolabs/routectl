@@ -1,5 +1,11 @@
 //! Unit tests for the v0.6.0 `merge_header_extras` helper.
 use super::*;
+use std::sync::Arc;
+
+use routectl_core::{ChatChunk, ChatResponse, Error, Provider, Result};
+
+use crate::resolved::ResolvedModel;
+use crate::router::chain::into_one_dispatch_target;
 
 /// Minimal provider stub so the `apply_layered_overlays` fixture can
 /// build a real `Arc<ResolvedModel>` (which requires an
