@@ -34,7 +34,7 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::server::load_overlay_default;
 
 /// Wire-shape version of the config panel payload.
-const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// The provenance-annotated effective view plus the activation inventory. Every
 /// field is a display-safe projection: model economics and capability verdicts
