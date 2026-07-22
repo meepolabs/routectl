@@ -45,7 +45,11 @@ use crate::server::CompositeStore;
 /// v1 -> v2: the reserved `capability` section became a real producer
 /// (override rows, catalog priors, the runtime-only learned line, and the
 /// legacy-key migrate nudge).
-const SCHEMA_VERSION: u32 = 2;
+///
+/// v2 -> v3: the status doctor panel's per-target reachability is derived
+/// from the last settled dispatch outcome (three states: reachable / unknown
+/// / degraded) instead of the coarse circuit phase.
+const SCHEMA_VERSION: u32 = 3;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -1864,8 +1868,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_two() {
-        assert_eq!(SCHEMA_VERSION, 2);
+    fn schema_version_is_three() {
+        assert_eq!(SCHEMA_VERSION, 3);
         let context = ctx(
             config_with_overrides(),
             Some("version = 3\n"),
@@ -1873,7 +1877,7 @@ mod tests {
             Vec::new(),
         );
         let report = build_report(&context);
-        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.schema_version, 3);
         // JSON mode carries the same capability content as the human render.
         let value = serde_json::to_value(&report).expect("serialize");
         let blob = value.to_string();
@@ -2807,7 +2811,7 @@ mod tests {
         let network = build_report(&context);
         let no_net = build_report_no_network(&context);
 
-        assert_eq!(no_net.schema_version, 2);
+        assert_eq!(no_net.schema_version, 3);
         assert!(
             no_net.findings.iter().all(|f| f.section != "probe"),
             "no-network report must have no probe rows"
