@@ -84,7 +84,7 @@
       --pill-pink-bg: #f6deea;    --pill-pink-fg: #6b2140;
       --pill-brown-bg: #ece0cf;   --pill-brown-fg: #5a3d12;
 
-      /* Glanceability visuals (f3): dedicated tokens so the quantitative
+      /* Glanceability visuals: dedicated tokens so the quantitative
          ramps stay independent of the semantic pill colors above. */
       --bar-fill: #cfe0fb;
       --ring-track: #e2e6ec;
@@ -93,7 +93,7 @@
       --heat-lo: #f7dcd8;
       --heat-mid: #fbeccb;
       --heat-hi: #d8f0dd;
-      --dot-size: 8px;
+      --dot-size: 6px;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -128,7 +128,7 @@
         --heat-lo: #3d1a16;
         --heat-mid: #3a2c0e;
         --heat-hi: #14351f;
-        --dot-size: 8px;
+        --dot-size: 6px;
       }
     }
 
@@ -563,7 +563,7 @@
       background: var(--pill-warn-bg); color: var(--pill-warn-fg);
     }
 
-    /* ---- render-layer affordances (f2 UX pass) ---- */
+    /* ---- render-layer affordances ---- */
 
     /* A zero-traffic group stays in the sorted table but dims (data floor --
        de-emphasis, never collapse). */
@@ -620,12 +620,13 @@
     }
 
     /* ============================================================
-       Glanceability visuals (f3): per-card trend sparklines,
+       Glanceability visuals: per-card trend sparklines,
        proportion bars, ring gauges, magnitude-unit typography,
        change flash, heat bands. Every color/dimension is a token
        (above); this section carries no raw hex. All additive over
        the numerals -- every figure still renders as text (data
-       floor), so deleting this section degrades to the f2 look.
+       floor), so deleting this section degrades to the plain
+       render-layer look.
        ============================================================ */
 
     /* Per-card trend sparkline under the numeral. Stroke + geometry
@@ -748,27 +749,28 @@
       .skeleton span { animation: none; }
       .panel-status.pulse { animation: none; }
       .windowsel button:active, .exp-btn:active, .refresh:active { transform: none; }
-      /* f3 motion: the count-up tween is JS-gated on the cached
+      /* Count-up motion: the count-up tween is JS-gated on the cached
          reducedMotion flag; the cell flash is a CSS animation, so null
          it here too. Sparklines / bars / rings are static by design. */
       .cell-flash { animation: none; }
     }
 
     /* ============================================================
-       Ambience, chrome finish + motion (f3, DROPPABLE)
+       Ambience, chrome finish + motion (DROPPABLE)
        Additive polish layered over the glanceability floor: sliding
        tab indicator, frosted tab bar, breathing live-dot, ambient
        radial tint, themed scrollbar + selection, colorblind-safe
        status-pill dots. SEVERABLE: this whole banner plus the
-       initAmbience() call can be deleted and the glanceability + f2
-       layers stay intact -- nothing above references anything here.
+       initAmbience() call can be deleted and the glanceability +
+       render-layer layers stay intact -- nothing above references
+       anything here.
        ============================================================ */
 
     /* Ambient tint token derived from the live accent so it tracks the
        theme with a single definition (no per-theme block needed). */
     :root { --ambient-tint: color-mix(in srgb, var(--accent) 7%, transparent); }
 
-    /* V-13: a fixed, subtle radial wash over the flat background. */
+    /* Fixed, subtle radial wash over the flat background. */
     body {
       background:
         radial-gradient(120% 80% at 50% -10%, var(--ambient-tint), transparent 70%),
@@ -776,14 +778,14 @@
       background-attachment: fixed;
     }
 
-    /* V-11: frosted translucent sticky tab bar. */
+    /* Frosted translucent sticky tab bar. */
     .tabbar {
       background: color-mix(in srgb, var(--bg) 82%, transparent);
       backdrop-filter: blur(8px);
       -webkit-backdrop-filter: blur(8px);
     }
 
-    /* V-9: one sliding underline replaces the per-tab active border.
+    /* One sliding underline replaces the per-tab active border.
        Positioned + sized in JS (initAmbience) via translateX + scaleX;
        its transition is killed under reduced motion by the global rule
        above, and the JS jump reads the cached reducedMotion flag. */
@@ -801,7 +803,7 @@
       pointer-events: none;
     }
 
-    /* V-12: the live-dot breathes while a panel is healthy; a panel in
+    /* The live-dot breathes while a panel is healthy; a panel in
        a transport-down state (stale / dead / terminal) shows a solid
        negative dot with no motion. Reads the existing panel state
        classes only -- no new timers or flags. */
@@ -816,19 +818,17 @@
       background: var(--neg);
     }
 
-    /* V-14: themed scrollbar + accent selection. */
+    /* Themed scrollbar + accent selection. */
     html { scrollbar-color: var(--accent) var(--surface-2); }
     ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 
-    /* V-15 / V-17: colorblind-safe leading dot on status-family pills
-       (circuit / reach / status / qstatus) in the pill's own fg color.
-       Attribute-substring match keeps this self-contained -- no marker
-       class threaded through the glanceability token builder. The
-       "status-" match also covers "qstatus-". Non-status token families
-       (verdict / tier / prov / src) intentionally carry no dot. */
-    .tok[class*="circuit-"]::before,
-    .tok[class*="reach-"]::before,
-    .tok[class*="status-"]::before {
+    /* Colorblind-safe leading dot on status-family pills (circuit / reach /
+       status / qstatus) in the pill's own fg color. The dot is keyed on the
+       dedicated .tok-dot marker class applied by the token builder for those
+       families only, so no other family can grow a dot by sharing a class-name
+       substring. Non-status token families (verdict / tier / prov / src)
+       intentionally carry no marker and no dot. */
+    .tok.tok-dot::before {
       content: "";
       display: inline-block;
       width: var(--dot-size);
@@ -1222,8 +1222,8 @@
 
     // ---- poll loop -------------------------------------------------------
 
-    // f3 seam: callbacks fired after each completed render round (a future
-    // push / animation layer registers here via onPollTick). Empty today; the
+    // Render-callback seam: callbacks fired after each completed render round (a
+    // future push / animation layer registers here via onPollTick). Empty today;
     // invocation stays wired so the hook cannot silently rot. A throwing
     // callback is isolated so it never wedges the loop.
     var pollTickCbs = [];
@@ -1234,7 +1234,7 @@
       });
     }
 
-    // ---- glanceability viz store (f3) ------------------------------------
+    // ---- glanceability viz store ------------------------------------
 
     // Six hero metrics tracked as per-poll DELTAS of their cumulative totals,
     // sampled ONLY from the today-window poll path (the hero totals are
@@ -1514,7 +1514,7 @@
       // arithmetic in the builder uses as_of, never the client's Date.now().
       serverNowMs = Date.parse(env.as_of);
       // Fresh data: an accent dot + relative/absolute as_of, with a brief
-      // opacity pulse so a live poll is visibly landing (Fix 3).
+      // opacity pulse so a live poll is visibly landing.
       status.replaceChildren();
       status.appendChild(makeLiveDot());
       status.appendChild(document.createTextNode(formatAsOf(env.as_of)));
@@ -1872,10 +1872,13 @@
 
     // Value-domain token cell: raw wire string as textContent, styled by a
     // class keyed on the exact string. `prefix + '-' + raw` plus the `.tok`
-    // fallback, so an unknown token stays readable and unstyled.
+    // fallback, so an unknown token stays readable and unstyled. Families that
+    // carry a colorblind-safe leading dot get an explicit `.tok-dot` marker so
+    // the dot is keyed on the family, never on a substring of the raw token.
+    var DOT_FAMILIES = { circuit: 1, reach: 1, status: 1, qstatus: 1 };
     function tok(prefix, raw) {
       var span = document.createElement('span');
-      span.className = 'tok ' + prefix + '-' + raw;
+      span.className = 'tok ' + prefix + '-' + raw + (DOT_FAMILIES[prefix] ? ' tok-dot' : '');
       span.textContent = (raw === null || raw === undefined) ? '-' : String(raw);
       return span;
     }
@@ -1953,7 +1956,7 @@
       return span;
     }
 
-    // ---- glanceability render helpers (f3) -------------------------------
+    // ---- glanceability render helpers -------------------------------
 
     // Magnitude number with a smaller, muted K/M/B suffix in its own span.
     // Number formatting is IDENTICAL to humanCount (humanCount stays untouched
@@ -2117,8 +2120,11 @@
     // A hero stat card carrying a magSpan numeral, a trend sparkline (today
     // window only -- non-today pauses display), and the count-up tween on a
     // today-window poll commit. renderedNum tracks the displayed cumulative so
-    // the next commit tweens from it; cancelTween keeps at most one rAF per key
-    // (cancel-on-replace, since the card DOM is rebuilt each render).
+    // the next commit tweens from it; only a today render updates that baseline,
+    // so a non-today window (a different total) can never become a tween basis
+    // and fabricate continuity on the round-trip back to today. cancelTween
+    // keeps at most one rAF per key (cancel-on-replace, since the card DOM is
+    // rebuilt each render).
     function heroCard(key, label, rawVal, flow) {
       var card = document.createElement('div');
       card.className = 'stat' + (flow ? ' stat--flow' : '');
@@ -2132,7 +2138,7 @@
       } else {
         v.appendChild(magSpan(rawVal));
       }
-      renderedNum[key] = num0(rawVal);
+      if (vizCtx.today) { renderedNum[key] = num0(rawVal); }
       card.appendChild(v);
       if (selectedWindow === 'today') { card.appendChild(sparkline(sparkBuf[key])); }
       var l = document.createElement('div');
@@ -2161,6 +2167,10 @@
     // ---- four panel-specific builders ------------------------------------
 
     function buildUsage(d) {
+      // Cancel every hero-key tween up front: a card that does not render this
+      // round (e.g. Reasoning when its total is 0) is never rebuilt, so its
+      // in-flight rAF would otherwise keep writing into a detached node.
+      HERO_KEYS.forEach(cancelTween);
       var c = document.createElement('div');
       var meta = document.createElement('div');
       meta.className = 'meta';
@@ -2185,7 +2195,7 @@
 
       // Hero stat cards. The token-flow figures (Input / Output / Cache read /
       // Cache write) are clustered visually. Input is RAW input, kept SEPARATE
-      // from the cache-write buckets rather than bundled (Fix 4b/5). The six
+      // from the cache-write buckets rather than bundled. The six
       // flow/count metrics carry a delta sparkline + count-up tween; Cache hit
       // is a ratio ring; Errors keeps its jump affordance and is excluded from
       // the trend series.
@@ -2213,8 +2223,8 @@
       } else {
         // Alias is the row identifier (the panel groups per alias/provider/
         // model/upstream, so aliases are the disambiguating key); model is a
-        // normal column (Fix 4c). Secondary counters live in the expandable
-        // detail (Fix 1).
+        // normal column. Secondary counters live in the expandable
+        // detail.
         var gt = mkTable('Usage by alias group', [
           R('alias'), C('model'), C('provider'), N('req'), N('ok'), N('err'),
           N('input'), N('output'), N('cache read'), N('hit%')
@@ -2372,7 +2382,7 @@
         c.appendChild(none());
       } else {
         // Primary columns kept lean; upstream / seat / probe move to the
-        // expandable detail so the table needs no inner x-scroll (Fix 2).
+        // expandable detail so the table needs no inner x-scroll.
         var t = mkTable('Health targets', [
           R('state key'), C('nickname'), C('provider'), C('circuit'), N('rpm avail')
         ], true);
@@ -2417,7 +2427,7 @@
       if (!models.length) {
         c.appendChild(none());
       } else {
-        // upstream / verified / wm / rm move to the expandable detail (Fix 2).
+        // upstream / verified / wm / rm move to the expandable detail.
         var mt = mkTable('Configured models', [
           R('nickname'), C('provider'), C('kind'), C('source'), N('max ctx')
         ], true);
