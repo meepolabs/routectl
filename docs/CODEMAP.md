@@ -83,7 +83,11 @@ listed at the bottom of each crate.
 - `src/anthropic_api/types_sse.rs` -- forward-compat catchalls (`Other(Value)` arms) on the three strict-tagged Anthropic SSE enums (`SseEvent`, `SseContentBlockStart`, `SseDelta`); extracted from `types.rs` for the 800-LOC ceiling
 - `src/anthropic_api/parts.rs` -- image-source translation (data-URI -> base64) and trailing-Text-after-tool_use stripping; also OpenAI file-part -> Anthropic document-source translation (`parse_file_document_source`; PDF base64 data URI only) and url-source image translation
 - `src/anthropic_api/ratelimit_unified.rs` -- tolerant parser for the `anthropic-ratelimit-unified-*` quota/overage response-header family (`parse_unified_quota` -> `AnthropicUnifiedQuota`; None when absent, non-UTF8 values skipped, unknown suffixes captured in `extras`) plus the once-per-flip overage state machine (`classify_overage_transition`); wired into the egress complete/stream dir-3 sites
-- `src/anthropic_api/cloak.rs` -- Claude Code identity cloak for the OauthBearer surface; strips billing/attribution unconditionally; for non-CC clients mints stable identity + `metadata.user_id` and stamps the identity system block; no-op beyond the billing strip for genuine CC clients
+- `src/anthropic_api/cloak.rs` -- OauthBearer-egress cloak root: shared config/types (`CloakMode`, `ToolRename`, `CloakConfig`, `CloakResult`, `ClaudeCodeIdentity`) and the `cloak_oauth_egress` orchestrator sequencing the concern submodules below
+- `src/anthropic_api/cloak/billing.rs` -- strips the Claude Code billing/attribution system block unconditionally (`strip_billing_block`)
+- `src/anthropic_api/cloak/identity.rs` -- non-CC client system relocation into a `<system-reminder>` block plus identity-only system and minted `metadata.user_id` (`relocate_client_system`, `mint_metadata_user_id`)
+- `src/anthropic_api/cloak/tool_rename.rs` -- tool-name `mcp__` normalization and operator `tool_rename` over the same tool-name paths, recording the per-request reverse map (`normalize_tool_names_to_mcp`, `apply_tool_rename`)
+- `src/anthropic_api/cloak/obfuscate.rs` -- zero-width-space obfuscation of configured sensitive words in system and message text (`obfuscate_sensitive_words`, `SensitiveWordMatcher`)
 
 ### openai_compat
 
