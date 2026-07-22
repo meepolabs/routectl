@@ -831,6 +831,61 @@ mod tests {
         assert_eq!(totals["cache_read_present"], 4);
     }
 
+    /// The migration race at the panel boundary: a pre-migration v11 snapshot
+    /// (the `resolved_class` column not yet added) must read back through
+    /// `GET /status/usage` as an unavailable panel -- fail-closed, never a
+    /// mixed-schema read or a 500 -- and become available once the writer has
+    /// migrated it to v12. The read-only open's version guard is unit-covered
+    /// in `routectl_usage::db`; this pins the HTTP-panel envelope on each side
+    /// of the migration.
+    #[tokio::test]
+    async fn v11_ledger_fails_closed_at_panel_then_available_after_migration() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+
+        // Build a full current-schema ledger with rows, then roll it back to
+        // the exact shape the prior binary wrote: drop the v12 column and stamp
+        // the old user_version. This is a genuine pre-ALTER v11 file.
+        seed_class_ledger(&path, &[("ok", None), ("upstream_error", Some("http-5xx"))]);
+        {
+            let db = open(&path).expect("reopen ledger");
+            db.conn()
+                .execute_batch(
+                    "ALTER TABLE requests DROP COLUMN resolved_class; \
+                     PRAGMA user_version = 11;",
+                )
+                .expect("roll back to v11 shape");
+        }
+
+        // Fail-closed: the read-only panel refuses the older schema.
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK, "an older-schema DB never 500s");
+        assert_eq!(
+            json["unavailable"],
+            codes::SCHEMA_MISMATCH,
+            "a pre-resolved_class v11 DB must fail closed as schema_mismatch: {json}"
+        );
+        assert!(json["data"].is_null(), "unavailable panel carries no data");
+        assert!(
+            json["as_of"].is_null(),
+            "unavailable panel carries no as_of"
+        );
+
+        // The writer migrates v11 -> v12 in place; the panel then reads it.
+        open(&path).expect("migrate v11 -> v12");
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["unavailable"].is_null(),
+            "a migrated v12 DB must read as available: {json}"
+        );
+        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["data"]["totals"]["requests"], 2);
+    }
+
     #[tokio::test]
     async fn empty_window_renders_empty_class_maps() {
         // An error row 40 days ago falls outside today's window: the panel's

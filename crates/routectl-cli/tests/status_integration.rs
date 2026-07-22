@@ -21,10 +21,12 @@
 //! at the HTTP boundary is inherently racy. The unit-level barrier is the
 //! faithful, non-flaky substitute.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use routectl_core::failure_class::FailureClass;
+use routectl_router::class_policy::ConfigFailureClass;
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, ProviderRuntimePolicy, RetryPolicy, ServerConfig,
 };
@@ -329,5 +331,144 @@ async fn page_get_returns_html_shell_with_no_store() {
     assert!(
         body.contains("<html"),
         "GET / must return the embedded HTML document"
+    );
+}
+
+/// Every canonical failure class with a kebab token. Constructed explicitly
+/// rather than derived: this list is the integration-side witness that the
+/// vocabulary is complete, and a new `#[non_exhaustive]` variant added
+/// upstream without a token here surfaces as a tripwire mismatch.
+fn known_failure_classes() -> Vec<FailureClass> {
+    vec![
+        FailureClass::RateLimited,
+        FailureClass::Auth,
+        FailureClass::BadRequest,
+        FailureClass::ContentPolicy,
+        FailureClass::ContextWindow,
+        FailureClass::ServerError,
+        FailureClass::Timeout,
+        FailureClass::NetworkError,
+        FailureClass::Overloaded,
+        FailureClass::FeatureUnsupported {
+            capability: "any".to_string(),
+        },
+        FailureClass::Unknown,
+    ]
+}
+
+/// The ten operator-nameable config failure classes.
+const fn config_failure_classes() -> [ConfigFailureClass; 10] {
+    [
+        ConfigFailureClass::RateLimited,
+        ConfigFailureClass::Auth,
+        ConfigFailureClass::BadRequest,
+        ConfigFailureClass::ContentPolicy,
+        ConfigFailureClass::ContextWindow,
+        ConfigFailureClass::ServerError,
+        ConfigFailureClass::Timeout,
+        ConfigFailureClass::NetworkError,
+        ConfigFailureClass::Overloaded,
+        ConfigFailureClass::FeatureUnsupported,
+    ]
+}
+
+/// The kebab failure-class vocabulary is ONE set shared by three surfaces: the
+/// canonical `FailureClass::class_token`, the operator-facing
+/// `ConfigFailureClass` serde names, and the `errors_by_class` keys the usage
+/// panel renders. This pins the first two against each other AND proves the
+/// wire path end-to-end -- a real upstream failure classified through the
+/// capture guard, written to the ledger as `resolved_class`, and read back
+/// through `GET /status/usage` yields a breakdown key drawn from that same
+/// vocabulary, never a fourth spelling introduced along the way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn errors_by_class_vocabulary_agrees_end_to_end() {
+    // (a) the canonical class_token vocabulary (Unknown contributes no token).
+    let class_token_vocab: BTreeSet<String> = known_failure_classes()
+        .iter()
+        .filter_map(|c| c.class_token().map(str::to_string))
+        .collect();
+    // (c) the operator-facing ConfigFailureClass serde kebab names.
+    let config_vocab: BTreeSet<String> = config_failure_classes()
+        .iter()
+        .map(|c| {
+            serde_json::to_value(c)
+                .unwrap()
+                .as_str()
+                .expect("config class serializes to a string")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        class_token_vocab, config_vocab,
+        "class_token and ConfigFailureClass serde vocabularies must be identical"
+    );
+
+    // (b) drive a real upstream failure: the capture guard classifies it,
+    // stamps resolved_class, and the writer persists the row.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+        .mount(&upstream)
+        .await;
+    let base = spawn(breaker_config(&upstream.uri())).await;
+    let client = reqwest::Client::new();
+
+    let _ = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&chat_body())
+        .send()
+        .await
+        .unwrap();
+
+    // The usage writer persists asynchronously; poll the panel until the
+    // classified error row lands.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let totals = loop {
+        let usage: Value = client
+            .get(format!("{base}/status/usage?window=all"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if usage["data"]["totals"]["errors"].as_i64().unwrap_or(0) >= 1 {
+            break usage["data"]["totals"].clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the classified error row never reached the usage panel: {usage}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let breakdown = totals["errors_by_class"]
+        .as_object()
+        .expect("errors_by_class is an object");
+    let keys: BTreeSet<String> = breakdown.keys().cloned().collect();
+    assert!(!keys.is_empty(), "a classified error must produce a key");
+
+    // Every rendered key is either the honest catch-all or a member of the ONE
+    // vocabulary -- no third spelling leaks in from the ledger column.
+    for key in &keys {
+        assert!(
+            key == "unclassified" || class_token_vocab.contains(key),
+            "errors_by_class key `{key}` is outside the class vocabulary {class_token_vocab:?}"
+        );
+    }
+    // The induced 503 (no overloaded token) classifies as server-error, so the
+    // canonical token flows all the way to the panel key.
+    assert!(
+        keys.contains("server-error"),
+        "a 503 upstream failure must render as `server-error`: {keys:?}"
+    );
+
+    // End-to-end reconciliation: the breakdown sums to the totals-level errors.
+    let breakdown_sum: i64 = breakdown.values().map(|v| v.as_i64().unwrap()).sum();
+    assert_eq!(
+        breakdown_sum,
+        totals["errors"].as_i64().unwrap(),
+        "the class breakdown must sum to the totals error count"
     );
 }
