@@ -3,10 +3,11 @@
 //! caller's reasoning config must arrive at the egress unmodified.
 use super::*;
 use crate::resolved::ResolvedModel;
+use crate::router::Router;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Choice, Message, Provider, ReasoningConfig,
+    ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider, ReasoningConfig, Result,
 };
 use std::sync::{Arc, Mutex};
 

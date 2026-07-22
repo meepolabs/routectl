@@ -3,11 +3,16 @@
 use super::*;
 use crate::config::{ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
+use crate::router::Router;
 use async_trait::async_trait;
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use parking_lot::Mutex as ParkingMutex;
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider};
+use routectl_core::{
+    ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider, Result,
+};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 struct CapturingProvider {
     id: String,
