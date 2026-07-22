@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(panels["usage"]["unavailable"], "no_data");
         assert!(panels["usage"]["data"].is_null());
         assert!(panels["usage"]["as_of"].is_null());
-        assert_eq!(panels["usage"]["schema_version"], 1);
+        assert_eq!(panels["usage"]["schema_version"], 2);
 
         // The three siblings are available and untouched.
         for name in ["health", "config", "doctor"] {

@@ -22,7 +22,7 @@ pub enum QueryError {
 /// The group-key columns shared by the aggregate and the raw-latency rows.
 /// `alias` is `NOT NULL` in the schema so it is always present; the rest are
 /// nullable. Plain data; the caller decides how to display or roll these up.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct GroupKey {
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -207,6 +207,52 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
         client_disconnect_total: row.get(26)?,
         client_disconnect_pre_dispatch: row.get(27)?,
     })
+}
+
+/// A SECOND flat query beside [`AGG_SQL`], deliberately NOT folded into it:
+/// the aggregate stays one row per group, while this breakdown fans a group
+/// into one row per failure class. It shares `AGG_SQL`'s window predicate and
+/// group-key expressions and adds the SAME `errors` filter (`outcome NOT IN
+/// ('ok', 'client_disconnect')`), so the per-group class counts sum EXACTLY to
+/// that group's `AggRow::errors`. NULL `resolved_class` (pre-dispatch or
+/// never-classified rows) buckets under `unclassified` via the COALESCE; a
+/// forward-compat token written by a newer binary passes through verbatim as
+/// its own class rather than being folded into `unclassified`.
+const ERRORS_BY_CLASS_SQL: &str = "\
+SELECT
+    COALESCE(model, requested_model) AS model, provider, upstream, alias,
+    COALESCE(resolved_class, 'unclassified')            AS class,
+    COUNT(*)                                            AS count
+FROM requests
+WHERE ts_start >= ?1 AND ts_start < ?2
+  AND outcome NOT IN ('ok', 'client_disconnect')
+GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
+         COALESCE(resolved_class, 'unclassified')";
+
+/// Windowed per-group error breakdown by resolved failure class. Returns one
+/// `(group key, class, count)` triple per `(group, class)` pair; the caller
+/// merges these into a per-group `class -> count` map (`GroupKey` derives
+/// `Hash` for that merge). By construction the counts sum to `AggRow::errors`
+/// per group and at totals (identical predicate). Rows outside `[from_ms,
+/// to_ms)` are excluded.
+pub fn errors_by_class(
+    db: &UsageDb,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<(GroupKey, String, i64)>, QueryError> {
+    let mut stmt = db.conn().prepare(ERRORS_BY_CLASS_SQL)?;
+    let rows = stmt
+        .query_map([from_ms, to_ms], |row| {
+            let key = GroupKey {
+                model: row.get(0)?,
+                provider: row.get(1)?,
+                upstream: row.get(2)?,
+                alias: row.get(3)?,
+            };
+            Ok((key, row.get::<_, String>(4)?, row.get::<_, i64>(5)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 const LATEST_QUOTA_SQL: &str = "\
@@ -2166,5 +2212,204 @@ mod tests {
         assert_eq!(cal.coverage, 0.0);
         assert_eq!(cal.accuracy, 0.0);
         assert_eq!(cal.hazard_decay, 0.0);
+    }
+
+    /// Insert a row with an explicit `outcome` and (nullable) `resolved_class`
+    /// so the errors-by-class breakdown's classify/NULL paths are testable.
+    /// `model` is fixed so the group key is `(provider, upstream, alias)`.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_class_row(
+        db: &UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        provider: &str,
+        upstream: &str,
+        alias: &str,
+        outcome: &str,
+        resolved_class: Option<&str>,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                 resolved_class) \
+                 VALUES (?1, ?1, ?2, 'openai', 'req-model', ?3, 'm', ?4, ?5, 0, ?6, 5, \
+                 0, 0, 1, 0, ?7)",
+                rusqlite::params![
+                    ts_start,
+                    request_id,
+                    alias,
+                    provider,
+                    upstream,
+                    outcome,
+                    resolved_class,
+                ],
+            )
+            .expect("insert class row");
+    }
+
+    #[test]
+    fn errors_by_class_sums_to_errors_per_group_and_at_totals() {
+        use std::collections::HashMap;
+
+        // Arrange: two groups with a mix of ok / client_disconnect (excluded)
+        // and classified / NULL-class error rows.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        // Group A (pa, ua): 4 errors across 3 classes incl. an unclassified.
+        insert_class_row(&db, "a-ok", 100, "pa", "ua", "al", "ok", None);
+        insert_class_row(
+            &db,
+            "a-cd",
+            105,
+            "pa",
+            "ua",
+            "al",
+            "client_disconnect",
+            None,
+        );
+        insert_class_row(
+            &db,
+            "a-e1",
+            110,
+            "pa",
+            "ua",
+            "al",
+            "upstream_error",
+            Some("http-5xx"),
+        );
+        insert_class_row(
+            &db,
+            "a-e2",
+            120,
+            "pa",
+            "ua",
+            "al",
+            "upstream_error",
+            Some("http-5xx"),
+        );
+        insert_class_row(&db, "a-e3", 130, "pa", "ua", "al", "gate_blocked", None);
+        insert_class_row(
+            &db,
+            "a-e4",
+            140,
+            "pa",
+            "ua",
+            "al",
+            "upstream_error",
+            Some("timeout"),
+        );
+        // Group B (pb, ub): 1 classified error.
+        insert_class_row(
+            &db,
+            "b-e1",
+            150,
+            "pb",
+            "ub",
+            "al",
+            "upstream_error",
+            Some("rate-limited"),
+        );
+
+        // Act
+        let agg = aggregate(&db, 0, 1000).expect("aggregate");
+        let breakdown = errors_by_class(&db, 0, 1000).expect("errors_by_class");
+
+        // Assert: per-group class counts sum EXACTLY to that group's errors.
+        let mut per_group: HashMap<GroupKey, i64> = HashMap::new();
+        for (key, _class, count) in &breakdown {
+            *per_group.entry(key.clone()).or_default() += *count;
+        }
+        for row in &agg {
+            let class_sum = per_group.get(&row.key).copied().unwrap_or(0);
+            assert_eq!(
+                class_sum, row.errors,
+                "group {:?} class sum {class_sum} != errors {}",
+                row.key, row.errors
+            );
+        }
+        // Group A breakdown: http-5xx=2, unclassified=1, timeout=1.
+        let a_key = agg
+            .iter()
+            .find(|r| r.key.provider.as_deref() == Some("pa"))
+            .expect("group A")
+            .key
+            .clone();
+        let a_classes: std::collections::BTreeMap<String, i64> = breakdown
+            .iter()
+            .filter(|(k, _, _)| *k == a_key)
+            .map(|(_, c, n)| (c.clone(), *n))
+            .collect();
+        assert_eq!(a_classes.get("http-5xx"), Some(&2));
+        assert_eq!(a_classes.get("unclassified"), Some(&1));
+        assert_eq!(a_classes.get("timeout"), Some(&1));
+
+        // Totals: the breakdown sums to the summed errors across all groups.
+        let total_errors: i64 = agg.iter().map(|r| r.errors).sum();
+        let total_breakdown: i64 = breakdown.iter().map(|(_, _, n)| *n).sum();
+        assert_eq!(total_breakdown, total_errors);
+        assert_eq!(total_breakdown, 5);
+    }
+
+    #[test]
+    fn errors_by_class_empty_window_returns_no_rows() {
+        // Arrange: an ok row and a client_disconnect row (neither is an error),
+        // plus an out-of-window error row.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_class_row(&db, "ok", 100, "p", "u", "a", "ok", None);
+        insert_class_row(&db, "cd", 110, "p", "u", "a", "client_disconnect", None);
+        insert_class_row(
+            &db,
+            "out",
+            5,
+            "p",
+            "u",
+            "a",
+            "upstream_error",
+            Some("http-5xx"),
+        );
+
+        // Act: window [100, 1000) has zero qualifying error rows.
+        let breakdown = errors_by_class(&db, 100, 1000).expect("errors_by_class");
+
+        // Assert
+        assert!(breakdown.is_empty());
+    }
+
+    #[test]
+    fn errors_by_class_uses_ts_start_index() {
+        // The breakdown must ride idx_requests_ts_start for its window range,
+        // not degrade to a full table scan. If this ever fails, add a covering
+        // index rather than accepting the scan (see the decision doc).
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        for i in 0..64 {
+            insert_class_row(
+                &db,
+                &format!("e{i}"),
+                100 + i,
+                "p",
+                "u",
+                "a",
+                "upstream_error",
+                Some("http-5xx"),
+            );
+        }
+
+        let plan: Vec<String> = db
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {ERRORS_BY_CLASS_SQL}"))
+            .expect("prepare explain")
+            .query_map([0_i64, 1000_i64], |row| row.get::<_, String>(3))
+            .expect("query explain")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect explain");
+
+        assert!(
+            plan.iter().any(|d| d.contains("idx_requests_ts_start")),
+            "breakdown query must use idx_requests_ts_start; plan was {plan:?}"
+        );
     }
 }
