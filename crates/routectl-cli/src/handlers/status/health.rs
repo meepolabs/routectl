@@ -26,7 +26,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the health panel payload.
-const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Per-target health plus learned negatives for the routing surface.
 #[derive(Debug, Clone, Serialize)]

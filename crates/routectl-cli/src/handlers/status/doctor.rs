@@ -35,7 +35,7 @@ use crate::commands::doctor::{build_report_no_network, gather_context_no_network
 /// Wire-shape version of the doctor panel payload. Reuses the no-network
 /// [`DoctorReport`]'s own `schema_version` (3): the panel embeds that report
 /// verbatim, so it must not invent a parallel number.
-const DOCTOR_SCHEMA_VERSION: u32 = 3;
+pub const DOCTOR_SCHEMA_VERSION: u32 = 3;
 
 /// The no-network doctor report plus the circuit-derived reachability summary.
 #[derive(Debug, Clone, Serialize)]

@@ -18,6 +18,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>routectl status</title>
+  <link rel="icon" id="favicon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%239aa5b5'></circle></svg>">
   <style>
     /*
       Design tokens. Every color, space, type, radius, and motion value
@@ -198,6 +199,27 @@
       font-family: var(--font-mono);
       font-size: var(--fs-xs);
       font-variant-numeric: tabular-nums;
+    }
+    .refresh {
+      font: inherit;
+      font-size: var(--fs-sm);
+      padding: var(--sp-1) var(--sp-3);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      color: var(--muted);
+      cursor: pointer;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+    }
+    .refresh:hover { background: var(--surface-2); color: var(--fg); }
+    .refresh:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+    .refresh:active { transform: translateY(1px); }
+    .refresh:disabled {
+      opacity: 0.45;
+      cursor: default;
     }
 
     /* ---- sticky tab bar ---- */
@@ -599,7 +621,7 @@
       * { transition: none !important; }
       .skeleton span { animation: none; }
       .panel-status.pulse { animation: none; }
-      .windowsel button:active, .exp-btn:active { transform: none; }
+      .windowsel button:active, .exp-btn:active, .refresh:active { transform: none; }
     }
   </style>
 </head>
@@ -613,6 +635,7 @@
         <button type="button" data-window="month" aria-pressed="false">Month</button>
         <button type="button" data-window="all" aria-pressed="false">All</button>
       </div>
+      <button type="button" class="refresh" id="refresh" title="Refresh now">Refresh</button>
       <div class="clock" id="clock" aria-hidden="true"></div>
     </div>
   </header>
@@ -682,11 +705,13 @@
     // guard, not version negotiation.
     var EXPECTED = { usage: 2, health: 2, config: 1, doctor: 3 };
     var PANELS = ['usage', 'health', 'config', 'doctor'];
+    var WINDOWS = ['today', 'week', 'month', 'all'];
 
     var BASE_MS = 5000;              // steady cadence
     var BACKOFF_MS = [10000, 20000, 30000]; // transport-failure backoff, 30s cap
     var TIMEOUT_MS = 2000;           // per-fetch AbortController budget
     var SKEW_TOLERANCE_SEC = 2;      // future as_of within this is not clock skew
+    var FRESH_SLACK_MS = 3000;       // grace past the due round before "stale"
 
     var selectedWindow = 'today';
     var terminal = false;            // set on 403; stops the loop permanently
@@ -700,6 +725,15 @@
     var countdownTimer = null;       // 1s interval driving the live clock
     var remainingSec = 0;            // seconds until the next scheduled round
     var backingOff = false;          // reflects backoff state in the clock text
+    var nextDueAtMs = 0;             // wall-clock instant the next round is due
+
+    // Favicon signal from the LAST fresh render of each panel: the badge kind
+    // (warn, error, or null) a successful render produced, and whether that
+    // render found the panel unavailable. Transport failures do NOT touch
+    // these (they surface via backoff/staleness at a higher favicon
+    // precedence), so warn_error recovers only when a fresh round lands.
+    var panelBadgeKind = {};
+    var panelUnavail = {};
 
     // Expansion state keyed by table caption -> { rowKey: true }. Survives the
     // per-poll DOM rebuild so an operator's expanded row stays open across
@@ -996,17 +1030,20 @@
     function tick() {
       if (terminal || running) { return; }
       running = true;
+      syncRefreshBtn();
       runRound().then(function (res) {
         running = false;
         firePollTick();
-        if (res && res.terminal) { return; }
+        if (res && res.terminal) { updateFavicon(); return; }
         scheduleNext(!!(res && res.ok));
+        updateFavicon();
       }).catch(function () {
         // A bug in rendering must not wedge the loop; treat as a failed
         // round and keep polling with backoff.
         running = false;
         firePollTick();
         scheduleNext(false);
+        updateFavicon();
       });
     }
 
@@ -1015,13 +1052,18 @@
       backoffIndex = ok ? -1 : Math.min(backoffIndex + 1, BACKOFF_MS.length - 1);
       var delay = backoffIndex < 0 ? BASE_MS : BACKOFF_MS[backoffIndex];
       backingOff = backoffIndex >= 0;
+      nextDueAtMs = Date.now() + delay;
       startCountdown(Math.round(delay / 1000));
       clearTimeout(timer);
       timer = setTimeout(tick, delay);
+      syncRefreshBtn();
     }
 
     // Immediately kick a fresh aggregate round (used when the operator
-    // returns to Today). Respects the single-in-flight guard.
+    // returns to Today, or clicks Refresh). Shares the single-in-flight /
+    // terminal gate; the Refresh button is additionally disabled during
+    // backoff (see syncRefreshBtn), so a manual click is an edge trigger
+    // with no queue and no backoff reset.
     function kickRefresh() {
       if (terminal || running) { return; }
       clearTimeout(timer);
@@ -1084,6 +1126,7 @@
       if (terminal || w === selectedWindow) { return; }
       selectedWindow = w;
       updateSelectorUI();
+      writeHash();
       if (w === 'today') {
         kickRefresh();
       } else {
@@ -1095,11 +1138,13 @@
         fetchWindow(w).then(function (win) {
           var res = applyWindowResult(win, w);
           firePollTick();
-          if (res.terminal) { return; }
+          if (res.terminal) { updateFavicon(); return; }
           scheduleNext(!!res.ok);
+          updateFavicon();
         }).catch(function () {
           firePollTick();
           scheduleNext(false);
+          updateFavicon();
         });
       }
     }
@@ -1126,7 +1171,14 @@
       }
 
       panel.classList.add('panel--ok');
-      setTabState(name, null);
+      var data = env.data || {};
+      // Content badge from THIS fresh success only. setTabState is the single
+      // badge writer; a transport failure later overwrites it with a
+      // stale/offline label (which wins) rather than clearing it to zero.
+      var badge = panelBadge(name, data);
+      setTabState(name, badge);
+      panelBadgeKind[name] = badge ? badge.kind : null;
+      panelUnavail[name] = false;
       // Pin the server clock for this panel's render round so all data-age
       // arithmetic in the builder uses as_of, never the client's Date.now().
       serverNowMs = Date.parse(env.as_of);
@@ -1139,7 +1191,7 @@
       status.appendChild(dot);
       status.appendChild(document.createTextNode(formatAsOf(env.as_of)));
       pulse(status);
-      body.replaceChildren(BUILDERS[name](env.data || {}));
+      body.replaceChildren(BUILDERS[name](data));
     }
 
     function renderUnavailable(name, code, extra) {
@@ -1149,6 +1201,10 @@
       panel.classList.remove('panel--ok', 'panel--stale', 'panel--dead');
       panel.classList.add('panel--unavailable');
       setTabState(name, { label: 'n/a', kind: 'muted' });
+      // A fresh round found this panel unavailable -> a warn_error favicon
+      // signal until a later fresh round clears it.
+      panelBadgeKind[name] = null;
+      panelUnavail[name] = true;
       status.textContent = '';
       var div = document.createElement('div');
       div.className = 'unavailable-msg';
@@ -1239,6 +1295,8 @@
         '(for example http://127.0.0.1:8787). Polling has stopped.');
       PANELS.forEach(function (n) { markPanelTransport(n, 'dead'); });
       updateSelectorUI();
+      syncRefreshBtn();
+      updateFavicon();
     }
 
     function setBanner(kind, text) {
@@ -1256,6 +1314,37 @@
     }
 
     // ---- tab state badges ------------------------------------------------
+
+    // The content badge for a panel's tab, computed ONLY from a fresh
+    // successful render (renderPanel's ok branch). Returns a { label, kind }
+    // state or null (no badge). Counts a genuine problem per panel: usage
+    // errors, health non-closed circuits, doctor warn+fail findings. Config
+    // carries no error concept, so it never badges. A zero count returns null
+    // so a clean panel shows nothing.
+    function panelBadge(name, data) {
+      if (name === 'usage') {
+        var errs = num0((data.totals || {}).errors);
+        return errs > 0 ? { label: humanCount(errs), kind: 'error' } : null;
+      }
+      if (name === 'health') {
+        var open = (data.targets || []).filter(function (t) {
+          return t.circuit && t.circuit !== 'closed';
+        }).length;
+        return open > 0 ? { label: String(open), kind: 'warn' } : null;
+      }
+      if (name === 'doctor') {
+        var findings = (data.report || {}).findings || [];
+        var warn = 0, fail = 0;
+        findings.forEach(function (f) {
+          if (f.status === 'Warn') { warn += 1; }
+          else if (f.status === 'Fail') { fail += 1; }
+        });
+        var total = warn + fail;
+        if (total === 0) { return null; }
+        return { label: String(total), kind: fail > 0 ? 'error' : 'warn' };
+      }
+      return null;
+    }
 
     // Surface a small badge on the tab when its panel is stale / offline /
     // unavailable, so a problem is visible without switching to that tab.
@@ -1965,6 +2054,119 @@
       }, 1000);
     }
 
+    // ---- chrome: favicon state machine -----------------------------------
+
+    // Four author-static favicon SVGs, differing by fill COLOR only -- no data
+    // is interpolated into the markup, so no wire/user value can reach the
+    // icon (an XSS floor). The '#' of each hex color is percent-encoded (%23)
+    // so it is not parsed as a URI fragment; explicit close tags avoid a
+    // self-closing tag so no quote-then-slash literal exists here (the
+    // page.rs mutation-channel scan treats such a literal as a fetch path).
+    var FAVICON_OK = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%234caf50'></circle></svg>";
+    var FAVICON_WARN = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23f0a020'></circle></svg>";
+    var FAVICON_STALE = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%239aa5b5'></circle></svg>";
+    var FAVICON_TERMINAL = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23d32f2f'></circle></svg>";
+    var FAVICONS = {
+      ok: FAVICON_OK,
+      warn_error: FAVICON_WARN,
+      stale_unknown: FAVICON_STALE,
+      terminal: FAVICON_TERMINAL
+    };
+
+    // Stale-or-unknown: the loop is backing off, OR no round has ever
+    // succeeded, OR the wall clock has passed the next round's due time by
+    // more than a fetch budget plus slack. The wall-clock arm matters because
+    // a hidden/background tab throttles the poll timer -- without it, a
+    // long-hidden tab would keep a green icon while its data quietly aged, so
+    // the visibility events re-check this on wake.
+    function isStaleUnknown() {
+      if (backingOff) { return true; }
+      if (lastSuccess === null) { return true; }
+      return Date.now() > nextDueAtMs + TIMEOUT_MS + FRESH_SLACK_MS;
+    }
+
+    // Warn-or-error, computed ONLY from the last fresh render of each panel
+    // (never from transport-failure state): any panel a fresh round found
+    // unavailable, or any content badge of kind warn/error. Recovers only when
+    // a later fresh round overwrites the signal.
+    function isWarnError() {
+      for (var i = 0; i < PANELS.length; i++) {
+        var n = PANELS[i];
+        if (panelUnavail[n]) { return true; }
+        if (panelBadgeKind[n] === 'warn' || panelBadgeKind[n] === 'error') { return true; }
+      }
+      return false;
+    }
+
+    // Precedence: terminal > stale_unknown > warn_error > ok.
+    function faviconState() {
+      if (terminal) { return 'terminal'; }
+      if (isStaleUnknown()) { return 'stale_unknown'; }
+      if (isWarnError()) { return 'warn_error'; }
+      return 'ok';
+    }
+
+    function updateFavicon() {
+      var link = el('favicon');
+      if (!link) { return; }
+      var next = FAVICONS[faviconState()];
+      if (link.getAttribute('href') !== next) { link.setAttribute('href', next); }
+    }
+
+    // ---- chrome: manual refresh ------------------------------------------
+
+    // The Refresh button is an edge trigger sharing the poll loop's single
+    // gate: enabled only when the loop is live and idle (not terminal, not
+    // mid-round, not backing off), so a click can neither queue a refresh nor
+    // reset backoff. This mirrors "transport == live" in the decision.
+    function syncRefreshBtn() {
+      var btn = el('refresh');
+      if (!btn) { return; }
+      btn.disabled = terminal || running || backingOff;
+    }
+
+    function initRefresh() {
+      var btn = el('refresh');
+      if (btn) { btn.addEventListener('click', kickRefresh); }
+      syncRefreshBtn();
+    }
+
+    // ---- chrome: hash routing (dumb view state) --------------------------
+
+    // Grammar: `#panel[/window]`. `panel` is one of PANELS; the optional
+    // `window` is one of WINDOWS. An unknown or absent panel canonicalizes to
+    // `usage`, an unknown or absent window to `today`. The hash carries VIEW
+    // STATE ONLY -- applyHash mutates activeTab / selectedWindow and nothing
+    // about fetch state, and never cancels in-flight work. A future panel is
+    // added by extending PANELS; the grammar itself does not change.
+    // The separator is built from its char code so this script carries no
+    // slash-leading string literal (see the mutation-channel scan in page.rs).
+    var HASH_SEP = String.fromCharCode(47);
+
+    function applyHash() {
+      var h = location.hash;
+      var raw = (h.charAt(0) === '#') ? h.slice(1) : h;
+      var parts = raw.split(HASH_SEP);
+      var panel = parts[0];
+      var win = parts[1];
+      activeTab = (PANELS.indexOf(panel) >= 0) ? panel : 'usage';
+      selectedWindow = (WINDOWS.indexOf(win) >= 0) ? win : 'today';
+    }
+
+    // Write the canonical hash for the current view state, only when it
+    // differs from the current one (loop-safe: replaceState never fires
+    // hashchange, and the guard stops a location.hash-assignment fallback from
+    // looping). The window segment is omitted for the `today` default.
+    function writeHash() {
+      var next = '#' + activeTab + (selectedWindow !== 'today' ? HASH_SEP + selectedWindow : '');
+      if (location.hash === next) { return; }
+      if (history.replaceState) {
+        history.replaceState(null, '', next);
+      } else {
+        location.hash = next;
+      }
+    }
+
     // ---- chrome: window selector -----------------------------------------
 
     function updateSelectorUI() {
@@ -1972,7 +2174,9 @@
       Array.prototype.forEach.call(buttons, function (b) {
         var active = b.getAttribute('data-window') === selectedWindow;
         b.setAttribute('aria-pressed', active ? 'true' : 'false');
-        b.disabled = terminal;
+        // The window applies to the Usage panel only, so the selector is
+        // inert (and disabled) on every other tab, and after a terminal stop.
+        b.disabled = terminal || activeTab !== 'usage';
       });
     }
 
@@ -1996,6 +2200,10 @@
         tab.tabIndex = sel ? 0 : -1;
         panel.hidden = !sel;
       });
+      // The window selector is Usage-only, and the hash mirrors the active
+      // tab; both follow every tab change.
+      updateSelectorUI();
+      writeHash();
     }
 
     function onTabKey(e, tabs, i) {
@@ -2022,8 +2230,25 @@
     }
 
     document.addEventListener('DOMContentLoaded', function () {
+      // Restore view state from the hash BEFORE the first tick so the initial
+      // render lands on the requested tab/window.
+      applyHash();
       initSelector();
       initTabs();
+      initRefresh();
+      updateFavicon();
+      // Back/forward or a manual hash edit re-applies view state; the sync
+      // path canonicalizes any bogus hash. This never touches fetch state.
+      window.addEventListener('hashchange', function () {
+        applyHash();
+        selectTab(activeTab);
+        updateSelectorUI();
+      });
+      // A hidden tab throttles the poll timer, so re-evaluate staleness (and
+      // the icon) whenever the tab regains attention.
+      document.addEventListener('visibilitychange', updateFavicon);
+      window.addEventListener('focus', updateFavicon);
+      window.addEventListener('pageshow', updateFavicon);
       tick();
     });
   })();

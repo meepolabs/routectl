@@ -182,4 +182,79 @@ mod tests {
             }
         }
     }
+
+    /// Drift guard between client and server: the dashboard's `EXPECTED`
+    /// schema-version map (the per-panel wire versions the JS renders against)
+    /// must equal the Rust panel `SCHEMA_VERSION` consts exactly. They ship in
+    /// the same binary, so a mismatch here would silently degrade a LIVE panel
+    /// to the client's "incompatible" fallback. Pins the two together: parse
+    /// the `EXPECTED = { ... }` object literal out of the embedded script and
+    /// assert key/value parity with the server-side consts.
+    #[test]
+    fn dashboard_expected_map_matches_panel_schema_versions() {
+        const DASHBOARD: &str = include_str!("dashboard.html");
+
+        // Isolate the first <script> block, the same slice the mutation scan
+        // reads, so a second embedded block could not smuggle a divergent map.
+        let start = DASHBOARD
+            .find("<script>")
+            .expect("dashboard has a <script> block");
+        let end = DASHBOARD
+            .find("</script>")
+            .expect("dashboard <script> block is closed");
+        let script = &DASHBOARD[start..end];
+
+        // Slice the `EXPECTED = { ... }` object-literal body.
+        let decl = script.find("EXPECTED").expect("dashboard defines EXPECTED");
+        let open = script[decl..]
+            .find('{')
+            .expect("EXPECTED has an object literal")
+            + decl;
+        let close = script[open..].find('}').expect("EXPECTED object is closed") + open;
+        let body = &script[open + 1..close];
+
+        // Parse the `key: value` pairs (keys may be bare or quoted).
+        let mut parsed: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for entry in body.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let (key, val) = entry
+                .split_once(':')
+                .expect("EXPECTED entry is `key: value`");
+            let key = key
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .to_string();
+            let val: u32 = val.trim().parse().expect("EXPECTED value is a u32");
+            parsed.insert(key, val);
+        }
+
+        let expected: std::collections::BTreeMap<String, u32> = [
+            (
+                "usage".to_string(),
+                crate::handlers::status::usage::SCHEMA_VERSION,
+            ),
+            (
+                "health".to_string(),
+                crate::handlers::status::health::SCHEMA_VERSION,
+            ),
+            (
+                "config".to_string(),
+                crate::handlers::status::config::SCHEMA_VERSION,
+            ),
+            (
+                "doctor".to_string(),
+                crate::handlers::status::doctor::DOCTOR_SCHEMA_VERSION,
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            parsed, expected,
+            "dashboard EXPECTED map must match the panel SCHEMA_VERSION consts"
+        );
+    }
 }
