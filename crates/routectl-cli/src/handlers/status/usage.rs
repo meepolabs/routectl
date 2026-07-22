@@ -9,6 +9,7 @@
 //! rows, ids, bodies, or prompts -- only rollups, windowed totals, the
 //! latest quota snapshot, and the would-trim summary.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,8 +20,8 @@ use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 use routectl_usage::{
-    AggRow, OpenError, QueryError, QuotaSnapshot, UsageDb, WouldTrimSummary, aggregate,
-    latest_quota, open_readonly_fastfail, would_trim_summary,
+    AggRow, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb, WouldTrimSummary, aggregate,
+    errors_by_class, latest_quota, open_readonly_fastfail, would_trim_summary,
 };
 
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
@@ -29,7 +30,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the usage panel payload.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// The `window` query parameter for `GET /status/usage`.
 #[derive(Debug, Deserialize)]
@@ -66,6 +67,22 @@ struct UsageTotals {
     reasoning_tokens: i64,
     cache_read_billed: i64,
     server_tool_calls: i64,
+    /// Window-wide error breakdown by resolved failure class, merged across
+    /// every group. Sums to `errors` by construction (same predicate). Empty
+    /// (`{}`) when the window has zero errors. NULL-class rows bucket under
+    /// `unclassified`; a forward-compat token an older reader does not know
+    /// appears as its own key rather than folding into `unclassified`.
+    errors_by_class: BTreeMap<String, i64>,
+    /// Window-wide count of client-disconnect rows. Surfaced so
+    /// `requests == ok + errors + client_disconnect_total` reconciles at
+    /// totals (it already reconciles per group).
+    client_disconnect_total: i64,
+    /// Window-wide count of rows that REPORTED a `cache_read` value
+    /// (`COUNT(cache_read)`, NULLs excluded) -- a reporting-only denominator,
+    /// not a request count. Hit-rate figures MUST divide by this, NOT by raw
+    /// `requests`: dividing by requests dilutes the rate with rows that never
+    /// reported a cache read.
+    cache_read_present: i64,
 }
 
 /// One rollup group at `(alias, provider, model, upstream)` granularity.
@@ -89,6 +106,17 @@ struct UsageGroup {
     server_tool_calls: i64,
     stream_count: i64,
     client_disconnect_total: i64,
+    /// Per-group error breakdown by resolved failure class. Sums to `errors`
+    /// by construction (same predicate). Empty (`{}`) when the group has zero
+    /// errors. NULL-class rows bucket under `unclassified`; forward-compat
+    /// tokens appear as their own keys.
+    errors_by_class: BTreeMap<String, i64>,
+    /// Count of rows in the group that REPORTED a `cache_read` value
+    /// (`COUNT(cache_read)`, NULLs excluded) -- a reporting-only denominator,
+    /// not a request count. Hit-rate figures MUST divide by this, NOT by raw
+    /// `requests`: dividing by requests dilutes the rate with rows that never
+    /// reported a cache read.
+    cache_read_present: i64,
 }
 
 /// The latest quota-bearing snapshot in the ledger, if any.
@@ -190,21 +218,34 @@ fn collect(
     bounds: WindowBounds,
 ) -> Result<UsagePanel, &'static str> {
     let rows = aggregate(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
+    let breakdown =
+        errors_by_class(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     let quota = latest_quota(db).map_err(|e| query_error_code(&e))?;
     let would_trim =
         would_trim_summary(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
-    Ok(assemble(token, bounds, rows, quota, would_trim))
+    Ok(assemble(token, bounds, rows, breakdown, quota, would_trim))
 }
 
 /// Fold the query results into the wire DTO. Totals are summed over the
-/// rollup groups.
+/// rollup groups. The flat error breakdown is merged into a per-group
+/// `class -> count` map keyed by the shared group key, then accumulated into
+/// the window-wide totals map.
 fn assemble(
     token: &'static str,
     bounds: WindowBounds,
     rows: Vec<AggRow>,
+    breakdown: Vec<(GroupKey, String, i64)>,
     quota: Option<QuotaSnapshot>,
     would_trim: WouldTrimSummary,
 ) -> UsagePanel {
+    let mut per_group: std::collections::HashMap<GroupKey, BTreeMap<String, i64>> =
+        std::collections::HashMap::new();
+    let mut totals_by_class: BTreeMap<String, i64> = BTreeMap::new();
+    for (key, class, count) in breakdown {
+        *totals_by_class.entry(class.clone()).or_default() += count;
+        *per_group.entry(key).or_default().entry(class).or_default() += count;
+    }
+
     let mut totals = UsageTotals::default();
     let mut groups = Vec::with_capacity(rows.len());
     for row in rows {
@@ -216,8 +257,12 @@ fn assemble(
         totals.reasoning_tokens += row.reasoning_tokens;
         totals.cache_read_billed += row.cache_read_billed;
         totals.server_tool_calls += row.server_tool_calls;
-        groups.push(map_group(row));
+        totals.client_disconnect_total += row.client_disconnect_total;
+        totals.cache_read_present += row.cache_read_present;
+        let group_classes = per_group.remove(&row.key).unwrap_or_default();
+        groups.push(map_group(row, group_classes));
     }
+    totals.errors_by_class = totals_by_class;
     UsagePanel {
         window: token,
         from_ms: bounds.from_ms,
@@ -229,7 +274,7 @@ fn assemble(
     }
 }
 
-fn map_group(row: AggRow) -> UsageGroup {
+fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup {
     UsageGroup {
         alias: row.key.alias,
         provider: row.key.provider,
@@ -248,6 +293,8 @@ fn map_group(row: AggRow) -> UsageGroup {
         server_tool_calls: row.server_tool_calls,
         stream_count: row.stream_count,
         client_disconnect_total: row.client_disconnect_total,
+        errors_by_class,
+        cache_read_present: row.cache_read_present,
     }
 }
 
@@ -650,6 +697,16 @@ mod tests {
                 client_disconnect_total: 0,
                 client_disconnect_pre_dispatch: 0,
             }],
+            vec![(
+                GroupKey {
+                    model: Some("m".into()),
+                    provider: Some("p".into()),
+                    upstream: Some("u".into()),
+                    alias: "a".into(),
+                },
+                "http-5xx".into(),
+                1,
+            )],
             None,
             WouldTrimSummary::default(),
         );
@@ -661,12 +718,164 @@ mod tests {
             );
         }
         // The aggregate shape IS present.
-        for expected in ["totals", "groups", "would_trim", "requests"] {
+        for expected in [
+            "totals",
+            "groups",
+            "would_trim",
+            "requests",
+            "errors_by_class",
+        ] {
             assert!(
                 text.contains(expected),
                 "missing aggregate field {expected}"
             );
         }
+    }
+
+    /// Seed a WAL ledger with rows carrying an explicit outcome and (nullable)
+    /// resolved_class so the error-breakdown paths are exercisable through the
+    /// full HTTP panel. All rows share one group key.
+    fn seed_class_ledger(path: &Path, rows: &[(&str, Option<&str>)]) {
+        let db = open(path).expect("open ledger");
+        let now = Local::now().timestamp_millis();
+        for (i, (outcome, class)) in rows.iter().enumerate() {
+            db.conn()
+                .execute(
+                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                     requested_model, alias, model, provider, upstream, stream, outcome, \
+                     latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                     input_tokens, output_tokens, cache_read, resolved_class) \
+                     VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 'm', 'p', 'u', 0, ?3, \
+                     5, 0, 0, 1, 0, 10, 20, ?4, ?5)",
+                    rusqlite::params![now, format!("r{i}"), outcome, 100, class],
+                )
+                .expect("seed class row");
+        }
+    }
+
+    #[tokio::test]
+    async fn errors_by_class_sums_to_errors_per_group_and_totals() {
+        // Arrange: one group, mixed outcomes incl. a NULL-class error row and
+        // excluded ok / client_disconnect rows.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_class_ledger(
+            &path,
+            &[
+                ("ok", None),
+                ("client_disconnect", None),
+                ("upstream_error", Some("http-5xx")),
+                ("upstream_error", Some("http-5xx")),
+                ("gate_blocked", None),
+                ("upstream_error", Some("timeout")),
+            ],
+        );
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The single group's breakdown sums to its errors and to totals.
+        let group = &json["data"]["groups"][0];
+        assert_eq!(group["errors"], 4);
+        assert_eq!(group["errors_by_class"]["http-5xx"], 2);
+        assert_eq!(group["errors_by_class"]["unclassified"], 1);
+        assert_eq!(group["errors_by_class"]["timeout"], 1);
+
+        let totals = &json["data"]["totals"];
+        assert_eq!(totals["errors"], 4);
+        assert_eq!(totals["errors_by_class"]["http-5xx"], 2);
+        assert_eq!(totals["errors_by_class"]["unclassified"], 1);
+        assert_eq!(totals["errors_by_class"]["timeout"], 1);
+        let breakdown_sum: i64 = totals["errors_by_class"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_i64().unwrap())
+            .sum();
+        assert_eq!(breakdown_sum, 4);
+    }
+
+    #[tokio::test]
+    async fn requests_reconcile_ok_errors_disconnect_at_totals() {
+        // REQ = OK + ERR + DISC at totals, with client_disconnect_total and
+        // cache_read_present surfaced.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_class_ledger(
+            &path,
+            &[
+                ("ok", None),
+                ("ok", None),
+                ("upstream_error", Some("http-5xx")),
+                ("client_disconnect", None),
+            ],
+        );
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let totals = &json["data"]["totals"];
+        let requests = totals["requests"].as_i64().unwrap();
+        let ok = totals["ok"].as_i64().unwrap();
+        let errors = totals["errors"].as_i64().unwrap();
+        let disc = totals["client_disconnect_total"].as_i64().unwrap();
+        assert_eq!(requests, 4);
+        assert_eq!(ok, 2);
+        assert_eq!(errors, 1);
+        assert_eq!(disc, 1);
+        assert_eq!(requests, ok + errors + disc);
+        // Every seeded row reported a cache_read, so the reporting-only
+        // denominator equals the request count here.
+        assert_eq!(totals["cache_read_present"], 4);
+    }
+
+    #[tokio::test]
+    async fn empty_window_renders_empty_class_maps() {
+        // An error row 40 days ago falls outside today's window: the panel's
+        // error breakdown maps must serialize as empty objects, not absent.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        let db = open(&path).expect("open ledger");
+        let old = Local::now().timestamp_millis() - 40 * DAY_MS;
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                 resolved_class) \
+                 VALUES (?1, ?1, 'old', 'openai', 'm', 'a', 'm', 'p', 'u', 0, \
+                 'upstream_error', 5, 0, 0, 1, 0, 'http-5xx')",
+                rusqlite::params![old],
+            )
+            .expect("seed old error row");
+        drop(db);
+
+        let (status, json) = get_usage(state_with_ledger(path.clone()), "/status/usage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["totals"]["requests"], 0);
+        // The totals breakdown is present and empty (serializes as {}).
+        assert!(json["data"]["totals"]["errors_by_class"].is_object());
+        assert_eq!(
+            json["data"]["totals"]["errors_by_class"]
+                .as_object()
+                .unwrap()
+                .len(),
+            0
+        );
+        // No groups in an empty window.
+        assert_eq!(json["data"]["groups"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn usage_panel_reports_schema_version_two() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+        let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["schema_version"], 2);
     }
 
     /// Poll-loop safety: a panel that stays unavailable across repeated polls

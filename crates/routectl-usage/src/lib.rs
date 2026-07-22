@@ -25,9 +25,9 @@ pub use learn_event::CapabilityLearnEvent;
 pub use migrate::MigrateError;
 pub use query::{
     AggRow, GroupKey, KCalibration, M1AttributionSummary, QueryError, QuotaSnapshot,
-    ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary, aggregate, k_calibration_summary,
-    latest_quota, m1_attribution_summary, read_reuse_samples_since, shadow_misfire_summary, ttfbs,
-    would_trim_summary,
+    ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary, aggregate, errors_by_class,
+    k_calibration_summary, latest_quota, m1_attribution_summary, read_reuse_samples_since,
+    shadow_misfire_summary, ttfbs, would_trim_summary,
 };
 pub use record::{Outcome, ParseOutcomeError, UsageRecord};
 pub use retention::{PruneOutcome, prune};
