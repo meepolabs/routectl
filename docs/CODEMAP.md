@@ -52,7 +52,7 @@ listed at the bottom of each crate.
 
 ### Top-level
 
-- `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares crate-internal feature-gated helper modules `system_filter`, `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`
+- `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares crate-internal feature-gated helper modules `system_filter`, `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`, `retry_after`
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin and User-Agent override; also owns the response-body cap cluster shared by all five provider egresses: `read_body_capped` (two-guard buffered read -- fast-reject on an honest over-cap `Content-Length` plus a mid-transfer running-total abort for chunked/understated bodies, returns `(bytes, hit_cap)`), the `MAX_RESPONSE_BODY_BYTES` 16 MB egress-side buffering cap (sibling to the streaming `MAX_FRAME_BYTES` frame cap; hardcoded, not a config knob), `body_cap_exceeded_message` (fixed client-safe string, never echoes upstream bytes), and `warn_body_cap` (one-WARN emitter with a fixed, drift-proof field set)
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller `reasoning.effort` against per-model `effort_levels` (rounds toward most-capable above max, least-capable below min); single source of truth across openai-compat, anthropic-api, bedrock, openai-responses

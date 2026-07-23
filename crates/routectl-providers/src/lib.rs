@@ -58,8 +58,9 @@ pub(crate) mod upstream_log;
 
 // Shared parser for the standard HTTP `Retry-After` response header.
 // Gated on the provider features that bring in `reqwest` + `chrono`
-// (every provider does); the router consumes the parsed `Duration` via
-// `Error::Upstream`, but provider egresses call this directly.
+// (every provider does). Crate-internal: provider egresses call this
+// directly, and the router only ever sees the parsed `Duration` via
+// `Error::Upstream` -- it never reaches the module by path.
 #[cfg(any(
     feature = "openai-compat",
     feature = "anthropic-api",
@@ -67,7 +68,7 @@ pub(crate) mod upstream_log;
     feature = "openai-responses",
     feature = "gemini"
 ))]
-pub mod retry_after;
+pub(crate) mod retry_after;
 
 // Shared tool-call id charset sanitizer. Anthropic and Bedrock Converse
 // require `tool_use.id` to match `^[a-zA-Z0-9_-]+$`; an OpenAI-origin id
