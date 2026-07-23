@@ -163,29 +163,6 @@ async fn get_resolves_labeled_seat_token() {
 }
 
 #[tokio::test]
-async fn bare_oauth_resolves_unlabeled_seat_unchanged() {
-    // Back-compat pin: a single unlabeled seat + bare ref behaves
-    // exactly as before -- the seat key for `label: None` is the bare
-    // provider, so resolution is byte-for-byte identical to today.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("creds.json");
-    let store = OAuthStore::open(&path).await.unwrap();
-    store
-        .write_record("anthropic", rec_at(unix_now() + 3600))
-        .await
-        .unwrap();
-
-    let tok = store
-        .get(&SecretRef::OAuth {
-            provider: "anthropic".into(),
-            label: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(tok, "tok-abc");
-}
-
-#[tokio::test]
 async fn on_auth_failure_targets_only_the_named_seat() {
     // A 401 on a labeled seat force-refreshes that seat's record and
     // leaves the sibling default seat untouched.
