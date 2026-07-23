@@ -5,7 +5,12 @@ use std::path::Path;
 use routectl_core::Result;
 use routectl_router::{CatalogOverlay, Config};
 
-use super::DEFAULT_MAX_BODY_BYTES;
+/// Maximum incoming JSON body size for `/v1/chat/completions` and
+/// `/v1/messages`. Operator-configurable via `[server] max_body_bytes`
+/// (default 32 MiB; see `routectl_router::ServerConfig`). Used by
+/// `compute_max_body_bytes` as the fallback when the operator-supplied
+/// value is zero.
+const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 /// Compute the effective `DefaultBodyLimit` value. Mirrors the legacy
 /// behavior: zero in the config means fall through to the library
