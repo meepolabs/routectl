@@ -6,12 +6,22 @@
 //! matcher, guardrail, and registry all participate.
 
 use super::*;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use futures::stream::BoxStream;
 use routectl_core::ForwardedBearer;
 use routectl_core::ToolDef;
 use routectl_core::capability::SignalTier;
+use routectl_core::{ChatChunk, ChatResponse, Provider, Result};
 use routectl_testkit::{CapturedEvent, with_capture};
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::config::Config;
+use crate::resolved::ResolvedModel;
+use crate::router::RouterOptions;
 
 /// A provider whose complete/stream always fail with a fixed upstream
 /// status plus optional type/code, so a test drives a precise
