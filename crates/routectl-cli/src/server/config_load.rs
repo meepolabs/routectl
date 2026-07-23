@@ -43,7 +43,7 @@ pub(super) fn compute_max_body_bytes(config: &Config) -> usize {
 ///
 /// The loaded overlay rides back on [`LoadedConfig::catalog_overlay`] --
 /// callers that build a Router thread it into
-/// [`build_router_from_config_with_overlay`] so the two-layer merge
+/// [`build_router_from_config_with_overlay`](super::router_build::build_router_from_config_with_overlay) so the two-layer merge
 /// (`routectl_router::apply_catalog_overlay`) sees the SAME overlay this
 /// call validated, at both cold start and every config reload.
 ///
