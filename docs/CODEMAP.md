@@ -407,6 +407,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 - `tests/replay_ingress.rs` -- replay-driven ingress contract test; walks captured fixtures, mounts the upstream response in wiremock, drives egress `complete()`, renders the canonical `ChatResponse` via `AnthropicIngress::render_response`, and asserts it matches the captured egress response structurally (anthropic ingress, non-stream scope)
 - `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract; asserts that a foreign upstream (openai-compat DeepSeek dialect) through canonical normalize and Anthropic ingress render does not leak vendor envelope keys or a `signature:null` thinking block into the Anthropic-shape response
 - `tests/e2e_reasoning.rs` -- end-to-end reasoning round-trip across DeepSeek / vLLM / Anthropic dialects
-- `tests/live_matrix.rs` -- live provider matrix (OpenRouter / opencode-go / NIM); requires API keys, gated by feature flag
+- `tests/live_matrix.rs` -- shared harness for the live provider matrix (request builders, `run_complete` / `run_stream` / `run_matrix`, `sanitize_provider_name`) plus `#[path]` wiring of the per-scenario submodules; one test binary, gated by the `live-integration` feature
+- `tests/live_matrix/openai_compat.rs` -- openai-compat matrices (OpenRouter / opencode-go / NIM)
+- `tests/live_matrix/bedrock_invoke.rs` -- Anthropic-on-Bedrock via InvokeModel + bearer key, plus ingress-through-bedrock end-to-end rows
+- `tests/live_matrix/bedrock_converse.rs` -- Bedrock Converse matrix (api_shape = Converse)
+- `tests/live_matrix/openai_responses.rs` -- OpenAI Responses matrix against the chatgpt-oauth Codex endpoint
+- `tests/live_matrix/gemini.rs` -- native Google Gemini matrix (x-goog-api-key header)
+- `tests/live_matrix/oauth_codex.rs` -- OpenAI Responses via routectl-managed `oauth://codex` bearer source
+- `tests/live_matrix/responses_ingress_live.rs` -- `POST /v1/responses` ingress over HTTP via the real axum server
+- `tests/live_matrix/oauth_antigravity.rs` -- Cloud Code Gemini via routectl-managed `oauth://antigravity` bearer source
 - `tests/live_anthropic_oauth.rs` -- live OAuth-bearer test against `api.anthropic.com`; gated by env token file
 - `tests/anthropic_forward_compat_stream.rs` -- full-pipeline integration tests for the Anthropic SSE forward-compat opaque-events fix; hand-crafted SSE wire-byte fixtures driven egress -> canonical -> ingress, asserting verbatim re-emission of unknown content_block types
