@@ -4,16 +4,22 @@
 //! account) and that a chain reduced to empty surfaces as
 //! `Error::NotImplemented` rather than walking and 400ing.
 use super::*;
-use crate::config::{ProviderEntry, ProviderRuntimePolicy};
+use crate::capability_matcher::resolve_requested_capability;
+use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
+use crate::router::LearnedProbeGuard;
+use crate::router::chain::into_one_dispatch_target;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use parking_lot::Mutex as ParkingMutex;
+use routectl_core::capability::SignalTier;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, CustomTool, Error, Message, Provider, ToolDef,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Provider stub that records every `complete()` call. The test
 /// asserts on `captured.len()` to prove a provider was (or was not)

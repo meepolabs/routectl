@@ -2,6 +2,11 @@
 //! lists keep their provenance labels, new override entries hard-drop
 //! or mask, and a `force_supported` mask precedes probe admission.
 use super::*;
+use crate::config::Config;
+use crate::resolved::ResolvedModel;
+use crate::router::chain::into_one_dispatch_target;
+use routectl_core::{ChatChunk, ChatResponse, Provider};
+use std::sync::Arc;
 
 /// Minimal provider stub so the fixtures can build a real
 /// `Arc<ResolvedModel>`; none of its methods are exercised here.

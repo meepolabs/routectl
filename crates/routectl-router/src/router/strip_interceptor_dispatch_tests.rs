@@ -5,14 +5,19 @@
 //! provider are the stripped bytes -- identically across all three
 //! paths.
 use super::*;
+use crate::config::Config;
+use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use parking_lot::Mutex as ParkingMutex;
+use routectl_core::capability::SignalTier;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, Message, Provider, TokenCount, ToolDef,
 };
 use routectl_testkit::with_capture;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Records every request that reaches the upstream at any of the three
