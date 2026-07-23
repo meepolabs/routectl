@@ -1854,6 +1854,3 @@ impl<T> typenum::type_operators::Same for routectl_providers::openai_responses::
 pub type routectl_providers::openai_responses::OpenAiResponsesProvider::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::openai_responses::OpenAiResponsesProvider where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::openai_responses::OpenAiResponsesProvider::into_shared(self) -> Shared
-pub mod routectl_providers::retry_after
-pub const fn routectl_providers::retry_after::is_rate_limit_status(u16) -> bool
-pub fn routectl_providers::retry_after::parse_retry_after(&http::header::map::HeaderMap) -> core::option::Option<core::time::Duration>
