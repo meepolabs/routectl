@@ -5,7 +5,7 @@ mod validate;
 mod warnings;
 
 #[cfg(test)]
-pub(crate) use build::resolve_max_thinking_entry_bytes_for_test;
+pub use build::resolve_max_thinking_entry_bytes_for_test;
 pub use build::{
     BuildOptions, apply_catalog_overlay, build_provider, build_provider_with_options,
     build_resolved_models,

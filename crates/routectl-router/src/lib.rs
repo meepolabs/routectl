@@ -5,9 +5,9 @@
 //! resolves an incoming request's `model` against the configured aliases, and
 //! walks the fallback chain on `5xx`/`429`/timeout errors.
 
-pub mod activation;
-pub mod capability_matcher;
-pub mod capability_strip;
+pub(crate) mod activation;
+pub(crate) mod capability_matcher;
+pub(crate) mod capability_strip;
 pub mod catalog;
 pub(crate) mod catalog_baked;
 #[doc(hidden)]
@@ -25,16 +25,16 @@ pub(crate) mod config_locate;
 pub(crate) mod config_migrate;
 pub(crate) mod config_path;
 pub(crate) mod config_write;
-pub mod context_trim;
-pub mod cost_gate;
-pub mod doctor;
-pub mod factory;
+pub(crate) mod context_trim;
+pub(crate) mod cost_gate;
+pub(crate) mod doctor;
+pub(crate) mod factory;
 pub(crate) mod feature_keys;
-pub mod glob;
-pub mod k_estimator;
-pub mod learned_capability;
-pub mod override_registry;
-pub mod resolved;
+pub(crate) mod glob;
+pub(crate) mod k_estimator;
+pub(crate) mod learned_capability;
+pub(crate) mod override_registry;
+pub(crate) mod resolved;
 pub mod router;
 pub mod runtime_state;
 pub mod schema_gen;
