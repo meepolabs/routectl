@@ -1021,3 +1021,53 @@ fn sse_response_completed_without_response_field_yields_upstream_error() {
         other => panic!("expected Upstream error, got {other:?}"),
     }
 }
+
+/// Bare fallback: a `response.failed` event carrying no parseable
+/// `response` payload must still surface as `Err::Upstream` (status 0)
+/// with the `response.failed` marker, not silently drop or emit a
+/// terminal success chunk.
+#[test]
+fn sse_response_failed_without_response_field_yields_upstream_error() {
+    // Arrange: `response.failed` with no `response` key.
+    let mut state = ResponsesStreamState::default();
+
+    // Act
+    let result = state.parse_event("test", parse(json!({"type": "response.failed"})));
+
+    // Assert
+    match result.expect_err("response.failed without response field must yield Err") {
+        Error::Upstream { status, body, .. } => {
+            assert_eq!(status, 0, "bare fallback carries no upstream status");
+            assert!(
+                body.contains("response.failed"),
+                "expected response.failed marker, got: {body}"
+            );
+        }
+        other => panic!("expected Upstream error, got {other:?}"),
+    }
+}
+
+/// Bare fallback sibling: a `response.cancelled` event carrying no
+/// parseable `response` payload must surface as `Err::Upstream`
+/// (status 0) with the `response.cancelled` marker rather than
+/// delegating to the completed path and emitting a terminal chunk.
+#[test]
+fn sse_response_cancelled_without_response_field_yields_upstream_error() {
+    // Arrange: `response.cancelled` with no `response` key.
+    let mut state = ResponsesStreamState::default();
+
+    // Act
+    let result = state.parse_event("test", parse(json!({"type": "response.cancelled"})));
+
+    // Assert
+    match result.expect_err("response.cancelled without response field must yield Err") {
+        Error::Upstream { status, body, .. } => {
+            assert_eq!(status, 0, "bare fallback carries no upstream status");
+            assert!(
+                body.contains("response.cancelled"),
+                "expected response.cancelled marker, got: {body}"
+            );
+        }
+        other => panic!("expected Upstream error, got {other:?}"),
+    }
+}
