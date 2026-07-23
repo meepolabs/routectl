@@ -7,23 +7,23 @@
 
 pub mod cache_control;
 pub mod capability;
-pub mod cloud_project;
+pub(crate) mod cloud_project;
 pub mod content_part;
 pub mod context_reduction;
 pub mod error;
 pub mod failure_class;
 pub mod identity;
 pub mod log_safe;
-pub mod provider;
-pub mod reasoning_dialect;
-pub mod reserved;
+pub(crate) mod provider;
+pub(crate) mod reasoning_dialect;
+pub(crate) mod reserved;
 pub mod schema;
-pub mod schema_opaque;
+pub(crate) mod schema_opaque;
 pub mod system_content;
-pub mod token_source;
+pub(crate) mod token_source;
 pub mod tool_def;
 pub mod upstream_meta;
-pub mod volatile;
+pub(crate) mod volatile;
 
 /// Shared canonical-request / canonical-response builders for the
 /// cross-crate contract tests. Compiled only under `cfg(test)` or the
