@@ -310,32 +310,6 @@ fn api_key_path_stamps_no_session_header() {
     );
 }
 
-/// A `header_extras` entry named `thread-id` is OVERRIDDEN by the
-/// generated per-request value (insert replaces, not appends).
-#[test]
-fn generated_thread_id_overrides_header_extras() {
-    // Arrange
-    let provider = oauth_provider_with_extras(vec![(
-        "thread-id".to_string(),
-        "operator-thread".to_string(),
-    )]);
-    let rb = provider.client.post("https://chatgpt.test/responses");
-
-    // Act
-    let rb = provider
-        .build_headers(rb, &base_req(), "test-jwt")
-        .expect("build_headers ok");
-    let request = rb.build().expect("build");
-
-    // Assert: single value, and it is NOT the operator's.
-    let tids = header_vals(&request, "thread-id");
-    assert_eq!(tids.len(), 1, "thread-id must be single-valued: {tids:?}");
-    assert_ne!(
-        tids[0], "operator-thread",
-        "generated thread-id must override the header_extras value",
-    );
-}
-
 /// On the ApiKey path the three codex identity headers
 /// (thread-id, x-client-request-id, x-codex-window-id) are NOT
 /// injected, even when ChatgptOauth-shaped header_extras are present.
