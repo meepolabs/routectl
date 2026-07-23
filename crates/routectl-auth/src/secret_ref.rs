@@ -38,12 +38,18 @@ pub enum SecretRef {
     /// A bare `oauth://anthropic` carries `label: None` -- the default/pool
     /// seat -- and is byte-for-byte identical to today's semantics.
     OAuth {
+        /// Provider id (the segment after `oauth://`).
         provider: String,
+        /// Optional seat label (the segment after `#`); `None` selects the
+        /// default/pool seat.
         label: Option<String>,
     },
 }
 
 impl SecretRef {
+    /// Parse a secret URI into a [`SecretRef`]. Recognizes the `env://`,
+    /// `file://`, and `oauth://` schemes; `literal:` is rejected. Returns
+    /// an error without echoing the input value.
     pub fn parse(uri: &str) -> Result<Self> {
         if let Some(var) = uri.strip_prefix("env://") {
             if var.is_empty() {
@@ -118,7 +124,7 @@ impl SecretRef {
 /// The rejection error for a `literal:` secret ref, shared by parse and by
 /// resolve so both boundaries speak with one voice. Names the safe
 /// key-setting paths and NEVER echoes the key value.
-pub(crate) fn literal_rejected() -> Error {
+pub fn literal_rejected() -> Error {
     Error::Auth(
         "literal: secret refs are not accepted -- an inline key lands on argv \
          (visible in `ps` and shell history) and is persisted in plaintext in \

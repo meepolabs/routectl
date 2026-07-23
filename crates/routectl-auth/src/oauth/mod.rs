@@ -61,24 +61,37 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum OAuthError {
+    /// The named provider is not in the registry.
     #[error("unknown oauth provider `{0}` (known: {known})", known = crate::oauth::known_provider_ids().join(", "))]
     UnknownProvider(String),
 
+    /// No stored credentials exist for the named provider.
     #[error("no credentials for `{0}`; run `routectl login {0}` first")]
     NotLoggedIn(String),
 
+    /// The on-disk credentials store uses a schema version this binary
+    /// does not support.
     #[error(
         "credentials store schema is v{found}; this binary expects v{expected}; \
              upgrade routectl or delete {path} and re-run `routectl login`"
     )]
     SchemaMismatch {
+        /// Schema version found on disk.
         found: u32,
+        /// Schema version this binary expects.
         expected: u32,
+        /// Path to the credentials file.
         path: String,
     },
 
+    /// The credentials file could not be parsed.
     #[error("oauth credentials file at {path} is corrupted: {detail}")]
-    CorruptedFile { path: String, detail: String },
+    CorruptedFile {
+        /// Path to the credentials file.
+        path: String,
+        /// Sanitized cause of the parse failure.
+        detail: String,
+    },
 
     /// A `serve`-owned store opened over a credentials file that failed to
     /// load is kept PRESENT but degraded: every request and every write
@@ -92,24 +105,31 @@ pub enum OAuthError {
     #[error("{0}")]
     Degraded(String),
 
+    /// The OAuth flow did not complete before its deadline.
     #[error("oauth flow timed out; re-run `routectl login {0}`")]
     LoginTimeout(String),
 
+    /// The callback CSRF state token did not match.
     #[error("oauth state mismatch (CSRF token did not match); re-run `routectl login {0}`")]
     StateMismatch(String),
 
+    /// The token endpoint returned an error response.
     #[error("token endpoint returned an error: {0}")]
     TokenEndpoint(String),
 
+    /// The refresh token is expired or revoked; re-login is required.
     #[error("refresh token expired or revoked; re-run `routectl login {0}`")]
     RefreshExpired(String),
 
+    /// A network error occurred during the flow.
     #[error("network error during oauth flow: {0}")]
     Network(String),
 
+    /// An I/O error occurred.
     #[error("io error: {0}")]
     Io(String),
 
+    /// An unexpected internal error occurred.
     #[error("internal: {0}")]
     Internal(String),
 }

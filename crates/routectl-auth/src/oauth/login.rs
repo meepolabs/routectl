@@ -60,16 +60,20 @@ impl LoginOptions {
         Self::default()
     }
 
+    /// Set whether the auth URL is printed to stdout instead of opening
+    /// a browser.
     pub const fn with_print_url(mut self, print_url: bool) -> Self {
         self.print_url = print_url;
         self
     }
 
+    /// Override the local callback port.
     pub const fn with_callback_port(mut self, port: Option<u16>) -> Self {
         self.callback_port = port;
         self
     }
 
+    /// Set the seat label the resulting record is written under.
     pub fn with_label(mut self, label: Option<String>) -> Self {
         self.label = label;
         self

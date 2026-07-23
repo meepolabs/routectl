@@ -3,10 +3,16 @@ use routectl_core::Result;
 
 use crate::SecretRef;
 
+/// Resolves [`SecretRef`] values to their current secret and mediates
+/// rotation. Implementations back the individual reference schemes.
 #[async_trait]
 pub trait SecretStore: Send + Sync {
+    /// Resolve a reference to its current secret value.
     async fn get(&self, secret_ref: &SecretRef) -> Result<String>;
+    /// Store a value for a reference whose backing store is writable.
     async fn set(&self, secret_ref: &SecretRef, value: &str) -> Result<()>;
+    /// Remove a stored value for a reference whose backing store is
+    /// writable.
     async fn delete(&self, secret_ref: &SecretRef) -> Result<()>;
 
     /// Hook invoked by the router when an upstream returns 401 against

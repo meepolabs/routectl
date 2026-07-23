@@ -54,64 +54,6 @@ pub type routectl_auth::atomic_write::FsyncPolicy::Output = T
 pub fn routectl_auth::atomic_write::ensure_dir_0700(&std::path::Path) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_auth::atomic_write::write_0600_atomic(&std::path::Path, &[u8]) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_auth::atomic_write::write_0600_atomic_with_policy(&std::path::Path, &[u8], routectl_auth::atomic_write::FsyncPolicy) -> core::result::Result<(), alloc::string::String>
-pub mod routectl_auth::memory_store
-pub struct routectl_auth::memory_store::MemoryStore
-impl routectl_auth::memory_store::MemoryStore
-pub const fn routectl_auth::memory_store::MemoryStore::new() -> Self
-impl core::clone::Clone for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::clone(&self) -> routectl_auth::memory_store::MemoryStore
-impl core::default::Default for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::default() -> routectl_auth::memory_store::MemoryStore
-impl routectl_auth::store::SecretStore for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-impl core::marker::Freeze for routectl_auth::memory_store::MemoryStore
-impl core::marker::Send for routectl_auth::memory_store::MemoryStore
-impl core::marker::Sync for routectl_auth::memory_store::MemoryStore
-impl core::marker::Unpin for routectl_auth::memory_store::MemoryStore
-impl core::marker::UnsafeUnpin for routectl_auth::memory_store::MemoryStore
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::memory_store::MemoryStore
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::memory_store::MemoryStore
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::memory_store::MemoryStore where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::memory_store::MemoryStore where U: core::convert::From<T>
-pub fn routectl_auth::memory_store::MemoryStore::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::memory_store::MemoryStore where U: core::convert::Into<T>
-pub type routectl_auth::memory_store::MemoryStore::Error = core::convert::Infallible
-pub fn routectl_auth::memory_store::MemoryStore::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::memory_store::MemoryStore where U: core::convert::TryFrom<T>
-pub type routectl_auth::memory_store::MemoryStore::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::memory_store::MemoryStore::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_auth::memory_store::MemoryStore where T: core::clone::Clone
-pub type routectl_auth::memory_store::MemoryStore::Owned = T
-pub fn routectl_auth::memory_store::MemoryStore::clone_into(&self, &mut T)
-pub fn routectl_auth::memory_store::MemoryStore::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_auth::memory_store::MemoryStore where T: core::clone::Clone
-pub fn routectl_auth::memory_store::MemoryStore::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_auth::memory_store::MemoryStore where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::memory_store::MemoryStore where T: ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::memory_store::MemoryStore where T: ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_auth::memory_store::MemoryStore where T: core::clone::Clone
-pub unsafe fn routectl_auth::memory_store::MemoryStore::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::memory_store::MemoryStore where T: ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::memory_store::MemoryStore::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::memory_store::MemoryStore
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::memory_store::MemoryStore
-impl<T> typenum::type_operators::Same for routectl_auth::memory_store::MemoryStore
-pub type routectl_auth::memory_store::MemoryStore::Output = T
 pub mod routectl_auth::oauth
 pub mod routectl_auth::oauth::types
 #[non_exhaustive] pub struct routectl_auth::oauth::types::AccountInfo
@@ -699,17 +641,17 @@ pub async fn routectl_auth::OAuthStore::open_or_degraded(impl core::convert::Int
 pub fn routectl_auth::OAuthStore::path(&self) -> &std::path::Path
 impl core::clone::Clone for routectl_auth::OAuthStore
 pub fn routectl_auth::OAuthStore::clone(&self) -> routectl_auth::OAuthStore
-impl routectl_auth::store::SecretStore for routectl_auth::OAuthStore
-pub fn routectl_auth::OAuthStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+impl routectl_auth::SecretStore for routectl_auth::OAuthStore
+pub fn routectl_auth::OAuthStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::OAuthStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::OAuthStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
 impl core::marker::Freeze for routectl_auth::OAuthStore
 impl core::marker::Send for routectl_auth::OAuthStore
 impl core::marker::Sync for routectl_auth::OAuthStore
@@ -751,7 +693,7 @@ impl<T> typenum::type_operators::Same for routectl_auth::OAuthStore
 pub type routectl_auth::OAuthStore::Output = T
 pub struct routectl_auth::oauth::OAuthStoreProjectCache
 impl routectl_auth::OAuthStoreProjectCache
-pub fn routectl_auth::OAuthStoreProjectCache::new(alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_auth::secret_ref::SecretRef) -> Self
+pub fn routectl_auth::OAuthStoreProjectCache::new(alloc::sync::Arc<dyn routectl_auth::SecretStore>, routectl_auth::SecretRef) -> Self
 impl core::fmt::Debug for routectl_auth::OAuthStoreProjectCache
 pub fn routectl_auth::OAuthStoreProjectCache::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl routectl_core::cloud_project::CloudProjectCache for routectl_auth::OAuthStoreProjectCache
@@ -920,208 +862,6 @@ pub async fn routectl_auth::oauth::run_login(&str, &routectl_auth::OAuthStore, r
 pub fn routectl_auth::oauth::seat_key(&str, core::option::Option<&str>) -> alloc::string::String
 pub fn routectl_auth::oauth::unix_now() -> u64
 pub type routectl_auth::oauth::OAuthResult<T> = core::result::Result<T, routectl_auth::oauth::OAuthError>
-pub mod routectl_auth::secret_capture
-#[non_exhaustive] pub enum routectl_auth::secret_capture::SecretCaptureError
-pub routectl_auth::secret_capture::SecretCaptureError::DirResolution(alloc::string::String)
-pub routectl_auth::secret_capture::SecretCaptureError::EnvEmpty
-pub routectl_auth::secret_capture::SecretCaptureError::EnvEmpty::var: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::EnvNotSet
-pub routectl_auth::secret_capture::SecretCaptureError::EnvNotSet::var: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::EnvNotUnicode
-pub routectl_auth::secret_capture::SecretCaptureError::EnvNotUnicode::var: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::NotADirectory
-pub routectl_auth::secret_capture::SecretCaptureError::NotADirectory::path: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::SymlinkedStore
-pub routectl_auth::secret_capture::SecretCaptureError::SymlinkedStore::path: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::Unusable
-pub routectl_auth::secret_capture::SecretCaptureError::Unusable::detail: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::Unusable::path: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::VerificationFailed
-pub routectl_auth::secret_capture::SecretCaptureError::VerificationFailed::name: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::Write
-pub routectl_auth::secret_capture::SecretCaptureError::Write::detail: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::Write::name: alloc::string::String
-pub routectl_auth::secret_capture::SecretCaptureError::WrongPermissions
-pub routectl_auth::secret_capture::SecretCaptureError::WrongPermissions::mode: u32
-pub routectl_auth::secret_capture::SecretCaptureError::WrongPermissions::path: alloc::string::String
-impl core::convert::From<routectl_auth::secret_capture::SecretCaptureError> for routectl_core::error::Error
-pub fn routectl_core::error::Error::from(routectl_auth::secret_capture::SecretCaptureError) -> Self
-impl core::error::Error for routectl_auth::secret_capture::SecretCaptureError
-impl core::fmt::Debug for routectl_auth::secret_capture::SecretCaptureError
-pub fn routectl_auth::secret_capture::SecretCaptureError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for routectl_auth::secret_capture::SecretCaptureError
-pub fn routectl_auth::secret_capture::SecretCaptureError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::Send for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::Sync for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::Unpin for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::UnsafeUnpin for routectl_auth::secret_capture::SecretCaptureError
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::secret_capture::SecretCaptureError
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::secret_capture::SecretCaptureError
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::secret_capture::SecretCaptureError where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::secret_capture::SecretCaptureError where U: core::convert::From<T>
-pub fn routectl_auth::secret_capture::SecretCaptureError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::secret_capture::SecretCaptureError where U: core::convert::Into<T>
-pub type routectl_auth::secret_capture::SecretCaptureError::Error = core::convert::Infallible
-pub fn routectl_auth::secret_capture::SecretCaptureError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::secret_capture::SecretCaptureError where U: core::convert::TryFrom<T>
-pub type routectl_auth::secret_capture::SecretCaptureError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::secret_capture::SecretCaptureError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for routectl_auth::secret_capture::SecretCaptureError where T: core::fmt::Display + ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for routectl_auth::secret_capture::SecretCaptureError where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::secret_capture::SecretCaptureError where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::secret_capture::SecretCaptureError where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_auth::secret_capture::SecretCaptureError
-pub fn routectl_auth::secret_capture::SecretCaptureError::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::secret_capture::SecretCaptureError where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::secret_capture::SecretCaptureError::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::secret_capture::SecretCaptureError
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::secret_capture::SecretCaptureError
-impl<T> typenum::type_operators::Same for routectl_auth::secret_capture::SecretCaptureError
-pub type routectl_auth::secret_capture::SecretCaptureError::Output = T
-pub struct routectl_auth::secret_capture::ManagedSecretStore
-impl routectl_auth::secret_capture::ManagedSecretStore
-pub fn routectl_auth::secret_capture::ManagedSecretStore::open(std::path::PathBuf) -> routectl_auth::secret_capture::SecretCaptureResult<Self>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::put(&self, &str, &str) -> routectl_auth::secret_capture::SecretCaptureResult<routectl_auth::secret_ref::SecretRef>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::ref_path(&self, &str) -> std::path::PathBuf
-impl core::fmt::Debug for routectl_auth::secret_capture::ManagedSecretStore
-pub fn routectl_auth::secret_capture::ManagedSecretStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::Send for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::Sync for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::Unpin for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::UnsafeUnpin for routectl_auth::secret_capture::ManagedSecretStore
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::secret_capture::ManagedSecretStore
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::secret_capture::ManagedSecretStore
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::secret_capture::ManagedSecretStore where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::secret_capture::ManagedSecretStore where U: core::convert::From<T>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::secret_capture::ManagedSecretStore where U: core::convert::Into<T>
-pub type routectl_auth::secret_capture::ManagedSecretStore::Error = core::convert::Infallible
-pub fn routectl_auth::secret_capture::ManagedSecretStore::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::secret_capture::ManagedSecretStore where U: core::convert::TryFrom<T>
-pub type routectl_auth::secret_capture::ManagedSecretStore::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::secret_capture::ManagedSecretStore::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for routectl_auth::secret_capture::ManagedSecretStore where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::secret_capture::ManagedSecretStore where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::secret_capture::ManagedSecretStore where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_auth::secret_capture::ManagedSecretStore
-pub fn routectl_auth::secret_capture::ManagedSecretStore::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::secret_capture::ManagedSecretStore where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::secret_capture::ManagedSecretStore
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::secret_capture::ManagedSecretStore
-impl<T> typenum::type_operators::Same for routectl_auth::secret_capture::ManagedSecretStore
-pub type routectl_auth::secret_capture::ManagedSecretStore::Output = T
-pub fn routectl_auth::secret_capture::default_secret_dir() -> routectl_auth::secret_capture::SecretCaptureResult<std::path::PathBuf>
-pub fn routectl_auth::secret_capture::env_ref(&str) -> routectl_auth::secret_capture::SecretCaptureResult<routectl_auth::secret_ref::SecretRef>
-pub type routectl_auth::secret_capture::SecretCaptureResult<T> = core::result::Result<T, routectl_auth::secret_capture::SecretCaptureError>
-pub mod routectl_auth::secret_ref
-#[non_exhaustive] pub enum routectl_auth::secret_ref::SecretRef
-pub routectl_auth::secret_ref::SecretRef::Env(alloc::string::String)
-pub routectl_auth::secret_ref::SecretRef::File(std::path::PathBuf)
-pub routectl_auth::secret_ref::SecretRef::Literal(alloc::string::String)
-pub routectl_auth::secret_ref::SecretRef::OAuth
-pub routectl_auth::secret_ref::SecretRef::OAuth::label: core::option::Option<alloc::string::String>
-pub routectl_auth::secret_ref::SecretRef::OAuth::provider: alloc::string::String
-impl routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::parse(&str) -> routectl_core::error::Result<Self>
-impl core::clone::Clone for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::clone(&self) -> routectl_auth::secret_ref::SecretRef
-impl core::cmp::Eq for routectl_auth::secret_ref::SecretRef
-impl core::cmp::PartialEq for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::eq(&self, &routectl_auth::secret_ref::SecretRef) -> bool
-impl core::fmt::Debug for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for routectl_auth::secret_ref::SecretRef
-impl core::marker::Freeze for routectl_auth::secret_ref::SecretRef
-impl core::marker::Send for routectl_auth::secret_ref::SecretRef
-impl core::marker::Sync for routectl_auth::secret_ref::SecretRef
-impl core::marker::Unpin for routectl_auth::secret_ref::SecretRef
-impl core::marker::UnsafeUnpin for routectl_auth::secret_ref::SecretRef
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::secret_ref::SecretRef
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::secret_ref::SecretRef
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::secret_ref::SecretRef where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::secret_ref::SecretRef where U: core::convert::From<T>
-pub fn routectl_auth::secret_ref::SecretRef::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::secret_ref::SecretRef where U: core::convert::Into<T>
-pub type routectl_auth::secret_ref::SecretRef::Error = core::convert::Infallible
-pub fn routectl_auth::secret_ref::SecretRef::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::secret_ref::SecretRef where U: core::convert::TryFrom<T>
-pub type routectl_auth::secret_ref::SecretRef::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::secret_ref::SecretRef::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_auth::secret_ref::SecretRef where T: core::clone::Clone
-pub type routectl_auth::secret_ref::SecretRef::Owned = T
-pub fn routectl_auth::secret_ref::SecretRef::clone_into(&self, &mut T)
-pub fn routectl_auth::secret_ref::SecretRef::to_owned(&self) -> T
-impl<T> alloc::string::ToString for routectl_auth::secret_ref::SecretRef where T: core::fmt::Display + ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::to_string(&self) -> alloc::string::String
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_auth::secret_ref::SecretRef where T: core::clone::Clone
-pub fn routectl_auth::secret_ref::SecretRef::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_auth::secret_ref::SecretRef where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::secret_ref::SecretRef where T: ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::secret_ref::SecretRef where T: ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_auth::secret_ref::SecretRef where T: core::clone::Clone
-pub unsafe fn routectl_auth::secret_ref::SecretRef::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::secret_ref::SecretRef where T: ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::secret_ref::SecretRef::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::secret_ref::SecretRef
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::secret_ref::SecretRef
-impl<T> typenum::type_operators::Same for routectl_auth::secret_ref::SecretRef
-pub type routectl_auth::secret_ref::SecretRef::Output = T
-pub mod routectl_auth::store
-pub trait routectl_auth::store::SecretStore: core::marker::Send + core::marker::Sync
-pub fn routectl_auth::store::SecretStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::store::SecretStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::store::SecretStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::store::SecretStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::store::SecretStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::store::SecretStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::store::SecretStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::store::SecretStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::store::SecretStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::store::SecretStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-impl routectl_auth::store::SecretStore for routectl_auth::OAuthStore
-pub fn routectl_auth::OAuthStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-impl routectl_auth::store::SecretStore for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
 #[non_exhaustive] pub enum routectl_auth::LocalProbe
 pub routectl_auth::LocalProbe::Expired
 pub routectl_auth::LocalProbe::Missing
@@ -1294,46 +1034,46 @@ pub routectl_auth::SecretCaptureError::Write::name: alloc::string::String
 pub routectl_auth::SecretCaptureError::WrongPermissions
 pub routectl_auth::SecretCaptureError::WrongPermissions::mode: u32
 pub routectl_auth::SecretCaptureError::WrongPermissions::path: alloc::string::String
-impl core::convert::From<routectl_auth::secret_capture::SecretCaptureError> for routectl_core::error::Error
-pub fn routectl_core::error::Error::from(routectl_auth::secret_capture::SecretCaptureError) -> Self
-impl core::error::Error for routectl_auth::secret_capture::SecretCaptureError
-impl core::fmt::Debug for routectl_auth::secret_capture::SecretCaptureError
-pub fn routectl_auth::secret_capture::SecretCaptureError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for routectl_auth::secret_capture::SecretCaptureError
-pub fn routectl_auth::secret_capture::SecretCaptureError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::Send for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::Sync for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::Unpin for routectl_auth::secret_capture::SecretCaptureError
-impl core::marker::UnsafeUnpin for routectl_auth::secret_capture::SecretCaptureError
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::secret_capture::SecretCaptureError
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::secret_capture::SecretCaptureError
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::secret_capture::SecretCaptureError where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::secret_capture::SecretCaptureError where U: core::convert::From<T>
-pub fn routectl_auth::secret_capture::SecretCaptureError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::secret_capture::SecretCaptureError where U: core::convert::Into<T>
-pub type routectl_auth::secret_capture::SecretCaptureError::Error = core::convert::Infallible
-pub fn routectl_auth::secret_capture::SecretCaptureError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::secret_capture::SecretCaptureError where U: core::convert::TryFrom<T>
-pub type routectl_auth::secret_capture::SecretCaptureError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::secret_capture::SecretCaptureError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for routectl_auth::secret_capture::SecretCaptureError where T: core::fmt::Display + ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for routectl_auth::secret_capture::SecretCaptureError where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::secret_capture::SecretCaptureError where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::secret_capture::SecretCaptureError where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_auth::secret_capture::SecretCaptureError
-pub fn routectl_auth::secret_capture::SecretCaptureError::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::secret_capture::SecretCaptureError where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::SecretCaptureError::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::secret_capture::SecretCaptureError::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::secret_capture::SecretCaptureError
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::secret_capture::SecretCaptureError
-impl<T> typenum::type_operators::Same for routectl_auth::secret_capture::SecretCaptureError
-pub type routectl_auth::secret_capture::SecretCaptureError::Output = T
+impl core::convert::From<routectl_auth::SecretCaptureError> for routectl_core::error::Error
+pub fn routectl_core::error::Error::from(routectl_auth::SecretCaptureError) -> Self
+impl core::error::Error for routectl_auth::SecretCaptureError
+impl core::fmt::Debug for routectl_auth::SecretCaptureError
+pub fn routectl_auth::SecretCaptureError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_auth::SecretCaptureError
+pub fn routectl_auth::SecretCaptureError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_auth::SecretCaptureError
+impl core::marker::Send for routectl_auth::SecretCaptureError
+impl core::marker::Sync for routectl_auth::SecretCaptureError
+impl core::marker::Unpin for routectl_auth::SecretCaptureError
+impl core::marker::UnsafeUnpin for routectl_auth::SecretCaptureError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::SecretCaptureError
+impl core::panic::unwind_safe::UnwindSafe for routectl_auth::SecretCaptureError
+impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::SecretCaptureError where B: http_body::Body
+impl<T, U> core::convert::Into<U> for routectl_auth::SecretCaptureError where U: core::convert::From<T>
+pub fn routectl_auth::SecretCaptureError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_auth::SecretCaptureError where U: core::convert::Into<T>
+pub type routectl_auth::SecretCaptureError::Error = core::convert::Infallible
+pub fn routectl_auth::SecretCaptureError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_auth::SecretCaptureError where U: core::convert::TryFrom<T>
+pub type routectl_auth::SecretCaptureError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_auth::SecretCaptureError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for routectl_auth::SecretCaptureError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_auth::SecretCaptureError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_auth::SecretCaptureError where T: 'static + ?core::marker::Sized
+pub fn routectl_auth::SecretCaptureError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_auth::SecretCaptureError where T: ?core::marker::Sized
+pub fn routectl_auth::SecretCaptureError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_auth::SecretCaptureError where T: ?core::marker::Sized
+pub fn routectl_auth::SecretCaptureError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_auth::SecretCaptureError
+pub fn routectl_auth::SecretCaptureError::from(T) -> T
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::SecretCaptureError where T: ?core::marker::Sized
+pub fn routectl_auth::SecretCaptureError::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_auth::SecretCaptureError::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_auth::SecretCaptureError
+impl<T> tracing::instrument::WithSubscriber for routectl_auth::SecretCaptureError
+impl<T> typenum::type_operators::Same for routectl_auth::SecretCaptureError
+pub type routectl_auth::SecretCaptureError::Output = T
 #[non_exhaustive] pub enum routectl_auth::SecretRef
 pub routectl_auth::SecretRef::Env(alloc::string::String)
 pub routectl_auth::SecretRef::File(std::path::PathBuf)
@@ -1341,61 +1081,61 @@ pub routectl_auth::SecretRef::Literal(alloc::string::String)
 pub routectl_auth::SecretRef::OAuth
 pub routectl_auth::SecretRef::OAuth::label: core::option::Option<alloc::string::String>
 pub routectl_auth::SecretRef::OAuth::provider: alloc::string::String
-impl routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::parse(&str) -> routectl_core::error::Result<Self>
-impl core::clone::Clone for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::clone(&self) -> routectl_auth::secret_ref::SecretRef
-impl core::cmp::Eq for routectl_auth::secret_ref::SecretRef
-impl core::cmp::PartialEq for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::eq(&self, &routectl_auth::secret_ref::SecretRef) -> bool
-impl core::fmt::Debug for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for routectl_auth::secret_ref::SecretRef
-impl core::marker::Freeze for routectl_auth::secret_ref::SecretRef
-impl core::marker::Send for routectl_auth::secret_ref::SecretRef
-impl core::marker::Sync for routectl_auth::secret_ref::SecretRef
-impl core::marker::Unpin for routectl_auth::secret_ref::SecretRef
-impl core::marker::UnsafeUnpin for routectl_auth::secret_ref::SecretRef
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::secret_ref::SecretRef
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::secret_ref::SecretRef
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::secret_ref::SecretRef where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::secret_ref::SecretRef where U: core::convert::From<T>
-pub fn routectl_auth::secret_ref::SecretRef::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::secret_ref::SecretRef where U: core::convert::Into<T>
-pub type routectl_auth::secret_ref::SecretRef::Error = core::convert::Infallible
-pub fn routectl_auth::secret_ref::SecretRef::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::secret_ref::SecretRef where U: core::convert::TryFrom<T>
-pub type routectl_auth::secret_ref::SecretRef::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::secret_ref::SecretRef::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_auth::secret_ref::SecretRef where T: core::clone::Clone
-pub type routectl_auth::secret_ref::SecretRef::Owned = T
-pub fn routectl_auth::secret_ref::SecretRef::clone_into(&self, &mut T)
-pub fn routectl_auth::secret_ref::SecretRef::to_owned(&self) -> T
-impl<T> alloc::string::ToString for routectl_auth::secret_ref::SecretRef where T: core::fmt::Display + ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::to_string(&self) -> alloc::string::String
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_auth::secret_ref::SecretRef where T: core::clone::Clone
-pub fn routectl_auth::secret_ref::SecretRef::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_auth::secret_ref::SecretRef where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::secret_ref::SecretRef where T: ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::secret_ref::SecretRef where T: ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_auth::secret_ref::SecretRef where T: core::clone::Clone
-pub unsafe fn routectl_auth::secret_ref::SecretRef::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_auth::secret_ref::SecretRef
-pub fn routectl_auth::secret_ref::SecretRef::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::secret_ref::SecretRef where T: ?core::marker::Sized
-pub fn routectl_auth::secret_ref::SecretRef::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::secret_ref::SecretRef::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::secret_ref::SecretRef
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::secret_ref::SecretRef
-impl<T> typenum::type_operators::Same for routectl_auth::secret_ref::SecretRef
-pub type routectl_auth::secret_ref::SecretRef::Output = T
+impl routectl_auth::SecretRef
+pub fn routectl_auth::SecretRef::parse(&str) -> routectl_core::error::Result<Self>
+impl core::clone::Clone for routectl_auth::SecretRef
+pub fn routectl_auth::SecretRef::clone(&self) -> routectl_auth::SecretRef
+impl core::cmp::Eq for routectl_auth::SecretRef
+impl core::cmp::PartialEq for routectl_auth::SecretRef
+pub fn routectl_auth::SecretRef::eq(&self, &routectl_auth::SecretRef) -> bool
+impl core::fmt::Debug for routectl_auth::SecretRef
+pub fn routectl_auth::SecretRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_auth::SecretRef
+pub fn routectl_auth::SecretRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_auth::SecretRef
+pub fn routectl_auth::SecretRef::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for routectl_auth::SecretRef
+impl core::marker::Freeze for routectl_auth::SecretRef
+impl core::marker::Send for routectl_auth::SecretRef
+impl core::marker::Sync for routectl_auth::SecretRef
+impl core::marker::Unpin for routectl_auth::SecretRef
+impl core::marker::UnsafeUnpin for routectl_auth::SecretRef
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::SecretRef
+impl core::panic::unwind_safe::UnwindSafe for routectl_auth::SecretRef
+impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::SecretRef where B: http_body::Body
+impl<T, U> core::convert::Into<U> for routectl_auth::SecretRef where U: core::convert::From<T>
+pub fn routectl_auth::SecretRef::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_auth::SecretRef where U: core::convert::Into<T>
+pub type routectl_auth::SecretRef::Error = core::convert::Infallible
+pub fn routectl_auth::SecretRef::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_auth::SecretRef where U: core::convert::TryFrom<T>
+pub type routectl_auth::SecretRef::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_auth::SecretRef::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_auth::SecretRef where T: core::clone::Clone
+pub type routectl_auth::SecretRef::Owned = T
+pub fn routectl_auth::SecretRef::clone_into(&self, &mut T)
+pub fn routectl_auth::SecretRef::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_auth::SecretRef where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_auth::SecretRef::to_string(&self) -> alloc::string::String
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_auth::SecretRef where T: core::clone::Clone
+pub fn routectl_auth::SecretRef::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_auth::SecretRef where T: 'static + ?core::marker::Sized
+pub fn routectl_auth::SecretRef::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_auth::SecretRef where T: ?core::marker::Sized
+pub fn routectl_auth::SecretRef::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_auth::SecretRef where T: ?core::marker::Sized
+pub fn routectl_auth::SecretRef::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_auth::SecretRef where T: core::clone::Clone
+pub unsafe fn routectl_auth::SecretRef::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_auth::SecretRef
+pub fn routectl_auth::SecretRef::from(T) -> T
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::SecretRef where T: ?core::marker::Sized
+pub fn routectl_auth::SecretRef::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_auth::SecretRef::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_auth::SecretRef
+impl<T> tracing::instrument::WithSubscriber for routectl_auth::SecretRef
+impl<T> typenum::type_operators::Same for routectl_auth::SecretRef
+pub type routectl_auth::SecretRef::Output = T
 #[non_exhaustive] pub struct routectl_auth::LoginOptions
 pub routectl_auth::LoginOptions::callback_port: core::option::Option<u16>
 pub routectl_auth::LoginOptions::label: core::option::Option<alloc::string::String>
@@ -1451,100 +1191,100 @@ impl<T> tracing::instrument::WithSubscriber for routectl_auth::LoginOptions
 impl<T> typenum::type_operators::Same for routectl_auth::LoginOptions
 pub type routectl_auth::LoginOptions::Output = T
 pub struct routectl_auth::ManagedSecretStore
-impl routectl_auth::secret_capture::ManagedSecretStore
-pub fn routectl_auth::secret_capture::ManagedSecretStore::open(std::path::PathBuf) -> routectl_auth::secret_capture::SecretCaptureResult<Self>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::put(&self, &str, &str) -> routectl_auth::secret_capture::SecretCaptureResult<routectl_auth::secret_ref::SecretRef>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::ref_path(&self, &str) -> std::path::PathBuf
-impl core::fmt::Debug for routectl_auth::secret_capture::ManagedSecretStore
-pub fn routectl_auth::secret_capture::ManagedSecretStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::Send for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::Sync for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::Unpin for routectl_auth::secret_capture::ManagedSecretStore
-impl core::marker::UnsafeUnpin for routectl_auth::secret_capture::ManagedSecretStore
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::secret_capture::ManagedSecretStore
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::secret_capture::ManagedSecretStore
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::secret_capture::ManagedSecretStore where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::secret_capture::ManagedSecretStore where U: core::convert::From<T>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::secret_capture::ManagedSecretStore where U: core::convert::Into<T>
-pub type routectl_auth::secret_capture::ManagedSecretStore::Error = core::convert::Infallible
-pub fn routectl_auth::secret_capture::ManagedSecretStore::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::secret_capture::ManagedSecretStore where U: core::convert::TryFrom<T>
-pub type routectl_auth::secret_capture::ManagedSecretStore::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::secret_capture::ManagedSecretStore::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for routectl_auth::secret_capture::ManagedSecretStore where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::secret_capture::ManagedSecretStore where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::secret_capture::ManagedSecretStore where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_auth::secret_capture::ManagedSecretStore
-pub fn routectl_auth::secret_capture::ManagedSecretStore::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::secret_capture::ManagedSecretStore where T: ?core::marker::Sized
-pub fn routectl_auth::secret_capture::ManagedSecretStore::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::secret_capture::ManagedSecretStore::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::secret_capture::ManagedSecretStore
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::secret_capture::ManagedSecretStore
-impl<T> typenum::type_operators::Same for routectl_auth::secret_capture::ManagedSecretStore
-pub type routectl_auth::secret_capture::ManagedSecretStore::Output = T
+impl routectl_auth::ManagedSecretStore
+pub fn routectl_auth::ManagedSecretStore::open(std::path::PathBuf) -> routectl_auth::SecretCaptureResult<Self>
+pub fn routectl_auth::ManagedSecretStore::put(&self, &str, &str) -> routectl_auth::SecretCaptureResult<routectl_auth::SecretRef>
+pub fn routectl_auth::ManagedSecretStore::ref_path(&self, &str) -> std::path::PathBuf
+impl core::fmt::Debug for routectl_auth::ManagedSecretStore
+pub fn routectl_auth::ManagedSecretStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_auth::ManagedSecretStore
+impl core::marker::Send for routectl_auth::ManagedSecretStore
+impl core::marker::Sync for routectl_auth::ManagedSecretStore
+impl core::marker::Unpin for routectl_auth::ManagedSecretStore
+impl core::marker::UnsafeUnpin for routectl_auth::ManagedSecretStore
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::ManagedSecretStore
+impl core::panic::unwind_safe::UnwindSafe for routectl_auth::ManagedSecretStore
+impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::ManagedSecretStore where B: http_body::Body
+impl<T, U> core::convert::Into<U> for routectl_auth::ManagedSecretStore where U: core::convert::From<T>
+pub fn routectl_auth::ManagedSecretStore::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_auth::ManagedSecretStore where U: core::convert::Into<T>
+pub type routectl_auth::ManagedSecretStore::Error = core::convert::Infallible
+pub fn routectl_auth::ManagedSecretStore::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_auth::ManagedSecretStore where U: core::convert::TryFrom<T>
+pub type routectl_auth::ManagedSecretStore::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_auth::ManagedSecretStore::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_auth::ManagedSecretStore where T: 'static + ?core::marker::Sized
+pub fn routectl_auth::ManagedSecretStore::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_auth::ManagedSecretStore where T: ?core::marker::Sized
+pub fn routectl_auth::ManagedSecretStore::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_auth::ManagedSecretStore where T: ?core::marker::Sized
+pub fn routectl_auth::ManagedSecretStore::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_auth::ManagedSecretStore
+pub fn routectl_auth::ManagedSecretStore::from(T) -> T
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::ManagedSecretStore where T: ?core::marker::Sized
+pub fn routectl_auth::ManagedSecretStore::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_auth::ManagedSecretStore::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_auth::ManagedSecretStore
+impl<T> tracing::instrument::WithSubscriber for routectl_auth::ManagedSecretStore
+impl<T> typenum::type_operators::Same for routectl_auth::ManagedSecretStore
+pub type routectl_auth::ManagedSecretStore::Output = T
 pub struct routectl_auth::MemoryStore
-impl routectl_auth::memory_store::MemoryStore
-pub const fn routectl_auth::memory_store::MemoryStore::new() -> Self
-impl core::clone::Clone for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::clone(&self) -> routectl_auth::memory_store::MemoryStore
-impl core::default::Default for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::default() -> routectl_auth::memory_store::MemoryStore
-impl routectl_auth::store::SecretStore for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-impl core::marker::Freeze for routectl_auth::memory_store::MemoryStore
-impl core::marker::Send for routectl_auth::memory_store::MemoryStore
-impl core::marker::Sync for routectl_auth::memory_store::MemoryStore
-impl core::marker::Unpin for routectl_auth::memory_store::MemoryStore
-impl core::marker::UnsafeUnpin for routectl_auth::memory_store::MemoryStore
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::memory_store::MemoryStore
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::memory_store::MemoryStore
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::memory_store::MemoryStore where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::memory_store::MemoryStore where U: core::convert::From<T>
-pub fn routectl_auth::memory_store::MemoryStore::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::memory_store::MemoryStore where U: core::convert::Into<T>
-pub type routectl_auth::memory_store::MemoryStore::Error = core::convert::Infallible
-pub fn routectl_auth::memory_store::MemoryStore::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::memory_store::MemoryStore where U: core::convert::TryFrom<T>
-pub type routectl_auth::memory_store::MemoryStore::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::memory_store::MemoryStore::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_auth::memory_store::MemoryStore where T: core::clone::Clone
-pub type routectl_auth::memory_store::MemoryStore::Owned = T
-pub fn routectl_auth::memory_store::MemoryStore::clone_into(&self, &mut T)
-pub fn routectl_auth::memory_store::MemoryStore::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_auth::memory_store::MemoryStore where T: core::clone::Clone
-pub fn routectl_auth::memory_store::MemoryStore::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_auth::memory_store::MemoryStore where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::memory_store::MemoryStore where T: ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::memory_store::MemoryStore where T: ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_auth::memory_store::MemoryStore where T: core::clone::Clone
-pub unsafe fn routectl_auth::memory_store::MemoryStore::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::from(T) -> T
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::memory_store::MemoryStore where T: ?core::marker::Sized
-pub fn routectl_auth::memory_store::MemoryStore::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::memory_store::MemoryStore::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::memory_store::MemoryStore
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::memory_store::MemoryStore
-impl<T> typenum::type_operators::Same for routectl_auth::memory_store::MemoryStore
-pub type routectl_auth::memory_store::MemoryStore::Output = T
+impl routectl_auth::MemoryStore
+pub const fn routectl_auth::MemoryStore::new() -> Self
+impl core::clone::Clone for routectl_auth::MemoryStore
+pub fn routectl_auth::MemoryStore::clone(&self) -> routectl_auth::MemoryStore
+impl core::default::Default for routectl_auth::MemoryStore
+pub fn routectl_auth::MemoryStore::default() -> routectl_auth::MemoryStore
+impl routectl_auth::SecretStore for routectl_auth::MemoryStore
+pub fn routectl_auth::MemoryStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::MemoryStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::MemoryStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+impl core::marker::Freeze for routectl_auth::MemoryStore
+impl core::marker::Send for routectl_auth::MemoryStore
+impl core::marker::Sync for routectl_auth::MemoryStore
+impl core::marker::Unpin for routectl_auth::MemoryStore
+impl core::marker::UnsafeUnpin for routectl_auth::MemoryStore
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::MemoryStore
+impl core::panic::unwind_safe::UnwindSafe for routectl_auth::MemoryStore
+impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::MemoryStore where B: http_body::Body
+impl<T, U> core::convert::Into<U> for routectl_auth::MemoryStore where U: core::convert::From<T>
+pub fn routectl_auth::MemoryStore::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_auth::MemoryStore where U: core::convert::Into<T>
+pub type routectl_auth::MemoryStore::Error = core::convert::Infallible
+pub fn routectl_auth::MemoryStore::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_auth::MemoryStore where U: core::convert::TryFrom<T>
+pub type routectl_auth::MemoryStore::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_auth::MemoryStore::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_auth::MemoryStore where T: core::clone::Clone
+pub type routectl_auth::MemoryStore::Owned = T
+pub fn routectl_auth::MemoryStore::clone_into(&self, &mut T)
+pub fn routectl_auth::MemoryStore::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_auth::MemoryStore where T: core::clone::Clone
+pub fn routectl_auth::MemoryStore::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_auth::MemoryStore where T: 'static + ?core::marker::Sized
+pub fn routectl_auth::MemoryStore::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_auth::MemoryStore where T: ?core::marker::Sized
+pub fn routectl_auth::MemoryStore::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_auth::MemoryStore where T: ?core::marker::Sized
+pub fn routectl_auth::MemoryStore::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_auth::MemoryStore where T: core::clone::Clone
+pub unsafe fn routectl_auth::MemoryStore::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_auth::MemoryStore
+pub fn routectl_auth::MemoryStore::from(T) -> T
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::MemoryStore where T: ?core::marker::Sized
+pub fn routectl_auth::MemoryStore::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_auth::MemoryStore::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_auth::MemoryStore
+impl<T> tracing::instrument::WithSubscriber for routectl_auth::MemoryStore
+impl<T> typenum::type_operators::Same for routectl_auth::MemoryStore
+pub type routectl_auth::MemoryStore::Output = T
 pub struct routectl_auth::OAuthStore
 impl routectl_auth::OAuthStore
 pub async fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches(&self, &str, &str) -> routectl_auth::oauth::OAuthResult<bool>
@@ -1567,17 +1307,17 @@ pub async fn routectl_auth::OAuthStore::open_or_degraded(impl core::convert::Int
 pub fn routectl_auth::OAuthStore::path(&self) -> &std::path::Path
 impl core::clone::Clone for routectl_auth::OAuthStore
 pub fn routectl_auth::OAuthStore::clone(&self) -> routectl_auth::OAuthStore
-impl routectl_auth::store::SecretStore for routectl_auth::OAuthStore
-pub fn routectl_auth::OAuthStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+impl routectl_auth::SecretStore for routectl_auth::OAuthStore
+pub fn routectl_auth::OAuthStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::OAuthStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::OAuthStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
 impl core::marker::Freeze for routectl_auth::OAuthStore
 impl core::marker::Send for routectl_auth::OAuthStore
 impl core::marker::Sync for routectl_auth::OAuthStore
@@ -1619,7 +1359,7 @@ impl<T> typenum::type_operators::Same for routectl_auth::OAuthStore
 pub type routectl_auth::OAuthStore::Output = T
 pub struct routectl_auth::OAuthStoreProjectCache
 impl routectl_auth::OAuthStoreProjectCache
-pub fn routectl_auth::OAuthStoreProjectCache::new(alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_auth::secret_ref::SecretRef) -> Self
+pub fn routectl_auth::OAuthStoreProjectCache::new(alloc::sync::Arc<dyn routectl_auth::SecretStore>, routectl_auth::SecretRef) -> Self
 impl core::fmt::Debug for routectl_auth::OAuthStoreProjectCache
 pub fn routectl_auth::OAuthStoreProjectCache::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl routectl_core::cloud_project::CloudProjectCache for routectl_auth::OAuthStoreProjectCache
@@ -1657,99 +1397,39 @@ impl<T> tracing::instrument::Instrument for routectl_auth::OAuthStoreProjectCach
 impl<T> tracing::instrument::WithSubscriber for routectl_auth::OAuthStoreProjectCache
 impl<T> typenum::type_operators::Same for routectl_auth::OAuthStoreProjectCache
 pub type routectl_auth::OAuthStoreProjectCache::Output = T
-pub struct routectl_auth::SecretToken(_)
-impl routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::expose(&self) -> &str
-pub fn routectl_auth::oauth::types::SecretToken::new(impl core::convert::Into<alloc::string::String>) -> Self
-impl core::clone::Clone for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::clone(&self) -> routectl_auth::oauth::types::SecretToken
-impl core::cmp::Eq for routectl_auth::oauth::types::SecretToken
-impl core::cmp::PartialEq for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::eq(&self, &routectl_auth::oauth::types::SecretToken) -> bool
-impl core::default::Default for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::default() -> routectl_auth::oauth::types::SecretToken
-impl core::fmt::Debug for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for routectl_auth::oauth::types::SecretToken
-impl core::ops::drop::Drop for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::drop(&mut self)
-impl serde_core::ser::Serialize for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::serialize<S: serde_core::ser::Serializer>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error>
-impl<'de> serde_core::de::Deserialize<'de> for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
-impl core::marker::Freeze for routectl_auth::oauth::types::SecretToken
-impl core::marker::Send for routectl_auth::oauth::types::SecretToken
-impl core::marker::Sync for routectl_auth::oauth::types::SecretToken
-impl core::marker::Unpin for routectl_auth::oauth::types::SecretToken
-impl core::marker::UnsafeUnpin for routectl_auth::oauth::types::SecretToken
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_auth::oauth::types::SecretToken
-impl core::panic::unwind_safe::UnwindSafe for routectl_auth::oauth::types::SecretToken
-impl<A, B, T> hyper_util::server::conn::auto::HttpServerConnExec<A, B> for routectl_auth::oauth::types::SecretToken where B: http_body::Body
-impl<T, U> core::convert::Into<U> for routectl_auth::oauth::types::SecretToken where U: core::convert::From<T>
-pub fn routectl_auth::oauth::types::SecretToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_auth::oauth::types::SecretToken where U: core::convert::Into<T>
-pub type routectl_auth::oauth::types::SecretToken::Error = core::convert::Infallible
-pub fn routectl_auth::oauth::types::SecretToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_auth::oauth::types::SecretToken where U: core::convert::TryFrom<T>
-pub type routectl_auth::oauth::types::SecretToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_auth::oauth::types::SecretToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_auth::oauth::types::SecretToken where T: core::clone::Clone
-pub type routectl_auth::oauth::types::SecretToken::Owned = T
-pub fn routectl_auth::oauth::types::SecretToken::clone_into(&self, &mut T)
-pub fn routectl_auth::oauth::types::SecretToken::to_owned(&self) -> T
-impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_auth::oauth::types::SecretToken where T: core::clone::Clone
-pub fn routectl_auth::oauth::types::SecretToken::from_ref(&T) -> T
-impl<T> core::any::Any for routectl_auth::oauth::types::SecretToken where T: 'static + ?core::marker::Sized
-pub fn routectl_auth::oauth::types::SecretToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_auth::oauth::types::SecretToken where T: ?core::marker::Sized
-pub fn routectl_auth::oauth::types::SecretToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_auth::oauth::types::SecretToken where T: ?core::marker::Sized
-pub fn routectl_auth::oauth::types::SecretToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_auth::oauth::types::SecretToken where T: core::clone::Clone
-pub unsafe fn routectl_auth::oauth::types::SecretToken::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_auth::oauth::types::SecretToken
-pub fn routectl_auth::oauth::types::SecretToken::from(T) -> T
-impl<T> serde_core::de::DeserializeOwned for routectl_auth::oauth::types::SecretToken where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_auth::oauth::types::SecretToken where T: ?core::marker::Sized
-pub fn routectl_auth::oauth::types::SecretToken::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-pub fn routectl_auth::oauth::types::SecretToken::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
-impl<T> tracing::instrument::Instrument for routectl_auth::oauth::types::SecretToken
-impl<T> tracing::instrument::WithSubscriber for routectl_auth::oauth::types::SecretToken
-impl<T> typenum::type_operators::Same for routectl_auth::oauth::types::SecretToken
-pub type routectl_auth::oauth::types::SecretToken::Output = T
 pub trait routectl_auth::SecretStore: core::marker::Send + core::marker::Sync
-pub fn routectl_auth::SecretStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::SecretStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::SecretStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::SecretStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::SecretStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::SecretStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::SecretStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::SecretStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::SecretStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::SecretStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-impl routectl_auth::store::SecretStore for routectl_auth::OAuthStore
-pub fn routectl_auth::OAuthStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::OAuthStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::OAuthStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-impl routectl_auth::store::SecretStore for routectl_auth::memory_store::MemoryStore
-pub fn routectl_auth::memory_store::MemoryStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::secret_ref::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::memory_store::MemoryStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::secret_ref::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
-pub fn routectl_auth::default_secret_dir() -> routectl_auth::secret_capture::SecretCaptureResult<std::path::PathBuf>
-pub fn routectl_auth::env_ref(&str) -> routectl_auth::secret_capture::SecretCaptureResult<routectl_auth::secret_ref::SecretRef>
-pub type routectl_auth::SecretCaptureResult<T> = core::result::Result<T, routectl_auth::secret_capture::SecretCaptureError>
+pub fn routectl_auth::SecretStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::SecretStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::SecretStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::SecretStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::SecretStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::SecretStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::SecretStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::SecretStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::SecretStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::SecretStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+impl routectl_auth::SecretStore for routectl_auth::MemoryStore
+pub fn routectl_auth::MemoryStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::MemoryStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::MemoryStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::MemoryStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+impl routectl_auth::SecretStore for routectl_auth::OAuthStore
+pub fn routectl_auth::OAuthStore::account_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<core::option::Option<alloc::string::String>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::clear_cloud_project_id_if_matches<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::OAuthStore::delete<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::get<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::list_seats<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::vec::Vec<routectl_auth::SecretRef>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::on_auth_failure<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::peek_cloud_project_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::peek_session_id<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_auth::OAuthStore::set<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::OAuthStore::set_cloud_project_id<'life0, 'life1, 'life2, 'async_trait>(&'life0 self, &'life1 routectl_auth::SecretRef, &'life2 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait
+pub fn routectl_auth::default_secret_dir() -> routectl_auth::SecretCaptureResult<std::path::PathBuf>
+pub fn routectl_auth::env_ref(&str) -> routectl_auth::SecretCaptureResult<routectl_auth::SecretRef>
+pub type routectl_auth::SecretCaptureResult<T> = core::result::Result<T, routectl_auth::SecretCaptureError>

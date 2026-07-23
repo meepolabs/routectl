@@ -15,10 +15,13 @@ use routectl_core::{Error, Result};
 
 use crate::{SecretRef, SecretStore};
 
+/// Default [`SecretStore`] that resolves `env://` and `file://`
+/// references at read-time and rejects `literal:` references.
 #[derive(Clone, Default)]
 pub struct MemoryStore;
 
 impl MemoryStore {
+    /// Construct a new store.
     pub const fn new() -> Self {
         Self
     }

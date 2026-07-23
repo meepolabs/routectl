@@ -99,9 +99,12 @@ impl<'de> Deserialize<'de> for SecretToken {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TokenRecord {
+    /// Access token presented to the upstream provider.
     pub access_token: SecretToken,
+    /// Refresh token used to renew the access token near expiry.
     pub refresh_token: SecretToken,
 
+    /// Token type reported by the endpoint (defaults to `Bearer`).
     #[serde(default = "default_token_type")]
     pub token_type: String,
 
@@ -152,11 +155,15 @@ fn default_token_type() -> String {
     "Bearer".into()
 }
 
+/// Operator-facing identity bits associated with a credential, shown by
+/// `routectl whoami`. Best-effort and never trusted for authentication.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct AccountInfo {
+    /// Account email, when known.
     #[serde(default)]
     pub email: Option<String>,
+    /// Stable account identifier, when known.
     #[serde(default)]
     pub account_id: Option<String>,
 }
@@ -211,7 +218,9 @@ pub fn seat_key(provider: &str, label: Option<&str>) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CredentialsFile {
+    /// On-disk schema version.
     pub schema_version: u32,
+    /// Stored records keyed by provider seat.
     #[serde(default)]
     pub providers: BTreeMap<String, TokenRecord>,
 }
@@ -223,6 +232,7 @@ impl Default for CredentialsFile {
 }
 
 impl CredentialsFile {
+    /// Construct an empty credentials file at the current schema version.
     pub const fn empty() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -230,14 +240,17 @@ impl CredentialsFile {
         }
     }
 
+    /// Look up the record for a provider seat key.
     pub fn get(&self, provider: &str) -> Option<&TokenRecord> {
         self.providers.get(provider)
     }
 
+    /// Insert or replace the record for a provider seat key.
     pub fn upsert(&mut self, provider: &str, rec: TokenRecord) {
         self.providers.insert(provider.into(), rec);
     }
 
+    /// Remove and return the record for a provider seat key.
     pub fn remove(&mut self, provider: &str) -> Option<TokenRecord> {
         self.providers.remove(provider)
     }

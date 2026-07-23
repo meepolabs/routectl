@@ -25,42 +25,87 @@ use crate::secret_ref::SecretRef;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SecretCaptureError {
+    /// The default secret directory could not be resolved from the
+    /// environment.
     #[error("could not resolve the default secret directory: {0}")]
     DirResolution(String),
 
+    /// The configured store path exists but is not a directory.
     #[error("secret store path {path} exists but is not a directory")]
-    NotADirectory { path: String },
+    NotADirectory {
+        /// Path that was expected to be a directory.
+        path: String,
+    },
 
+    /// The store path is a symbolic link; the store must be a real
+    /// directory.
     #[error(
         "secret store directory {path} is a symlink; a symlinked store can \
          redirect where secrets are written or read -- point the store at a \
          real directory"
     )]
-    SymlinkedStore { path: String },
+    SymlinkedStore {
+        /// Path of the symlinked store.
+        path: String,
+    },
 
+    /// The store directory is not owner-only (mode 0700).
     #[error(
         "secret store directory {path} has permissions {mode:o}; it must be \
          owner-only (0700) so other users cannot read stored secrets"
     )]
-    WrongPermissions { path: String, mode: u32 },
+    WrongPermissions {
+        /// Path of the store directory.
+        path: String,
+        /// Observed permission bits.
+        mode: u32,
+    },
 
+    /// The store directory could not be created or accessed.
     #[error("secret store directory {path} is not usable: {detail}")]
-    Unusable { path: String, detail: String },
+    Unusable {
+        /// Path of the store directory.
+        path: String,
+        /// Underlying cause.
+        detail: String,
+    },
 
+    /// The secret file could not be written.
     #[error("failed to write secret `{name}`: {detail}")]
-    Write { name: String, detail: String },
+    Write {
+        /// Logical name of the secret.
+        name: String,
+        /// Underlying cause.
+        detail: String,
+    },
 
+    /// The written secret failed read-back verification and was removed.
     #[error("post-write verification failed for secret `{name}`; the file was removed")]
-    VerificationFailed { name: String },
+    VerificationFailed {
+        /// Logical name of the secret.
+        name: String,
+    },
 
+    /// The named environment variable is not set.
     #[error("environment variable `{var}` is not set")]
-    EnvNotSet { var: String },
+    EnvNotSet {
+        /// Name of the environment variable.
+        var: String,
+    },
 
+    /// The named environment variable is set but empty.
     #[error("environment variable `{var}` is set but empty")]
-    EnvEmpty { var: String },
+    EnvEmpty {
+        /// Name of the environment variable.
+        var: String,
+    },
 
+    /// The named environment variable holds a non-Unicode value.
     #[error("environment variable `{var}` contains invalid unicode")]
-    EnvNotUnicode { var: String },
+    EnvNotUnicode {
+        /// Name of the environment variable.
+        var: String,
+    },
 }
 
 impl From<SecretCaptureError> for routectl_core::Error {
