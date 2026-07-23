@@ -16,6 +16,7 @@ use crate::learned_capability::ExportedEntry;
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use routectl_core::capability::normalize_capability_key;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, Provider, Role,
     ToolDef, Usage,
