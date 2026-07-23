@@ -275,10 +275,28 @@ pub async fn load_code_assist(
     let status = resp.status().as_u16();
     let headers = resp.headers().clone();
     let content_length = resp.content_length();
-    let (bytes, hit_cap) =
-        crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
-            .await
-            .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
+    let (bytes, hit_cap) = match crate::http_client::read_body_capped(
+        resp,
+        crate::http_client::MAX_RESPONSE_BODY_BYTES,
+    )
+    .await
+    {
+        Ok(read) => read,
+        // A mid-read transport failure on an error response is not a cap
+        // trip: degrade to an empty body plus a WARN so the real upstream
+        // status is preserved, matching the five sibling error-body paths.
+        // A read failure on a 2xx still surfaces as a transport error below.
+        Err(e) if status >= 400 => {
+            tracing::warn!(
+                provider = %provider_id,
+                status,
+                error = %e,
+                "failed to read upstream error body",
+            );
+            (Vec::new(), false)
+        }
+        Err(e) => return Err(Error::upstream(provider_id, 0, e.to_string())),
+    };
     let body_text = String::from_utf8_lossy(&bytes);
     if status >= 400 {
         if hit_cap {
@@ -346,10 +364,28 @@ pub async fn onboard_user(
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let content_length = resp.content_length();
-        let (bytes, hit_cap) =
-            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
-                .await
-                .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
+        let (bytes, hit_cap) = match crate::http_client::read_body_capped(
+            resp,
+            crate::http_client::MAX_RESPONSE_BODY_BYTES,
+        )
+        .await
+        {
+            Ok(read) => read,
+            // A mid-read transport failure on an error response is not a cap
+            // trip: degrade to an empty body plus a WARN so the real upstream
+            // status is preserved, matching the five sibling error-body paths.
+            // A read failure on a 2xx still surfaces as a transport error below.
+            Err(e) if status >= 400 => {
+                tracing::warn!(
+                    provider = %provider_id,
+                    status,
+                    error = %e,
+                    "failed to read upstream error body",
+                );
+                (Vec::new(), false)
+            }
+            Err(e) => return Err(Error::upstream(provider_id, 0, e.to_string())),
+        };
         let body_text = String::from_utf8_lossy(&bytes);
         if status != 200 {
             if hit_cap {
@@ -692,5 +728,94 @@ mod tests {
     #[test]
     fn is_project_mismatch_false_for_non_upstream_variant() {
         assert!(!is_project_mismatch(&Error::Auth("token expired".into())));
+    }
+
+    /// Spawn a one-shot raw TCP server that replies with `status` and a
+    /// chunked body that dies mid-stream (one partial chunk, then the socket
+    /// closes without the terminating `0\r\n\r\n`). wiremock always sends a
+    /// complete, honest-length response, so a raw socket is the only way to
+    /// drive a mid-read transport failure while the status line is intact.
+    async fn spawn_mid_read_failure_server(status: u16) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let head = format!(
+                "HTTP/1.1 {status} X\r\n\
+                 Content-Type: application/json\r\n\
+                 Transfer-Encoding: chunked\r\n\
+                 \r\n"
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            // One partial chunk, then drop -- no terminating chunk, so the
+            // client sees an incomplete message mid-body.
+            let _ = socket.write_all(b"10\r\n{\"error\":{\"code").await;
+            let _ = socket.flush().await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn load_code_assist_mid_read_failure_preserves_status_and_warns() {
+        let base = spawn_mid_read_failure_server(500).await;
+        let client = Client::new();
+
+        let (result, events) =
+            routectl_testkit::with_capture(load_code_assist(&client, "tok", &base, "gemini-cc"))
+                .await;
+
+        match result.expect_err("a mid-read transport failure must be an error") {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 500, "the real upstream status is preserved, not 0");
+                assert!(
+                    body.is_empty(),
+                    "an unreadable error body degrades to empty, got {body:?}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message == "failed to read upstream error body"),
+            "the error-body read failure must emit the shared WARN"
+        );
+    }
+
+    #[tokio::test]
+    async fn onboard_user_mid_read_failure_preserves_status_and_warns() {
+        let base = spawn_mid_read_failure_server(500).await;
+        let client = Client::new();
+
+        let (result, events) = routectl_testkit::with_capture(onboard_user(
+            &client,
+            "tok",
+            &base,
+            "free-tier",
+            Duration::from_millis(0),
+            "gemini-cc",
+        ))
+        .await;
+
+        match result.expect_err("a mid-read transport failure must be an error") {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 500, "the real upstream status is preserved, not 0");
+                assert!(
+                    body.is_empty(),
+                    "an unreadable error body degrades to empty, got {body:?}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message == "failed to read upstream error body"),
+            "the error-body read failure must emit the shared WARN"
+        );
     }
 }
