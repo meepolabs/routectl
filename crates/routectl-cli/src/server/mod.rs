@@ -33,11 +33,11 @@ use auth::TokenSet;
 #[cfg(test)]
 use config_load::read_parse_validate_config;
 #[cfg(all(test, unix))]
-pub(crate) use reload::run_sighup_listener;
+use reload::run_sighup_listener;
 #[cfg(test)]
 use reload::spawn_reload_pipeline;
 #[cfg(test)]
-pub(crate) use reload::{ReloadTrigger, handle_config_reload, handle_credentials_reload};
+use reload::{ReloadTrigger, handle_config_reload, handle_credentials_reload};
 #[cfg(test)]
 use routectl_auth::{MemoryStore, SecretStore};
 #[cfg(test)]
