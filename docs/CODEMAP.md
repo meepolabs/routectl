@@ -247,7 +247,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`, v1beta
 
 - `tests/factory.rs` -- secret-store-backed provider construction across all four provider kinds
 - `tests/factory_context_management_warning.rs` -- coverage for the `context_management` + `history_reasoning != "preserve"` consistency WARN emitted by `build_resolved_models` (fires once when inconsistent; silent otherwise)
-- `tests/router.rs` -- fallback-chain semantics, runtime-gate behavior with mock `Provider` impls
+- `tests/router.rs` -- coordinator for the router integration test binary: shared mock-`Provider` fixtures plus `#[path]` wiring of the per-scenario submodules under `tests/router/` (`default_alias`, `dispatch_fallback`, `dispatch_meta`, `gate_per_attempt`, `reported_model`, `retry`, `runtime_policy`); one binary covering fallback-chain semantics and runtime-gate behavior
+- `tests/learned_capability_loop.rs` -- coordinator for the learned-capability loop end-to-end binary: shared upstream/router fixtures plus `#[path]` wiring of the scenario submodules under `tests/learned_capability_loop/` (`real_envelope`, `learn_and_decay`, `never_learn`, `learned_tail`, `streaming`); one binary
 - `tests/delta_config.rs` -- pins the delta-config contract through real TOML loads: a sparse `[retry.classes.<class>]` single-leaf override inherits every other baked default via `resolved_class`; Vec fields replace whole; map fields merge per-key; an empty class table equals absent. Test-only -- the semantics live in `class_policy`/serde, not a merge module
 
 ## routectl-auth
