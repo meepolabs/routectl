@@ -97,8 +97,10 @@ pub(crate) const CLIENT_FINGERPRINT_METADATA_KEY: &str = "metadata";
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum BedrockApiShape {
+    /// The per-vendor `InvokeModel` API with a vendor-native body.
     #[default]
     Invoke,
+    /// The unified `Converse` API with a vendor-agnostic envelope.
     Converse,
 }
 
@@ -140,17 +142,26 @@ impl BedrockApiShape {
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum BedrockCreds {
+    /// Short-term Bedrock API key sent as a bearer credential.
     BearerKey {
+        /// The short-term API key.
         key: String,
     },
+    /// Raw AWS access key, secret key, and optional session token.
     Static {
+        /// AWS access key id.
         access_key: String,
+        /// AWS secret access key.
         secret_key: String,
+        /// Optional session token for temporary credentials.
         session_token: Option<String>,
     },
+    /// A named profile in `~/.aws/credentials`.
     Profile {
+        /// Profile name to resolve.
         name: String,
     },
+    /// AWS's standard credential provider chain.
     DefaultChain,
 }
 
@@ -189,6 +200,7 @@ impl std::fmt::Debug for BedrockCreds {
 /// fields, so the derived impl is safe.
 #[derive(Debug, Clone)]
 pub struct BedrockConfig {
+    /// Provider identifier used in tracing and log fields.
     pub id: String,
     /// AWS region (e.g. `us-west-2`). Affects the endpoint hostname and
     /// is part of the SigV4 signing scope.
@@ -200,7 +212,9 @@ pub struct BedrockConfig {
     /// different streaming-permission boundaries; the `routectl doctor`
     /// command surfaces this.
     pub model_id: String,
+    /// Selects the `Invoke` or `Converse` wire shape.
     pub api_shape: BedrockApiShape,
+    /// Resolved AWS credentials used to authenticate requests.
     pub creds: BedrockCreds,
     /// Override the User-Agent on outbound requests. Required when the
     /// IAM policy gating Bedrock access uses an `aws:UserAgent`
@@ -252,6 +266,7 @@ pub struct BedrockConfig {
     pub adaptive_thinking: Option<bool>,
 }
 
+/// Bedrock egress provider (Invoke or Converse shape).
 pub struct BedrockProvider {
     cfg: BedrockConfig,
     resolved: auth::ResolvedCreds,
@@ -555,7 +570,7 @@ impl Provider for BedrockProvider {
     /// Free reachability probe: resolve the AWS credential chain, no
     /// model invocation. A resolvable chain (Bearer key present, static
     /// keys, or a Profile / DefaultChain that answers) is `Reachable`;
-    /// a resolution failure maps via [`probe_outcome_for_resolve_error`].
+    /// a resolution failure maps via `probe_outcome_for_resolve_error`.
     /// Never signs or sends a Bedrock request, so it can never bill.
     ///
     /// Bounded by the shared `PROBE_TIMEOUT`: Profile / DefaultChain

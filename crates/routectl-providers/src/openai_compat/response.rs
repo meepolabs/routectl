@@ -52,6 +52,8 @@ pub const OPENAI_COMPAT_USAGE_SUBKEYS: &[&str] = &[
     "completion_tokens_details",
 ];
 
+/// Parse an openai-compat wire response into a canonical [`ChatResponse`],
+/// applying dialect-specific reasoning lifting and usage normalization.
 pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<ChatResponse> {
     let preprocessed = coalesce_reasoning_content_in_response(raw);
     let mut resp: ChatResponse = serde_json::from_value(preprocessed)

@@ -25,7 +25,7 @@
 //!
 //! - `BedrockMantle`: the Mantle proxy at
 //!   `https://bedrock-mantle.<region>.api.aws/openai/v1`. Authorization:
-//!   Bearer <bearer> using the long-term Bedrock API key (resolved via
+//!   Bearer `<bearer>` using the long-term Bedrock API key (resolved via
 //!   api_key_ref, typically env://AWS_BEARER_TOKEN_BEDROCK).
 
 use reqwest::RequestBuilder;

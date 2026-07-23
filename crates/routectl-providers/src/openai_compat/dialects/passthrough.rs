@@ -4,7 +4,9 @@
 use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 
+/// Generic passthrough reasoning dialect (see module docs).
 pub struct PassthroughDialect;
+/// Shared instance of [`PassthroughDialect`].
 pub static PASSTHROUGH: PassthroughDialect = PassthroughDialect;
 
 impl Dialect for PassthroughDialect {

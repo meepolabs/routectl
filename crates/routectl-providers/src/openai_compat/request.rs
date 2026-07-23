@@ -33,6 +33,9 @@ const DEFAULT_EXTRAS_SOURCE: &str = "payload_extras";
 /// an operator misconfiguration.
 const PROVIDER_EXTRAS_SOURCE: &str = "provider_extras";
 
+/// Translate a canonical [`ChatRequest`] into an openai-compat wire body,
+/// applying the reasoning dialect, history-reasoning policy, and merged
+/// payload extras.
 pub fn normalize(
     id: &str,
     req: &ChatRequest,

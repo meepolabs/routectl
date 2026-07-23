@@ -23,7 +23,9 @@ use super::util::{
 };
 use crate::effort::clamp_effort_to_supported;
 
+/// vLLM-served thinking-model reasoning dialect (see module docs).
 pub struct VllmDialect;
+/// Shared instance of [`VllmDialect`].
 pub static VLLM: VllmDialect = VllmDialect;
 
 impl Dialect for VllmDialect {

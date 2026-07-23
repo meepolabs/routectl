@@ -13,7 +13,9 @@ use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 use super::util::lift_think_tags;
 
+/// Inline `<think>` tag reasoning dialect (see module docs).
 pub struct RawThinkTagDialect;
+/// Shared instance of [`RawThinkTagDialect`].
 pub static RAW_THINK_TAG: RawThinkTagDialect = RawThinkTagDialect;
 
 impl Dialect for RawThinkTagDialect {

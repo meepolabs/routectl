@@ -259,6 +259,7 @@ impl Default for ThinkTagAccumulator {
 }
 
 impl ThinkTagAccumulator {
+    /// Create an empty accumulator positioned at the stream start.
     pub fn new() -> Self {
         Self {
             state: ThinkState::default(),

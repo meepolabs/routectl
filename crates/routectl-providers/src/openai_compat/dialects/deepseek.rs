@@ -24,7 +24,9 @@ use super::util::{
 use crate::effort::clamp_effort_to_supported;
 use crate::model_profile::profile_for;
 
+/// DeepSeek reasoning dialect (see module docs).
 pub struct DeepSeekDialect;
+/// Shared instance of [`DeepSeekDialect`].
 pub static DEEPSEEK: DeepSeekDialect = DeepSeekDialect;
 
 impl Dialect for DeepSeekDialect {

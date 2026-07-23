@@ -323,6 +323,7 @@ fn lookup_reverse(name: &str, map: &HashMap<String, String>) -> Option<String> {
     None
 }
 
+/// Parse an Anthropic Messages wire response into a canonical [`ChatResponse`].
 pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
     let resp: AnthropicResponse =
         serde_json::from_value(raw).map_err(|e| Error::normalize_response(id, e.to_string()))?;

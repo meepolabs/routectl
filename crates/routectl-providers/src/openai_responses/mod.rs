@@ -4,7 +4,7 @@
 //!
 //!   - `chatgpt-oauth` (default): ChatGPT subscription surface
 //!     at `https://chatgpt.com/backend-api/codex`. Uses
-//!     Authorization: Bearer <jwt> + ChatGPT-Account-Id + originator
+//!     Authorization: Bearer `<jwt>` + ChatGPT-Account-Id + originator
 //!     headers (codex parity). Fully wired: `complete()` + `stream()`
 //!     both ship.
 //!   - `api-key`: standard OpenAI surface at
@@ -13,7 +13,7 @@
 //!     be set via `extra_headers` if needed.
 //!   - `bedrock-mantle`: AWS Mantle proxy at
 //!     `https://bedrock-mantle.<region>.api.aws/openai/v1`. Uses
-//!     Authorization: Bearer <bearer> using the long-term Bedrock API
+//!     Authorization: Bearer `<bearer>` using the long-term Bedrock API
 //!     key (resolved via api_key_ref, typically
 //!     env://AWS_BEARER_TOKEN_BEDROCK).
 //!

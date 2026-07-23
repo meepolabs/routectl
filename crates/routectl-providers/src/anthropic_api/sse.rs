@@ -26,10 +26,14 @@ use super::types::SseEvent;
 /// (Anthropic's wire-shape invariant).
 #[derive(Debug, Clone)]
 pub enum OpenBlockKind {
+    /// A `text` content block.
     Text {
+        /// Upstream `content_block` index this block opened at.
         upstream_index: u32,
     },
+    /// A `thinking` content block accumulating reasoning text.
     Thinking {
+        /// Upstream `content_block` index this block opened at.
         upstream_index: u32,
         /// Accumulated thinking text from `thinking_delta` events.
         /// Aggregated into ONE structured `ReasoningDetail` emitted at
@@ -55,9 +59,13 @@ pub enum OpenBlockKind {
         /// Block index in reasoning_details array.
         detail_index: u32,
     },
+    /// A `tool_use` content block accumulating input JSON.
     ToolUse {
+        /// Upstream `content_block` index this block opened at.
         upstream_index: u32,
+        /// Tool-use id echoed on the emitted tool call.
         id: String,
+        /// Tool name echoed on the emitted tool call.
         name: String,
         /// Index in the tool_calls array being built.
         call_index: u32,
@@ -69,7 +77,9 @@ pub enum OpenBlockKind {
     /// re-emission by the matching Anthropic ingress (see
     /// `sse_opaque`).
     Unknown {
+        /// Upstream `content_block` index this block opened at.
         upstream_index: u32,
+        /// The unrecognized `content_block.type` value.
         type_tag: String,
     },
 }
@@ -91,10 +101,15 @@ impl OpenBlockKind {
 /// Persistent state across SSE events for one streaming response.
 #[derive(Debug, Default)]
 pub struct SseState {
+    /// Response id carried onto every emitted chunk.
     pub id: String,
+    /// Model name carried onto every emitted chunk.
     pub model: String,
+    /// Next index to assign in the reasoning_details array.
     pub next_detail_index: u32,
+    /// Next index to assign in the tool_calls array.
     pub next_call_index: u32,
+    /// The content block currently open, if any.
     pub open_block: Option<OpenBlockKind>,
     /// Captured from `message_start.message.usage`. Anthropic emits
     /// the input side of usage exactly once, in `message_start`; the
@@ -157,11 +172,17 @@ pub struct SseState {
     pub tool_reverse: std::collections::HashMap<String, String>,
 }
 
+/// Input-side usage captured once from `message_start`, carried forward
+/// so the closing usage frame reports full prompt tokens.
 #[derive(Debug, Default, Clone)]
 pub struct CapturedInputUsage {
+    /// Base input tokens.
     pub input_tokens: u32,
+    /// Tokens written to the prompt cache, if reported.
     pub cache_creation_input_tokens: Option<u32>,
+    /// Tokens read from the prompt cache, if reported.
     pub cache_read_input_tokens: Option<u32>,
+    /// Per-TTL cache-creation breakdown, if reported.
     pub cache_creation: Option<CacheCreation>,
 }
 

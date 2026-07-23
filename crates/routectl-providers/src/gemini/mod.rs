@@ -130,6 +130,7 @@ impl GeminiConfig {
     }
 }
 
+/// Gemini egress provider.
 pub struct GeminiProvider {
     cfg: GeminiConfig,
     client: Client,
@@ -140,6 +141,7 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
+    /// Build a provider from its configuration.
     pub fn new(cfg: GeminiConfig) -> Self {
         let client = crate::http_client::build(cfg.user_agent.as_deref());
         Self {
