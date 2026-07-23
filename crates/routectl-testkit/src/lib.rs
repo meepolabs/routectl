@@ -1,4 +1,5 @@
 #![deny(rustdoc::broken_intra_doc_links)]
+#![warn(missing_docs)]
 //! Shared in-process `tracing` capture test double for routectl's
 //! dev-dependency test suites -- both `#[cfg(test)]` unit tests and
 //! `tests/` integration binaries, which are separate compilation units
@@ -36,9 +37,15 @@ pub use scoped_env::ScopedEnv;
 /// to a string.
 #[derive(Debug, Clone)]
 pub struct CapturedEvent {
+    /// Severity level the event was emitted at.
     pub level: tracing::Level,
+    /// Target the event was emitted under, typically the emitting
+    /// module path.
     pub target: String,
+    /// The event's special `message` field, or empty if it carried none.
     pub message: String,
+    /// Every structured field other than `message`, as
+    /// `(name, rendered-value)` pairs in emission order.
     pub fields: Vec<(String, String)>,
 }
 
