@@ -10,18 +10,23 @@
 //! settled is not settled again by the set. The settlement observability
 //! events assert the guard's own emissions too (reached success and a
 //! reached-then-dropped terminal).
+use super::super::RouterOptions;
 use super::*;
+use crate::config::Config;
 use crate::config::{AliasValue, ProviderEntry};
 use crate::learned_capability::ExportedEntry;
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use routectl_core::Result;
+use routectl_core::capability::SignalTier;
 use routectl_core::capability::normalize_capability_key;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, Provider, Role,
     ToolDef, Usage,
 };
 use serde_json::json;
+use std::collections::BTreeMap;
 
 const PROVIDER_KIND: &str = "openai-compat";
 

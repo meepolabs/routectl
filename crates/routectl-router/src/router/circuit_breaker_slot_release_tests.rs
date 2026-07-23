@@ -10,10 +10,13 @@
 //!     transport error is NOT a synchronous leak: it is fallbackable, so
 //!     record_failure already clears the slot and re-trips cleanly.)
 use super::*;
+use crate::config::Config;
 use crate::config::{ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
+use routectl_core::{Result, TokenCount};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -365,7 +368,6 @@ async fn mid_stream_error_after_first_chunk_close_retrips_breaker() {
 
     // Drain the stream: first chunk Ok (already closed the breaker),
     // then one error frame (threshold = 1) re-trips it.
-    use futures::stream::StreamExt as _;
     let items: Vec<_> = stream.collect().await;
     assert_eq!(items.len(), 2, "first chunk + one error frame");
     assert!(items[0].is_ok(), "first frame is the success chunk");

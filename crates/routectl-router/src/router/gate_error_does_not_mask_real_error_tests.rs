@@ -8,6 +8,7 @@ use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy, Re
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use routectl_core::Result;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
 use std::collections::BTreeMap;
 
