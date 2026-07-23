@@ -6,12 +6,35 @@ use routectl_core::failure_class::{LastOutcome, classify};
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
 use super::dispatch::{
-    COUNT_TOKENS_CAPABLE_KIND, CountSeatOutcome, apply_remap, class_debits, class_label,
-    forwarded_terminal_status, is_capability_error, log_forwarded_auth_terminal, matched_by_label,
-    missing_forwarded_bearer_error, rate_limit_reset_hint, upstream_facts,
-    upstream_status_for_remap,
+    apply_remap, class_debits, class_label, forwarded_terminal_status, is_capability_error,
+    log_forwarded_auth_terminal, matched_by_label, missing_forwarded_bearer_error,
+    rate_limit_reset_hint, upstream_facts, upstream_status_for_remap,
 };
 use super::{DispatchTarget, Router, StripDecision, apply_layered_overlays};
+
+/// The single count_tokens-capable egress kind. `anthropic-api` is the
+/// only `Provider` impl that overrides `Provider::count_tokens` (every
+/// other kind uses the 501-ing trait default), and it is Claude-only,
+/// so all capable targets share the same Anthropic tokenizer family.
+/// `count_tokens` walks the dispatch chain to the first target whose
+/// `provider_kind` matches this token and skips the rest. Matches the
+/// `kind = "..."` discriminant from `ProviderEntry::kind_str`.
+pub(super) const COUNT_TOKENS_CAPABLE_KIND: &str = "anthropic-api";
+
+/// Outcome of dispatching `count_tokens` to one capable seat, driving
+/// the walk in [`Router::count_tokens`].
+pub(super) enum CountSeatOutcome {
+    /// The seat returned a token count; return it to the caller.
+    Count(TokenCount),
+    /// A definitive result for this request -- return the error verbatim.
+    /// Covers a settled health error (breaker already debited/parked), a
+    /// non-fallbackable 4xx, a gate block, or an auth-refresh failure.
+    Terminal(Error),
+    /// The seat is capable-by-kind but its upstream cannot count (local
+    /// `NotImplemented` or a wire 501). The probe slot was released
+    /// without a breaker debit; advance to the next capable seat.
+    Capability,
+}
 
 impl Router {
     /// Probe call: route a request to a count_tokens-CAPABLE provider in
