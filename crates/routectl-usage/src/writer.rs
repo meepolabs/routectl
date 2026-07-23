@@ -148,12 +148,12 @@ impl UsageWriter {
     ///
     /// Dropping the sender lets the consumer's `blocking_recv` return
     /// `None` once the queue empties, so a healthy DB drains fully. If the
-    /// DB is wedged the drain is abandoned after [`SHUTDOWN_DRAIN_DEADLINE`]
+    /// DB is wedged the drain is abandoned after `SHUTDOWN_DRAIN_DEADLINE`
     /// and the thread is left detached so shutdown never hangs.
     ///
     /// # Blocking
     ///
-    /// This performs a blocking drain of up to [`SHUTDOWN_DRAIN_DEADLINE`]
+    /// This performs a blocking drain of up to `SHUTDOWN_DRAIN_DEADLINE`
     /// and MUST be called from a blocking context. The daemon dispatches it
     /// via `tokio::task::spawn_blocking`; it must NEVER be called directly
     /// on an async runtime worker, or it can stall that worker for the full
