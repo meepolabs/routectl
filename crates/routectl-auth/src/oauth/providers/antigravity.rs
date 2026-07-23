@@ -456,6 +456,7 @@ fn decode_jwt_payload<T: serde::de::DeserializeOwned>(jwt: &str) -> OAuthResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_testkit::with_capture;
 
     /// Build a synthetic unsigned JWT (`header.payload.sig`) from a
     /// payload JSON `Value`. The signature segment is non-empty filler --
@@ -706,5 +707,141 @@ mod tests {
         let parsed = parse_token_response_json(&body, false).unwrap();
         let rec = map_to_record(parsed, None).unwrap();
         assert!(rec.account.email.is_none());
+    }
+
+    /// Wrap raw bytes + status into a `reqwest::Response` without touching
+    /// the network. Takes `Vec<u8>` (not `&str`) so the non-UTF-8 arm can
+    /// feed byte sequences that are not valid UTF-8.
+    fn synthetic_response(status: u16, body: Vec<u8>) -> reqwest::Response {
+        let http_resp: http::Response<bytes::Bytes> = http::Response::builder()
+            .status(status)
+            .body(bytes::Bytes::from(body))
+            .expect("build http response");
+        reqwest::Response::from(http_resp)
+    }
+
+    // NOTE(T2-1): `read_capped_body` is byte-identical across all four
+    // OAuth providers (anthropic/codex/xai/antigravity). These two arms
+    // are pinned here on the antigravity copy as the representative; the
+    // other three copies are the same source.
+    #[tokio::test]
+    async fn read_capped_body_rejects_over_cap_response() {
+        // A token-endpoint response larger than the 64 KiB cap must be
+        // refused with a TokenEndpoint error rather than buffered whole.
+        let oversized = vec![b'x'; MAX_TOKEN_BODY_BYTES + 1];
+        let resp = synthetic_response(200, oversized);
+
+        let err = read_capped_body(resp).await.unwrap_err();
+
+        match err {
+            OAuthError::TokenEndpoint(m) => {
+                assert!(m.contains("refusing to load"), "got: {m}");
+                assert!(m.contains(&MAX_TOKEN_BODY_BYTES.to_string()), "got: {m}");
+            }
+            other => panic!("expected TokenEndpoint over-cap error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_capped_body_rejects_non_utf8_response() {
+        // Invalid UTF-8 bytes must hard-error, never silently lossy-decode.
+        // The error text must NOT echo the raw body content.
+        let invalid_utf8 = vec![0xff, 0xfe, 0x80, 0x00];
+        let resp = synthetic_response(200, invalid_utf8);
+
+        let err = read_capped_body(resp).await.unwrap_err();
+
+        match err {
+            OAuthError::TokenEndpoint(m) => {
+                assert!(m.contains("not valid UTF-8"), "got: {m}");
+                assert!(!m.contains('\u{fffd}'), "must not echo lossy body: {m}");
+            }
+            other => panic!("expected TokenEndpoint UTF-8 error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_success_event_carries_sha8_and_status_no_token_value() {
+        // A successful refresh emits the debug event with status,
+        // new_refresh_token_present, an 8-hex sha8, and expires_in --
+        // and NO token VALUE in any field.
+        const NEW_RT: &str = "antigravity-new-refresh-token-CANARY";
+        let body = serde_json::json!({
+            "access_token": "AT",
+            "refresh_token": NEW_RT,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "https://www.googleapis.com/auth/cloud-platform"
+        })
+        .to_string();
+        let resp = synthetic_response(200, body.into_bytes());
+
+        let (result, events) = with_capture(decode_token_response_traced(
+            resp,
+            Some("PRIOR-RT"),
+            "deadbeef",
+        ))
+        .await;
+        result.expect("refresh should succeed");
+
+        let ev = events
+            .iter()
+            .find(|e| e.message == "antigravity refresh response")
+            .unwrap_or_else(|| panic!("no success event captured: {events:#?}"));
+        assert_eq!(ev.level, tracing::Level::DEBUG);
+        assert_eq!(ev.field("status"), Some("200"));
+        assert_eq!(ev.field("new_refresh_token_present"), Some("true"));
+        let sha = ev
+            .field("new_refresh_token_sha8")
+            .expect("new_refresh_token_sha8 field");
+        assert_eq!(sha.len(), 8, "sha8 must be 8 hex chars: {sha}");
+        for e in &events {
+            for (k, v) in &e.fields {
+                assert!(
+                    !v.contains(NEW_RT),
+                    "token value leaked into field {k}: {e:#?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_expired_emits_error_event_with_refresh_expired_kind() {
+        // A 400 invalid_grant on the refresh path maps to RefreshExpired
+        // and emits the error event with error_kind + prior sha8, and no
+        // body excerpt (the envelope could echo the refresh token).
+        const ECHOED_RT: &str = "rt-leakcanary-antigravity-9f1c";
+        let body = format!(r#"{{"error":"invalid_grant","refresh_token":"{ECHOED_RT}"}}"#);
+        let resp = synthetic_response(400, body.into_bytes());
+
+        let (result, events) = with_capture(decode_token_response_traced(
+            resp,
+            Some(ECHOED_RT),
+            "deadbeef",
+        ))
+        .await;
+        let err = result.expect_err("expected RefreshExpired");
+        assert!(matches!(err, OAuthError::RefreshExpired(_)), "got {err:?}");
+
+        let ev = events
+            .iter()
+            .find(|e| e.message == "antigravity refresh failed")
+            .unwrap_or_else(|| panic!("no error event captured: {events:#?}"));
+        assert_eq!(ev.level, tracing::Level::ERROR);
+        assert_eq!(ev.field("status"), Some("400"));
+        assert_eq!(ev.field("error_kind"), Some("refresh_expired"));
+        assert_eq!(ev.field("prior_refresh_token_sha8"), Some("deadbeef"));
+        for e in &events {
+            assert!(
+                !e.message.contains(ECHOED_RT),
+                "token leaked into message: {e:#?}"
+            );
+            for (k, v) in &e.fields {
+                assert!(
+                    !v.contains(ECHOED_RT),
+                    "token leaked into field {k}: {e:#?}"
+                );
+            }
+        }
     }
 }

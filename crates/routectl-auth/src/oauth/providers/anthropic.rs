@@ -447,6 +447,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_testkit::with_capture;
 
     #[test]
     fn auth_url_includes_pkce_and_scopes() {
@@ -811,6 +812,95 @@ mod tests {
                 headers.get(name).is_none(),
                 "token-endpoint POST must NOT carry the Stainless header {name}",
             );
+        }
+    }
+
+    /// Wrap raw bytes + status into a `reqwest::Response` without touching
+    /// the network.
+    fn synthetic_response(status: u16, body: Vec<u8>) -> reqwest::Response {
+        let http_resp: http::Response<bytes::Bytes> = http::Response::builder()
+            .status(status)
+            .body(bytes::Bytes::from(body))
+            .expect("build http response");
+        reqwest::Response::from(http_resp)
+    }
+
+    #[tokio::test]
+    async fn refresh_success_event_carries_sha8_and_status_no_token_value() {
+        // A successful refresh emits the debug event with status, an
+        // 8-hex new_refresh_token_sha8, and expires_in -- and NO token
+        // VALUE in any field.
+        const NEW_RT: &str = "anthropic-new-refresh-token-CANARY";
+        let body = format!(
+            r#"{{"access_token":"AT","refresh_token":"{NEW_RT}","token_type":"Bearer","expires_in":3600,"scope":"user:inference"}}"#
+        );
+        let resp = synthetic_response(200, body.into_bytes());
+
+        let (result, events) = with_capture(decode_token_response_traced(
+            resp,
+            Some("PRIOR-RT"),
+            "deadbeef",
+        ))
+        .await;
+        result.expect("refresh should succeed");
+
+        let ev = events
+            .iter()
+            .find(|e| e.message == "anthropic refresh response")
+            .unwrap_or_else(|| panic!("no success event captured: {events:#?}"));
+        assert_eq!(ev.level, tracing::Level::DEBUG);
+        assert_eq!(ev.field("status"), Some("200"));
+        let sha = ev
+            .field("new_refresh_token_sha8")
+            .expect("new_refresh_token_sha8 field");
+        assert_eq!(sha.len(), 8, "sha8 must be 8 hex chars: {sha}");
+        for e in &events {
+            for (k, v) in &e.fields {
+                assert!(
+                    !v.contains(NEW_RT),
+                    "token value leaked into field {k}: {e:#?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_expired_emits_error_event_with_refresh_expired_kind() {
+        // A 400 invalid_grant on the refresh path maps to RefreshExpired
+        // and emits the error event with error_kind + prior sha8. No event
+        // field may echo the refresh token the envelope carried.
+        const ECHOED_RT: &str = "rt-leakcanary-anthropic-4b2e";
+        let body = format!(r#"{{"error":"invalid_grant","refresh_token":"{ECHOED_RT}"}}"#);
+        let resp = synthetic_response(400, body.into_bytes());
+
+        let (result, events) = with_capture(decode_token_response_traced(
+            resp,
+            Some(ECHOED_RT),
+            "deadbeef",
+        ))
+        .await;
+        let err = result.expect_err("expected RefreshExpired");
+        assert!(matches!(err, OAuthError::RefreshExpired(_)), "got {err:?}");
+
+        let ev = events
+            .iter()
+            .find(|e| e.message == "anthropic refresh failed")
+            .unwrap_or_else(|| panic!("no error event captured: {events:#?}"));
+        assert_eq!(ev.level, tracing::Level::ERROR);
+        assert_eq!(ev.field("status"), Some("400"));
+        assert_eq!(ev.field("error_kind"), Some("refresh_expired"));
+        assert_eq!(ev.field("prior_refresh_token_sha8"), Some("deadbeef"));
+        for e in &events {
+            assert!(
+                !e.message.contains(ECHOED_RT),
+                "token leaked into message: {e:#?}"
+            );
+            for (k, v) in &e.fields {
+                assert!(
+                    !v.contains(ECHOED_RT),
+                    "token leaked into field {k}: {e:#?}"
+                );
+            }
         }
     }
 }
