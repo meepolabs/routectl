@@ -1123,33 +1123,6 @@ fn read_reuse_samples_filters_nulls_coalesces_and_orders() {
 }
 
 #[test]
-fn read_reuse_samples_respects_limit() {
-    // Arrange: five eligible rows.
-    let (_dir, path) = temp_db_path();
-    let db = open(&path).expect("open");
-    for i in 0..5i64 {
-        insert_reuse_row(
-            &db,
-            &format!("r{i}"),
-            100 + i,
-            Some("s1"),
-            Some("anthropic-api"),
-            Some("opus"),
-            Some(1),
-            "ok",
-        );
-    }
-
-    // Act: cap at 3.
-    let rows = read_reuse_samples_since(db.conn(), 0, 3).expect("read");
-
-    // Assert: the three NEWEST rows in the window, returned ascending
-    // (newest-N selection, then re-ordered oldest-first).
-    let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
-    assert_eq!(ids, vec![102, 103, 104]);
-}
-
-#[test]
 fn read_reuse_samples_selects_newest_within_window() {
     // Arrange: limit + 2 eligible rows with ascending distinct ts_start,
     // all inside the window.
