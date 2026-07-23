@@ -895,3 +895,97 @@ async fn disconnect_drop_emits_single_row_with_null_resolved_class() {
         "disconnect row must carry NULL resolved_class"
     );
 }
+
+/// Build a terminal chunk carrying an Anthropic unified-quota snapshot
+/// in its `upstream_meta`, so `observe_chunk` -> `observe_quota` lifts it
+/// into the QUOTA columns.
+fn chunk_with_quota(quota: routectl_core::upstream_meta::AnthropicUnifiedQuota) -> ChatChunk {
+    ChatChunk {
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        upstream_meta: Some(
+            routectl_core::upstream_meta::UpstreamMeta::from_anthropic_unified(quota),
+        ),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn observe_quota_lifts_parseable_utilization_and_reset_into_numeric_columns() {
+    // Arrange: a snapshot whose numeric fields are valid decimal/integer
+    // strings. `AnthropicUnifiedQuota` is `#[non_exhaustive]`, so it is
+    // built from a default and mutated rather than via a struct literal.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = routectl_core::upstream_meta::AnthropicUnifiedQuota::default();
+    quota.status = Some("allowed".into());
+    quota.overage_status = Some("disabled".into());
+    quota.utilization = Some("0.21".into());
+    quota.overage_utilization = Some("0.05".into());
+    quota.representative_claim = Some("five_hour".into());
+    quota.reset = Some("1900000000".into());
+    let chunk = chunk_with_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert: string columns copied verbatim, numeric columns parsed.
+    assert_eq!(cap.record.quota_claim.as_deref(), Some("five_hour"));
+    assert_eq!(cap.record.quota_status.as_deref(), Some("allowed"));
+    assert_eq!(cap.record.quota_overage_status.as_deref(), Some("disabled"));
+    assert_eq!(cap.record.quota_utilization, Some(0.21_f64));
+    assert_eq!(cap.record.quota_overage_utilization, Some(0.05_f64));
+    assert_eq!(cap.record.quota_reset, Some(1_900_000_000_i64));
+    assert!(cap.record.quota_extras.is_none());
+}
+
+#[test]
+fn observe_quota_leaves_unparseable_utilization_none_without_failing_the_row() {
+    // Arrange: garbage numeric strings must NOT poison the row -- the
+    // string columns still land, the numeric ones stay None.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = routectl_core::upstream_meta::AnthropicUnifiedQuota::default();
+    quota.status = Some("allowed".into());
+    quota.utilization = Some("not-a-number".into());
+    quota.reset = Some("soon".into());
+    quota.representative_claim = Some("five_hour".into());
+    let chunk = chunk_with_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert: the row survives; unparseable numerics degrade to None.
+    assert_eq!(cap.record.quota_status.as_deref(), Some("allowed"));
+    assert_eq!(cap.record.quota_claim.as_deref(), Some("five_hour"));
+    assert_eq!(cap.record.quota_utilization, None);
+    assert_eq!(cap.record.quota_reset, None);
+}
+
+#[test]
+fn observe_quota_maps_non_empty_extras_into_json_object() {
+    // Arrange: forward-compat `extras` pairs must land as a JSON object
+    // keyed by suffix.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = routectl_core::upstream_meta::AnthropicUnifiedQuota::default();
+    quota.representative_claim = Some("five_hour".into());
+    quota.extras = vec![
+        ("fallback-percentage".into(), "12".into()),
+        ("7d-status".into(), "allowed".into()),
+    ];
+    let chunk = chunk_with_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert: extras become a JSON object with string values.
+    assert_eq!(
+        cap.record.quota_extras,
+        Some(serde_json::json!({
+            "fallback-percentage": "12",
+            "7d-status": "allowed"
+        }))
+    );
+}

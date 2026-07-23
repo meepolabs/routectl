@@ -201,6 +201,66 @@ async fn sigterm_triggers_graceful_shutdown_and_serve_returns() {
     );
 }
 
+/// A MITM proxy that fails to start (here: a `cert_dir` that is a
+/// regular file, so directory creation fails) must NOT take the whole
+/// server down -- routectl's own HTTP listener still starts and serves,
+/// just without the MITM front. This pins the documented "degraded, not
+/// down" reliability promise: a fatal-MITM regression would make
+/// `serve_on_listener` return `Err` within milliseconds instead of
+/// serving until shutdown.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial]
+async fn mitm_start_failure_degrades_and_server_keeps_serving() {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use routectl_router::MitmConfig;
+    use std::time::Duration;
+
+    // Arrange: ephemeral loopback listener + a `[mitm]` block whose
+    // `cert_dir` points at an existing regular FILE. `start_mitm_proxy`
+    // fails at cert-directory creation -- a resource failure, distinct
+    // from the non-loopback security invariant that hard-refuses.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let bad_cert_dir = tempfile::NamedTempFile::new().expect("temp file to stand in for cert_dir");
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    config.mitm = Some(MitmConfig {
+        upstream_origin: "https://api.anthropic.com".into(),
+        listen_port: 0,
+        cert_dir: bad_cert_dir.path().to_path_buf(),
+        mitm_host: "api.anthropic.com".into(),
+        tested_cc_version: None,
+    });
+    let config = Arc::new(config);
+    let server = tokio::spawn(async move { serve_on_listener(config, listener, None).await });
+
+    // Assert (degradation): give serve time to reach the MITM arm and
+    // fail it. The server task must still be running -- a regression that
+    // made a MITM start failure fatal would have returned Err by now.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !server.is_finished(),
+        "a MITM start failure must not abort serve_on_listener"
+    );
+
+    // Act: graceful shutdown.
+    kill(Pid::from_raw(std::process::id() as i32), Signal::SIGTERM).expect("kill(SIGTERM) to self");
+
+    // Assert: serve returned Ok -- it served normally without the MITM
+    // front and shut down cleanly.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("degraded serve must return within 5s of SIGTERM")
+        .expect("server task must not panic");
+    assert!(
+        outcome.is_ok(),
+        "degraded serve (MITM failed to start) must still return Ok: {outcome:?}"
+    );
+}
+
 /// The bounded-drain select must resolve to "deadline elapsed" when
 /// the drain future never completes. We drive `drain_deadline_watcher`
 /// against a flipped signal with a tiny stand-in deadline and assert

@@ -649,6 +649,166 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
     );
 }
 
+/// Build a single-chunk stream carrying one reasoning detail, so
+/// `render_chunk_internal` drives it through `emit_delta_events`.
+fn reasoning_chunk(detail: routectl_core::ReasoningDetail) -> ChatChunk {
+    use routectl_core::schema::{ChunkChoice, ChunkDelta};
+    ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                reasoning_details: vec![detail],
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    }
+}
+
+#[test]
+fn encrypted_reasoning_emits_redacted_thinking_block_start_stop_pair_from_data() {
+    // Arrange: an Encrypted reasoning detail carrying the Anthropic /
+    // OpenRouter `data` payload. Anthropic clients 400 on malformed
+    // thinking blocks, so this must round-trip as a stand-alone
+    // redacted_thinking content_block_start + content_block_stop.
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+    const ENC: &str = "EnCrYpTeD-REDACTED-PAYLOAD-7c1e";
+    let chunk = reasoning_chunk(ReasoningDetail {
+        kind: ReasoningDetailKind::Encrypted,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.into()),
+        index: Some(0),
+        payload: json!({"data": ENC}),
+    });
+    let mut s = fresh_state();
+
+    // Act
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert: a redacted_thinking block_start carrying the data, then a
+    // matching block_stop -- no incremental delta in between.
+    let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
+    let start_pos = names
+        .iter()
+        .position(|n| *n == "content_block_start")
+        .expect("redacted_thinking must emit content_block_start");
+    let stop_pos = names
+        .iter()
+        .position(|n| *n == "content_block_stop")
+        .expect("redacted_thinking must emit content_block_stop");
+    assert!(
+        start_pos < stop_pos,
+        "block_start must precede block_stop: {names:?}"
+    );
+    let start = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("content_block_start"))
+        .unwrap();
+    assert!(
+        start.data.contains("\"type\":\"redacted_thinking\""),
+        "block must be redacted_thinking: {}",
+        start.data
+    );
+    assert!(
+        start.data.contains(&format!("\"data\":\"{ENC}\"")),
+        "encrypted payload must be carried verbatim: {}",
+        start.data
+    );
+    assert!(
+        !names.contains(&"content_block_delta"),
+        "redacted_thinking has no incremental delta path: {names:?}"
+    );
+}
+
+#[test]
+fn encrypted_reasoning_lifts_data_from_encrypted_content_alias() {
+    // Arrange: the OpenAI-Responses passthrough names the field
+    // `encrypted_content`; the emitter must pick it up as the
+    // redacted_thinking `data` when `data` is absent.
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+    const ENC: &str = "OPENAI-RESPONSES-ENCRYPTED-4b2e";
+    let chunk = reasoning_chunk(ReasoningDetail {
+        kind: ReasoningDetailKind::Encrypted,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.into()),
+        index: Some(0),
+        payload: json!({"encrypted_content": ENC}),
+    });
+    let mut s = fresh_state();
+
+    // Act
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert: data lifted from the alias into the redacted_thinking block.
+    let start = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("content_block_start"))
+        .expect("content_block_start emitted");
+    assert!(
+        start.data.contains("\"type\":\"redacted_thinking\""),
+        "block must be redacted_thinking: {}",
+        start.data
+    );
+    assert!(
+        start.data.contains(&format!("\"data\":\"{ENC}\"")),
+        "encrypted_content alias must supply the data: {}",
+        start.data
+    );
+}
+
+#[test]
+fn summary_reasoning_lifts_text_into_thinking_delta() {
+    // Arrange: an OpenAI-Responses Summary detail. Its text must lift
+    // into a thinking_delta on a thinking block (so cc renders it and
+    // the round-trip history keeps it), not a redacted block.
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+    const SUMMARY: &str = "high-level summary of the reasoning";
+    let chunk = reasoning_chunk(ReasoningDetail {
+        kind: ReasoningDetailKind::Summary,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.into()),
+        index: Some(0),
+        payload: json!({"text": SUMMARY}),
+    });
+    let mut s = fresh_state();
+
+    // Act
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert: a thinking block opens and a thinking_delta carries the
+    // summary text.
+    let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
+    assert!(
+        names.contains(&"content_block_start"),
+        "summary must open a thinking block: {names:?}"
+    );
+    let delta = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("content_block_delta"))
+        .expect("summary must emit a content_block_delta");
+    assert!(
+        delta.data.contains("\"type\":\"thinking_delta\""),
+        "summary lifts to thinking_delta: {}",
+        delta.data
+    );
+    assert!(
+        delta.data.contains(SUMMARY),
+        "summary text must be carried: {}",
+        delta.data
+    );
+    assert!(
+        !delta.data.contains("redacted_thinking"),
+        "summary must not render as redacted_thinking: {}",
+        delta.data
+    );
+}
+
 #[test]
 fn stream_tool_call_index_above_cap_returns_streaming_error() {
     // tool_blocks Vec growth bound.
