@@ -258,52 +258,6 @@ pub const routectl_core::capability::STRUCTURED_OUTPUT: &str
 pub const routectl_core::capability::WEB_SEARCH: &str
 pub const routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS: &[&str]
 pub fn routectl_core::capability::normalize_capability_key(&str, &str) -> alloc::string::String
-pub mod routectl_core::cloud_project
-pub struct routectl_core::cloud_project::InMemoryProjectCache
-impl routectl_core::cloud_project::InMemoryProjectCache
-pub const fn routectl_core::cloud_project::InMemoryProjectCache::new() -> Self
-pub fn routectl_core::cloud_project::InMemoryProjectCache::with(impl core::convert::Into<alloc::string::String>) -> Self
-impl core::default::Default for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::default() -> Self
-impl core::fmt::Debug for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl routectl_core::cloud_project::CloudProjectCache for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl !core::marker::Freeze for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::Send for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::Sync for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::Unpin for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::UnsafeUnpin for routectl_core::cloud_project::InMemoryProjectCache
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::cloud_project::InMemoryProjectCache
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::cloud_project::InMemoryProjectCache
-impl<T, U> core::convert::Into<U> for routectl_core::cloud_project::InMemoryProjectCache where U: core::convert::From<T>
-pub fn routectl_core::cloud_project::InMemoryProjectCache::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::cloud_project::InMemoryProjectCache where U: core::convert::Into<T>
-pub type routectl_core::cloud_project::InMemoryProjectCache::Error = core::convert::Infallible
-pub fn routectl_core::cloud_project::InMemoryProjectCache::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::cloud_project::InMemoryProjectCache where U: core::convert::TryFrom<T>
-pub type routectl_core::cloud_project::InMemoryProjectCache::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::cloud_project::InMemoryProjectCache::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for routectl_core::cloud_project::InMemoryProjectCache where T: 'static + ?core::marker::Sized
-pub fn routectl_core::cloud_project::InMemoryProjectCache::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::cloud_project::InMemoryProjectCache where T: ?core::marker::Sized
-pub fn routectl_core::cloud_project::InMemoryProjectCache::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::cloud_project::InMemoryProjectCache where T: ?core::marker::Sized
-pub fn routectl_core::cloud_project::InMemoryProjectCache::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::cloud_project::InMemoryProjectCache
-impl<T> tracing::instrument::WithSubscriber for routectl_core::cloud_project::InMemoryProjectCache
-pub trait routectl_core::cloud_project::CloudProjectCache: core::marker::Send + core::marker::Sync + core::fmt::Debug
-pub fn routectl_core::cloud_project::CloudProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_core::cloud_project::CloudProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::cloud_project::CloudProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl routectl_core::cloud_project::CloudProjectCache for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub mod routectl_core::content_part
 pub enum routectl_core::content_part::ContentPart
 pub routectl_core::content_part::ContentPart::Known(routectl_core::content_part::KnownContentPart)
@@ -925,162 +879,6 @@ pub fn routectl_core::log_safe::trace_structural_summary(&str, &str, &str, &serd
 pub fn routectl_core::log_safe::trace_upstream_response_headers(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::log_safe::trace_upstream_success_body(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::log_safe::wrap_stream_with_summary<S>(S, &'static str, &'static str, alloc::string::String) -> futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>> where S: futures_core::stream::Stream<Item = routectl_core::error::Result<routectl_core::schema::ChatChunk>> + core::marker::Send + 'static
-pub mod routectl_core::provider
-#[non_exhaustive] pub enum routectl_core::provider::ProbeOutcome
-pub routectl_core::provider::ProbeOutcome::AuthFailed(alloc::string::String)
-pub routectl_core::provider::ProbeOutcome::IndeterminateHttp
-pub routectl_core::provider::ProbeOutcome::IndeterminateHttp::status: u16
-pub routectl_core::provider::ProbeOutcome::Reachable
-pub routectl_core::provider::ProbeOutcome::Skipped(alloc::string::String)
-pub routectl_core::provider::ProbeOutcome::Unreachable(alloc::string::String)
-pub routectl_core::provider::ProbeOutcome::UnsupportedFreeProbe
-impl core::clone::Clone for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::clone(&self) -> routectl_core::provider::ProbeOutcome
-impl core::cmp::PartialEq for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::eq(&self, &routectl_core::provider::ProbeOutcome) -> bool
-impl core::fmt::Debug for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for routectl_core::provider::ProbeOutcome
-impl serde_core::ser::Serialize for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl core::marker::Freeze for routectl_core::provider::ProbeOutcome
-impl core::marker::Send for routectl_core::provider::ProbeOutcome
-impl core::marker::Sync for routectl_core::provider::ProbeOutcome
-impl core::marker::Unpin for routectl_core::provider::ProbeOutcome
-impl core::marker::UnsafeUnpin for routectl_core::provider::ProbeOutcome
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::provider::ProbeOutcome
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::provider::ProbeOutcome
-impl<T, U> core::convert::Into<U> for routectl_core::provider::ProbeOutcome where U: core::convert::From<T>
-pub fn routectl_core::provider::ProbeOutcome::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::provider::ProbeOutcome where U: core::convert::Into<T>
-pub type routectl_core::provider::ProbeOutcome::Error = core::convert::Infallible
-pub fn routectl_core::provider::ProbeOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::provider::ProbeOutcome where U: core::convert::TryFrom<T>
-pub type routectl_core::provider::ProbeOutcome::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::provider::ProbeOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::provider::ProbeOutcome where T: core::clone::Clone
-pub type routectl_core::provider::ProbeOutcome::Owned = T
-pub fn routectl_core::provider::ProbeOutcome::clone_into(&self, &mut T)
-pub fn routectl_core::provider::ProbeOutcome::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::provider::ProbeOutcome where T: 'static + ?core::marker::Sized
-pub fn routectl_core::provider::ProbeOutcome::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::provider::ProbeOutcome where T: ?core::marker::Sized
-pub fn routectl_core::provider::ProbeOutcome::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::provider::ProbeOutcome where T: ?core::marker::Sized
-pub fn routectl_core::provider::ProbeOutcome::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::provider::ProbeOutcome where T: core::clone::Clone
-pub unsafe fn routectl_core::provider::ProbeOutcome::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::provider::ProbeOutcome
-impl<T> tracing::instrument::WithSubscriber for routectl_core::provider::ProbeOutcome
-pub trait routectl_core::provider::Provider: core::marker::Send + core::marker::Sync
-pub fn routectl_core::provider::Provider::complete<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::ChatResponse>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::provider::Provider::count_tokens<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::TokenCount>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::provider::Provider::id(&self) -> &str
-pub fn routectl_core::provider::Provider::normalize_request(&self, &routectl_core::schema::ChatRequest) -> routectl_core::error::Result<serde_json::value::Value>
-pub fn routectl_core::provider::Provider::normalize_response(&self, serde_json::value::Value) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
-pub fn routectl_core::provider::Provider::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::provider::Provider::probe<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::provider::ProbeOutcome> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::provider::Provider::stream<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub mod routectl_core::reasoning_dialect
-pub enum routectl_core::reasoning_dialect::HistoryReasoning
-pub routectl_core::reasoning_dialect::HistoryReasoning::Auto
-pub routectl_core::reasoning_dialect::HistoryReasoning::Preserve
-pub routectl_core::reasoning_dialect::HistoryReasoning::Strip
-impl core::clone::Clone for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::clone(&self) -> routectl_core::reasoning_dialect::HistoryReasoning
-impl core::cmp::Eq for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::cmp::PartialEq for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::eq(&self, &routectl_core::reasoning_dialect::HistoryReasoning) -> bool
-impl core::default::Default for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::default() -> routectl_core::reasoning_dialect::HistoryReasoning
-impl core::fmt::Debug for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::StructuralPartialEq for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Freeze for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Send for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Sync for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Unpin for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::UnsafeUnpin for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_dialect::HistoryReasoning
-impl<T, U> core::convert::Into<U> for routectl_core::reasoning_dialect::HistoryReasoning where U: core::convert::From<T>
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_dialect::HistoryReasoning where U: core::convert::Into<T>
-pub type routectl_core::reasoning_dialect::HistoryReasoning::Error = core::convert::Infallible
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_dialect::HistoryReasoning where U: core::convert::TryFrom<T>
-pub type routectl_core::reasoning_dialect::HistoryReasoning::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_dialect::HistoryReasoning where T: core::clone::Clone
-pub type routectl_core::reasoning_dialect::HistoryReasoning::Owned = T
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::clone_into(&self, &mut T)
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::reasoning_dialect::HistoryReasoning where T: 'static + ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_dialect::HistoryReasoning where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_dialect::HistoryReasoning where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::reasoning_dialect::HistoryReasoning where T: core::clone::Clone
-pub unsafe fn routectl_core::reasoning_dialect::HistoryReasoning::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::reasoning_dialect::HistoryReasoning
-impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_dialect::HistoryReasoning
-pub enum routectl_core::reasoning_dialect::ReasoningDialect
-pub routectl_core::reasoning_dialect::ReasoningDialect::Deepseek
-pub routectl_core::reasoning_dialect::ReasoningDialect::Openai
-pub routectl_core::reasoning_dialect::ReasoningDialect::Openrouter
-pub routectl_core::reasoning_dialect::ReasoningDialect::Passthrough
-pub routectl_core::reasoning_dialect::ReasoningDialect::RawThinkTag
-pub routectl_core::reasoning_dialect::ReasoningDialect::Vllm
-impl core::clone::Clone for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::clone(&self) -> routectl_core::reasoning_dialect::ReasoningDialect
-impl core::cmp::Eq for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::cmp::PartialEq for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::eq(&self, &routectl_core::reasoning_dialect::ReasoningDialect) -> bool
-impl core::default::Default for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::default() -> routectl_core::reasoning_dialect::ReasoningDialect
-impl core::fmt::Debug for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::StructuralPartialEq for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Freeze for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Send for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Sync for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Unpin for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::UnsafeUnpin for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_dialect::ReasoningDialect
-impl<T, U> core::convert::Into<U> for routectl_core::reasoning_dialect::ReasoningDialect where U: core::convert::From<T>
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_dialect::ReasoningDialect where U: core::convert::Into<T>
-pub type routectl_core::reasoning_dialect::ReasoningDialect::Error = core::convert::Infallible
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_dialect::ReasoningDialect where U: core::convert::TryFrom<T>
-pub type routectl_core::reasoning_dialect::ReasoningDialect::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_dialect::ReasoningDialect where T: core::clone::Clone
-pub type routectl_core::reasoning_dialect::ReasoningDialect::Owned = T
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::clone_into(&self, &mut T)
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::reasoning_dialect::ReasoningDialect where T: 'static + ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_dialect::ReasoningDialect where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_dialect::ReasoningDialect where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::reasoning_dialect::ReasoningDialect where T: core::clone::Clone
-pub unsafe fn routectl_core::reasoning_dialect::ReasoningDialect::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::reasoning_dialect::ReasoningDialect
-impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_dialect::ReasoningDialect
-pub mod routectl_core::reserved
-pub fn routectl_core::reserved::is_canonical_request_key(&str) -> bool
 pub mod routectl_core::schema
 pub enum routectl_core::schema::MessageContent
 pub routectl_core::schema::MessageContent::Null
@@ -1312,7 +1110,7 @@ pub struct routectl_core::schema::ChatChunk
 pub routectl_core::schema::ChatChunk::choices: alloc::vec::Vec<routectl_core::schema::ChunkChoice>
 pub routectl_core::schema::ChatChunk::id: alloc::string::String
 pub routectl_core::schema::ChatChunk::model: alloc::string::String
-pub routectl_core::schema::ChatChunk::opaque_events: alloc::vec::Vec<routectl_core::schema_opaque::OpaqueSseEvent>
+pub routectl_core::schema::ChatChunk::opaque_events: alloc::vec::Vec<routectl_core::OpaqueSseEvent>
 pub routectl_core::schema::ChatChunk::upstream_meta: core::option::Option<routectl_core::upstream_meta::UpstreamMeta>
 pub routectl_core::schema::ChatChunk::usage: core::option::Option<routectl_core::schema::UsageDelta>
 impl core::clone::Clone for routectl_core::schema::ChatChunk
@@ -1852,13 +1650,13 @@ pub routectl_core::schema::RoutectlInternal::claude_code_headers: alloc::vec::Ve
 pub routectl_core::schema::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::schema::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
 pub routectl_core::schema::RoutectlInternal::header_extras: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>
-pub routectl_core::schema::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::reasoning_dialect::HistoryReasoning>
+pub routectl_core::schema::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::CoreHistoryReasoning>
 pub routectl_core::schema::RoutectlInternal::inbound_session_key: core::option::Option<alloc::string::String>
 pub routectl_core::schema::RoutectlInternal::max_output_tokens: u32
 pub routectl_core::schema::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::schema::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_core::schema::RoutectlInternal::provenance: routectl_core::schema::RequestProvenance
-pub routectl_core::schema::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::reasoning_dialect::ReasoningDialect>
+pub routectl_core::schema::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::CoreReasoningDialect>
 pub routectl_core::schema::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::supports_adaptive_thinking: bool
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
@@ -2048,52 +1846,6 @@ pub fn routectl_core::schema::UsageDelta::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::schema::UsageDelta where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::schema::UsageDelta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::UsageDelta
-pub mod routectl_core::schema_opaque
-#[non_exhaustive] pub enum routectl_core::schema_opaque::OpaqueSseEvent
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockDelta
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockDelta::raw_delta: alloc::vec::Vec<u8>
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockDelta::upstream_index: u32
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockStart
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockStart::raw_data: alloc::vec::Vec<u8>
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockStart::type_tag: alloc::string::String
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockStart::upstream_index: u32
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockStop
-pub routectl_core::schema_opaque::OpaqueSseEvent::ContentBlockStop::upstream_index: u32
-impl core::clone::Clone for routectl_core::schema_opaque::OpaqueSseEvent
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::clone(&self) -> routectl_core::schema_opaque::OpaqueSseEvent
-impl core::fmt::Debug for routectl_core::schema_opaque::OpaqueSseEvent
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::Send for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::Sync for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::Unpin for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::UnsafeUnpin for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema_opaque::OpaqueSseEvent
-impl<T, U> core::convert::Into<U> for routectl_core::schema_opaque::OpaqueSseEvent where U: core::convert::From<T>
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::schema_opaque::OpaqueSseEvent where U: core::convert::Into<T>
-pub type routectl_core::schema_opaque::OpaqueSseEvent::Error = core::convert::Infallible
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::schema_opaque::OpaqueSseEvent where U: core::convert::TryFrom<T>
-pub type routectl_core::schema_opaque::OpaqueSseEvent::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::schema_opaque::OpaqueSseEvent where T: core::clone::Clone
-pub type routectl_core::schema_opaque::OpaqueSseEvent::Owned = T
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::clone_into(&self, &mut T)
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::schema_opaque::OpaqueSseEvent where T: 'static + ?core::marker::Sized
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::schema_opaque::OpaqueSseEvent where T: ?core::marker::Sized
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::schema_opaque::OpaqueSseEvent where T: ?core::marker::Sized
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::schema_opaque::OpaqueSseEvent where T: core::clone::Clone
-pub unsafe fn routectl_core::schema_opaque::OpaqueSseEvent::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::schema_opaque::OpaqueSseEvent
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::schema_opaque::OpaqueSseEvent
-impl<T> tracing::instrument::WithSubscriber for routectl_core::schema_opaque::OpaqueSseEvent
 pub mod routectl_core::system_content
 pub enum routectl_core::system_content::SystemContent
 pub routectl_core::system_content::SystemContent::Blocks(alloc::vec::Vec<routectl_core::system_content::SystemBlock>)
@@ -2186,46 +1938,6 @@ pub fn routectl_core::system_content::SystemBlock::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::system_content::SystemBlock where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::system_content::SystemBlock
 impl<T> tracing::instrument::WithSubscriber for routectl_core::system_content::SystemBlock
-pub mod routectl_core::token_source
-pub struct routectl_core::token_source::StaticToken
-impl routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::new(impl core::convert::Into<alloc::string::String>) -> Self
-impl core::fmt::Debug for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl routectl_core::token_source::TokenSource for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::token_source::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl core::marker::Freeze for routectl_core::token_source::StaticToken
-impl core::marker::Send for routectl_core::token_source::StaticToken
-impl core::marker::Sync for routectl_core::token_source::StaticToken
-impl core::marker::Unpin for routectl_core::token_source::StaticToken
-impl core::marker::UnsafeUnpin for routectl_core::token_source::StaticToken
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::token_source::StaticToken
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::token_source::StaticToken
-impl<T, U> core::convert::Into<U> for routectl_core::token_source::StaticToken where U: core::convert::From<T>
-pub fn routectl_core::token_source::StaticToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::token_source::StaticToken where U: core::convert::Into<T>
-pub type routectl_core::token_source::StaticToken::Error = core::convert::Infallible
-pub fn routectl_core::token_source::StaticToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::token_source::StaticToken where U: core::convert::TryFrom<T>
-pub type routectl_core::token_source::StaticToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::token_source::StaticToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for routectl_core::token_source::StaticToken where T: 'static + ?core::marker::Sized
-pub fn routectl_core::token_source::StaticToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::token_source::StaticToken where T: ?core::marker::Sized
-pub fn routectl_core::token_source::StaticToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::token_source::StaticToken where T: ?core::marker::Sized
-pub fn routectl_core::token_source::StaticToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::token_source::StaticToken
-impl<T> tracing::instrument::WithSubscriber for routectl_core::token_source::StaticToken
-pub trait routectl_core::token_source::TokenSource: core::marker::Send + core::marker::Sync + core::fmt::Debug
-pub fn routectl_core::token_source::TokenSource::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::token_source::TokenSource::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl routectl_core::token_source::TokenSource for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::token_source::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub mod routectl_core::tool_def
 pub enum routectl_core::tool_def::ToolDef
 pub routectl_core::tool_def::ToolDef::Custom(routectl_core::tool_def::CustomTool)
@@ -2418,137 +2130,6 @@ pub fn routectl_core::upstream_meta::UpstreamMeta::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::UpstreamMeta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::UpstreamMeta
 pub const routectl_core::upstream_meta::OVERAGE_CLAIM: &str
-pub mod routectl_core::volatile
-#[non_exhaustive] pub enum routectl_core::volatile::VolatileConfidence
-pub routectl_core::volatile::VolatileConfidence::High
-pub routectl_core::volatile::VolatileConfidence::Low
-pub routectl_core::volatile::VolatileConfidence::None
-impl core::clone::Clone for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::clone(&self) -> routectl_core::volatile::VolatileConfidence
-impl core::cmp::Eq for routectl_core::volatile::VolatileConfidence
-impl core::cmp::PartialEq for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::eq(&self, &routectl_core::volatile::VolatileConfidence) -> bool
-impl core::fmt::Debug for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::volatile::VolatileConfidence
-impl core::marker::StructuralPartialEq for routectl_core::volatile::VolatileConfidence
-impl core::marker::Freeze for routectl_core::volatile::VolatileConfidence
-impl core::marker::Send for routectl_core::volatile::VolatileConfidence
-impl core::marker::Sync for routectl_core::volatile::VolatileConfidence
-impl core::marker::Unpin for routectl_core::volatile::VolatileConfidence
-impl core::marker::UnsafeUnpin for routectl_core::volatile::VolatileConfidence
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::volatile::VolatileConfidence
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::volatile::VolatileConfidence
-impl<T, U> core::convert::Into<U> for routectl_core::volatile::VolatileConfidence where U: core::convert::From<T>
-pub fn routectl_core::volatile::VolatileConfidence::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::volatile::VolatileConfidence where U: core::convert::Into<T>
-pub type routectl_core::volatile::VolatileConfidence::Error = core::convert::Infallible
-pub fn routectl_core::volatile::VolatileConfidence::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::volatile::VolatileConfidence where U: core::convert::TryFrom<T>
-pub type routectl_core::volatile::VolatileConfidence::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::volatile::VolatileConfidence::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::volatile::VolatileConfidence where T: core::clone::Clone
-pub type routectl_core::volatile::VolatileConfidence::Owned = T
-pub fn routectl_core::volatile::VolatileConfidence::clone_into(&self, &mut T)
-pub fn routectl_core::volatile::VolatileConfidence::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::volatile::VolatileConfidence where T: 'static + ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileConfidence::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::volatile::VolatileConfidence where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileConfidence::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::volatile::VolatileConfidence where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileConfidence::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::volatile::VolatileConfidence where T: core::clone::Clone
-pub unsafe fn routectl_core::volatile::VolatileConfidence::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::volatile::VolatileConfidence
-impl<T> tracing::instrument::WithSubscriber for routectl_core::volatile::VolatileConfidence
-#[non_exhaustive] pub enum routectl_core::volatile::VolatileKind
-pub routectl_core::volatile::VolatileKind::HexBlob
-pub routectl_core::volatile::VolatileKind::Jwt
-pub routectl_core::volatile::VolatileKind::Timestamp
-pub routectl_core::volatile::VolatileKind::Uuid
-impl core::clone::Clone for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::clone(&self) -> routectl_core::volatile::VolatileKind
-impl core::cmp::Eq for routectl_core::volatile::VolatileKind
-impl core::cmp::PartialEq for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::eq(&self, &routectl_core::volatile::VolatileKind) -> bool
-impl core::fmt::Debug for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::volatile::VolatileKind
-impl core::marker::StructuralPartialEq for routectl_core::volatile::VolatileKind
-impl core::marker::Freeze for routectl_core::volatile::VolatileKind
-impl core::marker::Send for routectl_core::volatile::VolatileKind
-impl core::marker::Sync for routectl_core::volatile::VolatileKind
-impl core::marker::Unpin for routectl_core::volatile::VolatileKind
-impl core::marker::UnsafeUnpin for routectl_core::volatile::VolatileKind
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::volatile::VolatileKind
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::volatile::VolatileKind
-impl<T, U> core::convert::Into<U> for routectl_core::volatile::VolatileKind where U: core::convert::From<T>
-pub fn routectl_core::volatile::VolatileKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::volatile::VolatileKind where U: core::convert::Into<T>
-pub type routectl_core::volatile::VolatileKind::Error = core::convert::Infallible
-pub fn routectl_core::volatile::VolatileKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::volatile::VolatileKind where U: core::convert::TryFrom<T>
-pub type routectl_core::volatile::VolatileKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::volatile::VolatileKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::volatile::VolatileKind where T: core::clone::Clone
-pub type routectl_core::volatile::VolatileKind::Owned = T
-pub fn routectl_core::volatile::VolatileKind::clone_into(&self, &mut T)
-pub fn routectl_core::volatile::VolatileKind::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::volatile::VolatileKind where T: 'static + ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::volatile::VolatileKind where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::volatile::VolatileKind where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::volatile::VolatileKind where T: core::clone::Clone
-pub unsafe fn routectl_core::volatile::VolatileKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::volatile::VolatileKind
-impl<T> tracing::instrument::WithSubscriber for routectl_core::volatile::VolatileKind
-#[non_exhaustive] pub struct routectl_core::volatile::VolatileReport
-impl routectl_core::volatile::VolatileReport
-pub const fn routectl_core::volatile::VolatileReport::confidence(&self) -> routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileReport::is_high_confidence_veto(&self) -> bool
-pub fn routectl_core::volatile::VolatileReport::kinds(&self) -> &[routectl_core::volatile::VolatileKind]
-impl core::clone::Clone for routectl_core::volatile::VolatileReport
-pub fn routectl_core::volatile::VolatileReport::clone(&self) -> routectl_core::volatile::VolatileReport
-impl core::fmt::Debug for routectl_core::volatile::VolatileReport
-pub fn routectl_core::volatile::VolatileReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_core::volatile::VolatileReport
-impl core::marker::Send for routectl_core::volatile::VolatileReport
-impl core::marker::Sync for routectl_core::volatile::VolatileReport
-impl core::marker::Unpin for routectl_core::volatile::VolatileReport
-impl core::marker::UnsafeUnpin for routectl_core::volatile::VolatileReport
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::volatile::VolatileReport
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::volatile::VolatileReport
-impl<T, U> core::convert::Into<U> for routectl_core::volatile::VolatileReport where U: core::convert::From<T>
-pub fn routectl_core::volatile::VolatileReport::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::volatile::VolatileReport where U: core::convert::Into<T>
-pub type routectl_core::volatile::VolatileReport::Error = core::convert::Infallible
-pub fn routectl_core::volatile::VolatileReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::volatile::VolatileReport where U: core::convert::TryFrom<T>
-pub type routectl_core::volatile::VolatileReport::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::volatile::VolatileReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::volatile::VolatileReport where T: core::clone::Clone
-pub type routectl_core::volatile::VolatileReport::Owned = T
-pub fn routectl_core::volatile::VolatileReport::clone_into(&self, &mut T)
-pub fn routectl_core::volatile::VolatileReport::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::volatile::VolatileReport where T: 'static + ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileReport::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::volatile::VolatileReport where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileReport::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::volatile::VolatileReport where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileReport::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::volatile::VolatileReport where T: core::clone::Clone
-pub unsafe fn routectl_core::volatile::VolatileReport::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::volatile::VolatileReport
-pub fn routectl_core::volatile::VolatileReport::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::volatile::VolatileReport
-impl<T> tracing::instrument::WithSubscriber for routectl_core::volatile::VolatileReport
-pub fn routectl_core::volatile::scan_volatile(&routectl_core::schema::ChatRequest) -> routectl_core::volatile::VolatileReport
 pub enum routectl_core::BreakpointPosition
 pub routectl_core::BreakpointPosition::Messages
 pub routectl_core::BreakpointPosition::System
@@ -2651,48 +2232,48 @@ pub enum routectl_core::CoreHistoryReasoning
 pub routectl_core::CoreHistoryReasoning::Auto
 pub routectl_core::CoreHistoryReasoning::Preserve
 pub routectl_core::CoreHistoryReasoning::Strip
-impl core::clone::Clone for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::clone(&self) -> routectl_core::reasoning_dialect::HistoryReasoning
-impl core::cmp::Eq for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::cmp::PartialEq for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::eq(&self, &routectl_core::reasoning_dialect::HistoryReasoning) -> bool
-impl core::default::Default for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::default() -> routectl_core::reasoning_dialect::HistoryReasoning
-impl core::fmt::Debug for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::StructuralPartialEq for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Freeze for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Send for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Sync for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::Unpin for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::marker::UnsafeUnpin for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_dialect::HistoryReasoning
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_dialect::HistoryReasoning
-impl<T, U> core::convert::Into<U> for routectl_core::reasoning_dialect::HistoryReasoning where U: core::convert::From<T>
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_dialect::HistoryReasoning where U: core::convert::Into<T>
-pub type routectl_core::reasoning_dialect::HistoryReasoning::Error = core::convert::Infallible
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_dialect::HistoryReasoning where U: core::convert::TryFrom<T>
-pub type routectl_core::reasoning_dialect::HistoryReasoning::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_dialect::HistoryReasoning where T: core::clone::Clone
-pub type routectl_core::reasoning_dialect::HistoryReasoning::Owned = T
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::clone_into(&self, &mut T)
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::reasoning_dialect::HistoryReasoning where T: 'static + ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_dialect::HistoryReasoning where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_dialect::HistoryReasoning where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::reasoning_dialect::HistoryReasoning where T: core::clone::Clone
-pub unsafe fn routectl_core::reasoning_dialect::HistoryReasoning::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::reasoning_dialect::HistoryReasoning
-pub fn routectl_core::reasoning_dialect::HistoryReasoning::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::reasoning_dialect::HistoryReasoning
-impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_dialect::HistoryReasoning
+impl core::clone::Clone for routectl_core::CoreHistoryReasoning
+pub fn routectl_core::CoreHistoryReasoning::clone(&self) -> routectl_core::CoreHistoryReasoning
+impl core::cmp::Eq for routectl_core::CoreHistoryReasoning
+impl core::cmp::PartialEq for routectl_core::CoreHistoryReasoning
+pub fn routectl_core::CoreHistoryReasoning::eq(&self, &routectl_core::CoreHistoryReasoning) -> bool
+impl core::default::Default for routectl_core::CoreHistoryReasoning
+pub fn routectl_core::CoreHistoryReasoning::default() -> routectl_core::CoreHistoryReasoning
+impl core::fmt::Debug for routectl_core::CoreHistoryReasoning
+pub fn routectl_core::CoreHistoryReasoning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::CoreHistoryReasoning
+impl core::marker::StructuralPartialEq for routectl_core::CoreHistoryReasoning
+impl core::marker::Freeze for routectl_core::CoreHistoryReasoning
+impl core::marker::Send for routectl_core::CoreHistoryReasoning
+impl core::marker::Sync for routectl_core::CoreHistoryReasoning
+impl core::marker::Unpin for routectl_core::CoreHistoryReasoning
+impl core::marker::UnsafeUnpin for routectl_core::CoreHistoryReasoning
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::CoreHistoryReasoning
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::CoreHistoryReasoning
+impl<T, U> core::convert::Into<U> for routectl_core::CoreHistoryReasoning where U: core::convert::From<T>
+pub fn routectl_core::CoreHistoryReasoning::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::CoreHistoryReasoning where U: core::convert::Into<T>
+pub type routectl_core::CoreHistoryReasoning::Error = core::convert::Infallible
+pub fn routectl_core::CoreHistoryReasoning::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::CoreHistoryReasoning where U: core::convert::TryFrom<T>
+pub type routectl_core::CoreHistoryReasoning::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::CoreHistoryReasoning::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::CoreHistoryReasoning where T: core::clone::Clone
+pub type routectl_core::CoreHistoryReasoning::Owned = T
+pub fn routectl_core::CoreHistoryReasoning::clone_into(&self, &mut T)
+pub fn routectl_core::CoreHistoryReasoning::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::CoreHistoryReasoning where T: 'static + ?core::marker::Sized
+pub fn routectl_core::CoreHistoryReasoning::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::CoreHistoryReasoning where T: ?core::marker::Sized
+pub fn routectl_core::CoreHistoryReasoning::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::CoreHistoryReasoning where T: ?core::marker::Sized
+pub fn routectl_core::CoreHistoryReasoning::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::CoreHistoryReasoning where T: core::clone::Clone
+pub unsafe fn routectl_core::CoreHistoryReasoning::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::CoreHistoryReasoning
+pub fn routectl_core::CoreHistoryReasoning::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::CoreHistoryReasoning
+impl<T> tracing::instrument::WithSubscriber for routectl_core::CoreHistoryReasoning
 pub enum routectl_core::CoreReasoningDialect
 pub routectl_core::CoreReasoningDialect::Deepseek
 pub routectl_core::CoreReasoningDialect::Openai
@@ -2700,48 +2281,48 @@ pub routectl_core::CoreReasoningDialect::Openrouter
 pub routectl_core::CoreReasoningDialect::Passthrough
 pub routectl_core::CoreReasoningDialect::RawThinkTag
 pub routectl_core::CoreReasoningDialect::Vllm
-impl core::clone::Clone for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::clone(&self) -> routectl_core::reasoning_dialect::ReasoningDialect
-impl core::cmp::Eq for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::cmp::PartialEq for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::eq(&self, &routectl_core::reasoning_dialect::ReasoningDialect) -> bool
-impl core::default::Default for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::default() -> routectl_core::reasoning_dialect::ReasoningDialect
-impl core::fmt::Debug for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::StructuralPartialEq for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Freeze for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Send for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Sync for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::Unpin for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::marker::UnsafeUnpin for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_dialect::ReasoningDialect
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_dialect::ReasoningDialect
-impl<T, U> core::convert::Into<U> for routectl_core::reasoning_dialect::ReasoningDialect where U: core::convert::From<T>
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_dialect::ReasoningDialect where U: core::convert::Into<T>
-pub type routectl_core::reasoning_dialect::ReasoningDialect::Error = core::convert::Infallible
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_dialect::ReasoningDialect where U: core::convert::TryFrom<T>
-pub type routectl_core::reasoning_dialect::ReasoningDialect::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_dialect::ReasoningDialect where T: core::clone::Clone
-pub type routectl_core::reasoning_dialect::ReasoningDialect::Owned = T
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::clone_into(&self, &mut T)
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::reasoning_dialect::ReasoningDialect where T: 'static + ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_dialect::ReasoningDialect where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_dialect::ReasoningDialect where T: ?core::marker::Sized
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::reasoning_dialect::ReasoningDialect where T: core::clone::Clone
-pub unsafe fn routectl_core::reasoning_dialect::ReasoningDialect::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::reasoning_dialect::ReasoningDialect
-pub fn routectl_core::reasoning_dialect::ReasoningDialect::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::reasoning_dialect::ReasoningDialect
-impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_dialect::ReasoningDialect
+impl core::clone::Clone for routectl_core::CoreReasoningDialect
+pub fn routectl_core::CoreReasoningDialect::clone(&self) -> routectl_core::CoreReasoningDialect
+impl core::cmp::Eq for routectl_core::CoreReasoningDialect
+impl core::cmp::PartialEq for routectl_core::CoreReasoningDialect
+pub fn routectl_core::CoreReasoningDialect::eq(&self, &routectl_core::CoreReasoningDialect) -> bool
+impl core::default::Default for routectl_core::CoreReasoningDialect
+pub fn routectl_core::CoreReasoningDialect::default() -> routectl_core::CoreReasoningDialect
+impl core::fmt::Debug for routectl_core::CoreReasoningDialect
+pub fn routectl_core::CoreReasoningDialect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::CoreReasoningDialect
+impl core::marker::StructuralPartialEq for routectl_core::CoreReasoningDialect
+impl core::marker::Freeze for routectl_core::CoreReasoningDialect
+impl core::marker::Send for routectl_core::CoreReasoningDialect
+impl core::marker::Sync for routectl_core::CoreReasoningDialect
+impl core::marker::Unpin for routectl_core::CoreReasoningDialect
+impl core::marker::UnsafeUnpin for routectl_core::CoreReasoningDialect
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::CoreReasoningDialect
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::CoreReasoningDialect
+impl<T, U> core::convert::Into<U> for routectl_core::CoreReasoningDialect where U: core::convert::From<T>
+pub fn routectl_core::CoreReasoningDialect::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::CoreReasoningDialect where U: core::convert::Into<T>
+pub type routectl_core::CoreReasoningDialect::Error = core::convert::Infallible
+pub fn routectl_core::CoreReasoningDialect::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::CoreReasoningDialect where U: core::convert::TryFrom<T>
+pub type routectl_core::CoreReasoningDialect::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::CoreReasoningDialect::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::CoreReasoningDialect where T: core::clone::Clone
+pub type routectl_core::CoreReasoningDialect::Owned = T
+pub fn routectl_core::CoreReasoningDialect::clone_into(&self, &mut T)
+pub fn routectl_core::CoreReasoningDialect::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::CoreReasoningDialect where T: 'static + ?core::marker::Sized
+pub fn routectl_core::CoreReasoningDialect::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::CoreReasoningDialect where T: ?core::marker::Sized
+pub fn routectl_core::CoreReasoningDialect::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::CoreReasoningDialect where T: ?core::marker::Sized
+pub fn routectl_core::CoreReasoningDialect::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::CoreReasoningDialect where T: core::clone::Clone
+pub unsafe fn routectl_core::CoreReasoningDialect::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::CoreReasoningDialect
+pub fn routectl_core::CoreReasoningDialect::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::CoreReasoningDialect
+impl<T> tracing::instrument::WithSubscriber for routectl_core::CoreReasoningDialect
 pub enum routectl_core::Error
 pub routectl_core::Error::Auth(alloc::string::String)
 pub routectl_core::Error::Config(alloc::string::String)
@@ -2938,41 +2519,41 @@ pub routectl_core::OpaqueSseEvent::ContentBlockStart::type_tag: alloc::string::S
 pub routectl_core::OpaqueSseEvent::ContentBlockStart::upstream_index: u32
 pub routectl_core::OpaqueSseEvent::ContentBlockStop
 pub routectl_core::OpaqueSseEvent::ContentBlockStop::upstream_index: u32
-impl core::clone::Clone for routectl_core::schema_opaque::OpaqueSseEvent
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::clone(&self) -> routectl_core::schema_opaque::OpaqueSseEvent
-impl core::fmt::Debug for routectl_core::schema_opaque::OpaqueSseEvent
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::Send for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::Sync for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::Unpin for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::marker::UnsafeUnpin for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema_opaque::OpaqueSseEvent
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema_opaque::OpaqueSseEvent
-impl<T, U> core::convert::Into<U> for routectl_core::schema_opaque::OpaqueSseEvent where U: core::convert::From<T>
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::schema_opaque::OpaqueSseEvent where U: core::convert::Into<T>
-pub type routectl_core::schema_opaque::OpaqueSseEvent::Error = core::convert::Infallible
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::schema_opaque::OpaqueSseEvent where U: core::convert::TryFrom<T>
-pub type routectl_core::schema_opaque::OpaqueSseEvent::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::schema_opaque::OpaqueSseEvent where T: core::clone::Clone
-pub type routectl_core::schema_opaque::OpaqueSseEvent::Owned = T
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::clone_into(&self, &mut T)
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::schema_opaque::OpaqueSseEvent where T: 'static + ?core::marker::Sized
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::schema_opaque::OpaqueSseEvent where T: ?core::marker::Sized
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::schema_opaque::OpaqueSseEvent where T: ?core::marker::Sized
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::schema_opaque::OpaqueSseEvent where T: core::clone::Clone
-pub unsafe fn routectl_core::schema_opaque::OpaqueSseEvent::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::schema_opaque::OpaqueSseEvent
-pub fn routectl_core::schema_opaque::OpaqueSseEvent::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::schema_opaque::OpaqueSseEvent
-impl<T> tracing::instrument::WithSubscriber for routectl_core::schema_opaque::OpaqueSseEvent
+impl core::clone::Clone for routectl_core::OpaqueSseEvent
+pub fn routectl_core::OpaqueSseEvent::clone(&self) -> routectl_core::OpaqueSseEvent
+impl core::fmt::Debug for routectl_core::OpaqueSseEvent
+pub fn routectl_core::OpaqueSseEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::OpaqueSseEvent
+impl core::marker::Send for routectl_core::OpaqueSseEvent
+impl core::marker::Sync for routectl_core::OpaqueSseEvent
+impl core::marker::Unpin for routectl_core::OpaqueSseEvent
+impl core::marker::UnsafeUnpin for routectl_core::OpaqueSseEvent
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::OpaqueSseEvent
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::OpaqueSseEvent
+impl<T, U> core::convert::Into<U> for routectl_core::OpaqueSseEvent where U: core::convert::From<T>
+pub fn routectl_core::OpaqueSseEvent::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::OpaqueSseEvent where U: core::convert::Into<T>
+pub type routectl_core::OpaqueSseEvent::Error = core::convert::Infallible
+pub fn routectl_core::OpaqueSseEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::OpaqueSseEvent where U: core::convert::TryFrom<T>
+pub type routectl_core::OpaqueSseEvent::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::OpaqueSseEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::OpaqueSseEvent where T: core::clone::Clone
+pub type routectl_core::OpaqueSseEvent::Owned = T
+pub fn routectl_core::OpaqueSseEvent::clone_into(&self, &mut T)
+pub fn routectl_core::OpaqueSseEvent::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::OpaqueSseEvent where T: 'static + ?core::marker::Sized
+pub fn routectl_core::OpaqueSseEvent::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::OpaqueSseEvent where T: ?core::marker::Sized
+pub fn routectl_core::OpaqueSseEvent::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::OpaqueSseEvent where T: ?core::marker::Sized
+pub fn routectl_core::OpaqueSseEvent::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::OpaqueSseEvent where T: core::clone::Clone
+pub unsafe fn routectl_core::OpaqueSseEvent::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::OpaqueSseEvent
+pub fn routectl_core::OpaqueSseEvent::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::OpaqueSseEvent
+impl<T> tracing::instrument::WithSubscriber for routectl_core::OpaqueSseEvent
 #[non_exhaustive] pub enum routectl_core::ProbeOutcome
 pub routectl_core::ProbeOutcome::AuthFailed(alloc::string::String)
 pub routectl_core::ProbeOutcome::IndeterminateHttp
@@ -2981,46 +2562,46 @@ pub routectl_core::ProbeOutcome::Reachable
 pub routectl_core::ProbeOutcome::Skipped(alloc::string::String)
 pub routectl_core::ProbeOutcome::Unreachable(alloc::string::String)
 pub routectl_core::ProbeOutcome::UnsupportedFreeProbe
-impl core::clone::Clone for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::clone(&self) -> routectl_core::provider::ProbeOutcome
-impl core::cmp::PartialEq for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::eq(&self, &routectl_core::provider::ProbeOutcome) -> bool
-impl core::fmt::Debug for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for routectl_core::provider::ProbeOutcome
-impl serde_core::ser::Serialize for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl core::marker::Freeze for routectl_core::provider::ProbeOutcome
-impl core::marker::Send for routectl_core::provider::ProbeOutcome
-impl core::marker::Sync for routectl_core::provider::ProbeOutcome
-impl core::marker::Unpin for routectl_core::provider::ProbeOutcome
-impl core::marker::UnsafeUnpin for routectl_core::provider::ProbeOutcome
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::provider::ProbeOutcome
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::provider::ProbeOutcome
-impl<T, U> core::convert::Into<U> for routectl_core::provider::ProbeOutcome where U: core::convert::From<T>
-pub fn routectl_core::provider::ProbeOutcome::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::provider::ProbeOutcome where U: core::convert::Into<T>
-pub type routectl_core::provider::ProbeOutcome::Error = core::convert::Infallible
-pub fn routectl_core::provider::ProbeOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::provider::ProbeOutcome where U: core::convert::TryFrom<T>
-pub type routectl_core::provider::ProbeOutcome::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::provider::ProbeOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::provider::ProbeOutcome where T: core::clone::Clone
-pub type routectl_core::provider::ProbeOutcome::Owned = T
-pub fn routectl_core::provider::ProbeOutcome::clone_into(&self, &mut T)
-pub fn routectl_core::provider::ProbeOutcome::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::provider::ProbeOutcome where T: 'static + ?core::marker::Sized
-pub fn routectl_core::provider::ProbeOutcome::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::provider::ProbeOutcome where T: ?core::marker::Sized
-pub fn routectl_core::provider::ProbeOutcome::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::provider::ProbeOutcome where T: ?core::marker::Sized
-pub fn routectl_core::provider::ProbeOutcome::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::provider::ProbeOutcome where T: core::clone::Clone
-pub unsafe fn routectl_core::provider::ProbeOutcome::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::provider::ProbeOutcome
-pub fn routectl_core::provider::ProbeOutcome::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::provider::ProbeOutcome
-impl<T> tracing::instrument::WithSubscriber for routectl_core::provider::ProbeOutcome
+impl core::clone::Clone for routectl_core::ProbeOutcome
+pub fn routectl_core::ProbeOutcome::clone(&self) -> routectl_core::ProbeOutcome
+impl core::cmp::PartialEq for routectl_core::ProbeOutcome
+pub fn routectl_core::ProbeOutcome::eq(&self, &routectl_core::ProbeOutcome) -> bool
+impl core::fmt::Debug for routectl_core::ProbeOutcome
+pub fn routectl_core::ProbeOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::ProbeOutcome
+impl serde_core::ser::Serialize for routectl_core::ProbeOutcome
+pub fn routectl_core::ProbeOutcome::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_core::ProbeOutcome
+impl core::marker::Send for routectl_core::ProbeOutcome
+impl core::marker::Sync for routectl_core::ProbeOutcome
+impl core::marker::Unpin for routectl_core::ProbeOutcome
+impl core::marker::UnsafeUnpin for routectl_core::ProbeOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::ProbeOutcome
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::ProbeOutcome
+impl<T, U> core::convert::Into<U> for routectl_core::ProbeOutcome where U: core::convert::From<T>
+pub fn routectl_core::ProbeOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::ProbeOutcome where U: core::convert::Into<T>
+pub type routectl_core::ProbeOutcome::Error = core::convert::Infallible
+pub fn routectl_core::ProbeOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::ProbeOutcome where U: core::convert::TryFrom<T>
+pub type routectl_core::ProbeOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::ProbeOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::ProbeOutcome where T: core::clone::Clone
+pub type routectl_core::ProbeOutcome::Owned = T
+pub fn routectl_core::ProbeOutcome::clone_into(&self, &mut T)
+pub fn routectl_core::ProbeOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::ProbeOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_core::ProbeOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::ProbeOutcome where T: ?core::marker::Sized
+pub fn routectl_core::ProbeOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::ProbeOutcome where T: ?core::marker::Sized
+pub fn routectl_core::ProbeOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::ProbeOutcome where T: core::clone::Clone
+pub unsafe fn routectl_core::ProbeOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::ProbeOutcome
+pub fn routectl_core::ProbeOutcome::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::ProbeOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_core::ProbeOutcome
 pub enum routectl_core::ReasoningDetailKind
 pub routectl_core::ReasoningDetailKind::Encrypted
 pub routectl_core::ReasoningDetailKind::Summary
@@ -3339,91 +2920,91 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::tool_def::ToolDef
 pub routectl_core::VolatileConfidence::High
 pub routectl_core::VolatileConfidence::Low
 pub routectl_core::VolatileConfidence::None
-impl core::clone::Clone for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::clone(&self) -> routectl_core::volatile::VolatileConfidence
-impl core::cmp::Eq for routectl_core::volatile::VolatileConfidence
-impl core::cmp::PartialEq for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::eq(&self, &routectl_core::volatile::VolatileConfidence) -> bool
-impl core::fmt::Debug for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::volatile::VolatileConfidence
-impl core::marker::StructuralPartialEq for routectl_core::volatile::VolatileConfidence
-impl core::marker::Freeze for routectl_core::volatile::VolatileConfidence
-impl core::marker::Send for routectl_core::volatile::VolatileConfidence
-impl core::marker::Sync for routectl_core::volatile::VolatileConfidence
-impl core::marker::Unpin for routectl_core::volatile::VolatileConfidence
-impl core::marker::UnsafeUnpin for routectl_core::volatile::VolatileConfidence
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::volatile::VolatileConfidence
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::volatile::VolatileConfidence
-impl<T, U> core::convert::Into<U> for routectl_core::volatile::VolatileConfidence where U: core::convert::From<T>
-pub fn routectl_core::volatile::VolatileConfidence::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::volatile::VolatileConfidence where U: core::convert::Into<T>
-pub type routectl_core::volatile::VolatileConfidence::Error = core::convert::Infallible
-pub fn routectl_core::volatile::VolatileConfidence::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::volatile::VolatileConfidence where U: core::convert::TryFrom<T>
-pub type routectl_core::volatile::VolatileConfidence::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::volatile::VolatileConfidence::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::volatile::VolatileConfidence where T: core::clone::Clone
-pub type routectl_core::volatile::VolatileConfidence::Owned = T
-pub fn routectl_core::volatile::VolatileConfidence::clone_into(&self, &mut T)
-pub fn routectl_core::volatile::VolatileConfidence::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::volatile::VolatileConfidence where T: 'static + ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileConfidence::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::volatile::VolatileConfidence where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileConfidence::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::volatile::VolatileConfidence where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileConfidence::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::volatile::VolatileConfidence where T: core::clone::Clone
-pub unsafe fn routectl_core::volatile::VolatileConfidence::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileConfidence::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::volatile::VolatileConfidence
-impl<T> tracing::instrument::WithSubscriber for routectl_core::volatile::VolatileConfidence
+impl core::clone::Clone for routectl_core::VolatileConfidence
+pub fn routectl_core::VolatileConfidence::clone(&self) -> routectl_core::VolatileConfidence
+impl core::cmp::Eq for routectl_core::VolatileConfidence
+impl core::cmp::PartialEq for routectl_core::VolatileConfidence
+pub fn routectl_core::VolatileConfidence::eq(&self, &routectl_core::VolatileConfidence) -> bool
+impl core::fmt::Debug for routectl_core::VolatileConfidence
+pub fn routectl_core::VolatileConfidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::VolatileConfidence
+impl core::marker::StructuralPartialEq for routectl_core::VolatileConfidence
+impl core::marker::Freeze for routectl_core::VolatileConfidence
+impl core::marker::Send for routectl_core::VolatileConfidence
+impl core::marker::Sync for routectl_core::VolatileConfidence
+impl core::marker::Unpin for routectl_core::VolatileConfidence
+impl core::marker::UnsafeUnpin for routectl_core::VolatileConfidence
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::VolatileConfidence
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::VolatileConfidence
+impl<T, U> core::convert::Into<U> for routectl_core::VolatileConfidence where U: core::convert::From<T>
+pub fn routectl_core::VolatileConfidence::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::VolatileConfidence where U: core::convert::Into<T>
+pub type routectl_core::VolatileConfidence::Error = core::convert::Infallible
+pub fn routectl_core::VolatileConfidence::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::VolatileConfidence where U: core::convert::TryFrom<T>
+pub type routectl_core::VolatileConfidence::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::VolatileConfidence::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::VolatileConfidence where T: core::clone::Clone
+pub type routectl_core::VolatileConfidence::Owned = T
+pub fn routectl_core::VolatileConfidence::clone_into(&self, &mut T)
+pub fn routectl_core::VolatileConfidence::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::VolatileConfidence where T: 'static + ?core::marker::Sized
+pub fn routectl_core::VolatileConfidence::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::VolatileConfidence where T: ?core::marker::Sized
+pub fn routectl_core::VolatileConfidence::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::VolatileConfidence where T: ?core::marker::Sized
+pub fn routectl_core::VolatileConfidence::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::VolatileConfidence where T: core::clone::Clone
+pub unsafe fn routectl_core::VolatileConfidence::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::VolatileConfidence
+pub fn routectl_core::VolatileConfidence::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::VolatileConfidence
+impl<T> tracing::instrument::WithSubscriber for routectl_core::VolatileConfidence
 #[non_exhaustive] pub enum routectl_core::VolatileKind
 pub routectl_core::VolatileKind::HexBlob
 pub routectl_core::VolatileKind::Jwt
 pub routectl_core::VolatileKind::Timestamp
 pub routectl_core::VolatileKind::Uuid
-impl core::clone::Clone for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::clone(&self) -> routectl_core::volatile::VolatileKind
-impl core::cmp::Eq for routectl_core::volatile::VolatileKind
-impl core::cmp::PartialEq for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::eq(&self, &routectl_core::volatile::VolatileKind) -> bool
-impl core::fmt::Debug for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_core::volatile::VolatileKind
-impl core::marker::StructuralPartialEq for routectl_core::volatile::VolatileKind
-impl core::marker::Freeze for routectl_core::volatile::VolatileKind
-impl core::marker::Send for routectl_core::volatile::VolatileKind
-impl core::marker::Sync for routectl_core::volatile::VolatileKind
-impl core::marker::Unpin for routectl_core::volatile::VolatileKind
-impl core::marker::UnsafeUnpin for routectl_core::volatile::VolatileKind
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::volatile::VolatileKind
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::volatile::VolatileKind
-impl<T, U> core::convert::Into<U> for routectl_core::volatile::VolatileKind where U: core::convert::From<T>
-pub fn routectl_core::volatile::VolatileKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::volatile::VolatileKind where U: core::convert::Into<T>
-pub type routectl_core::volatile::VolatileKind::Error = core::convert::Infallible
-pub fn routectl_core::volatile::VolatileKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::volatile::VolatileKind where U: core::convert::TryFrom<T>
-pub type routectl_core::volatile::VolatileKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::volatile::VolatileKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::volatile::VolatileKind where T: core::clone::Clone
-pub type routectl_core::volatile::VolatileKind::Owned = T
-pub fn routectl_core::volatile::VolatileKind::clone_into(&self, &mut T)
-pub fn routectl_core::volatile::VolatileKind::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::volatile::VolatileKind where T: 'static + ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::volatile::VolatileKind where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::volatile::VolatileKind where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::volatile::VolatileKind where T: core::clone::Clone
-pub unsafe fn routectl_core::volatile::VolatileKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::volatile::VolatileKind
-pub fn routectl_core::volatile::VolatileKind::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::volatile::VolatileKind
-impl<T> tracing::instrument::WithSubscriber for routectl_core::volatile::VolatileKind
+impl core::clone::Clone for routectl_core::VolatileKind
+pub fn routectl_core::VolatileKind::clone(&self) -> routectl_core::VolatileKind
+impl core::cmp::Eq for routectl_core::VolatileKind
+impl core::cmp::PartialEq for routectl_core::VolatileKind
+pub fn routectl_core::VolatileKind::eq(&self, &routectl_core::VolatileKind) -> bool
+impl core::fmt::Debug for routectl_core::VolatileKind
+pub fn routectl_core::VolatileKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::VolatileKind
+impl core::marker::StructuralPartialEq for routectl_core::VolatileKind
+impl core::marker::Freeze for routectl_core::VolatileKind
+impl core::marker::Send for routectl_core::VolatileKind
+impl core::marker::Sync for routectl_core::VolatileKind
+impl core::marker::Unpin for routectl_core::VolatileKind
+impl core::marker::UnsafeUnpin for routectl_core::VolatileKind
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::VolatileKind
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::VolatileKind
+impl<T, U> core::convert::Into<U> for routectl_core::VolatileKind where U: core::convert::From<T>
+pub fn routectl_core::VolatileKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::VolatileKind where U: core::convert::Into<T>
+pub type routectl_core::VolatileKind::Error = core::convert::Infallible
+pub fn routectl_core::VolatileKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::VolatileKind where U: core::convert::TryFrom<T>
+pub type routectl_core::VolatileKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::VolatileKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::VolatileKind where T: core::clone::Clone
+pub type routectl_core::VolatileKind::Owned = T
+pub fn routectl_core::VolatileKind::clone_into(&self, &mut T)
+pub fn routectl_core::VolatileKind::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::VolatileKind where T: 'static + ?core::marker::Sized
+pub fn routectl_core::VolatileKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::VolatileKind where T: ?core::marker::Sized
+pub fn routectl_core::VolatileKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::VolatileKind where T: ?core::marker::Sized
+pub fn routectl_core::VolatileKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::VolatileKind where T: core::clone::Clone
+pub unsafe fn routectl_core::VolatileKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::VolatileKind
+pub fn routectl_core::VolatileKind::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::VolatileKind
+impl<T> tracing::instrument::WithSubscriber for routectl_core::VolatileKind
 #[non_exhaustive] pub struct routectl_core::AnthropicUnifiedQuota
 pub routectl_core::AnthropicUnifiedQuota::extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::AnthropicUnifiedQuota::overage_status: core::option::Option<alloc::string::String>
@@ -3602,7 +3183,7 @@ pub struct routectl_core::ChatChunk
 pub routectl_core::ChatChunk::choices: alloc::vec::Vec<routectl_core::schema::ChunkChoice>
 pub routectl_core::ChatChunk::id: alloc::string::String
 pub routectl_core::ChatChunk::model: alloc::string::String
-pub routectl_core::ChatChunk::opaque_events: alloc::vec::Vec<routectl_core::schema_opaque::OpaqueSseEvent>
+pub routectl_core::ChatChunk::opaque_events: alloc::vec::Vec<routectl_core::OpaqueSseEvent>
 pub routectl_core::ChatChunk::upstream_meta: core::option::Option<routectl_core::upstream_meta::UpstreamMeta>
 pub routectl_core::ChatChunk::usage: core::option::Option<routectl_core::schema::UsageDelta>
 impl core::clone::Clone for routectl_core::schema::ChatChunk
@@ -4041,42 +3622,42 @@ pub fn routectl_core::cache_control::FrozenFloor::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::cache_control::FrozenFloor
 impl<T> tracing::instrument::WithSubscriber for routectl_core::cache_control::FrozenFloor
 pub struct routectl_core::InMemoryProjectCache
-impl routectl_core::cloud_project::InMemoryProjectCache
-pub const fn routectl_core::cloud_project::InMemoryProjectCache::new() -> Self
-pub fn routectl_core::cloud_project::InMemoryProjectCache::with(impl core::convert::Into<alloc::string::String>) -> Self
-impl core::default::Default for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::default() -> Self
-impl core::fmt::Debug for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl routectl_core::cloud_project::CloudProjectCache for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl !core::marker::Freeze for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::Send for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::Sync for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::Unpin for routectl_core::cloud_project::InMemoryProjectCache
-impl core::marker::UnsafeUnpin for routectl_core::cloud_project::InMemoryProjectCache
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::cloud_project::InMemoryProjectCache
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::cloud_project::InMemoryProjectCache
-impl<T, U> core::convert::Into<U> for routectl_core::cloud_project::InMemoryProjectCache where U: core::convert::From<T>
-pub fn routectl_core::cloud_project::InMemoryProjectCache::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::cloud_project::InMemoryProjectCache where U: core::convert::Into<T>
-pub type routectl_core::cloud_project::InMemoryProjectCache::Error = core::convert::Infallible
-pub fn routectl_core::cloud_project::InMemoryProjectCache::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::cloud_project::InMemoryProjectCache where U: core::convert::TryFrom<T>
-pub type routectl_core::cloud_project::InMemoryProjectCache::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::cloud_project::InMemoryProjectCache::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for routectl_core::cloud_project::InMemoryProjectCache where T: 'static + ?core::marker::Sized
-pub fn routectl_core::cloud_project::InMemoryProjectCache::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::cloud_project::InMemoryProjectCache where T: ?core::marker::Sized
-pub fn routectl_core::cloud_project::InMemoryProjectCache::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::cloud_project::InMemoryProjectCache where T: ?core::marker::Sized
-pub fn routectl_core::cloud_project::InMemoryProjectCache::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::cloud_project::InMemoryProjectCache
-impl<T> tracing::instrument::WithSubscriber for routectl_core::cloud_project::InMemoryProjectCache
+impl routectl_core::InMemoryProjectCache
+pub const fn routectl_core::InMemoryProjectCache::new() -> Self
+pub fn routectl_core::InMemoryProjectCache::with(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::default::Default for routectl_core::InMemoryProjectCache
+pub fn routectl_core::InMemoryProjectCache::default() -> Self
+impl core::fmt::Debug for routectl_core::InMemoryProjectCache
+pub fn routectl_core::InMemoryProjectCache::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl routectl_core::CloudProjectCache for routectl_core::InMemoryProjectCache
+pub fn routectl_core::InMemoryProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_core::InMemoryProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+pub fn routectl_core::InMemoryProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+impl !core::marker::Freeze for routectl_core::InMemoryProjectCache
+impl core::marker::Send for routectl_core::InMemoryProjectCache
+impl core::marker::Sync for routectl_core::InMemoryProjectCache
+impl core::marker::Unpin for routectl_core::InMemoryProjectCache
+impl core::marker::UnsafeUnpin for routectl_core::InMemoryProjectCache
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::InMemoryProjectCache
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::InMemoryProjectCache
+impl<T, U> core::convert::Into<U> for routectl_core::InMemoryProjectCache where U: core::convert::From<T>
+pub fn routectl_core::InMemoryProjectCache::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::InMemoryProjectCache where U: core::convert::Into<T>
+pub type routectl_core::InMemoryProjectCache::Error = core::convert::Infallible
+pub fn routectl_core::InMemoryProjectCache::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::InMemoryProjectCache where U: core::convert::TryFrom<T>
+pub type routectl_core::InMemoryProjectCache::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::InMemoryProjectCache::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::InMemoryProjectCache where T: 'static + ?core::marker::Sized
+pub fn routectl_core::InMemoryProjectCache::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::InMemoryProjectCache where T: ?core::marker::Sized
+pub fn routectl_core::InMemoryProjectCache::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::InMemoryProjectCache where T: ?core::marker::Sized
+pub fn routectl_core::InMemoryProjectCache::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::InMemoryProjectCache
+pub fn routectl_core::InMemoryProjectCache::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::InMemoryProjectCache
+impl<T> tracing::instrument::WithSubscriber for routectl_core::InMemoryProjectCache
 pub struct routectl_core::Message
 pub routectl_core::Message::content: routectl_core::schema::MessageContent
 pub routectl_core::Message::name: core::option::Option<alloc::string::String>
@@ -4342,13 +3923,13 @@ pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc
 pub routectl_core::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
 pub routectl_core::RoutectlInternal::forwarded_bearer: core::option::Option<routectl_core::schema::ForwardedBearer>
 pub routectl_core::RoutectlInternal::header_extras: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>
-pub routectl_core::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::reasoning_dialect::HistoryReasoning>
+pub routectl_core::RoutectlInternal::history_reasoning: core::option::Option<routectl_core::CoreHistoryReasoning>
 pub routectl_core::RoutectlInternal::inbound_session_key: core::option::Option<alloc::string::String>
 pub routectl_core::RoutectlInternal::max_output_tokens: u32
 pub routectl_core::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_core::RoutectlInternal::provenance: routectl_core::schema::RequestProvenance
-pub routectl_core::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::reasoning_dialect::ReasoningDialect>
+pub routectl_core::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::CoreReasoningDialect>
 pub routectl_core::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::supports_adaptive_thinking: bool
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
@@ -4389,38 +3970,38 @@ pub fn routectl_core::schema::RoutectlInternal::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::schema::RoutectlInternal
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::RoutectlInternal
 pub struct routectl_core::StaticToken
-impl routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::new(impl core::convert::Into<alloc::string::String>) -> Self
-impl core::fmt::Debug for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl routectl_core::token_source::TokenSource for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::token_source::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl core::marker::Freeze for routectl_core::token_source::StaticToken
-impl core::marker::Send for routectl_core::token_source::StaticToken
-impl core::marker::Sync for routectl_core::token_source::StaticToken
-impl core::marker::Unpin for routectl_core::token_source::StaticToken
-impl core::marker::UnsafeUnpin for routectl_core::token_source::StaticToken
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::token_source::StaticToken
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::token_source::StaticToken
-impl<T, U> core::convert::Into<U> for routectl_core::token_source::StaticToken where U: core::convert::From<T>
-pub fn routectl_core::token_source::StaticToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::token_source::StaticToken where U: core::convert::Into<T>
-pub type routectl_core::token_source::StaticToken::Error = core::convert::Infallible
-pub fn routectl_core::token_source::StaticToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::token_source::StaticToken where U: core::convert::TryFrom<T>
-pub type routectl_core::token_source::StaticToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::token_source::StaticToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for routectl_core::token_source::StaticToken where T: 'static + ?core::marker::Sized
-pub fn routectl_core::token_source::StaticToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::token_source::StaticToken where T: ?core::marker::Sized
-pub fn routectl_core::token_source::StaticToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::token_source::StaticToken where T: ?core::marker::Sized
-pub fn routectl_core::token_source::StaticToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::token_source::StaticToken
-impl<T> tracing::instrument::WithSubscriber for routectl_core::token_source::StaticToken
+impl routectl_core::StaticToken
+pub fn routectl_core::StaticToken::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::fmt::Debug for routectl_core::StaticToken
+pub fn routectl_core::StaticToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl routectl_core::TokenSource for routectl_core::StaticToken
+pub fn routectl_core::StaticToken::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+pub fn routectl_core::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+impl core::marker::Freeze for routectl_core::StaticToken
+impl core::marker::Send for routectl_core::StaticToken
+impl core::marker::Sync for routectl_core::StaticToken
+impl core::marker::Unpin for routectl_core::StaticToken
+impl core::marker::UnsafeUnpin for routectl_core::StaticToken
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::StaticToken
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::StaticToken
+impl<T, U> core::convert::Into<U> for routectl_core::StaticToken where U: core::convert::From<T>
+pub fn routectl_core::StaticToken::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::StaticToken where U: core::convert::Into<T>
+pub type routectl_core::StaticToken::Error = core::convert::Infallible
+pub fn routectl_core::StaticToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::StaticToken where U: core::convert::TryFrom<T>
+pub type routectl_core::StaticToken::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::StaticToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_core::StaticToken where T: 'static + ?core::marker::Sized
+pub fn routectl_core::StaticToken::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::StaticToken where T: ?core::marker::Sized
+pub fn routectl_core::StaticToken::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::StaticToken where T: ?core::marker::Sized
+pub fn routectl_core::StaticToken::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_core::StaticToken
+pub fn routectl_core::StaticToken::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::StaticToken
+impl<T> tracing::instrument::WithSubscriber for routectl_core::StaticToken
 pub struct routectl_core::StructuralSummary
 pub routectl_core::StructuralSummary::anthropic_beta: alloc::vec::Vec<alloc::string::String>
 pub routectl_core::StructuralSummary::cache_control_count: u32
@@ -4714,45 +4295,45 @@ impl<T> serde_core::de::DeserializeOwned for routectl_core::schema::UsageDelta w
 impl<T> tracing::instrument::Instrument for routectl_core::schema::UsageDelta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::UsageDelta
 #[non_exhaustive] pub struct routectl_core::VolatileReport
-impl routectl_core::volatile::VolatileReport
-pub const fn routectl_core::volatile::VolatileReport::confidence(&self) -> routectl_core::volatile::VolatileConfidence
-pub fn routectl_core::volatile::VolatileReport::is_high_confidence_veto(&self) -> bool
-pub fn routectl_core::volatile::VolatileReport::kinds(&self) -> &[routectl_core::volatile::VolatileKind]
-impl core::clone::Clone for routectl_core::volatile::VolatileReport
-pub fn routectl_core::volatile::VolatileReport::clone(&self) -> routectl_core::volatile::VolatileReport
-impl core::fmt::Debug for routectl_core::volatile::VolatileReport
-pub fn routectl_core::volatile::VolatileReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for routectl_core::volatile::VolatileReport
-impl core::marker::Send for routectl_core::volatile::VolatileReport
-impl core::marker::Sync for routectl_core::volatile::VolatileReport
-impl core::marker::Unpin for routectl_core::volatile::VolatileReport
-impl core::marker::UnsafeUnpin for routectl_core::volatile::VolatileReport
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::volatile::VolatileReport
-impl core::panic::unwind_safe::UnwindSafe for routectl_core::volatile::VolatileReport
-impl<T, U> core::convert::Into<U> for routectl_core::volatile::VolatileReport where U: core::convert::From<T>
-pub fn routectl_core::volatile::VolatileReport::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_core::volatile::VolatileReport where U: core::convert::Into<T>
-pub type routectl_core::volatile::VolatileReport::Error = core::convert::Infallible
-pub fn routectl_core::volatile::VolatileReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_core::volatile::VolatileReport where U: core::convert::TryFrom<T>
-pub type routectl_core::volatile::VolatileReport::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_core::volatile::VolatileReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_core::volatile::VolatileReport where T: core::clone::Clone
-pub type routectl_core::volatile::VolatileReport::Owned = T
-pub fn routectl_core::volatile::VolatileReport::clone_into(&self, &mut T)
-pub fn routectl_core::volatile::VolatileReport::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_core::volatile::VolatileReport where T: 'static + ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileReport::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_core::volatile::VolatileReport where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileReport::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_core::volatile::VolatileReport where T: ?core::marker::Sized
-pub fn routectl_core::volatile::VolatileReport::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_core::volatile::VolatileReport where T: core::clone::Clone
-pub unsafe fn routectl_core::volatile::VolatileReport::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_core::volatile::VolatileReport
-pub fn routectl_core::volatile::VolatileReport::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_core::volatile::VolatileReport
-impl<T> tracing::instrument::WithSubscriber for routectl_core::volatile::VolatileReport
+impl routectl_core::VolatileReport
+pub const fn routectl_core::VolatileReport::confidence(&self) -> routectl_core::VolatileConfidence
+pub fn routectl_core::VolatileReport::is_high_confidence_veto(&self) -> bool
+pub fn routectl_core::VolatileReport::kinds(&self) -> &[routectl_core::VolatileKind]
+impl core::clone::Clone for routectl_core::VolatileReport
+pub fn routectl_core::VolatileReport::clone(&self) -> routectl_core::VolatileReport
+impl core::fmt::Debug for routectl_core::VolatileReport
+pub fn routectl_core::VolatileReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::VolatileReport
+impl core::marker::Send for routectl_core::VolatileReport
+impl core::marker::Sync for routectl_core::VolatileReport
+impl core::marker::Unpin for routectl_core::VolatileReport
+impl core::marker::UnsafeUnpin for routectl_core::VolatileReport
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::VolatileReport
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::VolatileReport
+impl<T, U> core::convert::Into<U> for routectl_core::VolatileReport where U: core::convert::From<T>
+pub fn routectl_core::VolatileReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::VolatileReport where U: core::convert::Into<T>
+pub type routectl_core::VolatileReport::Error = core::convert::Infallible
+pub fn routectl_core::VolatileReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::VolatileReport where U: core::convert::TryFrom<T>
+pub type routectl_core::VolatileReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::VolatileReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::VolatileReport where T: core::clone::Clone
+pub type routectl_core::VolatileReport::Owned = T
+pub fn routectl_core::VolatileReport::clone_into(&self, &mut T)
+pub fn routectl_core::VolatileReport::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::VolatileReport where T: 'static + ?core::marker::Sized
+pub fn routectl_core::VolatileReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::VolatileReport where T: ?core::marker::Sized
+pub fn routectl_core::VolatileReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::VolatileReport where T: ?core::marker::Sized
+pub fn routectl_core::VolatileReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::VolatileReport where T: core::clone::Clone
+pub unsafe fn routectl_core::VolatileReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::VolatileReport
+pub fn routectl_core::VolatileReport::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::VolatileReport
+impl<T> tracing::instrument::WithSubscriber for routectl_core::VolatileReport
 pub const routectl_core::COMPUTER_USE: &str
 pub const routectl_core::HDR_MSG_EGRESS: &str
 pub const routectl_core::HDR_MSG_INGRESS: &str
@@ -4771,10 +4352,10 @@ pub trait routectl_core::CloudProjectCache: core::marker::Send + core::marker::S
 pub fn routectl_core::CloudProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn routectl_core::CloudProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::CloudProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl routectl_core::cloud_project::CloudProjectCache for routectl_core::cloud_project::InMemoryProjectCache
-pub fn routectl_core::cloud_project::InMemoryProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::cloud_project::InMemoryProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+impl routectl_core::CloudProjectCache for routectl_core::InMemoryProjectCache
+pub fn routectl_core::InMemoryProjectCache::clear_if_matches<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 str) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<bool>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn routectl_core::InMemoryProjectCache::get<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::option::Option<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+pub fn routectl_core::InMemoryProjectCache::put<'life0, 'async_trait>(&'life0 self, alloc::string::String) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub trait routectl_core::Provider: core::marker::Send + core::marker::Sync
 pub fn routectl_core::Provider::complete<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::ChatResponse>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::Provider::count_tokens<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::TokenCount>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
@@ -4782,14 +4363,14 @@ pub fn routectl_core::Provider::id(&self) -> &str
 pub fn routectl_core::Provider::normalize_request(&self, &routectl_core::schema::ChatRequest) -> routectl_core::error::Result<serde_json::value::Value>
 pub fn routectl_core::Provider::normalize_response(&self, serde_json::value::Value) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub fn routectl_core::Provider::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::Provider::probe<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::provider::ProbeOutcome> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+pub fn routectl_core::Provider::probe<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::ProbeOutcome> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::Provider::stream<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub trait routectl_core::TokenSource: core::marker::Send + core::marker::Sync + core::fmt::Debug
 pub fn routectl_core::TokenSource::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::TokenSource::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-impl routectl_core::token_source::TokenSource for routectl_core::token_source::StaticToken
-pub fn routectl_core::token_source::StaticToken::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
-pub fn routectl_core::token_source::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+impl routectl_core::TokenSource for routectl_core::StaticToken
+pub fn routectl_core::StaticToken::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+pub fn routectl_core::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<alloc::string::String>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::apply_json_minify(&mut routectl_core::schema::ChatRequest) -> routectl_core::context_reduction::ReductionOutcome
 pub fn routectl_core::compute_frozen_floor(&routectl_core::schema::ChatRequest) -> routectl_core::cache_control::FrozenFloor
 pub fn routectl_core::debug_upstream_error_body(&str, &str, u16, &str)
@@ -4807,7 +4388,7 @@ pub fn routectl_core::sanitize_detail_for_log(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_for_log(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body_with_cap(&str, usize) -> alloc::string::String
-pub fn routectl_core::scan_volatile(&routectl_core::schema::ChatRequest) -> routectl_core::volatile::VolatileReport
+pub fn routectl_core::scan_volatile(&routectl_core::schema::ChatRequest) -> routectl_core::VolatileReport
 pub fn routectl_core::trace_body_cap() -> usize
 pub fn routectl_core::trace_egress_body(&str, &serde_json::value::Value)
 pub fn routectl_core::trace_egress_headers(&str, &serde_json::value::Value)
