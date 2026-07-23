@@ -16,7 +16,7 @@ use routectl_router::{Config, ProviderEntry};
 /// [`every_top_level_field_is_classified`]); the runtime
 /// [`collect_restart_required_changes`] diffs the individual knobs inside.
 #[cfg(test)]
-pub(crate) const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "log", "usage", "mitm"];
+pub const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "log", "usage", "mitm"];
 
 /// Top-level sections carrying egress-defining knobs (where requests go,
 /// which credential authenticates them) that warrant an operator prompt on
@@ -24,12 +24,12 @@ pub(crate) const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "log", "usage"
 /// block is restart-required, so it is bucketed there; the runtime
 /// [`collect_high_consequence_changes`] still flags its egress fields.
 #[cfg(test)]
-pub(crate) const HIGH_CONSEQUENCE_SECTIONS: &[&str] = &["providers"];
+pub const HIGH_CONSEQUENCE_SECTIONS: &[&str] = &["providers"];
 
 /// Top-level sections that hot-reload cleanly on the next config swap with
 /// no restart and no confirmation prompt.
 #[cfg(test)]
-pub(crate) const HOT_RELOADABLE_SECTIONS: &[&str] = &[
+pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "version",
     "aliases",
     "retry",
@@ -54,7 +54,7 @@ pub(crate) const HOT_RELOADABLE_SECTIONS: &[&str] = &[
 /// restart-required too; `usage.enabled` alone flips live. A `[mitm]` edit
 /// is restart-required because the front-proxy listener is spawned once at
 /// boot.
-pub(crate) fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
+pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
 
     if prev.server.host != next.server.host {
@@ -111,7 +111,7 @@ pub(crate) fn collect_restart_required_changes(prev: &Config, next: &Config) -> 
 /// `credential_source` and the `[mitm]` block's upstream origin + SNI/Host.
 /// Local knobs (`[mitm] listen_port`, `cert_dir`) are not egress and stay
 /// out.
-pub(crate) fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
+pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
 
     let mut keys: BTreeSet<&str> = BTreeSet::new();
