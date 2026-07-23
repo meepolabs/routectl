@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, TokenCount,
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
     cache_control::{MAX_BREAKPOINTS, validate_source},
     context_reduction::{ReductionOutcome, apply_json_minify},
     failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
@@ -43,30 +43,6 @@ use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, 
 /// provider via the breaker instead, so the request falls over to a
 /// sibling rather than blocking on a multi-minute (or hostile) hint.
 const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
-
-/// The single count_tokens-capable egress kind. `anthropic-api` is the
-/// only `Provider` impl that overrides `Provider::count_tokens` (every
-/// other kind uses the 501-ing trait default), and it is Claude-only,
-/// so all capable targets share the same Anthropic tokenizer family.
-/// `count_tokens` walks the dispatch chain to the first target whose
-/// `provider_kind` matches this token and skips the rest. Matches the
-/// `kind = "..."` discriminant from `ProviderEntry::kind_str`.
-pub(super) const COUNT_TOKENS_CAPABLE_KIND: &str = "anthropic-api";
-
-/// Outcome of dispatching `count_tokens` to one capable seat, driving
-/// the walk in [`Router::count_tokens`].
-pub(super) enum CountSeatOutcome {
-    /// The seat returned a token count; return it to the caller.
-    Count(TokenCount),
-    /// A definitive result for this request -- return the error verbatim.
-    /// Covers a settled health error (breaker already debited/parked), a
-    /// non-fallbackable 4xx, a gate block, or an auth-refresh failure.
-    Terminal(Error),
-    /// The seat is capable-by-kind but its upstream cannot count (local
-    /// `NotImplemented` or a wire 501). The probe slot was released
-    /// without a breaker debit; advance to the next capable seat.
-    Capability,
-}
 
 impl Router {
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
