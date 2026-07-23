@@ -18,14 +18,15 @@ pub mod file_watch;
 pub mod k_rebuild;
 mod reload;
 pub mod request_id;
+mod router_build;
 pub mod secrets;
 mod serve;
 pub mod status_gate;
 
 pub use config_load::{LoadedConfig, load_effective_config, load_effective_config_unvalidated};
 pub(crate) use config_load::{load_overlay_default, parse_config_only};
+pub(crate) use router_build::build_router_from_config_with_overlay;
 pub use secrets::CompositeStore;
-pub(crate) use serve::build_router_from_config_with_overlay;
 pub use serve::{serve, serve_on_listener, serve_on_listener_with_overlay};
 
 #[cfg(test)]
@@ -45,7 +46,7 @@ use routectl_router::{CatalogOverlay, Config};
 #[cfg(test)]
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 #[cfg(test)]
-pub(crate) use serve::build_router_from_config;
+pub(crate) use router_build::build_router_from_config;
 #[cfg(test)]
 use serve::{
     build_usage_writer, cache_policy_banner, drain_deadline_watcher, drain_usage_writer,
