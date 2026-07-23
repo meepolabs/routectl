@@ -11,7 +11,7 @@ use crate::capability_strip::{Outcome, RequestInterceptor, StripContext, StripIn
 use crate::catalog::EffectiveRow;
 use crate::config::ProviderEntry;
 
-use super::dispatch::{DispatchSurface, UpstreamFacts, matched_by_label};
+use super::class_observe::{DispatchSurface, UpstreamFacts, matched_by_label};
 use super::{DispatchTarget, ProbeAdmission, Router, operator_betas};
 
 /// A request feature key (e.g. `web_search`, `structured_output`). Same
