@@ -170,3 +170,7 @@ pub async fn build_router_from_config_with_overlay(
 
     Ok(router)
 }
+
+#[cfg(test)]
+#[path = "router_build_tests.rs"]
+mod router_build_tests;

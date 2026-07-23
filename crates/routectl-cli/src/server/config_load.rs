@@ -246,3 +246,7 @@ fn warn_if_config_world_readable(path: &Path, config: &Config, raw_text: &str) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "config_load_tests.rs"]
+mod config_load_tests;

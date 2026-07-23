@@ -710,3 +710,7 @@ fn build_axum_router(
         .merge(status)
         .layer(axum::middleware::from_fn(request_id::middleware))
 }
+
+#[cfg(test)]
+#[path = "serve_tests.rs"]
+mod serve_tests;

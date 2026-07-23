@@ -648,3 +648,7 @@ pub(super) async fn handle_config_reload(
 #[cfg(test)]
 #[path = "activation_tests.rs"]
 mod activation_tests;
+
+#[cfg(test)]
+#[path = "reload_tests.rs"]
+mod reload_tests;
