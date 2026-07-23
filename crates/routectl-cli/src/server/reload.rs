@@ -141,7 +141,7 @@ pub(super) fn spawn_reload_pipeline(
 /// as a paired (Config + Credentials) full-rescan request. Sends are
 /// best-effort: a closed coordinator (post-shutdown) silently drops.
 #[cfg(unix)]
-pub async fn run_sighup_listener(
+pub(super) async fn run_sighup_listener(
     tx: mpsc::Sender<ReloadRequest>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -181,7 +181,7 @@ pub async fn run_sighup_listener(
 /// only labels the reload's success log line so an operator can tell
 /// which watched file fired a given reload.
 #[derive(Debug, Clone, Copy)]
-pub enum ReloadTrigger {
+pub(super) enum ReloadTrigger {
     ConfigFile,
     CatalogOverlay,
 }
@@ -428,7 +428,7 @@ async fn run_reload_coordinator(
 /// credentials.json with the same keys but new token values -- leaves
 /// the seat set identical and skips the rebuild, so a routine refresh
 /// costs only the cache reload it already paid for.
-pub async fn handle_credentials_reload(
+pub(super) async fn handle_credentials_reload(
     oauth_store: &Option<Arc<routectl_auth::OAuthStore>>,
     current_config: &Arc<Config>,
     current_overlay: &Arc<CatalogOverlay>,
@@ -552,7 +552,7 @@ async fn rebuild_router_for_seat_change(
 /// variables advance together -- a partial update (new config, stale
 /// overlay or vice versa) would desync the pair the next reload diffs
 /// against.
-pub async fn handle_config_reload(
+pub(super) async fn handle_config_reload(
     config_path: Option<&Path>,
     current_config: &Arc<Config>,
     secrets: Arc<dyn SecretStore>,
