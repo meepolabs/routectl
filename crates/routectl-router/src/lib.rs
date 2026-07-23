@@ -1,3 +1,4 @@
+#![deny(rustdoc::broken_intra_doc_links)]
 //! Router: alias resolution, fallback chains, retry policy.
 //!
 //! Reads a `Config` (typically loaded from `~/.config/routectl/config.toml`),

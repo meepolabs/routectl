@@ -6,7 +6,7 @@
 //! this module's own drift-guard test (which regenerates in-memory and
 //! diffs against the committed file). It is `pub` -- not `pub(crate)` --
 //! purely so the `gen_catalog` bin (a separate compilation unit under
-//! `src/bin/`) can reach [`render_catalog_baked_rs`]; it carries no part of
+//! `src/bin/`) can reach `render_catalog_baked_rs`; it carries no part of
 //! the catalog's runtime contract and is hidden from rendered docs.
 //!
 //! SOURCES: two vendored JSON snapshots under `catalog_data/` (see

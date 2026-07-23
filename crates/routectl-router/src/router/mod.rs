@@ -125,7 +125,7 @@ pub struct Router {
     /// `Cold` and silently un-arms the cost gate. See
     /// `carry_over_k_store_from`.
     ///
-    /// Held behind an `Arc` so the in-process [`KEstimator`] reader
+    /// Held behind an `Arc` so the in-process [`crate::k_estimator::KEstimator`] reader
     /// (`k_estimator` below) can share the SAME store as the dispatch path
     /// that records samples into it -- the reader observes every sample the
     /// writer lands, without any cross-store copy or refresh.
@@ -461,12 +461,12 @@ pub struct DispatchMeta {
     /// `req.model`). Always populated, even when resolution then failed.
     pub resolved_alias: String,
     /// Stable auto-cache decision token for the served target (see
-    /// [`CacheInjection::strategy_str`]). `None` when no target was
+    /// `CacheInjection::strategy_str`). `None` when no target was
     /// dispatched (count_tokens, unknown alias, or all entries
     /// gate-blocked before any injection point ran).
     pub cache_strategy: Option<&'static str>,
     /// Stable context-reduction decision token for the served target
-    /// (see [`reduction_strategy_token`]). `None` when no target was
+    /// (see `reduction_strategy_token`). `None` when no target was
     /// dispatched (count_tokens, unknown alias, or all entries
     /// gate-blocked before any reduction point ran).
     pub reduction_strategy: Option<&'static str>,
@@ -534,7 +534,7 @@ pub struct DispatchMeta {
     pub would_trim_path_extractable: Option<u64>,
     /// Recorder-version marker: `None` on pre-M1 rows and on rows where the
     /// near-lossless pass did not run (below the estimated-token trigger);
-    /// stamped with [`NEAR_LOSSLESS_RECORDER_VERSION`] by the M1 recorder
+    /// stamped with `NEAR_LOSSLESS_RECORDER_VERSION` by the M1 recorder
     /// (`Router::record_would_trim`) on every trigger-clearing row,
     /// regardless of whether the pass found any marks. Lets reporting
     /// filter to non-NULL rows so aggregates never mix baseline vs M1

@@ -68,7 +68,7 @@ impl Default for ReasoningDialect {
 /// Map the cross-crate carrier enum (`routectl_core`) into the
 /// providers-private dispatch enum. Keeps the carrier on
 /// `ChatRequest::routectl_internal` crate-neutral while letting this
-/// crate's dispatch loop use a tighter (#[non_exhaustive]) shape.
+/// crate's dispatch loop use a tighter (`#[non_exhaustive]`) shape.
 impl From<routectl_core::CoreReasoningDialect> for ReasoningDialect {
     fn from(d: routectl_core::CoreReasoningDialect) -> Self {
         match d {

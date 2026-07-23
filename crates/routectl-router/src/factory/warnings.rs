@@ -58,7 +58,7 @@ pub(super) fn warn_context_management_needs_preserve(
 }
 
 /// Advisory (never fatal) checks over the same `[retry.classes]` +
-/// `[providers.X.class_overrides]` surface [`validate_class_policy`]
+/// `[providers.X.class_overrides]` surface `validate_class_policy`
 /// hard-rejects on. Each finding here is a config smell the operator
 /// probably didn't intend, not a misconfiguration the loader must refuse.
 ///
@@ -66,7 +66,7 @@ pub(super) fn warn_context_management_needs_preserve(
 ///
 ///   - A `class_overrides` remap whose SOURCE status is a health signal
 ///     ([`is_health_status`]: 408, 429, or any 500..=599). Since
-///     [`validate_class_policy`] already restricts the target to a
+///     `validate_class_policy` already restricts the target to a
 ///     terminal, non-retrying class, any such remap diverts a
 ///     breaker-relevant status into a class the breaker does not debit --
 ///     an outage-masking risk if the upstream is actually unhealthy.
@@ -76,7 +76,7 @@ pub(super) fn warn_context_management_needs_preserve(
 ///     leftover the operator forgot to fill in or clear out.
 ///
 /// Call once per process startup (or `routectl config check`) alongside
-/// [`validate_class_policy`]; unlike that function, warnings never fail
+/// `validate_class_policy`; unlike that function, warnings never fail
 /// the load.
 pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
     let mut warnings = Vec::new();

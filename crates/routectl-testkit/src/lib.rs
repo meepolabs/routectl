@@ -1,3 +1,4 @@
+#![deny(rustdoc::broken_intra_doc_links)]
 //! Shared in-process `tracing` capture test double for routectl's
 //! dev-dependency test suites -- both `#[cfg(test)]` unit tests and
 //! `tests/` integration binaries, which are separate compilation units

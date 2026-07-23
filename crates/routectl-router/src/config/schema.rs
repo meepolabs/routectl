@@ -2106,7 +2106,7 @@ pub struct ProviderRuntimePolicy {
     ///
     /// Resolution order (provider > global):
     ///   provider.request_timeout_ms (this field)
-    ///     -> [retry] request_timeout_ms (workspace global)
+    ///     -> `[retry]` request_timeout_ms (workspace global)
     ///       -> None (no cap, reqwest's default)
     ///
     /// Use this when many models share the same upstream and the

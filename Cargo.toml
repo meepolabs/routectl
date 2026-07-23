@@ -165,12 +165,11 @@ panic = "abort"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # All 6 workspace crates are internal (publish = false). The CI gate runs
-# `-D warnings`, which promotes every warn to an error -- so missing_docs and
+# `-D warnings`, which promotes every warn to an error -- so
 # missing_debug_implementations cannot sit at "warn" without failing the gate
-# on ~285 private struct fields / variants. Enforcing full doc + Debug coverage
-# on non-public API has low value, so both are allowed at the workspace level.
+# on ~285 private struct fields / variants. Enforcing full Debug coverage
+# on non-public API has low value, so it is allowed at the workspace level.
 # Re-promote to "warn" per-crate if any crate's surface is ever published.
-missing_docs = "allow"
 missing_debug_implementations = "allow"
 
 [workspace.lints.clippy]
