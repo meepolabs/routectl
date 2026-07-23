@@ -41,7 +41,7 @@ use runtime_gate::{LearnedProbeGuard, ProbeAdmission};
 pub use status::RouteTargetStatus;
 
 #[cfg(test)]
-pub(crate) use crate::runtime_state::CircuitPhase;
+use crate::runtime_state::CircuitPhase;
 #[cfg(test)]
 use crate::runtime_state::GateDecision;
 
