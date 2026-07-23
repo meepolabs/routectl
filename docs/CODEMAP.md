@@ -302,7 +302,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 ## routectl-cli
 
 - `src/main.rs` -- clap CLI entry point; `main` wraps `run` (which dispatches `serve` / `init` / `login` / `logout` / `refresh` / `whoami` / `test` / `config` / `provider` / `usage` subcommands) and on an error routes the message through `commands::parse_error_redaction::redact_config_load_error` (fail-safe strip of config-load path/value leaks; non-config errors pass through unchanged) then prints it via `Display` -- preserving the multi-line actionable config-load message rather than `Debug`-escaping it -- before exiting 1
-- `src/lib.rs` -- library surface exposing `commands`, `handlers`, `ingress`, `server` modules to integration tests
+- `src/lib.rs` -- test-scaffolding facade (not a stable library API): re-exposes `commands`, `handlers` (`#[doc(hidden)]`), `ingress`, `proxy` (`#[doc(hidden)]`), and `server` to the crate's own integration-test binaries; `config_classify` is crate-internal (`pub(crate)`, consumed only via `crate::config_classify::`)
 
 ### server
 
