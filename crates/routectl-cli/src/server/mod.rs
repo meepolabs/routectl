@@ -2,8 +2,9 @@
 //! the loopback bind-safety guard, and the per-concern submodules (the
 //! `serve` loop / router build / bounded drain, config load, reload
 //! coordinator, auth, file watch, status gate), re-exported here at the
-//! `server::` paths callers use. Unit tests live in the sibling
-//! `#[path]`-included `tests.rs` sidecar.
+//! `server::` paths callers use. Each submodule owns its own
+//! `#[path]`-included unit-test sidecar; hub-local tests (bind safety)
+//! live in the sibling `tests.rs`.
 
 use std::sync::Arc;
 
@@ -30,32 +31,9 @@ pub use secrets::CompositeStore;
 pub use serve::{serve, serve_on_listener, serve_on_listener_with_overlay};
 
 #[cfg(test)]
-use auth::TokenSet;
-#[cfg(test)]
-use config_load::read_parse_validate_config;
-#[cfg(all(test, unix))]
-use reload::run_sighup_listener;
-#[cfg(test)]
-use reload::spawn_reload_pipeline;
-#[cfg(test)]
-use reload::{ReloadTrigger, handle_config_reload, handle_credentials_reload};
-#[cfg(test)]
-use routectl_auth::{MemoryStore, SecretStore};
-#[cfg(test)]
-use routectl_router::{CatalogOverlay, Config};
-#[cfg(test)]
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 #[cfg(test)]
 pub(crate) use router_build::build_router_from_config;
-#[cfg(test)]
-use serve::{
-    build_usage_writer, cache_policy_banner, drain_deadline_watcher, drain_usage_writer,
-    resolve_listener_tokens, status_requires_auth,
-};
-#[cfg(test)]
-use tokio::net::TcpListener;
-#[cfg(test)]
-use tokio::sync::{mpsc, watch};
 
 /// Shared state every axum handler reads from. The `Router` lives
 /// behind an `ArcSwap` so the file-watch / SIGHUP coordinator can
@@ -152,6 +130,9 @@ pub(crate) fn is_loopback(host: &str) -> bool {
         Err(_) => host == "localhost",
     }
 }
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 #[path = "tests.rs"]
