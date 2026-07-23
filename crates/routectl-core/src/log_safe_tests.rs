@@ -5,8 +5,9 @@
 //! this file is the body of `mod tests` declared inside `log_safe`.
 
 use super::{
-    MAX, MAX_DEBUG_BODY_BYTES, is_json_error_envelope, redact_prompts_with_flag, sanitize_capped,
-    sanitize_detail_with_flag, sanitize_for_log, sanitize_upstream_body,
+    MAX, MAX_DEBUG_BODY_BYTES, extract_upstream_message, is_json_error_envelope,
+    redact_prompts_with_flag, sanitize_capped, sanitize_detail_with_flag, sanitize_for_log,
+    sanitize_upstream_body,
 };
 use serde_json::json;
 
@@ -1746,4 +1747,31 @@ fn redact_audio_transcript_redacted() {
     );
     // The non-content sibling `format` stays visible.
     assert_eq!(got["input_audio"]["format"], "wav");
+}
+
+#[test]
+fn extract_upstream_message_returns_error_message_verbatim_from_json_envelope() {
+    // The primary branch: a standard `{"error":{"message":...}}` upstream
+    // body yields the message string verbatim -- operators reading
+    // `body_excerpt=` see the clean upstream error, not the JSON envelope.
+    let body = r#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+    assert_eq!(extract_upstream_message(body), "Incorrect API key provided");
+}
+
+#[test]
+fn extract_upstream_message_falls_back_to_sanitized_body_when_no_error_message() {
+    // JSON that parses but carries no `/error/message` pointer must not
+    // silently return an empty or sibling value -- it falls back to the
+    // sanitized excerpt of the whole body.
+    let body = r#"{"detail":"tenant-7 trace","status":503}"#;
+    assert_eq!(extract_upstream_message(body), sanitize_upstream_body(body));
+}
+
+#[test]
+fn extract_upstream_message_falls_back_when_error_message_is_not_a_string() {
+    // `error.message` present but non-string (a number here) fails the
+    // `as_str` guard, so the helper falls back to the sanitized body
+    // rather than stringifying the non-string node.
+    let body = r#"{"error":{"message":123}}"#;
+    assert_eq!(extract_upstream_message(body), sanitize_upstream_body(body));
 }
