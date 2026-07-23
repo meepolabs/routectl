@@ -29,6 +29,8 @@ pub use validate::{
     validate_cache_pricing_retired,
 };
 
+/// The parsed `config.toml`: server bind, providers, aliases, models, and
+/// the cross-cutting policy tables the router reads at startup.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

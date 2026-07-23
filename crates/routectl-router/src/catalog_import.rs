@@ -83,8 +83,11 @@ pub enum CandidateOrigin {
 /// its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedSelector {
+    /// The selector key that was skipped.
     pub selector: String,
+    /// Human-readable reason for the skip.
     pub reason: String,
+    /// Machine-readable skip discriminator.
     pub kind: SkipKind,
 }
 
@@ -108,7 +111,7 @@ pub enum SkipKind {
     /// module doc's admission note). Not counted.
     UnknownSelector,
     /// A derived cell carried a degenerate value (see
-    /// [`validate_candidate_cell`]). Not counted.
+    /// `validate_candidate_cell`). Not counted.
     DegenerateValue,
     /// Any other skip -- the fail-safe default so an un-tagged skip is
     /// never counted and the shrink guard stays strict.
@@ -123,13 +126,16 @@ pub enum SkipKind {
 /// I/O; the caller decides what to do with `cells` and `skipped`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportCandidate {
+    /// Where this candidate's rows were sourced from.
     pub origin: CandidateOrigin,
     /// The run date stamped on every candidate cell -- ONE value for the
     /// whole import run (candidate materialization time), passed in by
     /// the caller rather than read from the wall clock (this module is
     /// pure).
     pub verified_at: String,
+    /// Per-selector overlay cells ready to merge.
     pub cells: BTreeMap<String, OverlayCell>,
+    /// Selectors the group-and-agree mapper had to skip, with reasons.
     pub skipped: Vec<SkippedSelector>,
 }
 
@@ -331,10 +337,15 @@ impl ExistingCell {
 /// (`wm` down or `rm` up -- see `crate::cost_gate::break_even_k`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiffRow {
+    /// The selector key this row targets.
     pub selector: String,
+    /// The overlay cell the candidate would write.
     pub candidate: OverlayCell,
+    /// The current effective value this row is diffed against.
     pub existing: ExistingCell,
+    /// How impactful the change is (see [`ImpactClass`]).
     pub impact: ImpactClass,
+    /// Whether the change trends toward a lower break-even reuse count.
     pub cheaper_direction: bool,
 }
 
@@ -350,6 +361,8 @@ pub struct ImportDiff {
     /// Lands on a fresh selector, or freely overwrites the selector's
     /// own prior `source: import` cell.
     pub applied: Vec<DiffRow>,
+    /// Selectors the candidate could not admit, carried verbatim from
+    /// [`ImportCandidate::skipped`].
     pub skipped: Vec<SkippedSelector>,
     /// A `source: user` cell already owns this selector (or the
     /// selector is explicitly disabled) -- the existing value is
@@ -544,12 +557,14 @@ pub fn baked_row_map() -> BTreeMap<String, CatalogRow> {
 /// Selector row counts partitioned two ways: `per_source` by provider
 /// kind (`anthropic-api` / `bedrock` / `openai-responses` /
 /// `openai-compat`), `per_family` by the finer vendor grouping within
-/// each provider kind (see [`family_table`]) -- an `openai-compat`-wide
+/// each provider kind (see `family_table`) -- an `openai-compat`-wide
 /// aggregate would hide one vendor's snapshot truncating behind the
 /// other vendors' healthy rows, so the guard checks both granularities.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShrinkCounts {
+    /// Present-row count per source (provider kind).
     pub per_source: BTreeMap<String, usize>,
+    /// Present-row count per family (vendor grouping).
     pub per_family: BTreeMap<String, usize>,
 }
 
@@ -557,17 +572,24 @@ pub struct ShrinkCounts {
 /// or dropped to zero after previously contributing rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShrunkSource {
+    /// The source (provider kind) name.
     pub source: String,
+    /// Row count in the current baseline.
     pub baseline: usize,
+    /// Row count in the candidate.
     pub candidate: usize,
 }
 
 /// One family (vendor grouping) that fell below its size-scaled floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShrunkFamily {
+    /// The family (vendor grouping) name.
     pub family: String,
+    /// Row count in the current baseline.
     pub baseline: usize,
+    /// Row count in the candidate.
     pub candidate: usize,
+    /// The size-scaled floor the candidate had to meet.
     pub required: usize,
 }
 
@@ -578,8 +600,11 @@ pub struct ShrunkFamily {
 /// never a bypass flag.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShrinkVerdict {
+    /// Sources that fell below their floor.
     pub shrunk_sources: Vec<ShrunkSource>,
+    /// Sources that dropped to zero after previously contributing rows.
     pub zero_sources: Vec<ShrunkSource>,
+    /// Families that fell below their size-scaled floor.
     pub shrunk_families: Vec<ShrunkFamily>,
 }
 

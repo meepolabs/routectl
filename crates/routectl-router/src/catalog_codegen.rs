@@ -1,5 +1,5 @@
 //! Codegen for the checked-in baked catalog table
-//! ([`crate::catalog_baked`]).
+//! (`crate::catalog_baked`).
 //!
 //! This module is the shared core between the `gen_catalog` binary
 //! (`src/bin/gen_catalog.rs`, which writes `catalog_baked.rs` to disk) and
@@ -41,7 +41,7 @@
 //! source publishes cache pricing for the selector, else the selector is
 //! marked `economics_unconfirmed` and its economics mirror
 //! [`crate::catalog::CatalogRow::sentinel`] rather than a fabricated
-//! number (see [`OPENAI_COMPAT_SELECTORS`]).
+//! number (see `OPENAI_COMPAT_SELECTORS`).
 
 use std::collections::BTreeMap;
 #[cfg(feature = "gen-catalog")]

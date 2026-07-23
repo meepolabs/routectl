@@ -132,12 +132,19 @@ pub enum ProbeOutcome {
 /// without a retrofit, so the field set is fixed by contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnedRegistryEntry {
+    /// The routing state key (provider + model) this negative applies to.
     pub state_key: String,
+    /// The capability feature key that was rejected.
     pub feature_key: String,
+    /// The signal tier of the learned negative.
     pub signal_tier: SignalTier,
+    /// How many rejections have been observed.
     pub observations: u32,
+    /// When the negative was first observed.
     pub first_seen: Instant,
+    /// When the negative was most recently observed.
     pub last_seen: Instant,
+    /// When the negative's decay window lapses.
     pub expires_at: Instant,
 }
 

@@ -1,9 +1,14 @@
 #![deny(rustdoc::broken_intra_doc_links)]
+#![warn(missing_docs)]
 //! Router: alias resolution, fallback chains, retry policy.
 //!
 //! Reads a `Config` (typically loaded from `~/.config/routectl/config.toml`),
 //! resolves an incoming request's `model` against the configured aliases, and
 //! walks the fallback chain on `5xx`/`429`/timeout errors.
+//!
+//! Beyond dispatch, the crate owns the configuration schema and its
+//! validation, the prompt-cache pricing catalog and its operator overlay,
+//! the OAuth activation inventory, and the `doctor` report shapes.
 
 pub(crate) mod activation;
 pub(crate) mod capability_matcher;

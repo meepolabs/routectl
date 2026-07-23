@@ -119,7 +119,7 @@ pub struct ElisionMark {
     /// Estimated tokens of the ORIGINAL payload (before placeholder).
     pub original_tokens: u64,
     /// Custom placeholder text for this mark, or `None` to use the fixed
-    /// [`ELISION_PLACEHOLDER`]. M1 always sets `None`; a later increment
+    /// `ELISION_PLACEHOLDER`. M1 always sets `None`; a later increment
     /// (path-bearing placeholders) starts emitting `Some(...)` without a
     /// field-add or a retrofit of every mark consumer.
     pub replacement: Option<String>,
@@ -417,7 +417,7 @@ pub struct NearLosslessMarks {
     pub path_units: u64,
     /// Path-attribution NUMERATOR: of the [`Self::path_units`] results, how
     /// many resolved to a path -- their `tool_use_id` matched a paired
-    /// `ToolUse` (id linkage) whose input yielded a [`PATH_KEYS`] entry.
+    /// `ToolUse` (id linkage) whose input yielded a `PATH_KEYS` entry.
     pub path_extractable: u64,
 }
 
@@ -519,13 +519,13 @@ fn extract_path(input: &Value) -> Option<&str> {
 /// Collect near-lossless (dedup + plain supersession) elision marks over the
 /// `[start, scan_end)` message window, as a pure function of request content.
 ///
-/// SIBLING to [`collect_elision_marks`]; the shipped size-baseline path is
+/// SIBLING to `collect_elision_marks`; the shipped size-baseline path is
 /// left byte-untouched so `would_trim_tokens` keeps its meaning across the
 /// deploy boundary. Bounds are passed as ARGS (config is resolved by the
 /// caller); the window uses the same front-anchored discipline as the
 /// baseline scan.
 ///
-/// One O(parts) forward walk ([`collect_scan_units`]) serializes each elidable
+/// One O(parts) forward walk (`collect_scan_units`) serializes each elidable
 /// payload unit once (FNV-1a whole-unit hash + byte-exact key) and builds an
 /// `id -> path` index from every path-bearing `ToolUse`. Classification then
 /// runs in a FIXED order:
@@ -536,7 +536,7 @@ fn extract_path(input: &Value) -> Option<&str> {
 ///    the group's LATEST result (keep later, elide older). The `ToolUse` call
 ///    block + its input always SURVIVE -- only stale RESULT content is marked.
 ///    A result with no resolvable path (no paired call, or the call yields no
-///    [`PATH_KEYS`] entry) is fail-closed (never marked).
+///    `PATH_KEYS` entry) is fail-closed (never marked).
 /// 2. DEDUP (content-keyed, over the SURVIVORS): exact whole-unit byte
 ///    equality; keep the FIRST copy, elide later copies. Any byte difference
 ///    is a hash miss -> KEEP.

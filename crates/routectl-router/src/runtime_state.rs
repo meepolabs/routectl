@@ -77,6 +77,8 @@ pub enum GateDecision {
 }
 
 impl ProviderState {
+    /// Build a provider's runtime state from its policy, seeding the RPM
+    /// token bucket and circuit-breaker thresholds.
     pub fn new(policy: &ProviderRuntimePolicy) -> Self {
         let now = Instant::now();
         let circuit_cooldown = Duration::from_millis(
@@ -219,6 +221,7 @@ impl ProviderState {
         self.half_open_in_flight = false;
     }
 
+    /// True while a half-open probe is in flight for this provider.
     pub const fn half_open_probe_in_flight(&self) -> bool {
         self.half_open_in_flight
     }

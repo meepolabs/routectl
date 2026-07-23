@@ -44,7 +44,7 @@ use crate::config::CURRENT_CONFIG_VERSION;
 /// Seconds in a day, for epoch-day arithmetic off the system clock.
 const SECONDS_PER_DAY: i64 = 86_400;
 
-/// A pending catalog-overlay write computed by [`plan_v1_overlay`]: the
+/// A pending catalog-overlay write computed by `plan_v1_overlay`: the
 /// merged cell map plus the `base_revision` it was merged against. The
 /// caller commits it through the revision-checked `catalog_overlay::save`,
 /// which refuses (no write) if the on-disk revision has moved since.
@@ -129,7 +129,7 @@ impl MigrationPlan {
     }
 }
 
-/// Errors from the v1 overlay fold in [`plan_v1_overlay`]. Every variant
+/// Errors from the v1 overlay fold in `plan_v1_overlay`. Every variant
 /// fails closed: on any error the overlay is left byte-untouched (a partial
 /// write across multiple keys never happens -- conflicts are collected up
 /// front and the whole write is skipped when any exist).
@@ -138,13 +138,23 @@ pub enum MigrationError {
     /// A `[cache_pricing]` selector key does not parse as
     /// `provider_kind:model_glob`.
     #[error("cache-pricing migration: selector `{selector}` is invalid: {reason}")]
-    InvalidSelector { selector: String, reason: String },
+    InvalidSelector {
+        /// The offending selector key.
+        selector: String,
+        /// Why the selector failed to parse.
+        reason: String,
+    },
 
     /// A `[cache_pricing]` override is degenerate (same checks as
     /// `crate::catalog::validate_overrides`, applied here so a bad override
     /// never gets carried forward into the overlay).
     #[error("cache-pricing migration: override for `{selector}` is invalid: {reason}")]
-    InvalidOverride { selector: String, reason: String },
+    InvalidOverride {
+        /// The selector whose override is invalid.
+        selector: String,
+        /// Why the override is rejected.
+        reason: String,
+    },
 
     /// One or more candidate selectors already carry a DIFFERENT overlay
     /// value, or the overlay explicitly disables them (JSON `null`).
@@ -926,7 +936,7 @@ fn ensure_overrides_table(doc: &mut DocumentMut) -> Option<&mut dyn TableLike> {
 /// Apply the PURE `config.toml` document transforms for the ladder, from
 /// `raw_version` up to the latest, mutating `doc` in place. Performs NO IO
 /// and touches NO overlay -- the v1 `[cache_pricing]` fold is
-/// [`plan_v1_overlay`]'s separate concern. Both [`plan_migration`] (on a
+/// `plan_v1_overlay`'s separate concern. Both [`plan_migration`] (on a
 /// clone, to build the candidate) and the caller's commit closure (on the
 /// re-read document under the write lock) call this, so the committed bytes
 /// reproduce exactly what planning gated.
@@ -935,11 +945,11 @@ fn ensure_overrides_table(doc: &mut DocumentMut) -> Option<&mut dyn TableLike> {
 /// trait or registry: the next break is one file-local step function plus
 /// one rung here.
 ///
-/// - `raw_version <= 1`: [`apply_v1_to_v2_doc`] stamps `version = 2` and
+/// - `raw_version <= 1`: `apply_v1_to_v2_doc` stamps `version = 2` and
 ///   drops `[cache_pricing]`, then the v2 -> v3 rung runs on the result.
 /// - `raw_version == 2`: [`migrate_v2_to_v3`] retires the per-status retry
 ///   lists and stamps `version = 3`.
-/// - `raw_version == LATEST` ([`LATEST_MIGRATION_VERSION`]): the same-version
+/// - `raw_version == LATEST` (`LATEST_MIGRATION_VERSION`): the same-version
 ///   [`normalize_capability_overrides`] folds legacy `unsupported_features`
 ///   into `[capability.overrides]`, recording a 3 -> 3 step only when the
 ///   doc actually changed. A plain v3 file is a no-op (no step).

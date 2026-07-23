@@ -95,9 +95,13 @@ struct Cell {
 /// mirroring `LearnedCapabilityRegistry::snapshot`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverrideRow {
+    /// The target this override applies to.
     pub target_spec: String,
+    /// The capability key being overridden.
     pub capability_key: String,
+    /// The override verdict.
     pub verdict: OverrideVerdict,
+    /// Where the override came from.
     pub provenance: OverrideProvenance,
 }
 

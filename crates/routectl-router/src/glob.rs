@@ -104,6 +104,7 @@ pub struct PrefixIndex<V: Clone> {
 }
 
 impl<V: Clone> PrefixIndex<V> {
+    /// An empty prefix index.
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -140,6 +141,7 @@ impl<V: Clone> PrefixIndex<V> {
         self.entries.is_empty()
     }
 
+    /// Number of registered prefix patterns.
     pub const fn len(&self) -> usize {
         self.entries.len()
     }

@@ -26,7 +26,7 @@ use crate::config::Config;
 const SUGGESTION_THRESHOLD: f64 = 0.7;
 
 /// Parse `text` into a [`Config`], mapping any deserialize error through
-/// [`enhance_unknown_field_error`] so an "unknown field"/"unknown variant"
+/// `enhance_unknown_field_error` so an "unknown field"/"unknown variant"
 /// failure gains a `did you mean` hint when a close field name exists.
 ///
 /// The single production config parse site funnels through here.

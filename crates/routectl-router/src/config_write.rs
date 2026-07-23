@@ -76,15 +76,28 @@ pub enum ConfigWriteError<E> {
         "config `{path}` changed on disk since it was read; nothing was written -- \
          re-read the file and retry"
     )]
-    Conflict { path: String },
+    Conflict {
+        /// Path to the config file.
+        path: String,
+    },
 
     /// A filesystem failure (locking, reading, or the atomic write itself).
     #[error("config `{path}`: {reason}")]
-    Io { path: String, reason: String },
+    Io {
+        /// Path to the config file.
+        path: String,
+        /// Underlying I/O error message.
+        reason: String,
+    },
 
     /// The re-read bytes did not parse as a TOML document.
     #[error("config `{path}`: parse: {reason}")]
-    Parse { path: String, reason: String },
+    Parse {
+        /// Path to the config file.
+        path: String,
+        /// Why the document failed to parse.
+        reason: String,
+    },
 
     /// The `edit_fn` closure rejected the edit (typically a validation
     /// failure on the candidate document); the caller's error is preserved

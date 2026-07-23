@@ -73,26 +73,32 @@ pub struct BuildOptions {
 }
 
 impl BuildOptions {
+    /// Build options with every field at its default.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the strict-translation posture.
     pub const fn with_strict_translation(mut self, strict: bool) -> Self {
         self.strict_translation = strict;
         self
     }
 
+    /// Set the Bedrock `anthropic_beta` allowlist.
     pub fn with_bedrock_allowed_betas(mut self, list: Vec<String>) -> Self {
         self.bedrock_allowed_betas = list;
         self
     }
 
+    /// Set the Bedrock body-fields allowlist.
     pub fn with_bedrock_allowed_body_fields(mut self, list: Vec<String>) -> Self {
         self.bedrock_allowed_body_fields = list;
         self
     }
 }
 
+/// Build one provider from its config entry, resolving secrets through
+/// `secrets` and applying `opts`.
 #[tracing::instrument(skip_all, fields(provider = %name))]
 pub async fn build_provider_with_options(
     name: &str,

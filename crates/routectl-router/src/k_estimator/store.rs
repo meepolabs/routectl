@@ -56,7 +56,7 @@ pub struct Sample {
 /// Bounded ring of recent samples for one session triple.
 ///
 /// New samples are pushed to the back via [`KSessionWindow::push`]; once
-/// the window is at [`SAMPLES_PER_WINDOW`] the oldest is dropped. The
+/// the window is at `SAMPLES_PER_WINDOW` the oldest is dropped. The
 /// invariant `len() <= SAMPLES_PER_WINDOW` is enforced inside `push` so
 /// no caller can grow the window past the cap by accident.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -98,7 +98,7 @@ impl KSessionWindow {
 }
 
 /// Bounded LRU map of [`KSessionKey`] -> [`KSessionWindow`], sibling to
-/// [`crate::seat_pool::StickyPins`].
+/// `crate::seat_pool::StickyPins`.
 ///
 /// Wraps a `parking_lot::Mutex<LruCache<..>>` for interior mutability so
 /// the map is read/written on the `&self` dispatch path. Carried over on a

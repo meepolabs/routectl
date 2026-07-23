@@ -392,7 +392,7 @@ pub(super) fn is_health_status(status: u16) -> bool {
 ///
 ///   - Any `[providers.X.class_overrides]` entry whose remap TARGET falls
 ///     outside `{bad-request, content-policy, context-window,
-///     feature-unsupported}` ([`ALLOWED_REMAP_TARGETS`]). A remap may
+///     feature-unsupported}` (`ALLOWED_REMAP_TARGETS`). A remap may
 ///     only make behavior less aggressive -- move a status into one of
 ///     the terminal, non-retrying classes -- never toward a class the
 ///     router retries or debits for health. The error names the
@@ -655,7 +655,7 @@ const MITM_REQUIRED_HOST: &str = "api.anthropic.com";
 /// convention). When present, reject:
 /// - an `upstream_origin` that is not EXACTLY `https://api.anthropic.com`
 ///   (any other scheme, host, explicit port, userinfo, path, query, or
-///   fragment is rejected -- see [`MITM_REQUIRED_HOST`] for why this is
+///   fragment is rejected -- see `MITM_REQUIRED_HOST` for why this is
 ///   pinned rather than pattern-matched);
 /// - a `listen_port` that collides with `[server] port` (the two are
 ///   separate bound sockets on the same host);
@@ -884,7 +884,9 @@ fn validate_base_urls(config: &Config) -> Result<()> {
 /// means no caller has to normalize the prefix itself.
 #[derive(Debug, Default, Clone)]
 pub struct ConfigValidation {
+    /// Hard-fail conditions, each a bare message.
     pub errors: Vec<String>,
+    /// Advisory conditions, each a bare message.
     pub warnings: Vec<String>,
 }
 

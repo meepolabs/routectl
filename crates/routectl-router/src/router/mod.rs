@@ -72,7 +72,11 @@ const LIST_VALUED_HEADERS: &[&str] = &["anthropic-beta"];
 /// rather than recurse indefinitely.
 pub const ALIAS_MAX_RECURSION_DEPTH: usize = 8;
 
+/// The routing engine: resolves aliases, holds provider implementations
+/// and their per-model runtime gates, and drives dispatch over fallback
+/// chains.
 pub struct Router {
+    /// The configuration this router was built from.
     pub config: Arc<Config>,
     /// Provider implementations keyed by user-facing name. Private so
     /// every insertion goes through [`Router::register`], which keeps
@@ -485,7 +489,7 @@ pub struct DispatchMeta {
     /// `d` of the trimmer's would-cut candidate for the dispatched request.
     /// `None` when the steady-state trimmer proposed no cut (or no target was
     /// dispatched). The live request is NEVER mutated -- this is recording
-    /// only (see [`Router::record_would_trim`]).
+    /// only (see `Router::record_would_trim`).
     pub would_trim_tokens: Option<u64>,
     /// Non-mutating steady-state would-trim advisory: the break-even reuse
     /// count K* the cost gate priced for the would-cut candidate. `None` when
@@ -626,7 +630,9 @@ impl DispatchMeta {
 /// the growth point is [`DispatchMeta`], not this wrapper.
 #[derive(Debug)]
 pub struct Dispatched {
+    /// Router-scoped metadata, valid on both the `Ok` and `Err` arms.
     pub meta: DispatchMeta,
+    /// The non-streaming dispatch result.
     pub result: Result<ChatResponse>,
 }
 
@@ -636,7 +642,9 @@ pub struct Dispatched {
 /// arrives, so they are valid before the stream body is consumed. A
 /// fixed two-field pair for the same reason as [`Dispatched`].
 pub struct DispatchedStream {
+    /// Router-scoped metadata, valid before the stream body is consumed.
     pub meta: DispatchMeta,
+    /// The streaming dispatch result.
     pub result: Result<BoxStream<'static, Result<ChatChunk>>>,
 }
 
@@ -789,6 +797,9 @@ impl DispatchTarget {
 }
 
 impl Router {
+    /// Build a router from a config, provisioning a runtime gate for every
+    /// configured provider. Resolved models and providers are registered
+    /// separately.
     pub fn new(config: Arc<Config>) -> Self {
         let mut state = BTreeMap::new();
         for (name, entry) in &config.providers {
@@ -1111,6 +1122,8 @@ impl Router {
         self.resolved_models.get(nickname).cloned()
     }
 
+    /// Register a provider under a name, ensuring a runtime gate exists
+    /// for it even when no matching config entry was present.
     pub fn register(&mut self, name: impl Into<String>, provider: Arc<dyn Provider>) {
         let name = name.into();
         // Ensure a gate exists even for providers registered without a
