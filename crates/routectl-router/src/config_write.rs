@@ -190,7 +190,7 @@ where
 /// flushed too -- without this, a crash right after this call returns can
 /// roll the directory entry back to the pre-rename file even though the
 /// temp file's own contents were already fsynced.
-pub(crate) fn write_config_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_config_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "path has no parent directory".to_string())?;
