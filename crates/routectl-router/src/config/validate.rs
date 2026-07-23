@@ -23,7 +23,9 @@ pub(super) const fn default_config_version() -> u32 {
      routectl or downgrade the config's `version` key"
 )]
 pub struct VersionTooNewError {
+    /// Schema version found in the config file.
     pub found: u32,
+    /// Highest schema version this build supports.
     pub supported: u32,
 }
 
@@ -34,6 +36,7 @@ pub struct VersionTooNewError {
 /// `config` CLI both surface these Display strings verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigVersionError {
+    /// The config version is newer than this build supports.
     #[error(transparent)]
     TooNew(#[from] VersionTooNewError),
 
@@ -44,7 +47,12 @@ pub enum ConfigVersionError {
          `config migrate` to bring it forward, or edit it with a routectl binary that \
          matches its version. Nothing was written."
     )]
-    TooOld { found: u32, supported: u32 },
+    TooOld {
+        /// Schema version found in the config file.
+        found: u32,
+        /// Schema version this build writes.
+        supported: u32,
+    },
 }
 
 /// Read the `version` key straight off the RAW TOML text, before `Config`'s

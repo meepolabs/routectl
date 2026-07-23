@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime};
 #[derive(Debug, Clone)]
 pub struct KQuery<'a> {
     /// Inbound session identifier (typically the conversation-scoped token
-    /// that also keys [`crate::seat_pool::StickyPins`]). `None` for one-shot
+    /// that also keys `crate::seat_pool::StickyPins`). `None` for one-shot
     /// requests that carry no session.
     pub session_key: Option<&'a str>,
     /// Stable provider-kind token of the served target (`anthropic-api` |

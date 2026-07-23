@@ -48,12 +48,16 @@ use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, 
 const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
 
 impl Router {
+    /// Complete a non-streaming request with default options, returning
+    /// only the dispatch result.
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         self.complete_with_options(req, RouterOptions::default())
             .await
             .result
     }
 
+    /// Complete a non-streaming request, returning the result paired with
+    /// its router-scoped dispatch metadata.
     #[must_use]
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn complete_with_options(&self, req: ChatRequest, opts: RouterOptions) -> Dispatched {
@@ -674,6 +678,8 @@ impl Router {
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
+    /// Stream a request with default options, returning only the dispatch
+    /// result.
     pub async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.stream_with_options(req, RouterOptions::default())
             .await

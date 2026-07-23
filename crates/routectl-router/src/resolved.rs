@@ -133,6 +133,8 @@ pub struct ResolvedModel {
 }
 
 impl ResolvedModel {
+    /// Build a resolved model from its nickname, provider binding, and
+    /// upstream id, with all other knobs at their defaults.
     pub fn new(
         nickname: impl Into<String>,
         provider_name: impl Into<String>,
@@ -161,36 +163,43 @@ impl ResolvedModel {
         }
     }
 
+    /// Set the adaptive-thinking support flag.
     pub const fn with_supports_adaptive_thinking(mut self, val: bool) -> Self {
         self.supports_adaptive_thinking = val;
         self
     }
 
+    /// Set the effort-level allowlist.
     pub fn with_effort_levels(mut self, levels: Vec<String>) -> Self {
         self.effort_levels = Arc::from(levels.as_slice());
         self
     }
 
+    /// Set the maximum thinking-token budget.
     pub const fn with_max_thinking_budget(mut self, budget: u32) -> Self {
         self.max_thinking_budget = budget;
         self
     }
 
+    /// Set the reasoning dialect.
     pub const fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
         self.reasoning_dialect = Some(d);
         self
     }
 
+    /// Set the outgoing-history reasoning policy.
     pub const fn with_history_reasoning(mut self, h: HistoryReasoning) -> Self {
         self.history_reasoning = Some(h);
         self
     }
 
+    /// Set the per-model header extras.
     pub fn with_header_extras(mut self, headers: BTreeMap<String, String>) -> Self {
         self.header_extras = headers;
         self
     }
 
+    /// Set the per-model payload extras.
     pub fn with_payload_extras(mut self, extras: Value) -> Self {
         self.payload_extras = Some(extras);
         self

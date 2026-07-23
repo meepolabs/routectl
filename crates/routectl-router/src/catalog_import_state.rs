@@ -42,10 +42,15 @@ pub const CATALOG_IMPORT_STATE_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CatalogImportState {
+    /// Schema version of the persisted state file.
     pub schema_version: u32,
+    /// Fetch date (`YYYY-MM-DD`) of the last successful import.
     pub last_import_date: String,
+    /// Row count per source (provider kind) at the last import.
     pub per_source_counts: BTreeMap<String, usize>,
+    /// Row count per family (vendor grouping) at the last import.
     pub per_family_counts: BTreeMap<String, usize>,
+    /// Content hash per source at the last import.
     pub source_hashes: BTreeMap<String, String>,
 }
 
@@ -54,20 +59,36 @@ pub struct CatalogImportState {
 /// posture by [`load_baseline`] -- see the module doc.
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogImportStateError {
+    /// The file exists but is corrupt or does not parse.
     #[error("catalog import state {path}: corrupt or invalid: {reason}")]
-    Corrupt { path: String, reason: String },
+    Corrupt {
+        /// Path to the state file.
+        path: String,
+        /// What made the file unreadable.
+        reason: String,
+    },
 
+    /// The file's schema version is newer than this build supports.
     #[error(
         "catalog import state {path}: schema_version {found} is newer than the {current} this build supports"
     )]
     VersionTooNew {
+        /// Path to the state file.
         path: String,
+        /// Schema version found in the file.
         found: u32,
+        /// Schema version this build supports.
         current: u32,
     },
 
+    /// The file could not be read from disk.
     #[error("catalog import state {path}: {reason}")]
-    Io { path: String, reason: String },
+    Io {
+        /// Path to the state file.
+        path: String,
+        /// Underlying I/O error message.
+        reason: String,
+    },
 }
 
 /// Resolve the state file's default path: `catalog_import_state.json`

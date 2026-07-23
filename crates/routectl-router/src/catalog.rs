@@ -34,8 +34,8 @@
 //! tier-agnostic cell matches any tier, a tiered cell matches only its own
 //! tier.
 //!
-//! GENERATED BAKED TABLE: [`TABLE`] is populated at startup from
-//! [`crate::catalog_baked::baked_cells`], the output of
+//! GENERATED BAKED TABLE: `TABLE` is populated at startup from
+//! `crate::catalog_baked::baked_cells`, the output of
 //! `cargo run --bin gen_catalog` (see [`crate::catalog_codegen`] for the
 //! derivation from vendored models.dev + litellm snapshots). Every
 //! baked-matched row is treated as equally trustworthy
@@ -299,18 +299,25 @@ pub(crate) fn cell_value_defects(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CachePricingOverride {
+    /// Write multiplier override. `None` inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wm: Option<f32>,
+    /// Read multiplier override. `None` inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rm: Option<f32>,
+    /// Cache time-to-live override, in seconds. `None` inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<u32>,
+    /// Minimum-cacheable-prefix override, in tokens. `None` inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_prefix_tokens: Option<u32>,
+    /// Storage-rent-charging override. `None` inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_storage_rent: Option<bool>,
+    /// Per-hour storage-rent multiplier override. `None` inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_rent: Option<f32>,
+    /// Auto-cacher override. `None` inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_cacher: Option<bool>,
     /// Operator-supplied verification date (`"YYYY-MM-DD"`). Format-
@@ -337,7 +344,7 @@ impl CachePricingOverride {
     /// Reject a degenerate override before it is merged onto a baked row.
     ///
     /// The `wm` / `rm` / `max_context_tokens` structural invariants are the
-    /// shared [`cell_value_defects`] predicate; this method adds the
+    /// shared `cell_value_defects` predicate; this method adds the
     /// caller-owned posture on its result plus the `verified_at` check.
     ///
     /// RELIABILITY GUARD: a finite `wm` BELOW the sentinel's `wm` (2.0) is
@@ -380,12 +387,14 @@ impl CachePricingOverride {
 /// A parsed `"provider_kind:model_glob"` config-key selector for the
 /// `[cache_pricing]` override table. The raw key is split on the FIRST
 /// colon so a model glob may itself contain colons (real Bedrock ids do).
-/// [`best_override`] uses this to apply `Config.cache_pricing` overrides
+/// `best_override` uses this to apply `Config.cache_pricing` overrides
 /// onto baked rows during [`lookup_with_overrides`] /
 /// [`lookup_baked_with_overrides`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachePricingSelector {
+    /// Provider-kind token (the part before the first colon).
     pub provider_kind: String,
+    /// Model glob (the part after the first colon; may contain colons).
     pub model_glob: String,
 }
 
@@ -497,7 +506,7 @@ fn lookup_baked(
 /// `None` resolves to the `"5m"` default (routectl's auto-emit default and
 /// the common case).
 ///
-/// Delegates to [`lookup_baked`] (exact-or-glob model match, then the
+/// Delegates to `lookup_baked` (exact-or-glob model match, then the
 /// provider `"*"` catch-all) and falls back to [`CatalogRow::sentinel`]
 /// when neither matches. Model matching reuses [`AliasPattern`] (the
 /// alias-table glob matcher); the `"*"` provider catch-all is handled
@@ -511,12 +520,12 @@ pub fn lookup(provider_kind: &str, model: &str, tier: Option<&str>) -> CatalogRo
 
 /// True when the baked catalog table carries at least one row for
 /// `kind` -- the stable `kind_str()` provider-kind discriminant
-/// (`anthropic-api`, `openai-compat`, ...). Derived from [`TABLE`]
+/// (`anthropic-api`, `openai-compat`, ...). Derived from `TABLE`
 /// itself, so it cannot drift from the cataloged kind set.
 ///
 /// The coupling guard for callers (e.g. activation gating) that need to
 /// ask "is this provider kind cataloged?" without reaching into the
-/// baked-table internals ([`BakedCell`] / [`TABLE`] stay private).
+/// baked-table internals (`BakedCell` / `TABLE` stay private).
 #[must_use]
 pub fn is_cataloged_provider_kind(kind: &str) -> bool {
     TABLE.iter().any(|cell| cell.provider_kind == kind)
@@ -585,7 +594,7 @@ fn best_override<'a>(
 /// from `overrides`.
 ///
 /// Resolves the baked row via [`lookup`] (sentinel fallback included),
-/// then merges the best-matching override (see [`best_override`]). When NO
+/// then merges the best-matching override (see `best_override`). When NO
 /// override matches, returns the baked row unchanged. When a matched
 /// override is degenerate (it slipped past [`validate_overrides`] and
 /// `with_overrides` rejects it), this falls back to the baked row and warns
@@ -616,7 +625,7 @@ pub fn lookup_with_overrides(
 }
 
 /// Look up a REAL baked-table cell for `(provider_kind, model, tier)` (see
-/// [`lookup_baked`] -- NO sentinel fallback) and apply the best-matching
+/// `lookup_baked` -- NO sentinel fallback) and apply the best-matching
 /// LEGACY `[cache_pricing]` override, if any. Returns `None` when no baked
 /// cell matches: an override targeting a wholly-unmatched selector no
 /// longer synthesizes a row (the `[cache_pricing]` channel is retired in
@@ -718,7 +727,7 @@ fn is_stale(verified_at: &str, today: i64) -> bool {
 }
 
 /// Emit a `tracing::warn!` when the WHOLE baked table's snapshot date
-/// ([`BAKED_SNAPSHOT_DATE`]) is more than 90 days stale. Never panics.
+/// (`BAKED_SNAPSHOT_DATE`) is more than 90 days stale. Never panics.
 /// Called once at startup.
 ///
 /// This redesign dropped the per-row `verified_at` field, so staleness is no
@@ -745,8 +754,11 @@ fn warn_if_stale_at(today: i64) {
 /// One entry from the baked catalog table, exposing the provider kind and
 /// model glob alongside the row. Returned by [`baked_table_rows`].
 pub struct BakedPricingRow {
+    /// Provider-kind token for this baked cell.
     pub provider_kind: &'static str,
+    /// Model glob for this baked cell.
     pub model_glob: &'static str,
+    /// The baked catalog row.
     pub row: CatalogRow,
 }
 
@@ -766,7 +778,7 @@ pub fn baked_table_rows() -> Vec<BakedPricingRow> {
 }
 
 /// True when `verified_at` is more than [`stale_after_days`] before today
-/// (as measured by the system clock). Wraps [`is_stale`] with the live
+/// (as measured by the system clock). Wraps `is_stale` with the live
 /// clock for callers that do not need a pinned test clock.
 #[must_use]
 pub fn is_stale_today(verified_at: &str) -> bool {
@@ -807,8 +819,11 @@ pub enum EffectiveRow {
     /// A usable row, with the winning layer's provenance and staleness
     /// stamp attached.
     Present {
+        /// The winning catalog row.
         row: CatalogRow,
+        /// Which layer supplied the row.
         source: Source,
+        /// Staleness stamp (`YYYY-MM-DD`) of the winning value.
         verified_at: String,
     },
     /// The overlay cell for this selector is JSON `null`: an operator (or
@@ -911,7 +926,7 @@ fn merge_capabilities(
 }
 
 /// Select the overlay cell for `(provider_kind, model)`, mirroring
-/// [`best_override`]'s selector-match precedence: an exact-provider match
+/// `best_override`'s selector-match precedence: an exact-provider match
 /// beats the `"*"` catch-all, and within a tier the longest model-glob
 /// prefix wins. Overlay keys share the SAME `"provider_kind:model_glob"`
 /// shape as `[cache_pricing]` selector keys, so [`CachePricingSelector`]

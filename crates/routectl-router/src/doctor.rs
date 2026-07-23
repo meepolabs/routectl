@@ -11,8 +11,11 @@ pub use routectl_core::ProbeOutcome;
 /// Severity of a single doctor finding. Fixed triad; not a growth enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Status {
+    /// The check passed.
     Pass,
+    /// The check passed with a caveat worth surfacing.
     Warn,
+    /// The check failed.
     Fail,
 }
 
@@ -21,10 +24,15 @@ pub enum Status {
 /// that never carry a token, path, or env value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
+    /// Stable, display-safe category token.
     pub section: &'static str,
+    /// The check's name.
     pub name: String,
+    /// The check's severity.
     pub status: Status,
+    /// Operator-facing detail message.
     pub detail: String,
+    /// Optional operator-facing remediation hint.
     pub remediation: Option<String>,
 }
 
@@ -33,11 +41,17 @@ pub struct Finding {
 /// CLI copies the fields across when it assembles the report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct WouldTrimPanel {
+    /// Requests eligible for trimming.
     pub candidate_requests: i64,
+    /// Tokens that would be trimmed.
     pub would_trim_tokens: i64,
+    /// Candidates whose break-even verdict was met.
     pub verdict_met: i64,
+    /// Candidates whose break-even verdict was unmet.
     pub verdict_unmet: i64,
+    /// Candidates with a cold cache.
     pub verdict_cold: i64,
+    /// Candidates that could not be priced.
     pub verdict_unpriced: i64,
 }
 
@@ -45,14 +59,18 @@ pub struct WouldTrimPanel {
 /// panels land here additively as `Option` fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct DoctorPanels {
+    /// The steady-state would-trim panel, when computed.
     pub would_trim: Option<WouldTrimPanel>,
 }
 
 /// The full doctor report: a flat findings list plus the structured panels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DoctorReport {
+    /// Report schema version.
     pub schema_version: u32,
+    /// The flat list of findings.
     pub findings: Vec<Finding>,
+    /// The structured panels.
     pub panels: DoctorPanels,
 }
 

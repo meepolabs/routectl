@@ -81,7 +81,10 @@ pub enum ActivationStatus {
     /// A usable local credential is present.
     Activated,
     /// Not usable; the `reason` says why.
-    Unresolved { reason: UnresolvedReason },
+    Unresolved {
+        /// Why the credential is not usable.
+        reason: UnresolvedReason,
+    },
 }
 
 impl ActivationStatus {
@@ -150,8 +153,11 @@ impl ActivationState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ActivatedChange {
+    /// OAuth provider id.
     pub provider_id: String,
+    /// The provider's own-credential config kind token.
     pub provider_kind: &'static str,
+    /// Whether the alias table reaches this provider.
     pub referenced_by_aliases: bool,
 }
 
@@ -162,9 +168,13 @@ pub struct ActivatedChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeactivatedChange {
+    /// OAuth provider id.
     pub provider_id: String,
+    /// The provider's own-credential config kind token.
     pub provider_kind: &'static str,
+    /// Why the credential is now unresolved.
     pub reason: UnresolvedReason,
+    /// Whether the alias table reaches this provider.
     pub referenced_by_aliases: bool,
 }
 
@@ -173,7 +183,9 @@ pub struct DeactivatedChange {
 /// reason-only changes among unresolved providers) produce no entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivationDelta {
+    /// Providers that entered the activated set.
     pub newly_activated: Vec<ActivatedChange>,
+    /// Providers that left the activated set.
     pub newly_deactivated: Vec<DeactivatedChange>,
 }
 

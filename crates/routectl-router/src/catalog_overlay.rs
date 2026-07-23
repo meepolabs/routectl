@@ -73,7 +73,9 @@ pub const CATALOG_OVERLAY_SCHEMA_VERSION: u32 = 1;
 /// always round-trips.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CatalogOverlay {
+    /// Schema version of this overlay.
     pub schema_version: u32,
+    /// Monotonic revision counter, bumped on every save.
     pub revision: u64,
     /// Selector (row key) -> overlay value. See the module doc for the
     /// three-state `Option<Option<OverlayCell>>` semantics via
@@ -96,7 +98,9 @@ impl Default for CatalogOverlay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlaySource {
+    /// Migrated from a legacy stamp or override.
     Import,
+    /// Authored directly by an operator.
     User,
 }
 
@@ -112,18 +116,26 @@ pub enum OverlaySource {
 /// than silently filling in a fabricated provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlayCell {
+    /// Provenance of this cell.
     pub source: OverlaySource,
+    /// Verification date (`YYYY-MM-DD`) stamped on this cell.
     pub verified_at: String,
+    /// Write-multiplier override. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wm: Option<f32>,
+    /// Read-multiplier override. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rm: Option<f32>,
+    /// Cache-TTL override, in seconds. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<u32>,
+    /// Minimum-cacheable-prefix override, in tokens. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_prefix_tokens: Option<u32>,
+    /// Context-window override, in tokens. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Capability-prior override. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<BTreeMap<String, bool>>,
 }
@@ -137,7 +149,12 @@ pub enum OverlayError {
     /// The file exists but is not valid JSON, or does not match
     /// [`CatalogOverlay`]'s shape.
     #[error("catalog overlay {path}: corrupt or invalid: {reason}")]
-    Corrupt { path: String, reason: String },
+    Corrupt {
+        /// Path to the overlay file.
+        path: String,
+        /// What made the file unreadable.
+        reason: String,
+    },
 
     /// `schema_version` in the file is greater than
     /// [`CATALOG_OVERLAY_SCHEMA_VERSION`]: a newer routectl wrote this
@@ -146,8 +163,11 @@ pub enum OverlayError {
         "catalog overlay {path}: schema_version {found} is newer than the {current} this build supports"
     )]
     VersionTooNew {
+        /// Path to the overlay file.
         path: String,
+        /// Schema version found in the file.
         found: u32,
+        /// Schema version this build supports.
         current: u32,
     },
 
@@ -155,13 +175,23 @@ pub enum OverlayError {
     /// missing parent that could not be created, ...) distinct from a
     /// content problem.
     #[error("catalog overlay {path}: {reason}")]
-    Io { path: String, reason: String },
+    Io {
+        /// Path to the overlay file.
+        path: String,
+        /// Underlying I/O error message.
+        reason: String,
+    },
 
     /// [`save`]'s `expected_revision` did not match the on-disk revision.
     /// No write occurred; the caller re-reads and retries explicitly (no
     /// auto-retry here -- see the module doc).
     #[error("catalog overlay revision conflict: expected {expected}, on-disk revision is {actual}")]
-    RevisionConflict { expected: u64, actual: u64 },
+    RevisionConflict {
+        /// Revision the caller expected on disk.
+        expected: u64,
+        /// Revision actually found on disk.
+        actual: u64,
+    },
 }
 
 /// Resolve the overlay file's default path: `catalog_overlay.json` inside

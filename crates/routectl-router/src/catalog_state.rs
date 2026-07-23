@@ -396,7 +396,7 @@ fn jv<T: Serialize>(v: T) -> Value {
 }
 
 /// Escalation class for one changed catalog field, shared by the
-/// baked-row drift log ([`diff_row`]) and the overlay import diff
+/// baked-row drift log (`diff_row`) and the overlay import diff
 /// (`crate::catalog_import::diff_overlay`). `Ord`-derived in ascending
 /// severity (`DisplayOnly < CostAffecting < RoutingAffecting`) so
 /// [`escalate`] -- folding several changed fields on the same row --
@@ -462,18 +462,31 @@ pub const fn escalate(a: ImpactClass, b: ImpactClass) -> ImpactClass {
 /// between enabled and disabled rather than a single field's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImpactField {
+    /// The write multiplier.
     Wm,
+    /// The read multiplier.
     Rm,
+    /// The cache time-to-live.
     TtlSeconds,
+    /// The minimum cacheable prefix size.
     MinPrefixTokens,
+    /// The context window.
     MaxContextTokens,
+    /// The capability priors.
     Capabilities,
+    /// The auto-cacher flag.
     AutoCacher,
+    /// The storage-rent-charging flag (baked-only).
     HasStorageRent,
+    /// The storage-rent multiplier (baked-only).
     StorageRent,
+    /// The TTL tier (baked-only).
     Tier,
+    /// The verification stamp (overlay-only).
     VerifiedAt,
+    /// The provenance (overlay-only).
     Source,
+    /// Synthetic: a whole row flipping between enabled and disabled.
     Enablement,
 }
 

@@ -65,7 +65,7 @@ pub(super) fn warn_context_management_needs_preserve(
 /// Two checks, each producing zero or more warning lines:
 ///
 ///   - A `class_overrides` remap whose SOURCE status is a health signal
-///     ([`is_health_status`]: 408, 429, or any 500..=599). Since
+///     (`is_health_status`: 408, 429, or any 500..=599). Since
 ///     `validate_class_policy` already restricts the target to a
 ///     terminal, non-retrying class, any such remap diverts a
 ///     breaker-relevant status into a class the breaker does not debit --

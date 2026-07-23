@@ -94,14 +94,22 @@ pub enum KeepReason {
 #[non_exhaustive]
 pub enum GateDecision {
     /// Keep the original prefix.
-    Keep { reason: KeepReason },
+    Keep {
+        /// Why the prefix is kept.
+        reason: KeepReason,
+    },
     /// Break the cache and apply the edit; net-positive at the assumed reuse.
-    Break { delta_tokens: u64 },
+    Break {
+        /// Tokens saved by breaking.
+        delta_tokens: u64,
+    },
     /// RESERVED for a later phase: a break that is free by construction
     /// (prefix already evicted, or an incidental re-warm that was happening
     /// anyway). Never returned today; reserved for a later eviction-guard increment.
     FreeBreak {
+        /// Tokens saved by breaking.
         delta_tokens: u64,
+        /// Why the break is free.
         reason: &'static str,
     },
 }

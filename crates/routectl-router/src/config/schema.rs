@@ -456,14 +456,19 @@ fn default_mitm_host() -> String {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PricingConfig {
+    /// USD per million input tokens. `None` leaves the input dimension unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_per_mtok: Option<f64>,
+    /// USD per million output tokens. `None` leaves the output dimension unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_per_mtok: Option<f64>,
+    /// USD per million tokens read from the prompt cache. `None` leaves it unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_per_mtok: Option<f64>,
+    /// USD per million tokens written to the 5-minute cache tier. `None` leaves it unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_5m_per_mtok: Option<f64>,
+    /// USD per million tokens written to the 1-hour cache tier. `None` leaves it unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h_per_mtok: Option<f64>,
 }
@@ -485,8 +490,11 @@ pub struct PricingConfig {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RegistryEntry {
+    /// Per-million-token pricing for this registry row. `None` leaves the row unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<PricingConfig>,
+    /// Provider scope. When set, the row applies only to the named provider,
+    /// letting the same upstream id be priced differently per provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
 }
@@ -687,6 +695,8 @@ pub struct ModelEntry {
 }
 
 impl ModelEntry {
+    /// Build an entry binding the given upstream model id to a provider,
+    /// with all other knobs at their defaults.
     pub fn new(provider: impl Into<String>, upstream: impl Into<String>) -> Self {
         Self {
             provider: provider.into(),
@@ -731,21 +741,25 @@ impl ModelEntry {
         self
     }
 
+    /// Set the reasoning dialect that governs how thinking is expressed on the wire.
     pub const fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
         self.reasoning_dialect = Some(d);
         self
     }
 
+    /// Set how prior-turn reasoning is carried forward in conversation history.
     pub const fn with_history_reasoning(mut self, h: HistoryReasoning) -> Self {
         self.history_reasoning = Some(h);
         self
     }
 
+    /// Set the per-model header extras merged into each outbound request.
     pub fn with_header_extras(mut self, headers: BTreeMap<String, String>) -> Self {
         self.header_extras = headers;
         self
     }
 
+    /// Set the per-model payload extras merged into each outbound request body.
     pub fn with_payload_extras(mut self, payload: Value) -> Self {
         self.payload_extras = Some(payload);
         self
@@ -834,7 +848,9 @@ fn default_effort_levels() -> Vec<String> {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum AliasValue {
+    /// A single model nickname.
     Single(String),
+    /// An ordered fallback chain of model nicknames.
     Chain(Vec<String>),
 }
 
@@ -855,6 +871,7 @@ impl AliasValue {
         }
     }
 
+    /// True when this alias resolves to no nicknames (an empty chain).
     pub const fn is_empty(&self) -> bool {
         match self {
             Self::Single(_) => false,
@@ -870,7 +887,9 @@ impl AliasValue {
 /// previous `Box<dyn Iterator>` implementation that allocated per
 /// call.
 pub enum NicknameIter<'a> {
+    /// Yields the single nickname once.
     Single(Option<&'a str>),
+    /// Yields each nickname in the chain in order.
     Chain(std::slice::Iter<'a, String>),
 }
 
@@ -936,6 +955,8 @@ pub struct BedrockGlobalConfig {
     pub allowed_body_fields: Vec<String>,
 }
 
+/// Listener bind config: host, port, auth, and request-size / translation
+/// posture for the HTTP server.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -943,6 +964,7 @@ pub struct ServerConfig {
     /// `--unsafe-public` is passed on the CLI.
     #[serde(default = "default_host")]
     pub host: String,
+    /// Bind port.
     #[serde(default = "default_port")]
     pub port: u16,
 
@@ -1004,6 +1026,7 @@ impl Default for ServerConfig {
     }
 }
 
+/// Listener-side authentication: the set of tokens a client must present.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerAuth {
@@ -1093,12 +1116,17 @@ impl CacheCapability {
     }
 }
 
+/// One `[providers.X]` entry, tagged by `kind`. Each variant carries the
+/// transport-side knobs (auth, base URL, header/payload extras, cache and
+/// runtime policy) for one upstream shape.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum ProviderEntry {
+    /// OpenAI-compatible chat-completions provider.
     #[non_exhaustive]
     OpenaiCompat {
+        /// Endpoint base URL.
         base_url: String,
         /// Reference to the API key. One of:
         ///   - `env://VAR_NAME`             (process env var)
@@ -1138,9 +1166,11 @@ pub enum ProviderEntry {
         /// lives outside `runtime`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reduction_enabled: Option<bool>,
+        /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
+    /// Native Anthropic Messages API provider.
     #[non_exhaustive]
     AnthropicApi {
         /// Reference to the API key, resolved the same way as every
@@ -1150,8 +1180,10 @@ pub enum ProviderEntry {
         /// empty for `forwarded` and non-empty for `own`.
         #[serde(default)]
         api_key_ref: String,
+        /// Endpoint base URL.
         #[serde(default = "default_anthropic_base")]
         base_url: String,
+        /// `anthropic-version` header value sent upstream.
         #[serde(default = "default_anthropic_version")]
         anthropic_version: String,
         /// How the Messages API authenticates this provider. Default
@@ -1244,13 +1276,14 @@ pub enum ProviderEntry {
         /// `[[providers.X.cloak.tool_rename]] from=.. to=..`.
         #[serde(default)]
         cloak: CloakConfig,
+        /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
     /// OpenAI Responses API provider. Three auth surfaces:
     /// - `chatgpt-oauth`: ChatGPT subscription JWT.
     /// - `api-key`: standard OpenAI API key.
-    /// - `bedrock-mantle`: Authorization: Bearer <bearer> using the
+    /// - `bedrock-mantle`: `Authorization: Bearer <bearer>` using the
     ///   long-term Bedrock API key (resolved via api_key_ref, typically
     ///   env://AWS_BEARER_TOKEN_BEDROCK).
     ///
@@ -1302,6 +1335,7 @@ pub enum ProviderEntry {
         /// policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reduction_enabled: Option<bool>,
+        /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1312,10 +1346,14 @@ pub enum ProviderEntry {
     #[cfg(feature = "bedrock")]
     #[non_exhaustive]
     Bedrock {
+        /// AWS region for the Bedrock runtime endpoint.
         region: String,
+        /// Wire shape: InvokeModel (default) or Converse.
         #[serde(default)]
         api_shape: BedrockApiShapeConfig,
+        /// AWS credential source for SigV4 signing.
         creds: BedrockCredsConfig,
+        /// Override the outbound User-Agent.
         #[serde(default)]
         user_agent: Option<String>,
         /// Provider-level header extras.
@@ -1324,6 +1362,7 @@ pub enum ProviderEntry {
         /// Provider-level payload extras.
         #[serde(default)]
         payload_extras: Option<Value>,
+        /// `anthropic_beta` flags forwarded on Anthropic-family models.
         #[serde(default)]
         anthropic_beta: Vec<String>,
         /// Operator override for this entry's prompt-cache capability.
@@ -1342,6 +1381,7 @@ pub enum ProviderEntry {
         /// policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reduction_enabled: Option<bool>,
+        /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1391,6 +1431,7 @@ pub enum ProviderEntry {
         /// policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reduction_enabled: Option<bool>,
+        /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1407,8 +1448,10 @@ pub enum ProviderEntry {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum BedrockApiShapeConfig {
+    /// The vendor-specific InvokeModel wire shape.
     #[default]
     Invoke,
+    /// The vendor-neutral Converse wire shape.
     Converse,
 }
 
@@ -1441,18 +1484,27 @@ pub enum BedrockApiShapeConfig {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum BedrockCredsConfig {
+    /// A long-term Bedrock API key (bearer token).
     BearerKey {
+        /// Reference to the bearer key.
         key_ref: String,
     },
+    /// Static AWS access/secret keys, optionally with a session token.
     Static {
+        /// Reference to the AWS access key id.
         access_key_ref: String,
+        /// Reference to the AWS secret access key.
         secret_key_ref: String,
+        /// Reference to an optional AWS session token.
         #[serde(default)]
         session_token_ref: Option<String>,
     },
+    /// A named profile from the AWS shared-credentials file.
     Profile {
+        /// The profile name.
         name: String,
     },
+    /// The AWS default credential provider chain.
     DefaultChain,
 }
 
@@ -1710,6 +1762,8 @@ impl ProviderEntry {
         }
     }
 
+    /// Construct an `OpenaiCompat` entry with the given base URL and key
+    /// reference and all other knobs at their defaults.
     pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
         Self::OpenaiCompat {
             base_url: base_url.into(),
@@ -1724,6 +1778,8 @@ impl ProviderEntry {
         }
     }
 
+    /// Construct an `AnthropicApi` entry with the given key reference and
+    /// all other knobs at their defaults.
     pub fn anthropic_api(api_key_ref: impl Into<String>) -> Self {
         Self::AnthropicApi {
             api_key_ref: api_key_ref.into(),
@@ -1788,6 +1844,7 @@ impl ProviderEntry {
         }
     }
 
+    /// Set the AnthropicApi variant's `auth_kind`. Panics on other variants.
     pub fn with_auth_kind(mut self, kind: AuthKind) -> Self {
         match &mut self {
             Self::AnthropicApi { auth_kind, .. } => *auth_kind = kind,
@@ -1796,6 +1853,7 @@ impl ProviderEntry {
         self
     }
 
+    /// Set the Gemini variant's `auth_mode`. Panics on other variants.
     #[cfg(feature = "gemini")]
     pub fn with_gemini_auth_mode(mut self, mode: GeminiAuthMode) -> Self {
         match &mut self {
@@ -1853,6 +1911,7 @@ impl ProviderEntry {
         self
     }
 
+    /// Replace this entry's runtime/rate-limit policy.
     pub fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
         match &mut self {
             Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => {
@@ -1868,6 +1927,7 @@ impl ProviderEntry {
         self
     }
 
+    /// Replace this entry's provider-level header extras.
     pub fn with_header_extras(mut self, headers: BTreeMap<String, String>) -> Self {
         match &mut self {
             Self::OpenaiCompat { header_extras, .. } => *header_extras = headers,
@@ -1882,6 +1942,7 @@ impl ProviderEntry {
         self
     }
 
+    /// Replace this entry's provider-level payload extras.
     pub fn with_payload_extras(mut self, extras: Value) -> Self {
         let slot = Some(extras);
         match &mut self {
@@ -1897,6 +1958,7 @@ impl ProviderEntry {
         self
     }
 
+    /// Set the `base_url` on an api-backed variant. Panics on others.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         let u = url.into();
         match &mut self {
@@ -1908,6 +1970,7 @@ impl ProviderEntry {
         self
     }
 
+    /// Set the AnthropicApi variant's `anthropic_version`. Panics on others.
     pub fn with_anthropic_version(mut self, version: impl Into<String>) -> Self {
         match &mut self {
             Self::AnthropicApi {
@@ -1966,6 +2029,8 @@ impl ProviderEntry {
         self
     }
 
+    /// Redact any inline literal secrets in this entry's key references,
+    /// in place, so the entry is safe to serialize into diagnostics.
     pub fn redact_secrets(&mut self) {
         match self {
             Self::OpenaiCompat { api_key_ref, .. } | Self::AnthropicApi { api_key_ref, .. } => {
@@ -1991,6 +2056,8 @@ impl ProviderEntry {
         }
     }
 
+    /// Every secret-URI reference this entry carries, for startup
+    /// resolution. A `forwarded` entry's empty `api_key_ref` is omitted.
     pub fn secret_uris(&self) -> Vec<&str> {
         match self {
             Self::OpenaiCompat { api_key_ref, .. } => vec![api_key_ref.as_str()],
@@ -2200,17 +2267,24 @@ pub fn default_gemini_base() -> String {
     "https://generativelanguage.googleapis.com/v1beta".into()
 }
 
+/// How an openai-compat provider expresses reasoning/thinking on the wire.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum ReasoningDialect {
+    /// OpenAI's native reasoning shape.
     #[default]
     Openai,
+    /// DeepSeek's reasoning shape.
     Deepseek,
+    /// vLLM's reasoning shape.
     Vllm,
+    /// A raw `<think>` tag embedded in message content.
     RawThinkTag,
+    /// OpenRouter's reasoning shape.
     Openrouter,
+    /// Forward reasoning fields verbatim without translation.
     Passthrough,
 }
 
@@ -2261,6 +2335,8 @@ impl From<HistoryReasoning> for routectl_core::CoreHistoryReasoning {
     }
 }
 
+/// Retry and backoff policy for a provider chain: attempt caps, backoff
+/// timing, and optional per-error-class overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct RetryPolicy {
@@ -2284,6 +2360,7 @@ pub struct RetryPolicy {
     /// a single retry while flaky 5xx may need more attempts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_on_429: Option<u32>,
+    /// Retry cap for `5xx` responses. Overrides `max_attempts` when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_on_5xx: Option<u32>,
     /// Network errors (status 0): DNS, TCP connect, TLS handshake,
