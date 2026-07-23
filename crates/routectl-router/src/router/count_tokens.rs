@@ -5,13 +5,13 @@ use std::time::Instant;
 use routectl_core::failure_class::{LastOutcome, classify};
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
-use super::{
-    COUNT_TOKENS_CAPABLE_KIND, CountSeatOutcome, DispatchTarget, Router, StripDecision,
-    apply_layered_overlays, apply_remap, class_debits, class_label, forwarded_terminal_status,
-    is_capability_error, log_forwarded_auth_terminal, matched_by_label,
+use super::dispatch::{
+    COUNT_TOKENS_CAPABLE_KIND, CountSeatOutcome, apply_remap, class_debits, class_label,
+    forwarded_terminal_status, is_capability_error, log_forwarded_auth_terminal, matched_by_label,
     missing_forwarded_bearer_error, rate_limit_reset_hint, upstream_facts,
     upstream_status_for_remap,
 };
+use super::{DispatchTarget, Router, StripDecision, apply_layered_overlays};
 
 impl Router {
     /// Probe call: route a request to a count_tokens-CAPABLE provider in
