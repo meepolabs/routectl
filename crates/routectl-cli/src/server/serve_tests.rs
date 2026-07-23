@@ -237,14 +237,11 @@ async fn mitm_start_failure_degrades_and_server_keeps_serving() {
     let config = Arc::new(config);
     let server = tokio::spawn(async move { serve_on_listener(config, listener, None).await });
 
-    // Assert (degradation): give serve time to reach the MITM arm and
-    // fail it. The server task must still be running -- a regression that
-    // made a MITM start failure fatal would have returned Err by now.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !server.is_finished(),
-        "a MITM start failure must not abort serve_on_listener"
-    );
+    // Let the server install its signal handler and pass the MITM arm.
+    // The degradation itself is proven by the final assertion: a
+    // regression that made a MITM start failure fatal resolves the task
+    // with Err, which the Ok check below rejects.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Act: graceful shutdown.
     kill(Pid::from_raw(std::process::id() as i32), Signal::SIGTERM).expect("kill(SIGTERM) to self");
