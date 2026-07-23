@@ -22,6 +22,7 @@ use crate::runtime_state::ProviderState;
 mod cache_plan;
 mod capability_learn;
 mod chain;
+mod class_observe;
 mod count_tokens;
 mod dispatch;
 mod feature_filter;
@@ -1124,9 +1125,10 @@ impl Router {
 #[cfg(test)]
 use chain::{dispatch_target_for_seat, into_one_dispatch_target};
 #[cfg(test)]
+use class_observe::DispatchSurface;
+#[cfg(test)]
 use dispatch::{
-    DispatchSurface, retry_cap_for, should_fallback, should_retry_same_provider,
-    would_trim_k_floor_for_meta,
+    retry_cap_for, should_fallback, should_retry_same_provider, would_trim_k_floor_for_meta,
 };
 #[cfg(test)]
 use futures::stream::StreamExt;

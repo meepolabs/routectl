@@ -5,10 +5,11 @@ use std::time::Instant;
 use routectl_core::failure_class::{LastOutcome, classify};
 use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 
+use super::class_observe::{class_label, matched_by_label, upstream_facts};
 use super::dispatch::{
-    apply_remap, class_debits, class_label, forwarded_terminal_status, is_capability_error,
-    log_forwarded_auth_terminal, matched_by_label, missing_forwarded_bearer_error,
-    rate_limit_reset_hint, upstream_facts, upstream_status_for_remap,
+    apply_remap, class_debits, forwarded_terminal_status, is_capability_error,
+    log_forwarded_auth_terminal, missing_forwarded_bearer_error, rate_limit_reset_hint,
+    upstream_status_for_remap,
 };
 use super::{DispatchTarget, Router, StripDecision, apply_layered_overlays};
 
