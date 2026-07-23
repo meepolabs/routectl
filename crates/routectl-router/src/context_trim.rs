@@ -330,7 +330,7 @@ fn substitute_placeholder(part: &mut ContentPart, replacement: Option<&str>) {
 }
 
 /// Rough token estimate for the whole request: serialized byte length / 4.
-pub(crate) fn estimate_total_tokens(req: &ChatRequest) -> u64 {
+pub fn estimate_total_tokens(req: &ChatRequest) -> u64 {
     serialized_len(req) / BYTES_PER_TOKEN_ESTIMATE
 }
 

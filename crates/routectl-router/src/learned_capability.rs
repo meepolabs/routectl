@@ -153,6 +153,9 @@ pub struct ExportedEntry {
     pub first_seen: Instant,
     pub last_seen: Instant,
     pub expires_at: Instant,
+    // Populated on export for test observation; import intentionally
+    // discards it (a probe slot cannot carry across a hot reload).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub in_flight: bool,
     pub consecutive_failed_probes: u32,
 }
@@ -370,6 +373,7 @@ impl LearnedCapabilityRegistry {
     }
 
     /// Drop every entry (invalidation on catalog / overlay change).
+    #[allow(dead_code)]
     pub fn clear_all(&self) {
         self.entries.write().clear();
     }
@@ -405,12 +409,8 @@ impl LearnedCapabilityRegistry {
         }
     }
 
-    /// Number of resident entries.
-    pub fn len(&self) -> usize {
-        self.entries.read().len()
-    }
-
     /// Whether the registry holds no entries.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.read().is_empty()
     }

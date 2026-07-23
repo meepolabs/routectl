@@ -122,7 +122,7 @@ const ANTHROPIC_INFERRED: &[InferredPhrase] = &[InferredPhrase {
 /// capability this resolver can attribute. The single shared resolver: its
 /// output keys on the request-capability namespace so learn capture, the
 /// act-side lookup, and probe settlement all meet on identical strings.
-pub(crate) fn resolve_requested_capability(
+pub fn resolve_requested_capability(
     provider_kind: &str,
     err: &Error,
     cf: &ClassifiedFailure,
@@ -259,7 +259,7 @@ fn is_safe_param_token(param: &str) -> bool {
 /// carries the capability the upstream named, never a request body / message
 /// / prompt. An unsafe (oversized, whitespace/control-laden, or empty) param
 /// yields `None` so the log boundary never trusts the raw upstream field.
-pub(crate) fn upstream_param(err: &Error) -> Option<String> {
+pub fn upstream_param(err: &Error) -> Option<String> {
     upstream_error_field(err, "param").filter(|param| is_safe_param_token(param))
 }
 

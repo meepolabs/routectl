@@ -74,8 +74,6 @@ pub enum StripKind {
     ToolParam,
     /// A token in `ChatRequest::anthropic_beta`.
     BetaFlag,
-    /// A top-level key in `ChatRequest::provider_extras`.
-    BodyKey,
 }
 
 /// The result of running the interceptor over a request.
