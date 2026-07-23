@@ -87,7 +87,7 @@ fn sanitize_capped(s: &str, cap: usize) -> String {
 
 /// Sanitize a client-controlled string for inclusion in a tracing
 /// field or log message. Replaces every non-printable-ASCII char with
-/// `?` and caps total length at [`MAX`] characters. Spaces are
+/// `?` and caps total length at `MAX` characters. Spaces are
 /// preserved (single-line log fields commonly contain them).
 ///
 /// Returns an owned `String`; the caller passes it to tracing via
@@ -102,7 +102,7 @@ pub fn sanitize_for_log(s: &str) -> String {
 /// malformed request fragment (a tool_use block, a content part) into its
 /// message. Always control-char-filtered and length-capped via
 /// [`sanitize_for_log`]; that cap bounds size and blocks log injection but
-/// does NOT redact a secret or prompt sitting within the first [`MAX`]
+/// does NOT redact a secret or prompt sitting within the first `MAX`
 /// chars. When `ROUTECTL_LOG_REDACT_PROMPTS=1` the content is instead
 /// collapsed to a `<redacted len=N>` marker so embedded user content never
 /// reaches the log line -- same length-side-channel caveat as
@@ -245,7 +245,7 @@ fn truncate_json_for_log(body: &serde_json::Value, cap: usize) -> String {
 /// the [`init_log_overrides`]-seeded `[log]` config override (when
 /// set and `> 0`); else [`MAX_TRACE_BODY_BYTES`] (16 KB).
 ///
-/// Same setup caveat as [`redact_enabled`]: set the env var BEFORE
+/// Same setup caveat as `redact_enabled`: set the env var BEFORE
 /// launching routectl. The resolved value is announced once at
 /// startup via the (module-private) `log_trace_body_cap_status`,
 /// invoked by [`init_log_overrides`] so operators can confirm the
@@ -330,7 +330,7 @@ fn redact_enabled() -> bool {
 /// of the process. When env is unset, falls through to the
 /// [`init_log_overrides`]-seeded `[log]` config fallback before
 /// landing on the hardcoded default (false). Same setup caveat as
-/// [`redact_enabled`]: set the env var BEFORE launching routectl;
+/// `redact_enabled`: set the env var BEFORE launching routectl;
 /// flipping it afterward has no effect. Default false makes the four
 /// `trace_*_headers` helpers a no-op unless the operator opts in --
 /// header lines carry auth and other verbatim values and must not
@@ -1009,7 +1009,7 @@ pub(crate) fn redact_header_values(headers: &mut serde_json::Value) {
 /// `ROUTECTL_TRACE_HEADERS=1` and gated on TRACE so the default `info`
 /// level pays nothing. Bearer JWTs and api keys in `authorization` /
 /// `x-api-key` / `proxy-authorization` (and the other names
-/// [`redact_header_values`] covers) are redacted before emission so
+/// `redact_header_values` covers) are redacted before emission so
 /// `journalctl` / log archives -- and the fixture-capture rig, which
 /// parses this same trace line -- never carry a live client session
 /// token. Other headers (anthropic-beta, anthropic-version, the
@@ -1037,7 +1037,7 @@ pub fn trace_ingress_headers(ingress: &str, headers: &serde_json::Value) {
 /// for a given provider (direction 2: routectl -> upstream). Opt-in via
 /// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. Bearer JWTs and api keys
 /// in `authorization` / `x-api-key` / `proxy-authorization` are
-/// redacted before emission via [`redact_header_values`] so
+/// redacted before emission via `redact_header_values` so
 /// `journalctl` / log archives never carry a live access token. Other
 /// headers (anthropic-beta, anthropic-version, originator, ...) emit
 /// verbatim since they are not secrets and the fixture-capture
@@ -1065,7 +1065,7 @@ pub fn trace_outgoing_headers(provider_kind: &str, id: &str, headers: &serde_jso
 /// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. Secret-bearing headers
 /// (`set-cookie` session credentials, an `authorization` echo, the
 /// `x-amz-security-token` STS credential) are redacted via
-/// [`redact_header_values`] before emission so a response header cannot
+/// `redact_header_values` before emission so a response header cannot
 /// leak a replayable secret into the log. Non-secret headers (rate-limit
 /// metadata, `x-amz-date`, ...) round-trip verbatim. See
 /// [`trace_ingress_headers`] for the single-line rationale. `headers`
@@ -1126,7 +1126,9 @@ pub fn trace_egress_headers(ingress: &str, headers: &serde_json::Value) {
 /// operator-greppable enum-like flags.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StructuralSummary {
+    /// Request model identifier.
     pub model: Option<String>,
+    /// Requested `max_tokens`.
     pub max_tokens: Option<u32>,
     /// One of `"enabled:<budget>"`, `"adaptive:<effort>"`, or None.
     /// The raw budget integer and effort string are encoded into the
@@ -1154,6 +1156,7 @@ pub struct StructuralSummary {
     /// Sorted top-level keys of `provider_extras` if present (for
     /// forward-compat sweep visibility).
     pub provider_extras_keys: Vec<String>,
+    /// Whether streaming was requested.
     pub stream: Option<bool>,
 }
 

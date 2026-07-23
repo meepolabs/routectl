@@ -26,7 +26,10 @@ pub enum ProbeOutcome {
     /// probe cannot read as a clean pass or a credential rejection (3xx,
     /// 404, 429, 5xx). The network path and TLS work, yet the endpoint's
     /// health is unproven -- a warning, not a pass and not a hard failure.
-    IndeterminateHttp { status: u16 },
+    IndeterminateHttp {
+        /// The HTTP status the endpoint answered with.
+        status: u16,
+    },
     /// The provider has no free reachability probe. This is the default
     /// for any provider that does not override `Provider::probe`.
     UnsupportedFreeProbe,
@@ -34,6 +37,10 @@ pub enum ProbeOutcome {
     Skipped(String),
 }
 
+/// A translating backend: normalizes canonical requests to a provider's
+/// wire format, runs the upstream call, and normalizes the response back
+/// to canonical shape. Implemented by every backend (openai-compat,
+/// anthropic-api, bedrock).
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable provider id, e.g. "openai-compat:deepseek". Used in errors

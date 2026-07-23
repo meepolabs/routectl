@@ -1,13 +1,31 @@
+//! The crate-wide [`enum@Error`] type and its [`Result`] alias.
+//!
+//! One error enum spans caller errors, configuration failures,
+//! upstream/provider failures, and unexpected runtime faults. The HTTP
+//! boundary maps each variant to a status and a client-safe body while
+//! keeping operator detail in logs.
+
 use thiserror::Error;
 
+/// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// The crate-wide error type spanning caller errors, configuration
+/// failures, upstream/provider failures, and unexpected runtime faults.
+/// The HTTP boundary maps each variant to a status and a client-safe
+/// body; operator detail stays in logs.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// An upstream provider returned an HTTP error. Carries the operator
+    /// detail plus structured classifiers (`retry_after`, `upstream_type`,
+    /// `upstream_code`) consumed by the router and surfaced to callers.
     #[error("provider `{provider}`: upstream HTTP {status}: {body}")]
     Upstream {
+        /// Provider that produced the error.
         provider: String,
+        /// Upstream HTTP status code.
         status: u16,
+        /// Operator-facing detail from the upstream response.
         body: String,
         /// Optional reset hint parsed from the upstream response (e.g.
         /// a `Retry-After` header). Consumed structurally by the router
@@ -29,18 +47,25 @@ pub enum Error {
         upstream_code: Option<String>,
     },
 
+    /// Request could not be normalized into the canonical shape for the
+    /// named provider.
     #[error("provider `{0}`: request normalization failed: {1}")]
     NormalizeRequest(String, String),
 
+    /// Upstream response could not be normalized back to canonical shape
+    /// for the named provider.
     #[error("provider `{0}`: response normalization failed: {1}")]
     NormalizeResponse(String, String),
 
+    /// The named provider is not configured.
     #[error("provider `{0}` not configured")]
     UnknownProvider(String),
 
+    /// The named alias is not configured.
     #[error("alias `{0}` not configured")]
     UnknownAlias(String),
 
+    /// Authentication failed or credentials were missing.
     #[error("auth: {0}")]
     Auth(String),
 
@@ -78,6 +103,7 @@ pub enum Error {
     #[error("validation: {0}")]
     Validation(String),
 
+    /// A streaming (SSE) transport or framing failure.
     #[error("streaming: {0}")]
     Streaming(String),
 
@@ -93,15 +119,18 @@ pub enum Error {
     #[error("not implemented for provider `{0}`: {1}")]
     NotImplemented(String, String),
 
+    /// A bare `std::io::Error` carried verbatim.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A JSON serialization or deserialization failure.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }
 
 // Convenience constructors used widely by provider impls.
 impl Error {
+    /// Construct an `Upstream` error with no reset hint or classifiers.
     pub fn upstream(provider: impl Into<String>, status: u16, body: impl Into<String>) -> Self {
         Self::Upstream {
             provider: provider.into(),
@@ -158,10 +187,12 @@ impl Error {
         }
     }
 
+    /// Construct a `NormalizeRequest` error for the named provider.
     pub fn normalize_request(provider: impl Into<String>, msg: impl Into<String>) -> Self {
         Self::NormalizeRequest(provider.into(), msg.into())
     }
 
+    /// Construct a `NormalizeResponse` error for the named provider.
     pub fn normalize_response(provider: impl Into<String>, msg: impl Into<String>) -> Self {
         Self::NormalizeResponse(provider.into(), msg.into())
     }

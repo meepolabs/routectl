@@ -44,8 +44,11 @@ use crate::tool_def::ToolDef;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VolatileConfidence {
+    /// No volatile content detected (the prose default).
     None,
+    /// Low-confidence signal; warn-only, does not veto auto-caching.
     Low,
+    /// High-confidence signal; vetoes auto-caching.
     High,
 }
 
@@ -54,9 +57,13 @@ pub enum VolatileConfidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VolatileKind {
+    /// A UUID token.
     Uuid,
+    /// A timestamp token.
     Timestamp,
+    /// A JSON Web Token.
     Jwt,
+    /// A long hexadecimal blob (e.g. a hash or nonce).
     HexBlob,
 }
 
@@ -70,6 +77,7 @@ pub struct VolatileReport {
 }
 
 impl VolatileReport {
+    /// The scan's overall confidence verdict.
     pub const fn confidence(&self) -> VolatileConfidence {
         self.confidence
     }
