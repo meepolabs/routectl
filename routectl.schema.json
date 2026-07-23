@@ -810,7 +810,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -999,7 +999,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1148,7 +1148,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1290,7 +1290,7 @@
               "type": "string"
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1429,7 +1429,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> [retry] request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
               "format": "uint64",
               "minimum": 0,
               "type": [

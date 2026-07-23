@@ -224,7 +224,7 @@ pub struct KCalibration {
     /// value means reuse decays late in a session; read before the live-cut
     /// go/no-go decision, it is
     /// the trigger to open the age-conditioned-hazard design (a constant
-    /// pooled hazard would over-predict E[K] late). DIAGNOSTIC, never a gate.
+    /// pooled hazard would over-predict E\[K\] late). DIAGNOSTIC, never a gate.
     /// 0.0 when no group has enough rows to split into meaningful halves.
     pub hazard_decay: f64,
 }

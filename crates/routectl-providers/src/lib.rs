@@ -1,3 +1,4 @@
+#![deny(rustdoc::broken_intra_doc_links)]
 //! Provider implementations.
 //!
 //! The default build includes `openai-compat`, `anthropic-api`, and

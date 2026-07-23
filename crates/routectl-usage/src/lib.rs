@@ -1,3 +1,4 @@
+#![deny(rustdoc::broken_intra_doc_links)]
 //! Usage-accounting persistence for routectl.
 //!
 //! This crate owns the canonical `UsageRecord` shape, the closed

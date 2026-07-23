@@ -1,3 +1,5 @@
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod atomic_write;
 pub mod memory_store;
 #[cfg(feature = "oauth")]

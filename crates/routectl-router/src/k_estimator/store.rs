@@ -14,7 +14,7 @@ use lru::LruCache;
 use parking_lot::Mutex;
 
 /// Bound on the number of distinct (session, provider_kind, model) triples
-/// tracked at once. Matches [`crate::seat_pool::STICKY_PIN_CAPACITY`] so a
+/// tracked at once. Matches `seat_pool::STICKY_PIN_CAPACITY` so a
 /// session that is alive in the sticky-pin map also has a live K window.
 pub const K_SESSION_CAPACITY: usize = 4096;
 
