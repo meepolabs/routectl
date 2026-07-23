@@ -380,7 +380,7 @@ impl LearnedCapabilityRegistry {
     }
 
     /// Drop every entry (invalidation on catalog / overlay change).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn clear_all(&self) {
         self.entries.write().clear();
     }
@@ -392,7 +392,7 @@ impl LearnedCapabilityRegistry {
     /// immediately. A no-op when no such entry is resident. Returns whether
     /// an entry was expired.
     ///
-    /// The targeted counterpart to [`clear_all`](Self::clear_all): used on a
+    /// The targeted counterpart to `clear_all`: used on a
     /// hot-reload when the operator override cell governing this key changed,
     /// so the resident verdict is re-verified against live upstream behavior
     /// rather than either trusted blindly or dropped along with every

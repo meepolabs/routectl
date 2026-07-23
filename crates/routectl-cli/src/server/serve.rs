@@ -29,7 +29,7 @@ use super::{AppState, CompositeStore, check_bind_safety, k_rebuild, request_id, 
 /// without a restart. `None` disables the config half of the watcher
 /// (tests that build a `Config` in-memory have no path to watch).
 ///
-/// `catalog_overlay` is the overlay [`load_effective_config`] loaded
+/// `catalog_overlay` is the overlay [`load_effective_config`](super::config_load::load_effective_config) loaded
 /// alongside `config` at the SAME cold-start read -- `main.rs` threads it
 /// straight through rather than this function re-reading the overlay file
 /// itself, so a config-path reload (which DOES re-read both) and the
