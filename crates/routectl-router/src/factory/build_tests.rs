@@ -101,6 +101,42 @@ mod build_resolved_models_tests {
         assert!(err.contains("unknown provider"), "got: {err}");
     }
 
+    #[tokio::test]
+    async fn nickname_containing_hash_is_rejected_before_resolution() {
+        // `#` is reserved as the seat-pool runtime-state-key separator
+        // (`{nickname}#{label}`); a nickname carrying it must land in
+        // `failed` with the reserved-separator reason and never enter the
+        // resolved table -- even though its provider resolves cleanly.
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+            )],
+            vec![("a#b", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(
+            !models.contains_key("a#b"),
+            "a `#` nickname must not enter the resolved table"
+        );
+        let (nickname, err) = failed
+            .iter()
+            .find(|(n, _)| n == "a#b")
+            .expect("expected a failed entry for the `#` nickname");
+        assert_eq!(nickname, "a#b");
+        assert!(
+            err.contains("`#`"),
+            "reason must name the reserved char: {err}"
+        );
+        assert!(
+            err.contains("seat-pool state-key separator"),
+            "reason must explain the reservation: {err}"
+        );
+    }
+
     #[cfg(feature = "bedrock")]
     #[test]
     fn bedrock_factory_path_uses_per_model_upstream_for_model_id() {
