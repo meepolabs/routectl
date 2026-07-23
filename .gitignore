@@ -36,3 +36,4 @@ crates/routectl-cli/tests/fixtures/captured/
 
 # Local research scratch -- personal notes, config references, experiments.
 scratch/
+.cargo-target-*/
