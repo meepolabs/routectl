@@ -1,10 +1,10 @@
 //! Per-(provider_kind, model) catalog data module: the baked reference
 //! table for prompt-cache economics, context window, and capability
 //! priors, plus the two-layer merge with the on-disk overlay
-//! ([`crate::catalog_overlay`]).
+//! ([`CatalogOverlay`]).
 //!
 //! TWO LAYERS: layer 1 is this module's baked
-//! table, compiled into the binary; layer 2 is [`crate::catalog_overlay`]'s
+//! table, compiled into the binary; layer 2 is [`CatalogOverlay`]'s
 //! `catalog_overlay.json`. [`merge`] combines a baked row with its overlay
 //! cell into an [`EffectiveRow`] -- the overlay wins over baked, JSON
 //! `null` disables the entry, and provenance (`source` + `verified_at`) is
@@ -921,7 +921,7 @@ fn merge_capabilities(
 /// [`merge`], which falls through to the baked layer. Returns
 /// `Some(&Option<OverlayCell>)` on a match; the inner `None` is the
 /// null-disable sentinel `merge` reads directly (see the module's overlay
-/// docs on [`crate::catalog_overlay`]).
+/// docs on [`CatalogOverlay`]).
 #[must_use]
 pub fn lookup_overlay_cell<'a>(
     provider_kind: &str,
