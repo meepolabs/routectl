@@ -47,7 +47,9 @@ pub enum OpenError {
     /// Creating the parent directory failed.
     #[error("failed to create usage db directory {path}: {source}")]
     CreateDir {
+        /// Directory path that could not be created.
         path: String,
+        /// The underlying I/O error.
         #[source]
         source: std::io::Error,
     },
@@ -55,7 +57,9 @@ pub enum OpenError {
     /// Opening the SQLite file failed.
     #[error("failed to open usage db {path}: {source}")]
     Open {
+        /// Path that could not be opened.
         path: String,
+        /// The underlying SQLite error.
         #[source]
         source: rusqlite::Error,
     },
@@ -67,7 +71,9 @@ pub enum OpenError {
     /// Tightening the file permissions failed (Unix only).
     #[error("failed to set usage db permissions {path}: {source}")]
     Permissions {
+        /// Path whose permissions could not be set.
         path: String,
+        /// The underlying I/O error.
         #[source]
         source: std::io::Error,
     },
@@ -80,13 +86,21 @@ pub enum OpenError {
     /// absent or the `requests` table has never been created. The CLI can
     /// turn this into a friendly "no usage data yet" message.
     #[error("no usage data yet at {path}")]
-    NoData { path: String },
+    NoData {
+        /// Path that held no usage data.
+        path: String,
+    },
 
     /// The on-disk DB reports a schema version newer than this binary
     /// understands. A read-only viewer refuses to guess at a future
     /// layout rather than silently misread it.
     #[error("usage db schema version {found} is newer than supported {supported}")]
-    VersionTooNew { found: i64, supported: i64 },
+    VersionTooNew {
+        /// On-disk schema version.
+        found: i64,
+        /// Highest version this binary understands.
+        supported: i64,
+    },
 
     /// The on-disk DB predates this binary (found < supported). A read-only
     /// viewer refuses to query an unmigrated layout; start the service once
@@ -95,14 +109,22 @@ pub enum OpenError {
         "usage db schema version {found} predates this binary (supported {supported}); \
          start the service once to migrate it"
     )]
-    VersionTooOld { found: i64, supported: i64 },
+    VersionTooOld {
+        /// On-disk schema version.
+        found: i64,
+        /// Version this binary requires.
+        supported: i64,
+    },
 
     /// A fast-fail read-only open found a journal mode other than WAL. A
     /// viewer must not flip journal modes on a live writer's DB, and a
     /// non-WAL journal means readers and the writer would contend, so the
     /// viewer fails closed rather than risk it.
     #[error("usage db journal mode is '{found}', expected 'wal'")]
-    NotWal { found: String },
+    NotWal {
+        /// The journal mode actually found.
+        found: String,
+    },
 }
 
 /// Current wall-clock time as epoch milliseconds. Saturates to 0 if the

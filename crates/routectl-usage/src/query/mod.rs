@@ -23,9 +23,14 @@ pub enum QueryError {
 /// nullable. Plain data; the caller decides how to display or roll these up.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct GroupKey {
+    /// Served model nickname. `None` in the raw column when no target was
+    /// dispatched (aggregates coalesce it to `requested_model`).
     pub model: Option<String>,
+    /// Served provider name. `None` when no target was dispatched.
     pub provider: Option<String>,
+    /// Served upstream target id. `None` when no target was dispatched.
     pub upstream: Option<String>,
+    /// Resolved routing alias. `NOT NULL` in the schema, so always present.
     pub alias: String,
 }
 
@@ -55,12 +60,20 @@ pub struct GroupKey {
 /// `upstream_error` remain inside `errors`.
 #[derive(Debug, Clone)]
 pub struct AggRow {
+    /// The group's `(model, provider, upstream, alias)` key.
     pub key: GroupKey,
+    /// Total requests in the group.
     pub requests: i64,
+    /// Requests whose outcome was `ok`.
     pub ok: i64,
+    /// Requests whose outcome was an error, excluding `client_disconnect`
+    /// (see the struct note).
     pub errors: i64,
+    /// Summed input tokens over the group (NULL counters count as 0).
     pub input_tokens: i64,
+    /// Summed output tokens over the group (NULL counters count as 0).
     pub output_tokens: i64,
+    /// Summed reasoning tokens over the group (NULL counters count as 0).
     pub reasoning_tokens: i64,
     /// Peak cached-context SIZE seen in the group (`MAX(cache_read)`). NOT a
     /// flow: each row's `cache_read` is a per-turn SNAPSHOT of the cached
@@ -79,18 +92,35 @@ pub struct AggRow {
     /// thinking it is the repeat-counting bug that was removed; pricing the
     /// peak instead understates cost by roughly the turn count.
     pub cache_read_billed: i64,
+    /// Summed 5-minute cache-write tokens over the group.
     pub cache_write_5m: i64,
+    /// Summed 1-hour cache-write tokens over the group.
     pub cache_write_1h: i64,
+    /// Total server-tool invocations across the group (sum of the integer
+    /// values inside each row's `server_tool_use` JSON map).
     pub server_tool_calls: i64,
+    /// Summed time-to-first-byte, milliseconds, over rows with a TTFB.
     pub sum_ttfb_ms: i64,
+    /// Count of rows with a non-NULL `ttfb_ms` (the `sum_ttfb_ms` divisor).
     pub ttfb_count: i64,
+    /// Summed generation window (`latency_ms - ttfb_ms`) over streaming,
+    /// successful rows with a usable TTFB. Feeds the throughput estimate.
     pub gen_window_ms: i64,
+    /// Summed output tokens over the same rows as `gen_window_ms`. Feeds
+    /// the throughput estimate.
     pub gen_output_tokens: i64,
+    /// Count of rows reporting a reasoning-token value (COUNT ignores NULL),
+    /// distinguishing "reported 0" from "not reported".
     pub reasoning_present: i64,
+    /// Count of rows reporting a cache-read value (COUNT ignores NULL).
     pub cache_read_present: i64,
+    /// Count of rows reporting a 5-minute cache-write value.
     pub cache_write_5m_present: i64,
+    /// Count of rows reporting a 1-hour cache-write value.
     pub cache_write_1h_present: i64,
+    /// Count of rows reporting a `server_tool_use` value.
     pub server_tool_present: i64,
+    /// Count of streaming rows in the group.
     pub stream_count: i64,
     /// Rows in the group whose terminal outcome is `client_disconnect`
     /// (client hung up before `finalize`, per the `Drop` fallback in

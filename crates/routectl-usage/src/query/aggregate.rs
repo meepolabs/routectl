@@ -10,12 +10,19 @@ use super::{AggRow, GroupKey, QueryError};
 /// columns the daemon stamps on a row when an upstream reports quota data.
 #[derive(Debug, Clone)]
 pub struct QuotaSnapshot {
+    /// Start time of the row this snapshot came from, epoch-millis UTC.
     pub ts_start: i64,
+    /// Quota claim token. `None` when absent.
     pub claim: Option<String>,
+    /// Quota status. `None` when absent.
     pub status: Option<String>,
+    /// Overage-quota status. `None` when absent.
     pub overage_status: Option<String>,
+    /// Primary-quota utilization ratio. `None` when absent.
     pub utilization: Option<f64>,
+    /// Overage-quota utilization ratio. `None` when absent.
     pub overage_utilization: Option<f64>,
+    /// Quota reset time, epoch-millis UTC. `None` when absent.
     pub reset: Option<i64>,
 }
 

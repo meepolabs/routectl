@@ -21,6 +21,7 @@ use crate::writer::WriterMessage;
 /// `enqueued` / `dropped_full`; the consumer thread bumps the persist /
 /// error / prune counters. All reads are relaxed snapshots for
 /// observability -- never used for control flow.
+#[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct UsageCounters {
     enqueued: AtomicU64,
@@ -200,6 +201,7 @@ impl UsageHandle {
     }
 
     /// Read-only view of the shared health counters.
+    #[doc(hidden)]
     pub const fn counters(&self) -> &Arc<UsageCounters> {
         &self.counters
     }
