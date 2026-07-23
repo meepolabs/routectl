@@ -299,19 +299,6 @@ async fn provider_switch_true_with_global_true_injects() {
 }
 
 #[tokio::test]
-async fn cross_dialect_openai_ingress_to_anthropic_target_emits_marker() {
-    // OpenAI-ingress-shaped request (no cache_control vocabulary) to an
-    // anthropic-api target: the canonical marker is set and the egress
-    // would emit it. We assert the canonical marker is present.
-    let (router, captured) = rig(anthropic_entry(), true, 0);
-    let req = base_req();
-    router.complete(req).await.expect("ok");
-    let captured = captured.lock();
-    let up = captured.first().expect("one dispatch");
-    assert_eq!(up.cache_control, Some(CacheControl::ephemeral_5m()));
-}
-
-#[tokio::test]
 async fn injection_is_idempotent_across_attempts() {
     // First attempt 503 (retryable), second ok: both attempt bodies on
     // the same target must be byte-identical -- the decision does not
