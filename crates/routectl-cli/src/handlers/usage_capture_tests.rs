@@ -241,25 +241,6 @@ fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, tempfile::T
 }
 
 #[tokio::test]
-async fn finalize_moves_record_and_emits_one_row() {
-    // Arrange
-    let (mut cap, handle, writer, _dir) = capture_with_handle();
-
-    // Act: a single finalize moves the owned record into the channel.
-    cap.finalize(Outcome::Ok);
-    drop(cap);
-
-    // Assert: exactly one row reaches the writer.
-    assert!(wait_persisted(&handle, 1), "row not persisted");
-    writer.shutdown();
-    assert_eq!(
-        handle.counters().persisted(),
-        1,
-        "finalize must emit exactly one row"
-    );
-}
-
-#[tokio::test]
 async fn finalize_then_drop_still_one_row() {
     // Arrange
     let (mut cap, handle, writer, _dir) = capture_with_handle();
