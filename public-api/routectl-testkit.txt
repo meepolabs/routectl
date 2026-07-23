@@ -1,0 +1,77 @@
+pub mod routectl_testkit
+pub struct routectl_testkit::CapturedEvent
+pub routectl_testkit::CapturedEvent::fields: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub routectl_testkit::CapturedEvent::level: tracing_core::metadata::Level
+pub routectl_testkit::CapturedEvent::message: alloc::string::String
+pub routectl_testkit::CapturedEvent::target: alloc::string::String
+impl routectl_testkit::CapturedEvent
+pub fn routectl_testkit::CapturedEvent::field(&self, &str) -> core::option::Option<&str>
+impl core::clone::Clone for routectl_testkit::CapturedEvent
+pub fn routectl_testkit::CapturedEvent::clone(&self) -> routectl_testkit::CapturedEvent
+impl core::fmt::Debug for routectl_testkit::CapturedEvent
+pub fn routectl_testkit::CapturedEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_testkit::CapturedEvent
+impl core::marker::Send for routectl_testkit::CapturedEvent
+impl core::marker::Sync for routectl_testkit::CapturedEvent
+impl core::marker::Unpin for routectl_testkit::CapturedEvent
+impl core::marker::UnsafeUnpin for routectl_testkit::CapturedEvent
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::CapturedEvent
+impl core::panic::unwind_safe::UnwindSafe for routectl_testkit::CapturedEvent
+impl<T, U> core::convert::Into<U> for routectl_testkit::CapturedEvent where U: core::convert::From<T>
+pub fn routectl_testkit::CapturedEvent::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_testkit::CapturedEvent where U: core::convert::Into<T>
+pub type routectl_testkit::CapturedEvent::Error = core::convert::Infallible
+pub fn routectl_testkit::CapturedEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_testkit::CapturedEvent where U: core::convert::TryFrom<T>
+pub type routectl_testkit::CapturedEvent::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_testkit::CapturedEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_testkit::CapturedEvent where T: core::clone::Clone
+pub type routectl_testkit::CapturedEvent::Owned = T
+pub fn routectl_testkit::CapturedEvent::clone_into(&self, &mut T)
+pub fn routectl_testkit::CapturedEvent::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_testkit::CapturedEvent where T: 'static + ?core::marker::Sized
+pub fn routectl_testkit::CapturedEvent::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_testkit::CapturedEvent where T: ?core::marker::Sized
+pub fn routectl_testkit::CapturedEvent::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_testkit::CapturedEvent where T: ?core::marker::Sized
+pub fn routectl_testkit::CapturedEvent::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_testkit::CapturedEvent where T: core::clone::Clone
+pub unsafe fn routectl_testkit::CapturedEvent::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_testkit::CapturedEvent
+pub fn routectl_testkit::CapturedEvent::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_testkit::CapturedEvent
+impl<T> tracing::instrument::WithSubscriber for routectl_testkit::CapturedEvent
+pub struct routectl_testkit::ScopedEnv
+impl routectl_testkit::ScopedEnv
+pub fn routectl_testkit::ScopedEnv::set(impl core::convert::AsRef<std::ffi::os_str::OsStr>, impl core::convert::AsRef<std::ffi::os_str::OsStr>) -> Self
+pub fn routectl_testkit::ScopedEnv::unset(impl core::convert::AsRef<std::ffi::os_str::OsStr>) -> Self
+impl core::ops::drop::Drop for routectl_testkit::ScopedEnv
+pub fn routectl_testkit::ScopedEnv::drop(&mut self)
+impl core::marker::Freeze for routectl_testkit::ScopedEnv
+impl core::marker::Send for routectl_testkit::ScopedEnv
+impl core::marker::Sync for routectl_testkit::ScopedEnv
+impl core::marker::Unpin for routectl_testkit::ScopedEnv
+impl core::marker::UnsafeUnpin for routectl_testkit::ScopedEnv
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::ScopedEnv
+impl core::panic::unwind_safe::UnwindSafe for routectl_testkit::ScopedEnv
+impl<T, U> core::convert::Into<U> for routectl_testkit::ScopedEnv where U: core::convert::From<T>
+pub fn routectl_testkit::ScopedEnv::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_testkit::ScopedEnv where U: core::convert::Into<T>
+pub type routectl_testkit::ScopedEnv::Error = core::convert::Infallible
+pub fn routectl_testkit::ScopedEnv::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_testkit::ScopedEnv where U: core::convert::TryFrom<T>
+pub type routectl_testkit::ScopedEnv::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_testkit::ScopedEnv::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_testkit::ScopedEnv where T: 'static + ?core::marker::Sized
+pub fn routectl_testkit::ScopedEnv::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_testkit::ScopedEnv where T: ?core::marker::Sized
+pub fn routectl_testkit::ScopedEnv::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_testkit::ScopedEnv where T: ?core::marker::Sized
+pub fn routectl_testkit::ScopedEnv::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_testkit::ScopedEnv
+pub fn routectl_testkit::ScopedEnv::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_testkit::ScopedEnv
+impl<T> tracing::instrument::WithSubscriber for routectl_testkit::ScopedEnv
+pub fn routectl_testkit::capture_events<F: core::ops::function::FnOnce()>(F) -> alloc::vec::Vec<routectl_testkit::CapturedEvent>
+pub async fn routectl_testkit::capture_lines<F: core::future::future::Future>(F) -> (<F as core::future::future::Future>::Output, alloc::vec::Vec<alloc::string::String>)
+pub async fn routectl_testkit::with_capture<F: core::future::future::Future>(F) -> (<F as core::future::future::Future>::Output, alloc::vec::Vec<routectl_testkit::CapturedEvent>)

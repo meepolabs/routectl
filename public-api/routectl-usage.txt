@@ -1,0 +1,1068 @@
+pub mod routectl_usage
+pub enum routectl_usage::MigrateError
+pub routectl_usage::MigrateError::Sqlite(rusqlite::error::Error)
+pub routectl_usage::MigrateError::VersionTooNew
+pub routectl_usage::MigrateError::VersionTooNew::found: i64
+pub routectl_usage::MigrateError::VersionTooNew::supported: i64
+impl core::convert::From<routectl_usage::MigrateError> for routectl_usage::OpenError
+pub fn routectl_usage::OpenError::from(routectl_usage::MigrateError) -> Self
+impl core::convert::From<rusqlite::error::Error> for routectl_usage::MigrateError
+pub fn routectl_usage::MigrateError::from(rusqlite::error::Error) -> Self
+impl core::error::Error for routectl_usage::MigrateError
+pub fn routectl_usage::MigrateError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for routectl_usage::MigrateError
+pub fn routectl_usage::MigrateError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_usage::MigrateError
+pub fn routectl_usage::MigrateError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_usage::MigrateError
+impl core::marker::Send for routectl_usage::MigrateError
+impl core::marker::Sync for routectl_usage::MigrateError
+impl core::marker::Unpin for routectl_usage::MigrateError
+impl core::marker::UnsafeUnpin for routectl_usage::MigrateError
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_usage::MigrateError
+impl !core::panic::unwind_safe::UnwindSafe for routectl_usage::MigrateError
+impl<T, U> core::convert::Into<U> for routectl_usage::MigrateError where U: core::convert::From<T>
+pub fn routectl_usage::MigrateError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::MigrateError where U: core::convert::Into<T>
+pub type routectl_usage::MigrateError::Error = core::convert::Infallible
+pub fn routectl_usage::MigrateError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::MigrateError where U: core::convert::TryFrom<T>
+pub type routectl_usage::MigrateError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::MigrateError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for routectl_usage::MigrateError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_usage::MigrateError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_usage::MigrateError where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::MigrateError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::MigrateError where T: ?core::marker::Sized
+pub fn routectl_usage::MigrateError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::MigrateError where T: ?core::marker::Sized
+pub fn routectl_usage::MigrateError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::MigrateError
+pub fn routectl_usage::MigrateError::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::MigrateError
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::MigrateError
+pub enum routectl_usage::OpenError
+pub routectl_usage::OpenError::CreateDir
+pub routectl_usage::OpenError::CreateDir::path: alloc::string::String
+pub routectl_usage::OpenError::CreateDir::source: core::io::error::Error
+pub routectl_usage::OpenError::Migrate(routectl_usage::MigrateError)
+pub routectl_usage::OpenError::NoData
+pub routectl_usage::OpenError::NoData::path: alloc::string::String
+pub routectl_usage::OpenError::NotWal
+pub routectl_usage::OpenError::NotWal::found: alloc::string::String
+pub routectl_usage::OpenError::Open
+pub routectl_usage::OpenError::Open::path: alloc::string::String
+pub routectl_usage::OpenError::Open::source: rusqlite::error::Error
+pub routectl_usage::OpenError::Permissions
+pub routectl_usage::OpenError::Permissions::path: alloc::string::String
+pub routectl_usage::OpenError::Permissions::source: core::io::error::Error
+pub routectl_usage::OpenError::Pragma(rusqlite::error::Error)
+pub routectl_usage::OpenError::VersionTooNew
+pub routectl_usage::OpenError::VersionTooNew::found: i64
+pub routectl_usage::OpenError::VersionTooNew::supported: i64
+pub routectl_usage::OpenError::VersionTooOld
+pub routectl_usage::OpenError::VersionTooOld::found: i64
+pub routectl_usage::OpenError::VersionTooOld::supported: i64
+impl core::convert::From<routectl_usage::MigrateError> for routectl_usage::OpenError
+pub fn routectl_usage::OpenError::from(routectl_usage::MigrateError) -> Self
+impl core::error::Error for routectl_usage::OpenError
+pub fn routectl_usage::OpenError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for routectl_usage::OpenError
+pub fn routectl_usage::OpenError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_usage::OpenError
+pub fn routectl_usage::OpenError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_usage::OpenError
+impl core::marker::Send for routectl_usage::OpenError
+impl core::marker::Sync for routectl_usage::OpenError
+impl core::marker::Unpin for routectl_usage::OpenError
+impl core::marker::UnsafeUnpin for routectl_usage::OpenError
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_usage::OpenError
+impl !core::panic::unwind_safe::UnwindSafe for routectl_usage::OpenError
+impl<T, U> core::convert::Into<U> for routectl_usage::OpenError where U: core::convert::From<T>
+pub fn routectl_usage::OpenError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::OpenError where U: core::convert::Into<T>
+pub type routectl_usage::OpenError::Error = core::convert::Infallible
+pub fn routectl_usage::OpenError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::OpenError where U: core::convert::TryFrom<T>
+pub type routectl_usage::OpenError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::OpenError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for routectl_usage::OpenError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_usage::OpenError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_usage::OpenError where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::OpenError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::OpenError where T: ?core::marker::Sized
+pub fn routectl_usage::OpenError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::OpenError where T: ?core::marker::Sized
+pub fn routectl_usage::OpenError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::OpenError
+pub fn routectl_usage::OpenError::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::OpenError
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::OpenError
+pub enum routectl_usage::Outcome
+pub routectl_usage::Outcome::Cancelled
+pub routectl_usage::Outcome::ClientDisconnect
+pub routectl_usage::Outcome::GateBlocked
+pub routectl_usage::Outcome::Ok
+pub routectl_usage::Outcome::Timeout
+pub routectl_usage::Outcome::UpstreamError
+impl routectl_usage::Outcome
+pub const fn routectl_usage::Outcome::as_str(&self) -> &'static str
+impl core::clone::Clone for routectl_usage::Outcome
+pub fn routectl_usage::Outcome::clone(&self) -> routectl_usage::Outcome
+impl core::cmp::Eq for routectl_usage::Outcome
+impl core::cmp::PartialEq for routectl_usage::Outcome
+pub fn routectl_usage::Outcome::eq(&self, &routectl_usage::Outcome) -> bool
+impl core::convert::TryFrom<&str> for routectl_usage::Outcome
+pub type routectl_usage::Outcome::Error = routectl_usage::ParseOutcomeError
+pub fn routectl_usage::Outcome::try_from(&str) -> core::result::Result<Self, Self::Error>
+impl core::default::Default for routectl_usage::Outcome
+pub fn routectl_usage::Outcome::default() -> routectl_usage::Outcome
+impl core::fmt::Debug for routectl_usage::Outcome
+pub fn routectl_usage::Outcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::Outcome
+impl core::marker::StructuralPartialEq for routectl_usage::Outcome
+impl core::str::traits::FromStr for routectl_usage::Outcome
+pub type routectl_usage::Outcome::Err = routectl_usage::ParseOutcomeError
+pub fn routectl_usage::Outcome::from_str(&str) -> core::result::Result<Self, Self::Err>
+impl serde_core::ser::Serialize for routectl_usage::Outcome
+pub fn routectl_usage::Outcome::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_usage::Outcome
+pub fn routectl_usage::Outcome::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_usage::Outcome
+impl core::marker::Send for routectl_usage::Outcome
+impl core::marker::Sync for routectl_usage::Outcome
+impl core::marker::Unpin for routectl_usage::Outcome
+impl core::marker::UnsafeUnpin for routectl_usage::Outcome
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::Outcome
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::Outcome
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::Outcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::Outcome::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::Outcome where U: core::convert::From<T>
+pub fn routectl_usage::Outcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::Outcome where U: core::convert::Into<T>
+pub type routectl_usage::Outcome::Error = core::convert::Infallible
+pub fn routectl_usage::Outcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::Outcome where U: core::convert::TryFrom<T>
+pub type routectl_usage::Outcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::Outcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::Outcome where T: core::clone::Clone
+pub type routectl_usage::Outcome::Owned = T
+pub fn routectl_usage::Outcome::clone_into(&self, &mut T)
+pub fn routectl_usage::Outcome::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::Outcome where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::Outcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::Outcome where T: ?core::marker::Sized
+pub fn routectl_usage::Outcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::Outcome where T: ?core::marker::Sized
+pub fn routectl_usage::Outcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::Outcome where T: core::clone::Clone
+pub unsafe fn routectl_usage::Outcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::Outcome
+pub fn routectl_usage::Outcome::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for routectl_usage::Outcome where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for routectl_usage::Outcome
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::Outcome
+pub enum routectl_usage::PruneOutcome
+pub routectl_usage::PruneOutcome::Pruned
+pub routectl_usage::PruneOutcome::Pruned::deleted: usize
+pub routectl_usage::PruneOutcome::Skipped
+impl core::clone::Clone for routectl_usage::PruneOutcome
+pub fn routectl_usage::PruneOutcome::clone(&self) -> routectl_usage::PruneOutcome
+impl core::cmp::Eq for routectl_usage::PruneOutcome
+impl core::cmp::PartialEq for routectl_usage::PruneOutcome
+pub fn routectl_usage::PruneOutcome::eq(&self, &routectl_usage::PruneOutcome) -> bool
+impl core::fmt::Debug for routectl_usage::PruneOutcome
+pub fn routectl_usage::PruneOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::PruneOutcome
+impl core::marker::StructuralPartialEq for routectl_usage::PruneOutcome
+impl core::marker::Freeze for routectl_usage::PruneOutcome
+impl core::marker::Send for routectl_usage::PruneOutcome
+impl core::marker::Sync for routectl_usage::PruneOutcome
+impl core::marker::Unpin for routectl_usage::PruneOutcome
+impl core::marker::UnsafeUnpin for routectl_usage::PruneOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::PruneOutcome
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::PruneOutcome
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::PruneOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::PruneOutcome::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::PruneOutcome where U: core::convert::From<T>
+pub fn routectl_usage::PruneOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::PruneOutcome where U: core::convert::Into<T>
+pub type routectl_usage::PruneOutcome::Error = core::convert::Infallible
+pub fn routectl_usage::PruneOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::PruneOutcome where U: core::convert::TryFrom<T>
+pub type routectl_usage::PruneOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::PruneOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::PruneOutcome where T: core::clone::Clone
+pub type routectl_usage::PruneOutcome::Owned = T
+pub fn routectl_usage::PruneOutcome::clone_into(&self, &mut T)
+pub fn routectl_usage::PruneOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::PruneOutcome where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::PruneOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::PruneOutcome where T: ?core::marker::Sized
+pub fn routectl_usage::PruneOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::PruneOutcome where T: ?core::marker::Sized
+pub fn routectl_usage::PruneOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::PruneOutcome where T: core::clone::Clone
+pub unsafe fn routectl_usage::PruneOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::PruneOutcome
+pub fn routectl_usage::PruneOutcome::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::PruneOutcome
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::PruneOutcome
+pub enum routectl_usage::QueryError
+pub routectl_usage::QueryError::Sqlite(rusqlite::error::Error)
+impl core::convert::From<rusqlite::error::Error> for routectl_usage::QueryError
+pub fn routectl_usage::QueryError::from(rusqlite::error::Error) -> Self
+impl core::error::Error for routectl_usage::QueryError
+pub fn routectl_usage::QueryError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for routectl_usage::QueryError
+pub fn routectl_usage::QueryError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_usage::QueryError
+pub fn routectl_usage::QueryError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_usage::QueryError
+impl core::marker::Send for routectl_usage::QueryError
+impl core::marker::Sync for routectl_usage::QueryError
+impl core::marker::Unpin for routectl_usage::QueryError
+impl core::marker::UnsafeUnpin for routectl_usage::QueryError
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_usage::QueryError
+impl !core::panic::unwind_safe::UnwindSafe for routectl_usage::QueryError
+impl<T, U> core::convert::Into<U> for routectl_usage::QueryError where U: core::convert::From<T>
+pub fn routectl_usage::QueryError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::QueryError where U: core::convert::Into<T>
+pub type routectl_usage::QueryError::Error = core::convert::Infallible
+pub fn routectl_usage::QueryError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::QueryError where U: core::convert::TryFrom<T>
+pub type routectl_usage::QueryError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::QueryError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for routectl_usage::QueryError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_usage::QueryError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_usage::QueryError where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::QueryError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::QueryError where T: ?core::marker::Sized
+pub fn routectl_usage::QueryError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::QueryError where T: ?core::marker::Sized
+pub fn routectl_usage::QueryError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::QueryError
+pub fn routectl_usage::QueryError::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::QueryError
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::QueryError
+pub struct routectl_usage::AggRow
+pub routectl_usage::AggRow::cache_read_avg: i64
+pub routectl_usage::AggRow::cache_read_billed: i64
+pub routectl_usage::AggRow::cache_read_peak: i64
+pub routectl_usage::AggRow::cache_read_present: i64
+pub routectl_usage::AggRow::cache_write_1h: i64
+pub routectl_usage::AggRow::cache_write_1h_present: i64
+pub routectl_usage::AggRow::cache_write_5m: i64
+pub routectl_usage::AggRow::cache_write_5m_present: i64
+pub routectl_usage::AggRow::client_disconnect_pre_dispatch: i64
+pub routectl_usage::AggRow::client_disconnect_total: i64
+pub routectl_usage::AggRow::errors: i64
+pub routectl_usage::AggRow::gen_output_tokens: i64
+pub routectl_usage::AggRow::gen_window_ms: i64
+pub routectl_usage::AggRow::input_tokens: i64
+pub routectl_usage::AggRow::key: routectl_usage::GroupKey
+pub routectl_usage::AggRow::ok: i64
+pub routectl_usage::AggRow::output_tokens: i64
+pub routectl_usage::AggRow::reasoning_present: i64
+pub routectl_usage::AggRow::reasoning_tokens: i64
+pub routectl_usage::AggRow::requests: i64
+pub routectl_usage::AggRow::server_tool_calls: i64
+pub routectl_usage::AggRow::server_tool_present: i64
+pub routectl_usage::AggRow::stream_count: i64
+pub routectl_usage::AggRow::sum_ttfb_ms: i64
+pub routectl_usage::AggRow::ttfb_count: i64
+impl core::clone::Clone for routectl_usage::AggRow
+pub fn routectl_usage::AggRow::clone(&self) -> routectl_usage::AggRow
+impl core::fmt::Debug for routectl_usage::AggRow
+pub fn routectl_usage::AggRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_usage::AggRow
+impl core::marker::Send for routectl_usage::AggRow
+impl core::marker::Sync for routectl_usage::AggRow
+impl core::marker::Unpin for routectl_usage::AggRow
+impl core::marker::UnsafeUnpin for routectl_usage::AggRow
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::AggRow
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::AggRow
+impl<T, U> core::convert::Into<U> for routectl_usage::AggRow where U: core::convert::From<T>
+pub fn routectl_usage::AggRow::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::AggRow where U: core::convert::Into<T>
+pub type routectl_usage::AggRow::Error = core::convert::Infallible
+pub fn routectl_usage::AggRow::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::AggRow where U: core::convert::TryFrom<T>
+pub type routectl_usage::AggRow::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::AggRow::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::AggRow where T: core::clone::Clone
+pub type routectl_usage::AggRow::Owned = T
+pub fn routectl_usage::AggRow::clone_into(&self, &mut T)
+pub fn routectl_usage::AggRow::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::AggRow where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::AggRow::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::AggRow where T: ?core::marker::Sized
+pub fn routectl_usage::AggRow::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::AggRow where T: ?core::marker::Sized
+pub fn routectl_usage::AggRow::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::AggRow where T: core::clone::Clone
+pub unsafe fn routectl_usage::AggRow::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::AggRow
+pub fn routectl_usage::AggRow::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::AggRow
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::AggRow
+pub struct routectl_usage::CapabilityLearnEvent
+pub routectl_usage::CapabilityLearnEvent::capability_key: alloc::string::String
+pub routectl_usage::CapabilityLearnEvent::observations: u32
+pub routectl_usage::CapabilityLearnEvent::provider_kind: alloc::string::String
+pub routectl_usage::CapabilityLearnEvent::remapped: bool
+pub routectl_usage::CapabilityLearnEvent::request_features: alloc::vec::Vec<alloc::string::String>
+pub routectl_usage::CapabilityLearnEvent::signal_tier: alloc::string::String
+pub routectl_usage::CapabilityLearnEvent::state_key: alloc::string::String
+pub routectl_usage::CapabilityLearnEvent::ts: i64
+pub routectl_usage::CapabilityLearnEvent::upstream_status: u16
+impl core::clone::Clone for routectl_usage::CapabilityLearnEvent
+pub fn routectl_usage::CapabilityLearnEvent::clone(&self) -> routectl_usage::CapabilityLearnEvent
+impl core::fmt::Debug for routectl_usage::CapabilityLearnEvent
+pub fn routectl_usage::CapabilityLearnEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_usage::CapabilityLearnEvent
+impl core::marker::Send for routectl_usage::CapabilityLearnEvent
+impl core::marker::Sync for routectl_usage::CapabilityLearnEvent
+impl core::marker::Unpin for routectl_usage::CapabilityLearnEvent
+impl core::marker::UnsafeUnpin for routectl_usage::CapabilityLearnEvent
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::CapabilityLearnEvent
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::CapabilityLearnEvent
+impl<T, U> core::convert::Into<U> for routectl_usage::CapabilityLearnEvent where U: core::convert::From<T>
+pub fn routectl_usage::CapabilityLearnEvent::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::CapabilityLearnEvent where U: core::convert::Into<T>
+pub type routectl_usage::CapabilityLearnEvent::Error = core::convert::Infallible
+pub fn routectl_usage::CapabilityLearnEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::CapabilityLearnEvent where U: core::convert::TryFrom<T>
+pub type routectl_usage::CapabilityLearnEvent::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::CapabilityLearnEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::CapabilityLearnEvent where T: core::clone::Clone
+pub type routectl_usage::CapabilityLearnEvent::Owned = T
+pub fn routectl_usage::CapabilityLearnEvent::clone_into(&self, &mut T)
+pub fn routectl_usage::CapabilityLearnEvent::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::CapabilityLearnEvent where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::CapabilityLearnEvent::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::CapabilityLearnEvent where T: ?core::marker::Sized
+pub fn routectl_usage::CapabilityLearnEvent::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::CapabilityLearnEvent where T: ?core::marker::Sized
+pub fn routectl_usage::CapabilityLearnEvent::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::CapabilityLearnEvent where T: core::clone::Clone
+pub unsafe fn routectl_usage::CapabilityLearnEvent::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::CapabilityLearnEvent
+pub fn routectl_usage::CapabilityLearnEvent::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::CapabilityLearnEvent
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::CapabilityLearnEvent
+pub struct routectl_usage::CostBreakdown
+pub routectl_usage::CostBreakdown::cache_read_usd: f64
+pub routectl_usage::CostBreakdown::cache_write_1h_usd: f64
+pub routectl_usage::CostBreakdown::cache_write_5m_usd: f64
+pub routectl_usage::CostBreakdown::input_usd: f64
+pub routectl_usage::CostBreakdown::output_usd: f64
+pub routectl_usage::CostBreakdown::total_usd: f64
+impl core::clone::Clone for routectl_usage::CostBreakdown
+pub fn routectl_usage::CostBreakdown::clone(&self) -> routectl_usage::CostBreakdown
+impl core::cmp::PartialEq for routectl_usage::CostBreakdown
+pub fn routectl_usage::CostBreakdown::eq(&self, &routectl_usage::CostBreakdown) -> bool
+impl core::fmt::Debug for routectl_usage::CostBreakdown
+pub fn routectl_usage::CostBreakdown::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::CostBreakdown
+impl core::marker::Freeze for routectl_usage::CostBreakdown
+impl core::marker::Send for routectl_usage::CostBreakdown
+impl core::marker::Sync for routectl_usage::CostBreakdown
+impl core::marker::Unpin for routectl_usage::CostBreakdown
+impl core::marker::UnsafeUnpin for routectl_usage::CostBreakdown
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::CostBreakdown
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::CostBreakdown
+impl<T, U> core::convert::Into<U> for routectl_usage::CostBreakdown where U: core::convert::From<T>
+pub fn routectl_usage::CostBreakdown::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::CostBreakdown where U: core::convert::Into<T>
+pub type routectl_usage::CostBreakdown::Error = core::convert::Infallible
+pub fn routectl_usage::CostBreakdown::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::CostBreakdown where U: core::convert::TryFrom<T>
+pub type routectl_usage::CostBreakdown::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::CostBreakdown::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::CostBreakdown where T: core::clone::Clone
+pub type routectl_usage::CostBreakdown::Owned = T
+pub fn routectl_usage::CostBreakdown::clone_into(&self, &mut T)
+pub fn routectl_usage::CostBreakdown::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::CostBreakdown where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::CostBreakdown::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::CostBreakdown where T: ?core::marker::Sized
+pub fn routectl_usage::CostBreakdown::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::CostBreakdown where T: ?core::marker::Sized
+pub fn routectl_usage::CostBreakdown::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::CostBreakdown where T: core::clone::Clone
+pub unsafe fn routectl_usage::CostBreakdown::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::CostBreakdown
+pub fn routectl_usage::CostBreakdown::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::CostBreakdown
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::CostBreakdown
+pub struct routectl_usage::GroupKey
+pub routectl_usage::GroupKey::alias: alloc::string::String
+pub routectl_usage::GroupKey::model: core::option::Option<alloc::string::String>
+pub routectl_usage::GroupKey::provider: core::option::Option<alloc::string::String>
+pub routectl_usage::GroupKey::upstream: core::option::Option<alloc::string::String>
+impl core::clone::Clone for routectl_usage::GroupKey
+pub fn routectl_usage::GroupKey::clone(&self) -> routectl_usage::GroupKey
+impl core::cmp::Eq for routectl_usage::GroupKey
+impl core::cmp::PartialEq for routectl_usage::GroupKey
+pub fn routectl_usage::GroupKey::eq(&self, &routectl_usage::GroupKey) -> bool
+impl core::default::Default for routectl_usage::GroupKey
+pub fn routectl_usage::GroupKey::default() -> routectl_usage::GroupKey
+impl core::fmt::Debug for routectl_usage::GroupKey
+pub fn routectl_usage::GroupKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_usage::GroupKey
+pub fn routectl_usage::GroupKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for routectl_usage::GroupKey
+impl core::marker::Freeze for routectl_usage::GroupKey
+impl core::marker::Send for routectl_usage::GroupKey
+impl core::marker::Sync for routectl_usage::GroupKey
+impl core::marker::Unpin for routectl_usage::GroupKey
+impl core::marker::UnsafeUnpin for routectl_usage::GroupKey
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::GroupKey
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::GroupKey
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::GroupKey where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::GroupKey::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::GroupKey where U: core::convert::From<T>
+pub fn routectl_usage::GroupKey::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::GroupKey where U: core::convert::Into<T>
+pub type routectl_usage::GroupKey::Error = core::convert::Infallible
+pub fn routectl_usage::GroupKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::GroupKey where U: core::convert::TryFrom<T>
+pub type routectl_usage::GroupKey::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::GroupKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::GroupKey where T: core::clone::Clone
+pub type routectl_usage::GroupKey::Owned = T
+pub fn routectl_usage::GroupKey::clone_into(&self, &mut T)
+pub fn routectl_usage::GroupKey::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::GroupKey where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::GroupKey::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::GroupKey where T: ?core::marker::Sized
+pub fn routectl_usage::GroupKey::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::GroupKey where T: ?core::marker::Sized
+pub fn routectl_usage::GroupKey::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::GroupKey where T: core::clone::Clone
+pub unsafe fn routectl_usage::GroupKey::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::GroupKey
+pub fn routectl_usage::GroupKey::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::GroupKey
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::GroupKey
+pub struct routectl_usage::KCalibration
+pub routectl_usage::KCalibration::accuracy: f64
+pub routectl_usage::KCalibration::coverage: f64
+pub routectl_usage::KCalibration::hazard_decay: f64
+pub routectl_usage::KCalibration::n: usize
+impl core::clone::Clone for routectl_usage::KCalibration
+pub fn routectl_usage::KCalibration::clone(&self) -> routectl_usage::KCalibration
+impl core::cmp::PartialEq for routectl_usage::KCalibration
+pub fn routectl_usage::KCalibration::eq(&self, &routectl_usage::KCalibration) -> bool
+impl core::fmt::Debug for routectl_usage::KCalibration
+pub fn routectl_usage::KCalibration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::KCalibration
+impl core::marker::Freeze for routectl_usage::KCalibration
+impl core::marker::Send for routectl_usage::KCalibration
+impl core::marker::Sync for routectl_usage::KCalibration
+impl core::marker::Unpin for routectl_usage::KCalibration
+impl core::marker::UnsafeUnpin for routectl_usage::KCalibration
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::KCalibration
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::KCalibration
+impl<T, U> core::convert::Into<U> for routectl_usage::KCalibration where U: core::convert::From<T>
+pub fn routectl_usage::KCalibration::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::KCalibration where U: core::convert::Into<T>
+pub type routectl_usage::KCalibration::Error = core::convert::Infallible
+pub fn routectl_usage::KCalibration::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::KCalibration where U: core::convert::TryFrom<T>
+pub type routectl_usage::KCalibration::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::KCalibration::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::KCalibration where T: core::clone::Clone
+pub type routectl_usage::KCalibration::Owned = T
+pub fn routectl_usage::KCalibration::clone_into(&self, &mut T)
+pub fn routectl_usage::KCalibration::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::KCalibration where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::KCalibration::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::KCalibration where T: ?core::marker::Sized
+pub fn routectl_usage::KCalibration::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::KCalibration where T: ?core::marker::Sized
+pub fn routectl_usage::KCalibration::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::KCalibration where T: core::clone::Clone
+pub unsafe fn routectl_usage::KCalibration::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::KCalibration
+pub fn routectl_usage::KCalibration::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::KCalibration
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::KCalibration
+pub struct routectl_usage::M1AttributionSummary
+pub routectl_usage::M1AttributionSummary::context_fraction_present: i64
+pub routectl_usage::M1AttributionSummary::context_fraction_sum: f64
+pub routectl_usage::M1AttributionSummary::dedup_tokens: i64
+pub routectl_usage::M1AttributionSummary::path_extractable: i64
+pub routectl_usage::M1AttributionSummary::path_units: i64
+pub routectl_usage::M1AttributionSummary::recorder_requests: i64
+pub routectl_usage::M1AttributionSummary::supersession_tokens: i64
+impl core::clone::Clone for routectl_usage::M1AttributionSummary
+pub fn routectl_usage::M1AttributionSummary::clone(&self) -> routectl_usage::M1AttributionSummary
+impl core::cmp::PartialEq for routectl_usage::M1AttributionSummary
+pub fn routectl_usage::M1AttributionSummary::eq(&self, &routectl_usage::M1AttributionSummary) -> bool
+impl core::default::Default for routectl_usage::M1AttributionSummary
+pub fn routectl_usage::M1AttributionSummary::default() -> routectl_usage::M1AttributionSummary
+impl core::fmt::Debug for routectl_usage::M1AttributionSummary
+pub fn routectl_usage::M1AttributionSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::M1AttributionSummary
+impl core::marker::StructuralPartialEq for routectl_usage::M1AttributionSummary
+impl core::marker::Freeze for routectl_usage::M1AttributionSummary
+impl core::marker::Send for routectl_usage::M1AttributionSummary
+impl core::marker::Sync for routectl_usage::M1AttributionSummary
+impl core::marker::Unpin for routectl_usage::M1AttributionSummary
+impl core::marker::UnsafeUnpin for routectl_usage::M1AttributionSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::M1AttributionSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::M1AttributionSummary
+impl<T, U> core::convert::Into<U> for routectl_usage::M1AttributionSummary where U: core::convert::From<T>
+pub fn routectl_usage::M1AttributionSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::M1AttributionSummary where U: core::convert::Into<T>
+pub type routectl_usage::M1AttributionSummary::Error = core::convert::Infallible
+pub fn routectl_usage::M1AttributionSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::M1AttributionSummary where U: core::convert::TryFrom<T>
+pub type routectl_usage::M1AttributionSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::M1AttributionSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::M1AttributionSummary where T: core::clone::Clone
+pub type routectl_usage::M1AttributionSummary::Owned = T
+pub fn routectl_usage::M1AttributionSummary::clone_into(&self, &mut T)
+pub fn routectl_usage::M1AttributionSummary::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::M1AttributionSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::M1AttributionSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::M1AttributionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::M1AttributionSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::M1AttributionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::M1AttributionSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::M1AttributionSummary where T: core::clone::Clone
+pub unsafe fn routectl_usage::M1AttributionSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::M1AttributionSummary
+pub fn routectl_usage::M1AttributionSummary::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::M1AttributionSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::M1AttributionSummary
+pub struct routectl_usage::ParseOutcomeError(pub alloc::string::String)
+impl core::error::Error for routectl_usage::ParseOutcomeError
+impl core::fmt::Debug for routectl_usage::ParseOutcomeError
+pub fn routectl_usage::ParseOutcomeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_usage::ParseOutcomeError
+pub fn routectl_usage::ParseOutcomeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_usage::ParseOutcomeError
+impl core::marker::Send for routectl_usage::ParseOutcomeError
+impl core::marker::Sync for routectl_usage::ParseOutcomeError
+impl core::marker::Unpin for routectl_usage::ParseOutcomeError
+impl core::marker::UnsafeUnpin for routectl_usage::ParseOutcomeError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::ParseOutcomeError
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::ParseOutcomeError
+impl<T, U> core::convert::Into<U> for routectl_usage::ParseOutcomeError where U: core::convert::From<T>
+pub fn routectl_usage::ParseOutcomeError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::ParseOutcomeError where U: core::convert::Into<T>
+pub type routectl_usage::ParseOutcomeError::Error = core::convert::Infallible
+pub fn routectl_usage::ParseOutcomeError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::ParseOutcomeError where U: core::convert::TryFrom<T>
+pub type routectl_usage::ParseOutcomeError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::ParseOutcomeError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for routectl_usage::ParseOutcomeError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_usage::ParseOutcomeError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for routectl_usage::ParseOutcomeError where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::ParseOutcomeError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::ParseOutcomeError where T: ?core::marker::Sized
+pub fn routectl_usage::ParseOutcomeError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::ParseOutcomeError where T: ?core::marker::Sized
+pub fn routectl_usage::ParseOutcomeError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::ParseOutcomeError
+pub fn routectl_usage::ParseOutcomeError::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::ParseOutcomeError
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::ParseOutcomeError
+pub struct routectl_usage::QuotaSnapshot
+pub routectl_usage::QuotaSnapshot::claim: core::option::Option<alloc::string::String>
+pub routectl_usage::QuotaSnapshot::overage_status: core::option::Option<alloc::string::String>
+pub routectl_usage::QuotaSnapshot::overage_utilization: core::option::Option<f64>
+pub routectl_usage::QuotaSnapshot::reset: core::option::Option<i64>
+pub routectl_usage::QuotaSnapshot::status: core::option::Option<alloc::string::String>
+pub routectl_usage::QuotaSnapshot::ts_start: i64
+pub routectl_usage::QuotaSnapshot::utilization: core::option::Option<f64>
+impl core::clone::Clone for routectl_usage::QuotaSnapshot
+pub fn routectl_usage::QuotaSnapshot::clone(&self) -> routectl_usage::QuotaSnapshot
+impl core::fmt::Debug for routectl_usage::QuotaSnapshot
+pub fn routectl_usage::QuotaSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_usage::QuotaSnapshot
+impl core::marker::Send for routectl_usage::QuotaSnapshot
+impl core::marker::Sync for routectl_usage::QuotaSnapshot
+impl core::marker::Unpin for routectl_usage::QuotaSnapshot
+impl core::marker::UnsafeUnpin for routectl_usage::QuotaSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::QuotaSnapshot
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::QuotaSnapshot
+impl<T, U> core::convert::Into<U> for routectl_usage::QuotaSnapshot where U: core::convert::From<T>
+pub fn routectl_usage::QuotaSnapshot::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::QuotaSnapshot where U: core::convert::Into<T>
+pub type routectl_usage::QuotaSnapshot::Error = core::convert::Infallible
+pub fn routectl_usage::QuotaSnapshot::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::QuotaSnapshot where U: core::convert::TryFrom<T>
+pub type routectl_usage::QuotaSnapshot::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::QuotaSnapshot::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::QuotaSnapshot where T: core::clone::Clone
+pub type routectl_usage::QuotaSnapshot::Owned = T
+pub fn routectl_usage::QuotaSnapshot::clone_into(&self, &mut T)
+pub fn routectl_usage::QuotaSnapshot::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::QuotaSnapshot where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::QuotaSnapshot::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::QuotaSnapshot where T: ?core::marker::Sized
+pub fn routectl_usage::QuotaSnapshot::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::QuotaSnapshot where T: ?core::marker::Sized
+pub fn routectl_usage::QuotaSnapshot::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::QuotaSnapshot where T: core::clone::Clone
+pub unsafe fn routectl_usage::QuotaSnapshot::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::QuotaSnapshot
+pub fn routectl_usage::QuotaSnapshot::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::QuotaSnapshot
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::QuotaSnapshot
+pub struct routectl_usage::Rates
+pub routectl_usage::Rates::cache_read_per_mtok: core::option::Option<f64>
+pub routectl_usage::Rates::cache_write_1h_per_mtok: core::option::Option<f64>
+pub routectl_usage::Rates::cache_write_5m_per_mtok: core::option::Option<f64>
+pub routectl_usage::Rates::input_per_mtok: core::option::Option<f64>
+pub routectl_usage::Rates::output_per_mtok: core::option::Option<f64>
+impl core::clone::Clone for routectl_usage::Rates
+pub fn routectl_usage::Rates::clone(&self) -> routectl_usage::Rates
+impl core::cmp::PartialEq for routectl_usage::Rates
+pub fn routectl_usage::Rates::eq(&self, &routectl_usage::Rates) -> bool
+impl core::default::Default for routectl_usage::Rates
+pub fn routectl_usage::Rates::default() -> routectl_usage::Rates
+impl core::fmt::Debug for routectl_usage::Rates
+pub fn routectl_usage::Rates::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::Rates
+impl core::marker::Freeze for routectl_usage::Rates
+impl core::marker::Send for routectl_usage::Rates
+impl core::marker::Sync for routectl_usage::Rates
+impl core::marker::Unpin for routectl_usage::Rates
+impl core::marker::UnsafeUnpin for routectl_usage::Rates
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::Rates
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::Rates
+impl<T, U> core::convert::Into<U> for routectl_usage::Rates where U: core::convert::From<T>
+pub fn routectl_usage::Rates::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::Rates where U: core::convert::Into<T>
+pub type routectl_usage::Rates::Error = core::convert::Infallible
+pub fn routectl_usage::Rates::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::Rates where U: core::convert::TryFrom<T>
+pub type routectl_usage::Rates::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::Rates::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::Rates where T: core::clone::Clone
+pub type routectl_usage::Rates::Owned = T
+pub fn routectl_usage::Rates::clone_into(&self, &mut T)
+pub fn routectl_usage::Rates::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::Rates where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::Rates::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::Rates where T: ?core::marker::Sized
+pub fn routectl_usage::Rates::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::Rates where T: ?core::marker::Sized
+pub fn routectl_usage::Rates::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::Rates where T: core::clone::Clone
+pub unsafe fn routectl_usage::Rates::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::Rates
+pub fn routectl_usage::Rates::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::Rates
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::Rates
+pub struct routectl_usage::ReuseSampleRow
+pub routectl_usage::ReuseSampleRow::cache_read: i64
+pub routectl_usage::ReuseSampleRow::model: alloc::string::String
+pub routectl_usage::ReuseSampleRow::provider_kind: alloc::string::String
+pub routectl_usage::ReuseSampleRow::session_id: alloc::string::String
+pub routectl_usage::ReuseSampleRow::ts_start_ms: i64
+impl core::clone::Clone for routectl_usage::ReuseSampleRow
+pub fn routectl_usage::ReuseSampleRow::clone(&self) -> routectl_usage::ReuseSampleRow
+impl core::cmp::Eq for routectl_usage::ReuseSampleRow
+impl core::cmp::PartialEq for routectl_usage::ReuseSampleRow
+pub fn routectl_usage::ReuseSampleRow::eq(&self, &routectl_usage::ReuseSampleRow) -> bool
+impl core::fmt::Debug for routectl_usage::ReuseSampleRow
+pub fn routectl_usage::ReuseSampleRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::ReuseSampleRow
+impl core::marker::Freeze for routectl_usage::ReuseSampleRow
+impl core::marker::Send for routectl_usage::ReuseSampleRow
+impl core::marker::Sync for routectl_usage::ReuseSampleRow
+impl core::marker::Unpin for routectl_usage::ReuseSampleRow
+impl core::marker::UnsafeUnpin for routectl_usage::ReuseSampleRow
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::ReuseSampleRow
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::ReuseSampleRow
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::ReuseSampleRow where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::ReuseSampleRow::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::ReuseSampleRow where U: core::convert::From<T>
+pub fn routectl_usage::ReuseSampleRow::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::ReuseSampleRow where U: core::convert::Into<T>
+pub type routectl_usage::ReuseSampleRow::Error = core::convert::Infallible
+pub fn routectl_usage::ReuseSampleRow::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::ReuseSampleRow where U: core::convert::TryFrom<T>
+pub type routectl_usage::ReuseSampleRow::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::ReuseSampleRow::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::ReuseSampleRow where T: core::clone::Clone
+pub type routectl_usage::ReuseSampleRow::Owned = T
+pub fn routectl_usage::ReuseSampleRow::clone_into(&self, &mut T)
+pub fn routectl_usage::ReuseSampleRow::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::ReuseSampleRow where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::ReuseSampleRow::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::ReuseSampleRow where T: ?core::marker::Sized
+pub fn routectl_usage::ReuseSampleRow::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::ReuseSampleRow where T: ?core::marker::Sized
+pub fn routectl_usage::ReuseSampleRow::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::ReuseSampleRow where T: core::clone::Clone
+pub unsafe fn routectl_usage::ReuseSampleRow::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::ReuseSampleRow
+pub fn routectl_usage::ReuseSampleRow::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::ReuseSampleRow
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::ReuseSampleRow
+pub struct routectl_usage::ShadowMisfireSummary
+pub routectl_usage::ShadowMisfireSummary::compared_turns: i64
+pub routectl_usage::ShadowMisfireSummary::misfire_turns: i64
+impl core::clone::Clone for routectl_usage::ShadowMisfireSummary
+pub fn routectl_usage::ShadowMisfireSummary::clone(&self) -> routectl_usage::ShadowMisfireSummary
+impl core::cmp::Eq for routectl_usage::ShadowMisfireSummary
+impl core::cmp::PartialEq for routectl_usage::ShadowMisfireSummary
+pub fn routectl_usage::ShadowMisfireSummary::eq(&self, &routectl_usage::ShadowMisfireSummary) -> bool
+impl core::default::Default for routectl_usage::ShadowMisfireSummary
+pub fn routectl_usage::ShadowMisfireSummary::default() -> routectl_usage::ShadowMisfireSummary
+impl core::fmt::Debug for routectl_usage::ShadowMisfireSummary
+pub fn routectl_usage::ShadowMisfireSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::ShadowMisfireSummary
+impl core::marker::StructuralPartialEq for routectl_usage::ShadowMisfireSummary
+impl core::marker::Freeze for routectl_usage::ShadowMisfireSummary
+impl core::marker::Send for routectl_usage::ShadowMisfireSummary
+impl core::marker::Sync for routectl_usage::ShadowMisfireSummary
+impl core::marker::Unpin for routectl_usage::ShadowMisfireSummary
+impl core::marker::UnsafeUnpin for routectl_usage::ShadowMisfireSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::ShadowMisfireSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::ShadowMisfireSummary
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::ShadowMisfireSummary where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::ShadowMisfireSummary::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::ShadowMisfireSummary where U: core::convert::From<T>
+pub fn routectl_usage::ShadowMisfireSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::ShadowMisfireSummary where U: core::convert::Into<T>
+pub type routectl_usage::ShadowMisfireSummary::Error = core::convert::Infallible
+pub fn routectl_usage::ShadowMisfireSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::ShadowMisfireSummary where U: core::convert::TryFrom<T>
+pub type routectl_usage::ShadowMisfireSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::ShadowMisfireSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::ShadowMisfireSummary where T: core::clone::Clone
+pub type routectl_usage::ShadowMisfireSummary::Owned = T
+pub fn routectl_usage::ShadowMisfireSummary::clone_into(&self, &mut T)
+pub fn routectl_usage::ShadowMisfireSummary::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::ShadowMisfireSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::ShadowMisfireSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::ShadowMisfireSummary where T: ?core::marker::Sized
+pub fn routectl_usage::ShadowMisfireSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::ShadowMisfireSummary where T: ?core::marker::Sized
+pub fn routectl_usage::ShadowMisfireSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::ShadowMisfireSummary where T: core::clone::Clone
+pub unsafe fn routectl_usage::ShadowMisfireSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::ShadowMisfireSummary
+pub fn routectl_usage::ShadowMisfireSummary::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::ShadowMisfireSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::ShadowMisfireSummary
+pub struct routectl_usage::UsageCounters
+impl routectl_usage::UsageCounters
+pub fn routectl_usage::UsageCounters::dropped_disabled(&self) -> u64
+pub fn routectl_usage::UsageCounters::dropped_full(&self) -> u64
+pub fn routectl_usage::UsageCounters::enqueued(&self) -> u64
+pub fn routectl_usage::UsageCounters::learn_events_dropped_full(&self) -> u64
+pub fn routectl_usage::UsageCounters::learn_events_enqueued(&self) -> u64
+pub fn routectl_usage::UsageCounters::learn_events_persisted(&self) -> u64
+pub fn routectl_usage::UsageCounters::persisted(&self) -> u64
+pub fn routectl_usage::UsageCounters::prune_errors(&self) -> u64
+pub fn routectl_usage::UsageCounters::write_errors(&self) -> u64
+impl core::default::Default for routectl_usage::UsageCounters
+pub fn routectl_usage::UsageCounters::default() -> routectl_usage::UsageCounters
+impl core::fmt::Debug for routectl_usage::UsageCounters
+pub fn routectl_usage::UsageCounters::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl !core::marker::Freeze for routectl_usage::UsageCounters
+impl core::marker::Send for routectl_usage::UsageCounters
+impl core::marker::Sync for routectl_usage::UsageCounters
+impl core::marker::Unpin for routectl_usage::UsageCounters
+impl core::marker::UnsafeUnpin for routectl_usage::UsageCounters
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::UsageCounters
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::UsageCounters
+impl<T, U> core::convert::Into<U> for routectl_usage::UsageCounters where U: core::convert::From<T>
+pub fn routectl_usage::UsageCounters::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::UsageCounters where U: core::convert::Into<T>
+pub type routectl_usage::UsageCounters::Error = core::convert::Infallible
+pub fn routectl_usage::UsageCounters::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::UsageCounters where U: core::convert::TryFrom<T>
+pub type routectl_usage::UsageCounters::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::UsageCounters::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_usage::UsageCounters where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::UsageCounters::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::UsageCounters where T: ?core::marker::Sized
+pub fn routectl_usage::UsageCounters::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::UsageCounters where T: ?core::marker::Sized
+pub fn routectl_usage::UsageCounters::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::UsageCounters
+pub fn routectl_usage::UsageCounters::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::UsageCounters
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageCounters
+pub struct routectl_usage::UsageDb
+impl routectl_usage::UsageDb
+pub const fn routectl_usage::UsageDb::conn(&self) -> &rusqlite::Connection
+pub fn routectl_usage::UsageDb::into_conn(self) -> rusqlite::Connection
+pub fn routectl_usage::UsageDb::path(&self) -> &std::path::Path
+impl !core::marker::Freeze for routectl_usage::UsageDb
+impl core::marker::Send for routectl_usage::UsageDb
+impl !core::marker::Sync for routectl_usage::UsageDb
+impl core::marker::Unpin for routectl_usage::UsageDb
+impl core::marker::UnsafeUnpin for routectl_usage::UsageDb
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_usage::UsageDb
+impl !core::panic::unwind_safe::UnwindSafe for routectl_usage::UsageDb
+impl<T, U> core::convert::Into<U> for routectl_usage::UsageDb where U: core::convert::From<T>
+pub fn routectl_usage::UsageDb::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::UsageDb where U: core::convert::Into<T>
+pub type routectl_usage::UsageDb::Error = core::convert::Infallible
+pub fn routectl_usage::UsageDb::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::UsageDb where U: core::convert::TryFrom<T>
+pub type routectl_usage::UsageDb::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::UsageDb::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_usage::UsageDb where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::UsageDb::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::UsageDb where T: ?core::marker::Sized
+pub fn routectl_usage::UsageDb::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::UsageDb where T: ?core::marker::Sized
+pub fn routectl_usage::UsageDb::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::UsageDb
+pub fn routectl_usage::UsageDb::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::UsageDb
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageDb
+pub struct routectl_usage::UsageHandle
+impl routectl_usage::UsageHandle
+pub const fn routectl_usage::UsageHandle::counters(&self) -> &alloc::sync::Arc<routectl_usage::UsageCounters>
+pub fn routectl_usage::UsageHandle::is_enabled(&self) -> bool
+pub fn routectl_usage::UsageHandle::set_enabled(&self, bool)
+pub fn routectl_usage::UsageHandle::try_send(&self, routectl_usage::UsageRecord)
+pub fn routectl_usage::UsageHandle::try_send_learn_event(&self, routectl_usage::CapabilityLearnEvent)
+impl core::clone::Clone for routectl_usage::UsageHandle
+pub fn routectl_usage::UsageHandle::clone(&self) -> routectl_usage::UsageHandle
+impl core::marker::Freeze for routectl_usage::UsageHandle
+impl core::marker::Send for routectl_usage::UsageHandle
+impl core::marker::Sync for routectl_usage::UsageHandle
+impl core::marker::Unpin for routectl_usage::UsageHandle
+impl core::marker::UnsafeUnpin for routectl_usage::UsageHandle
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::UsageHandle
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::UsageHandle
+impl<T, U> core::convert::Into<U> for routectl_usage::UsageHandle where U: core::convert::From<T>
+pub fn routectl_usage::UsageHandle::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::UsageHandle where U: core::convert::Into<T>
+pub type routectl_usage::UsageHandle::Error = core::convert::Infallible
+pub fn routectl_usage::UsageHandle::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::UsageHandle where U: core::convert::TryFrom<T>
+pub type routectl_usage::UsageHandle::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::UsageHandle::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::UsageHandle where T: core::clone::Clone
+pub type routectl_usage::UsageHandle::Owned = T
+pub fn routectl_usage::UsageHandle::clone_into(&self, &mut T)
+pub fn routectl_usage::UsageHandle::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::UsageHandle where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::UsageHandle::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::UsageHandle where T: ?core::marker::Sized
+pub fn routectl_usage::UsageHandle::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::UsageHandle where T: ?core::marker::Sized
+pub fn routectl_usage::UsageHandle::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::UsageHandle where T: core::clone::Clone
+pub unsafe fn routectl_usage::UsageHandle::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::UsageHandle
+pub fn routectl_usage::UsageHandle::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::UsageHandle
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageHandle
+pub struct routectl_usage::UsageRecord
+pub routectl_usage::UsageRecord::alias: alloc::string::String
+pub routectl_usage::UsageRecord::attempt_count: u32
+pub routectl_usage::UsageRecord::cache_read: core::option::Option<u64>
+pub routectl_usage::UsageRecord::cache_write_1h: core::option::Option<u64>
+pub routectl_usage::UsageRecord::cache_write_5m: core::option::Option<u64>
+pub routectl_usage::UsageRecord::error_class: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::extra: core::option::Option<serde_json::value::Value>
+pub routectl_usage::UsageRecord::fallback_count: u32
+pub routectl_usage::UsageRecord::finish_reason: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::http_status: core::option::Option<u16>
+pub routectl_usage::UsageRecord::ingress_dialect: alloc::string::String
+pub routectl_usage::UsageRecord::input_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::latency_ms: i64
+pub routectl_usage::UsageRecord::max_tokens_req: core::option::Option<u32>
+pub routectl_usage::UsageRecord::model: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::msg_count: u32
+pub routectl_usage::UsageRecord::outcome: routectl_usage::Outcome
+pub routectl_usage::UsageRecord::output_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::provider: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::provider_kind: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::quota_claim: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::quota_extras: core::option::Option<serde_json::value::Value>
+pub routectl_usage::UsageRecord::quota_overage_status: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::quota_overage_utilization: core::option::Option<f64>
+pub routectl_usage::UsageRecord::quota_reset: core::option::Option<i64>
+pub routectl_usage::UsageRecord::quota_status: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::quota_utilization: core::option::Option<f64>
+pub routectl_usage::UsageRecord::reasoning_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::reduction_strategy: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::request_id: alloc::string::String
+pub routectl_usage::UsageRecord::requested_model: alloc::string::String
+pub routectl_usage::UsageRecord::resolved_class: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::seat: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::selection_decision: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::server_tool_use: core::option::Option<serde_json::value::Value>
+pub routectl_usage::UsageRecord::service_tier: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::session_id: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::strategy: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::stream: bool
+pub routectl_usage::UsageRecord::thinking_req: core::option::Option<u32>
+pub routectl_usage::UsageRecord::thinking_req_kind: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::tool_count: u32
+pub routectl_usage::UsageRecord::ts_end: i64
+pub routectl_usage::UsageRecord::ts_start: i64
+pub routectl_usage::UsageRecord::ttfb_ms: core::option::Option<i64>
+pub routectl_usage::UsageRecord::upstream: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::would_trim_break_even_k: core::option::Option<f64>
+pub routectl_usage::UsageRecord::would_trim_context_fraction: core::option::Option<f64>
+pub routectl_usage::UsageRecord::would_trim_dedup_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::would_trim_k_floor: core::option::Option<f64>
+pub routectl_usage::UsageRecord::would_trim_path_extractable: core::option::Option<u64>
+pub routectl_usage::UsageRecord::would_trim_path_units: core::option::Option<u64>
+pub routectl_usage::UsageRecord::would_trim_raw_marks: core::option::Option<serde_json::value::Value>
+pub routectl_usage::UsageRecord::would_trim_recorder_version: core::option::Option<i64>
+pub routectl_usage::UsageRecord::would_trim_shadow_misfire: core::option::Option<i64>
+pub routectl_usage::UsageRecord::would_trim_supersession_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::would_trim_tokens: core::option::Option<u64>
+impl core::clone::Clone for routectl_usage::UsageRecord
+pub fn routectl_usage::UsageRecord::clone(&self) -> routectl_usage::UsageRecord
+impl core::default::Default for routectl_usage::UsageRecord
+pub fn routectl_usage::UsageRecord::default() -> routectl_usage::UsageRecord
+impl core::fmt::Debug for routectl_usage::UsageRecord
+pub fn routectl_usage::UsageRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for routectl_usage::UsageRecord
+pub fn routectl_usage::UsageRecord::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_usage::UsageRecord
+pub fn routectl_usage::UsageRecord::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_usage::UsageRecord
+impl core::marker::Send for routectl_usage::UsageRecord
+impl core::marker::Sync for routectl_usage::UsageRecord
+impl core::marker::Unpin for routectl_usage::UsageRecord
+impl core::marker::UnsafeUnpin for routectl_usage::UsageRecord
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::UsageRecord
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::UsageRecord
+impl<T, U> core::convert::Into<U> for routectl_usage::UsageRecord where U: core::convert::From<T>
+pub fn routectl_usage::UsageRecord::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::UsageRecord where U: core::convert::Into<T>
+pub type routectl_usage::UsageRecord::Error = core::convert::Infallible
+pub fn routectl_usage::UsageRecord::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::UsageRecord where U: core::convert::TryFrom<T>
+pub type routectl_usage::UsageRecord::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::UsageRecord::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::UsageRecord where T: core::clone::Clone
+pub type routectl_usage::UsageRecord::Owned = T
+pub fn routectl_usage::UsageRecord::clone_into(&self, &mut T)
+pub fn routectl_usage::UsageRecord::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::UsageRecord where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::UsageRecord::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::UsageRecord where T: ?core::marker::Sized
+pub fn routectl_usage::UsageRecord::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::UsageRecord where T: ?core::marker::Sized
+pub fn routectl_usage::UsageRecord::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::UsageRecord where T: core::clone::Clone
+pub unsafe fn routectl_usage::UsageRecord::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::UsageRecord
+pub fn routectl_usage::UsageRecord::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for routectl_usage::UsageRecord where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for routectl_usage::UsageRecord
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageRecord
+pub struct routectl_usage::UsageWriter
+impl routectl_usage::UsageWriter
+pub const fn routectl_usage::UsageWriter::counters(&self) -> &alloc::sync::Arc<routectl_usage::UsageCounters>
+pub fn routectl_usage::UsageWriter::shutdown(self)
+pub fn routectl_usage::UsageWriter::start(std::path::PathBuf, usize, u32, bool) -> (routectl_usage::UsageHandle, Self)
+impl core::ops::drop::Drop for routectl_usage::UsageWriter
+pub fn routectl_usage::UsageWriter::drop(&mut self)
+impl core::marker::Freeze for routectl_usage::UsageWriter
+impl core::marker::Send for routectl_usage::UsageWriter
+impl !core::marker::Sync for routectl_usage::UsageWriter
+impl core::marker::Unpin for routectl_usage::UsageWriter
+impl core::marker::UnsafeUnpin for routectl_usage::UsageWriter
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_usage::UsageWriter
+impl !core::panic::unwind_safe::UnwindSafe for routectl_usage::UsageWriter
+impl<T, U> core::convert::Into<U> for routectl_usage::UsageWriter where U: core::convert::From<T>
+pub fn routectl_usage::UsageWriter::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::UsageWriter where U: core::convert::Into<T>
+pub type routectl_usage::UsageWriter::Error = core::convert::Infallible
+pub fn routectl_usage::UsageWriter::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::UsageWriter where U: core::convert::TryFrom<T>
+pub type routectl_usage::UsageWriter::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::UsageWriter::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_usage::UsageWriter where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::UsageWriter::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::UsageWriter where T: ?core::marker::Sized
+pub fn routectl_usage::UsageWriter::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::UsageWriter where T: ?core::marker::Sized
+pub fn routectl_usage::UsageWriter::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::UsageWriter
+pub fn routectl_usage::UsageWriter::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::UsageWriter
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageWriter
+pub struct routectl_usage::WouldTrimSummary
+pub routectl_usage::WouldTrimSummary::candidate_requests: i64
+pub routectl_usage::WouldTrimSummary::verdict_cold: i64
+pub routectl_usage::WouldTrimSummary::verdict_met: i64
+pub routectl_usage::WouldTrimSummary::verdict_unmet: i64
+pub routectl_usage::WouldTrimSummary::verdict_unpriced: i64
+pub routectl_usage::WouldTrimSummary::would_trim_tokens: i64
+impl core::clone::Clone for routectl_usage::WouldTrimSummary
+pub fn routectl_usage::WouldTrimSummary::clone(&self) -> routectl_usage::WouldTrimSummary
+impl core::cmp::Eq for routectl_usage::WouldTrimSummary
+impl core::cmp::PartialEq for routectl_usage::WouldTrimSummary
+pub fn routectl_usage::WouldTrimSummary::eq(&self, &routectl_usage::WouldTrimSummary) -> bool
+impl core::default::Default for routectl_usage::WouldTrimSummary
+pub fn routectl_usage::WouldTrimSummary::default() -> routectl_usage::WouldTrimSummary
+impl core::fmt::Debug for routectl_usage::WouldTrimSummary
+pub fn routectl_usage::WouldTrimSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::WouldTrimSummary
+impl core::marker::StructuralPartialEq for routectl_usage::WouldTrimSummary
+impl core::marker::Freeze for routectl_usage::WouldTrimSummary
+impl core::marker::Send for routectl_usage::WouldTrimSummary
+impl core::marker::Sync for routectl_usage::WouldTrimSummary
+impl core::marker::Unpin for routectl_usage::WouldTrimSummary
+impl core::marker::UnsafeUnpin for routectl_usage::WouldTrimSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::WouldTrimSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::WouldTrimSummary
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::WouldTrimSummary where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::WouldTrimSummary::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::WouldTrimSummary where U: core::convert::From<T>
+pub fn routectl_usage::WouldTrimSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::WouldTrimSummary where U: core::convert::Into<T>
+pub type routectl_usage::WouldTrimSummary::Error = core::convert::Infallible
+pub fn routectl_usage::WouldTrimSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::WouldTrimSummary where U: core::convert::TryFrom<T>
+pub type routectl_usage::WouldTrimSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::WouldTrimSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::WouldTrimSummary where T: core::clone::Clone
+pub type routectl_usage::WouldTrimSummary::Owned = T
+pub fn routectl_usage::WouldTrimSummary::clone_into(&self, &mut T)
+pub fn routectl_usage::WouldTrimSummary::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::WouldTrimSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::WouldTrimSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::WouldTrimSummary where T: ?core::marker::Sized
+pub fn routectl_usage::WouldTrimSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::WouldTrimSummary where T: ?core::marker::Sized
+pub fn routectl_usage::WouldTrimSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::WouldTrimSummary where T: core::clone::Clone
+pub unsafe fn routectl_usage::WouldTrimSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::WouldTrimSummary
+pub fn routectl_usage::WouldTrimSummary::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::WouldTrimSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::WouldTrimSummary
+pub const routectl_usage::CHANNEL_CAPACITY: usize
+pub const routectl_usage::META_CREATED_AT_MS: &str
+pub const routectl_usage::META_SCHEMA_VERSION: &str
+pub const routectl_usage::SCHEMA_VERSION: i64
+pub fn routectl_usage::aggregate(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<routectl_usage::AggRow>, routectl_usage::QueryError>
+pub fn routectl_usage::errors_by_class(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, alloc::string::String, i64)>, routectl_usage::QueryError>
+pub fn routectl_usage::estimate_cost(&routectl_usage::UsageRecord, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>
+pub fn routectl_usage::estimate_cost_tokens(i64, i64, i64, i64, i64, i64, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>
+pub fn routectl_usage::k_calibration_summary(&routectl_usage::UsageDb) -> core::result::Result<routectl_usage::KCalibration, routectl_usage::QueryError>
+pub fn routectl_usage::latest_quota(&routectl_usage::UsageDb) -> core::result::Result<core::option::Option<routectl_usage::QuotaSnapshot>, routectl_usage::QueryError>
+pub fn routectl_usage::m1_attribution_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::M1AttributionSummary, routectl_usage::QueryError>
+pub fn routectl_usage::open(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
+pub fn routectl_usage::open_readonly(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
+pub fn routectl_usage::open_readonly_fastfail(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
+pub fn routectl_usage::prune(&rusqlite::Connection, u32, i64) -> core::result::Result<routectl_usage::PruneOutcome, rusqlite::error::Error>
+pub fn routectl_usage::read_reuse_samples_since(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::ReuseSampleRow>>
+pub fn routectl_usage::shadow_misfire_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::ShadowMisfireSummary, routectl_usage::QueryError>
+pub fn routectl_usage::ttfbs(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, i64)>, routectl_usage::QueryError>
+pub fn routectl_usage::would_trim_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::WouldTrimSummary, routectl_usage::QueryError>
