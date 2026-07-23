@@ -101,6 +101,7 @@ impl OpenAiResponsesConfig {
     }
 }
 
+/// OpenAI Responses egress provider.
 pub struct OpenAiResponsesProvider {
     pub(super) cfg: OpenAiResponsesConfig,
     pub(super) client: Client,
@@ -126,6 +127,7 @@ pub struct OpenAiResponsesProvider {
 }
 
 impl OpenAiResponsesProvider {
+    /// Build a provider from its configuration.
     pub fn new(cfg: OpenAiResponsesConfig) -> Self {
         // Always pass an explicit UA string so the client-level default
         // header carries the codex-derived value. Operator-supplied

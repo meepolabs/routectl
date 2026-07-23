@@ -10,7 +10,9 @@ use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 use super::util::preserve_history_reasoning_details;
 
+/// OpenRouter reasoning dialect (see module docs).
 pub struct OpenRouterDialect;
+/// Shared instance of [`OpenRouterDialect`].
 pub static OPENROUTER: OpenRouterDialect = OpenRouterDialect;
 
 impl Dialect for OpenRouterDialect {

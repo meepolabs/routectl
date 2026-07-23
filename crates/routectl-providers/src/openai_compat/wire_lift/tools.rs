@@ -1,4 +1,4 @@
-//! Lift canonical `req.tools` (Vec<ToolDef>) into the OpenAI
+//! Lift canonical `req.tools` (`Vec<ToolDef>`) into the OpenAI
 //! `{type:"function", function:{name, description, parameters, strict?}}`
 //! wire shape.
 //!

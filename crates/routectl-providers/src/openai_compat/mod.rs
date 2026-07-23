@@ -50,10 +50,14 @@ use sse::ThinkTagAccumulator;
 /// and a typo-on-rename can't silently break operator log filters.
 const PROVIDER_KIND: &str = "openai-compat";
 
+/// Configuration for an openai-compat egress provider.
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatConfig {
+    /// Provider identifier used in tracing and log fields.
     pub id: String,
+    /// Base URL of the upstream; the completions path is appended to it.
     pub base_url: String,
+    /// Bearer credential sent in the `Authorization` header.
     pub api_key: String,
     /// Provider-level extra headers (renamed from `extra_headers` in
     /// v0.6.0). Operators set `[providers.X] header_extras = { ... }`;
@@ -132,12 +136,14 @@ impl From<routectl_core::CoreHistoryReasoning> for HistoryReasoning {
     }
 }
 
+/// openai-compat chat-completions egress provider.
 pub struct OpenAiCompatProvider {
     cfg: OpenAiCompatConfig,
     client: reqwest::Client,
 }
 
 impl OpenAiCompatProvider {
+    /// Build a provider from its configuration.
     pub fn new(cfg: OpenAiCompatConfig) -> Self {
         let client = crate::http_client::build(cfg.user_agent.as_deref());
         Self { cfg, client }

@@ -28,10 +28,16 @@ use super::BedrockCreds;
 pub enum ResolvedCreds {
     /// SigV4-signed requests. The provider is queried per request and
     /// is responsible for any caching/refresh behavior (for SSO etc.).
-    Sigv4 { provider: SharedCredentialsProvider },
+    Sigv4 {
+        /// Credentials provider queried per request.
+        provider: SharedCredentialsProvider,
+    },
     /// Bedrock console short-term API key. SigV4 is skipped; the
     /// signing layer attaches `Authorization: Bearer <key>`.
-    Bearer { key: String },
+    Bearer {
+        /// Short-term API key sent as a bearer credential.
+        key: String,
+    },
 }
 
 impl std::fmt::Debug for ResolvedCreds {

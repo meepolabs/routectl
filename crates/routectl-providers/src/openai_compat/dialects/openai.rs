@@ -13,7 +13,9 @@ use super::util::drop_sampling_params;
 use crate::effort::clamp_effort_to_supported;
 use crate::model_profile::profile_for;
 
+/// Vanilla OpenAI reasoning dialect (see module docs).
 pub struct OpenAiDialect;
+/// Shared instance of [`OpenAiDialect`].
 pub static OPENAI: OpenAiDialect = OpenAiDialect;
 
 impl Dialect for OpenAiDialect {

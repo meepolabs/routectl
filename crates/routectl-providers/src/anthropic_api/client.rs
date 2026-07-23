@@ -29,8 +29,10 @@ pub enum AuthKind {
     OauthBearer,
 }
 
+/// Configuration for an anthropic-api egress provider.
 #[derive(Clone)]
 pub struct AnthropicApiConfig {
+    /// Provider identifier used in tracing and log fields.
     pub id: String,
     /// Source of the bearer/API-key token. For env/file/literal
     /// secret refs, this is a `StaticToken` resolved once at
@@ -40,8 +42,11 @@ pub struct AnthropicApiConfig {
     /// `~/.config/routectl/credentials.json` is picked up live
     /// without restarting routectl.
     pub auth: Arc<dyn TokenSource>,
+    /// Base URL of the upstream Messages API.
     pub base_url: String,
+    /// Value sent in the `anthropic-version` header.
     pub anthropic_version: String,
+    /// Selects the authentication scheme used to present the token.
     pub auth_kind: AuthKind,
     /// Provider-level extra HTTP headers (renamed from `extra_headers`
     /// in v0.6.0). The router's dispatch layer merges this with the
@@ -230,6 +235,7 @@ pub(super) fn should_use_forwarded_bearer(
     use_forwarded_bearer && has_bearer && is_anthropic_api_host(base_url)
 }
 
+/// anthropic-api Messages egress provider.
 pub struct AnthropicApiProvider {
     pub(super) cfg: AnthropicApiConfig,
     pub(super) client: Client,
@@ -269,6 +275,7 @@ pub struct AnthropicApiProvider {
 /// the `!forwarded_leg` gate. Own mode (`forwarded_leg(req) == false`) behavior
 /// is byte-for-byte unchanged by this contract.
 impl AnthropicApiProvider {
+    /// Build a provider from its configuration.
     pub fn new(cfg: AnthropicApiConfig) -> Self {
         let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind);
         let client = crate::http_client::build(ua.as_deref());

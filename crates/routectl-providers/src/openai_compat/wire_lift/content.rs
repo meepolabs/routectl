@@ -6,7 +6,7 @@
 //! rewrites:
 //!
 //!   {"type":"image", "source":{"type":"base64", "media_type", "data"}}
-//!     -> {"type":"image_url", "image_url":{"url":"data:<media_type>;base64,<data>"}}
+//!     -> {"type":"image_url", "image_url":{"url":`"data:<media_type>;base64,<data>"`}}
 //!
 //!   {"type":"image", "source":{"type":"url", "url":"..."}}
 //!     -> {"type":"image_url", "image_url":{"url":"..."}}
