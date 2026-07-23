@@ -349,13 +349,18 @@ const ALLOWED_REMAP_TARGETS: [crate::class_policy::ConfigFailureClass; 4] = [
 
 /// Render a [`crate::class_policy::ConfigFailureClass`] as the kebab-case
 /// token it parses from / serializes to in TOML (e.g. `bad-request`), for
-/// validator and warning messages that name a class. Round-trips through
-/// the type's own `Serialize` impl rather than a hand-duplicated match arm
-/// list, so the two spellings cannot drift.
+/// validator and warning messages that name a class. Delegates to the
+/// canonical [`routectl_core::failure_class::FailureClass::class_token`] via
+/// the config-to-canonical adapter, so validator, migrator, and `/status`
+/// share one token vocabulary and cannot drift. Every
+/// [`ConfigFailureClass`](crate::class_policy::ConfigFailureClass) maps to a
+/// canonical class that yields a token (only `Unknown`, which the closed
+/// config set never names, returns `None`).
 pub(super) fn class_token(class: crate::class_policy::ConfigFailureClass) -> String {
-    serde_json::to_string(&class)
-        .expect("ConfigFailureClass serialization is infallible")
-        .trim_matches('"')
+    class
+        .to_failure_class()
+        .class_token()
+        .expect("every ConfigFailureClass maps to a canonical class with a token")
         .to_string()
 }
 
