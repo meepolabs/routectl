@@ -53,6 +53,7 @@ pub struct StaticToken {
 }
 
 impl StaticToken {
+    /// Wrap an already-resolved token string.
     pub fn new(value: impl Into<String>) -> Self {
         Self {
             value: value.into(),

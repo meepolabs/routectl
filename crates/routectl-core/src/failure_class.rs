@@ -5,7 +5,7 @@
 //! policy row. An `upstream_type` / `upstream_code` token may only lift a
 //! classification BETWEEN classes in the SAME policy row (a lift never
 //! changes retry / fallback / debit behavior). Provider-family token
-//! vocabularies live in the [`tables`] submodule, keyed by the provider
+//! vocabularies live in the `tables` submodule, keyed by the provider
 //! `kind` string.
 //!
 //! Leaf module: it reads only the structured fields already on
@@ -413,7 +413,7 @@ pub struct StatusClassGuidance {
 }
 
 /// Derive [`StatusClassGuidance`] for any `status`, reusing the real
-/// [`classify_upstream`] path -- never a hand-duplicated status->class table,
+/// `classify_upstream` path -- never a hand-duplicated status->class table,
 /// so a taxonomy change cannot drift the guidance.
 ///
 /// Panic-free for any `u16`: a status outside `{0} U 400..=599` yields the

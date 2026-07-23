@@ -33,6 +33,7 @@ use crate::{
 };
 use serde_json::json;
 
+/// Build a plain user-text message.
 pub fn user_msg(text: &str) -> Message {
     Message {
         refusal: None,
@@ -46,6 +47,7 @@ pub fn user_msg(text: &str) -> Message {
     }
 }
 
+/// Build a plain assistant-text message.
 pub fn assistant_text_msg(text: &str) -> Message {
     Message {
         refusal: None,
@@ -78,6 +80,7 @@ pub fn get_weather_tool() -> ToolDef {
     })
 }
 
+/// Canonical fixtures, one builder per cross-crate contract scenario.
 pub mod scenarios {
     use super::{
         CacheControl, ChatRequest, ChatResponse, Choice, ContentPart, CustomTool, KnownContentPart,

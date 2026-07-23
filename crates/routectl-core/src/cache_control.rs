@@ -18,8 +18,12 @@ use crate::error::{Error, Result};
 /// explicitly when set so a parsed-and-re-emitted request is byte-stable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheControl {
+    /// Breakpoint kind, serialized as the wire `type` field. Only
+    /// `ephemeral` is currently defined.
     #[serde(rename = "type")]
     pub kind: String,
+    /// Cache lifetime (`"5m"` or `"1h"`). Absent means the `"5m"` wire
+    /// default; see [`CacheControl::effective_ttl`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
 }
@@ -54,7 +58,9 @@ pub const MAX_BREAKPOINTS: usize = 4;
 /// One observed cache_control marker, with where it sat in the cache prefix.
 /// Used by `validate` to enforce TTL ordering across positions.
 pub struct Breakpoint<'a> {
+    /// Where this marker sits in the cache prefix.
     pub position: BreakpointPosition,
+    /// The observed marker.
     pub control: &'a CacheControl,
 }
 
@@ -63,8 +69,11 @@ pub struct Breakpoint<'a> {
 /// shorter (5m).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BreakpointPosition {
+    /// Tool definitions, first in the cache prefix.
     Tools,
+    /// System blocks, after tools.
     System,
+    /// Message content parts, after system.
     Messages,
     /// Top-level auto-cache marker. Counts toward the 4-breakpoint cap.
     TopLevel,
@@ -137,7 +146,9 @@ pub fn validate(breakpoints: &[Breakpoint<'_>]) -> Result<()> {
 /// `OwnedBreakpoint::new`.
 #[non_exhaustive]
 pub struct OwnedBreakpoint {
+    /// Where this marker sits in the cache prefix.
     pub position: BreakpointPosition,
+    /// The owned marker.
     pub control: CacheControl,
 }
 

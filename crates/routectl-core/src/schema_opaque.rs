@@ -34,16 +34,24 @@ pub enum OpaqueSseEvent {
     /// JSON of the inner `content_block` (e.g. `{"type":"server_tool_use",
     /// "id":"...","input":{...}}`) is preserved in `raw_data`.
     ContentBlockStart {
+        /// Block index as reported by the upstream stream.
         upstream_index: u32,
+        /// The block's wire `type` discriminant.
         type_tag: String,
+        /// Raw JSON of the inner `content_block`, preserved verbatim.
         raw_data: Vec<u8>,
     },
     /// `content_block_delta` event where the delta type is unknown
     /// (e.g. `citations_delta`). Raw delta JSON preserved.
     ContentBlockDelta {
+        /// Block index as reported by the upstream stream.
         upstream_index: u32,
+        /// Raw delta JSON, preserved verbatim.
         raw_delta: Vec<u8>,
     },
     /// `content_block_stop` event for an unknown block.
-    ContentBlockStop { upstream_index: u32 },
+    ContentBlockStop {
+        /// Block index as reported by the upstream stream.
+        upstream_index: u32,
+    },
 }

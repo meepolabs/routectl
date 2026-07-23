@@ -1,4 +1,5 @@
 #![deny(rustdoc::broken_intra_doc_links)]
+#![warn(missing_docs)]
 //! Core types and Provider trait for routectl.
 //!
 //! Schema follows the OpenRouter normalized shape so any client that speaks

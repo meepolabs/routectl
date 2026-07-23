@@ -73,14 +73,19 @@ impl UpstreamMeta {
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct AnthropicUnifiedQuota {
+    /// Raw `-status` value.
     pub status: Option<String>,
+    /// Raw `-overage-status` value.
     pub overage_status: Option<String>,
     /// 5h-window utilization (a decimal fraction string like "0.21"),
     /// the operational subscription signal. Sourced from the
     /// `-5h-utilization` header; there is no bare `-utilization` header.
     pub utilization: Option<String>,
+    /// Raw `-overage-utilization` value.
     pub overage_utilization: Option<String>,
+    /// Raw `-representative-claim` value.
     pub representative_claim: Option<String>,
+    /// Raw `-reset` value.
     pub reset: Option<String>,
     /// Any other `anthropic-ratelimit-unified-<suffix>` header captured
     /// for forward-compat, as `(suffix, value)` pairs in header order.

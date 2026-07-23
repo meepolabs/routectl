@@ -48,15 +48,21 @@ pub enum ToolDef {
 /// object schema so a minimal `{name}` tool round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomTool {
+    /// Tool name the model calls.
     pub name: String,
+    /// Human-readable tool description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// JSON Schema for the tool's input arguments.
     #[serde(default = "empty_object_schema")]
     pub input_schema: Value,
+    /// Optional cache breakpoint marker on this tool definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+    /// Anthropic deferred-loading hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer_loading: Option<bool>,
+    /// Strict schema-adherence flag (OpenAI structured tools).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
     /// Optional `type` discriminant. Anthropic accepts `"custom"` or

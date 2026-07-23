@@ -46,9 +46,13 @@ where
     }))
 }
 
+/// The canonical (OpenRouter-normalized) chat completion request. Every
+/// ingress parses into this shape and every egress reads from it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRequest {
+    /// Target model identifier (alias or provider-native id).
     pub model: String,
+    /// Conversation turns in order.
     pub messages: Vec<Message>,
 
     /// Top-level system prompt. Anthropic accepts a flat string or an
@@ -58,10 +62,13 @@ pub struct ChatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemContent>,
 
+    /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Nucleus-sampling probability mass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
+    /// Maximum tokens to generate in the completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// OpenAI accepts `stop` as EITHER a bare string OR an array of
@@ -75,22 +82,31 @@ pub struct ChatRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub stop: Option<Vec<String>>,
+    /// Whether to stream the response as SSE chunks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// Number of completions to generate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<u32>,
+    /// Sampling seed for reproducible outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
+    /// Whether to return token log-probabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<bool>,
+    /// Number of top alternatives to return per token when `logprobs` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u32>,
+    /// Per-token bias map applied to sampling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logit_bias: Option<Value>,
+    /// Presence penalty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f64>,
+    /// Frequency penalty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f64>,
+    /// Opaque end-user identifier forwarded upstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
@@ -100,8 +116,10 @@ pub struct ChatRequest {
     /// Anthropic builtins, and any future shape (passthrough).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDef>>,
+    /// Tool-selection directive, passed through verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
+    /// Structured-output / response-format directive, passed through verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<Value>,
 
@@ -157,9 +175,12 @@ pub struct ChatRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum RequestProvenance {
+    /// Constructed directly, with no ingress in the loop.
     #[default]
     Library,
+    /// Parsed by the Anthropic ingress.
     AnthropicIngress,
+    /// Parsed by the OpenAI ingress.
     OpenaiIngress,
 }
 
@@ -211,7 +232,7 @@ pub struct RoutectlInternal {
     /// ingress (any header whose name, case-insensitive, starts with
     /// `x-claude-code-`). The Anthropic-API egress merges these into
     /// the outbound request for gateway cost attribution per the
-    /// llm-gateway docs at https://code.claude.com/docs/en/llm-gateway.
+    /// llm-gateway docs at <https://code.claude.com/docs/en/llm-gateway>.
     /// Other egresses ignore this. Order-preserving so multiple
     /// `X-Claude-Code-Agent-Id` headers (if a future shape ships them)
     /// are sent in inbound order. Empty when no matching headers were
@@ -379,18 +400,26 @@ impl std::fmt::Display for ForwardedBearer {
     }
 }
 
+/// Role of a message author on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
+    /// System / developer instructions.
     System,
+    /// End-user turn.
     User,
+    /// Model turn.
     Assistant,
+    /// Tool-result turn.
     Tool,
 }
 
+/// One conversation turn in canonical form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// Author role for this turn.
     pub role: Role,
+    /// Message body (text, typed parts, or null).
     #[serde(default)]
     pub content: MessageContent,
 
@@ -409,10 +438,13 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_details: Vec<ReasoningDetail>,
 
+    /// Optional author name (OpenAI function/tool naming).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Correlation id for a `Role::Tool` turn's result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Assistant tool-call requests (OpenAI shape), passed through verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<Value>>,
 
@@ -425,9 +457,11 @@ pub struct Message {
     pub refusal: Option<String>,
 }
 
+/// A message body: a flat string, typed content parts, or null.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
+    /// Flat text content.
     Text(String),
     /// Typed content parts. Round-trips Anthropic and OpenAI-shape blocks
     /// losslessly via `ContentPart` (see `crate::content_part`). Unknown
@@ -472,13 +506,18 @@ pub struct ReasoningConfig {
 /// clients that treat these fields as informational.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
+    /// Upstream response id (empty when the upstream omitted it).
     #[serde(default)]
     pub id: String,
+    /// Model that produced the response (empty when omitted).
     #[serde(default)]
     pub model: String,
+    /// Unix creation timestamp (zero when omitted).
     #[serde(default)]
     pub created: i64,
+    /// Completion choices.
     pub choices: Vec<Choice>,
+    /// Token usage tallies, when the upstream reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     /// Which configured provider answered (routectl-specific extension; clients ignore).
@@ -505,11 +544,15 @@ pub struct ChatResponse {
     pub upstream_meta: Option<crate::upstream_meta::UpstreamMeta>,
 }
 
+/// One completion choice in a `ChatResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Choice {
+    /// Zero-based choice index.
     #[serde(default)]
     pub index: u32,
+    /// The assistant message for this choice.
     pub message: Message,
+    /// Why generation stopped (`stop`, `length`, `tool_calls`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     /// The matched stop sequence (when the upstream surfaced one). Set
@@ -536,12 +579,16 @@ pub struct Choice {
 /// `cache_read_input_tokens`, and the per-TTL breakdown).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
+    /// Tokens in the prompt.
     #[serde(default)]
     pub prompt_tokens: u32,
+    /// Tokens generated in the completion.
     #[serde(default)]
     pub completion_tokens: u32,
+    /// Sum of prompt and completion tokens.
     #[serde(default)]
     pub total_tokens: u32,
+    /// Reasoning tokens billed, when the upstream reports them separately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
     /// Tokens written to the prompt cache on this request (cache miss
@@ -599,8 +646,10 @@ impl Usage {
 /// Per-TTL breakdown of cache writes for one request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CacheCreation {
+    /// Tokens written to the 5-minute-TTL cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_5m_input_tokens: Option<u32>,
+    /// Tokens written to the 1-hour-TTL cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_1h_input_tokens: Option<u32>,
 }
@@ -614,6 +663,7 @@ pub struct CacheCreation {
 /// Wire reference: <https://docs.anthropic.com/en/api/messages-count-tokens>
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenCount {
+    /// Token count Anthropic reports for the supplied request.
     pub input_tokens: u32,
     /// Forward-compat catchall. Anthropic's response carries
     /// `cache_creation_input_tokens` and `cache_read_input_tokens`
@@ -631,10 +681,13 @@ pub struct TokenCount {
 /// that only look at `choices[].delta`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatChunk {
+    /// Upstream chunk id (empty when omitted).
     #[serde(default)]
     pub id: String,
+    /// Model that produced the chunk (empty when omitted).
     #[serde(default)]
     pub model: String,
+    /// Per-choice deltas carried by this chunk.
     #[serde(default)]
     pub choices: Vec<ChunkChoice>,
     /// Streaming usage update. Anthropic emits cache stats in
@@ -661,11 +714,15 @@ pub struct ChatChunk {
     pub upstream_meta: Option<crate::upstream_meta::UpstreamMeta>,
 }
 
+/// One streaming choice delta within a `ChatChunk`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkChoice {
+    /// Zero-based choice index this delta applies to.
     #[serde(default)]
     pub index: u32,
+    /// The incremental delta for this choice.
     pub delta: ChunkDelta,
+    /// Why generation stopped, on the terminal chunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     /// The matched stop sequence on the terminal chunk. Parallel to
@@ -676,18 +733,23 @@ pub struct ChunkChoice {
     pub matched_stop_sequence: Option<String>,
 }
 
+/// Incremental content for one streaming choice.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChunkDelta {
+    /// Author role, set on the opening delta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
+    /// Incremental text content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     /// Upstream `reasoning_content` is coalesced here by the SSE chunk
     /// preprocessor; see `coalesce_reasoning_content` in openai_compat/sse.rs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Incremental typed reasoning blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_details: Vec<ReasoningDetail>,
+    /// Incremental assistant tool-call requests, passed through verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<Value>>,
 }
@@ -696,18 +758,25 @@ pub struct ChunkDelta {
 /// because chunks may carry partial info.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageDelta {
+    /// Prompt token count, when carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
+    /// Completion token count, when carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<u32>,
+    /// Total token count, when carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u32>,
+    /// Reasoning token count, when carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
+    /// Cache-write token count, when carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u32>,
+    /// Cache-read token count, when carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u32>,
+    /// Per-TTL cache-write breakdown, when carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation: Option<CacheCreation>,
     /// Server-side tool invocation counts streamed in Anthropic's
@@ -740,14 +809,19 @@ pub struct Reasoning {
 /// defaults when they need them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningDetail {
+    /// Discriminator selecting the payload shape and egress handling.
     #[serde(rename = "type")]
     pub kind: ReasoningDetailKind,
+    /// Provider block id, when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Provider-specific shape tag (e.g. `anthropic-claude-v1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// Ordering index within a multi-block reasoning stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
+    /// The kind-specific fields (text, signature, encrypted content, ...).
     #[serde(flatten)]
     pub payload: Value,
 }

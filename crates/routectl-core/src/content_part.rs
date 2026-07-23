@@ -24,16 +24,21 @@ use crate::cache_control::CacheControl;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ContentPart {
+    /// A block type the hub introspects; see [`KnownContentPart`].
     Known(KnownContentPart),
     /// Forward-compat catchall. Captures the original `type` discriminant,
     /// any `cache_control` marker, and all other fields verbatim. The
     /// Anthropic egress re-emits this verbatim; non-Anthropic egresses
     /// drop with a `tracing::warn!`.
     Other {
+        /// Original wire `type` discriminant.
         #[serde(rename = "type")]
         type_tag: String,
+        /// Cache breakpoint marker, surfaced so future block types still
+        /// reach the validator.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// All remaining fields, preserved verbatim.
         #[serde(flatten)]
         extras: Map<String, Value>,
     },
@@ -50,9 +55,12 @@ pub enum KnownContentPart {
     /// Plain text block. The most common content shape; carried by
     /// every wire dialect routectl translates.
     Text {
+        /// The text payload.
         text: String,
+        /// Optional citation metadata carried alongside the text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         citations: Option<Value>,
+        /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -60,7 +68,9 @@ pub enum KnownContentPart {
     /// media_type, data}` or `{type: "url", url}` depending on Anthropic
     /// API version.
     Image {
+        /// Image payload (`base64` or `url` source object).
         source: Value,
+        /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -68,7 +78,9 @@ pub enum KnownContentPart {
     /// detail}}`). Kept distinct from `Image` so each ingress emits its
     /// native shape and round-tripping is byte-stable.
     ImageUrl {
+        /// Nested `image_url` object, preserved verbatim.
         image_url: Value,
+        /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -81,7 +93,9 @@ pub enum KnownContentPart {
     /// block. `file` carries the raw nested object verbatim, mirroring
     /// how `ImageUrl` carries `image_url`.
     File {
+        /// Nested `file` object, preserved verbatim.
         file: Value,
+        /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -91,11 +105,15 @@ pub enum KnownContentPart {
     /// equivalent and lift `title` / `citations` only on Anthropic
     /// egresses.
     Document {
+        /// Document payload (`base64` / `url` / `text` source object).
         source: Value,
+        /// Optional document title.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// Optional citation metadata.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         citations: Option<Value>,
+        /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -104,9 +122,13 @@ pub enum KnownContentPart {
     /// follow-up user turn. `input` is the JSON-encoded args object the
     /// model decided to pass to the tool.
     ToolUse {
+        /// Correlation id echoed by the matching tool result.
         id: String,
+        /// Tool name the model chose to call.
         name: String,
+        /// JSON-encoded arguments the model passed to the tool.
         input: Value,
+        /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -116,17 +138,23 @@ pub enum KnownContentPart {
     /// `is_error` flags structured tool errors so the model can
     /// disambiguate from successful results.
     ToolResult {
+        /// Correlation id matching the originating `ToolUse.id`.
         tool_use_id: String,
+        /// Tool output returned to the model.
         content: Value,
+        /// Whether the tool returned a structured error.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
     /// Extended thinking block. `signature` is mandatory for multi-turn
     /// tool-use continuity on Anthropic and is preserved verbatim.
     Thinking {
+        /// The model's reasoning text.
         thinking: String,
+        /// Opaque signature required for multi-turn tool-use continuity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
@@ -134,7 +162,10 @@ pub enum KnownContentPart {
     /// opaque encrypted payload AWS / Anthropic substituted for content
     /// their safety system flagged. Preserve verbatim on round-trip;
     /// never log the contents.
-    RedactedThinking { data: String },
+    RedactedThinking {
+        /// Opaque encrypted payload; preserve verbatim, never log.
+        data: String,
+    },
 }
 
 impl ContentPart {
@@ -158,6 +189,8 @@ impl ContentPart {
 }
 
 impl KnownContentPart {
+    /// `cache_control` if the block carries one; `None` for `Thinking`
+    /// and `RedactedThinking`, which cannot bear a marker.
     pub const fn cache_control(&self) -> Option<&CacheControl> {
         match self {
             Self::Text { cache_control, .. }
@@ -171,6 +204,7 @@ impl KnownContentPart {
         }
     }
 
+    /// Wire-shape `type` discriminant for this block.
     pub const fn type_tag(&self) -> &'static str {
         match self {
             Self::Text { .. } => "text",

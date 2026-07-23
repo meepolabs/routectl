@@ -15,7 +15,9 @@ use crate::cache_control::CacheControl;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SystemContent {
+    /// Flat system-prompt string.
     Text(String),
+    /// Array of typed system blocks with per-block cache markers.
     Blocks(Vec<SystemBlock>),
 }
 
@@ -28,9 +30,12 @@ pub struct SystemBlock {
     /// can build a `SystemBlock` programmatically without repeating it.
     #[serde(rename = "type", default = "default_text_type")]
     pub kind: String,
+    /// The block's text content.
     pub text: String,
+    /// Optional cache breakpoint marker on this block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+    /// Optional citation metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citations: Option<serde_json::Value>,
 }
