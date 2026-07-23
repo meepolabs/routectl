@@ -25,7 +25,12 @@ pub enum MigrateError {
     /// not downgrade; the caller should refuse to write rather than
     /// corrupt a forward-versioned file.
     #[error("db schema version {found} is newer than supported {supported}")]
-    VersionTooNew { found: i64, supported: i64 },
+    VersionTooNew {
+        /// On-disk schema version.
+        found: i64,
+        /// Highest version this binary understands.
+        supported: i64,
+    },
 }
 
 /// Read the current `PRAGMA user_version`.

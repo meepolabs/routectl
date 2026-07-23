@@ -138,6 +138,7 @@ impl UsageWriter {
     }
 
     /// Read-only view of the shared health counters.
+    #[doc(hidden)]
     pub const fn counters(&self) -> &Arc<UsageCounters> {
         &self.counters
     }

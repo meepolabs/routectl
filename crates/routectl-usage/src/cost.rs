@@ -25,10 +25,15 @@ const TOKENS_PER_MTOK: f64 = 1_000_000.0;
 /// output, so reasoning never appears as a separate cost dimension.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Rates {
+    /// USD per million input tokens. `None` leaves the input dimension unpriced.
     pub input_per_mtok: Option<f64>,
+    /// USD per million output tokens. `None` leaves the output dimension unpriced.
     pub output_per_mtok: Option<f64>,
+    /// USD per million cache-read tokens. `None` leaves cache reads unpriced.
     pub cache_read_per_mtok: Option<f64>,
+    /// USD per million 5-minute cache-write tokens. `None` leaves them unpriced.
     pub cache_write_5m_per_mtok: Option<f64>,
+    /// USD per million 1-hour cache-write tokens. `None` leaves them unpriced.
     pub cache_write_1h_per_mtok: Option<f64>,
 }
 
@@ -36,11 +41,17 @@ pub struct Rates {
 /// component fields always sum to `total_usd`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostBreakdown {
+    /// Sum of the five component costs, USD.
     pub total_usd: f64,
+    /// Input-token cost, USD.
     pub input_usd: f64,
+    /// Output-token cost, USD.
     pub output_usd: f64,
+    /// Cache-read cost, USD.
     pub cache_read_usd: f64,
+    /// 5-minute cache-write cost, USD.
     pub cache_write_5m_usd: f64,
+    /// 1-hour cache-write cost, USD.
     pub cache_write_1h_usd: f64,
 }
 
@@ -61,6 +72,7 @@ pub struct CostBreakdown {
 ///
 /// Reasoning tokens are intentionally excluded: they are billed as
 /// output upstream, so counting them here would double-charge.
+#[doc(hidden)]
 pub fn estimate_cost(record: &UsageRecord, rates: &Rates) -> Option<CostBreakdown> {
     estimate_cost_tokens(
         opt_u64_to_i64(record.input_tokens),

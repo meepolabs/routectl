@@ -17,8 +17,14 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+    /// The request completed successfully.
     Ok,
+    /// The upstream provider returned an error after a dispatch attempt.
     UpstreamError,
+    /// The client hung up before the request finalized. Also the enum's
+    /// `Default`, so it is the abnormal-exit sentinel stamped on a
+    /// finalize-less exit.
+    //
     // `#[default]` resolves to the real, persisted `ClientDisconnect`
     // outcome -- chosen because it is the abnormal-exit sentinel the
     // finalize/Drop path already stamps via `mem::take` for a
@@ -29,8 +35,11 @@ pub enum Outcome {
     // DB writer except on that abnormal-exit path.
     #[default]
     ClientDisconnect,
+    /// The request exceeded its deadline before completing.
     Timeout,
+    /// The request was cancelled before completing.
     Cancelled,
+    /// A local gate refused the request before any dispatch attempt.
     GateBlocked,
 }
 
@@ -86,16 +95,29 @@ impl TryFrom<&str> for Outcome {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageRecord {
     // IDENTITY
+    /// Request start time, epoch-millis UTC.
     pub ts_start: i64,
+    /// Request completion time, epoch-millis UTC.
     pub ts_end: i64,
+    /// Unique request identifier; the idempotency key for this row.
     pub request_id: String,
+    /// Wire dialect the client spoke (e.g. `anthropic`, `openai`).
     pub ingress_dialect: String,
+    /// Model name the client asked for, before alias resolution.
     pub requested_model: String,
+    /// Resolved routing alias the request mapped to.
     pub alias: String,
+    /// Served model nickname. `None` when no target was dispatched.
     pub model: Option<String>,
+    /// Served upstream target id. `None` when no target was dispatched.
     pub upstream: Option<String>,
+    /// Served provider name. `None` when no target was dispatched.
     pub provider: Option<String>,
+    /// Stable provider-kind token of the served target. `None` when no
+    /// target was dispatched.
     pub provider_kind: Option<String>,
+    /// Seat the served target drew from. `None` for keyless / non-pooled
+    /// targets.
     pub seat: Option<String>,
     /// Populated from the Anthropic ingress's `inbound_session_key`
     /// (header `x-claude-code-session-id`, falling back to body
@@ -107,17 +129,29 @@ pub struct UsageRecord {
     pub session_id: Option<String>,
 
     // SHAPE
+    /// Whether the client requested a streaming response.
     pub stream: bool,
+    /// Client-requested max output tokens. `None` when unset.
     pub max_tokens_req: Option<u32>,
+    /// Number of tools declared in the request.
     pub tool_count: u32,
+    /// Client-requested thinking/reasoning budget. `None` when unset.
     pub thinking_req: Option<u32>,
+    /// Kind of thinking budget requested (e.g. `budget_tokens`). `None`
+    /// when unset.
     pub thinking_req_kind: Option<String>,
+    /// Number of messages in the request.
     pub msg_count: u32,
+    /// Requested service tier. `None` when unset.
     pub service_tier: Option<String>,
 
     // OUTCOME
+    /// Terminal outcome of the request.
     pub outcome: Outcome,
+    /// Client-transport HTTP status. `None` for streaming rows written
+    /// before the commit-point fix.
     pub http_status: Option<u16>,
+    /// Legacy free-form error-class label. `None` on success.
     pub error_class: Option<String>,
     /// Canonical kebab failure-class token (`FailureClass::class_token`) for a
     /// request that reached a dispatch attempt and failed. `None` for a
@@ -126,8 +160,12 @@ pub struct UsageRecord {
     /// (`Unknown`). A `None` reads back as "unclassified"; there is no
     /// backfill of rows written before this column existed.
     pub resolved_class: Option<String>,
+    /// Upstream finish reason (e.g. `stop`, `length`). `None` when the
+    /// request did not complete with a reported reason.
     pub finish_reason: Option<String>,
+    /// Number of dispatch attempts made for this request.
     pub attempt_count: u32,
+    /// Number of fallbacks past the first target.
     pub fallback_count: u32,
     /// Stable auto-cache decision token for the served target (e.g.
     /// `auto_emitted`, `caller_supplied`, `auto_skipped:no_capability`).
@@ -213,28 +251,50 @@ pub struct UsageRecord {
     pub would_trim_context_fraction: Option<f64>,
 
     // TIMING
+    /// End-to-end request latency, milliseconds.
     pub latency_ms: i64,
+    /// Time to first byte, milliseconds. `None` for non-streaming rows
+    /// and when no first byte was observed.
     pub ttfb_ms: Option<i64>,
 
     // TOKENS
+    /// Cache-exclusive new input tokens. `None` when not reported.
     pub input_tokens: Option<u64>,
+    /// Output tokens generated. `None` when not reported.
     pub output_tokens: Option<u64>,
+    /// Reasoning tokens (billed as output upstream). `None` when not
+    /// reported.
     pub reasoning_tokens: Option<u64>,
+    /// Cached prefix tokens re-read this turn (a per-turn snapshot, not a
+    /// flow). `None` when not reported.
     pub cache_read: Option<u64>,
+    /// Tokens written to the 5-minute cache. `None` when not reported.
     pub cache_write_5m: Option<u64>,
+    /// Tokens written to the 1-hour cache. `None` when not reported.
     pub cache_write_1h: Option<u64>,
+    /// Server-tool invocation counts as a JSON map. `None` when no server
+    /// tools were used.
     pub server_tool_use: Option<Value>,
 
     // QUOTA snapshot
+    /// Quota claim token reported by the upstream. `None` when absent.
     pub quota_claim: Option<String>,
+    /// Quota status reported by the upstream. `None` when absent.
     pub quota_status: Option<String>,
+    /// Overage-quota status reported by the upstream. `None` when absent.
     pub quota_overage_status: Option<String>,
+    /// Primary-quota utilization ratio. `None` when absent.
     pub quota_utilization: Option<f64>,
+    /// Overage-quota utilization ratio. `None` when absent.
     pub quota_overage_utilization: Option<f64>,
+    /// Quota reset time, epoch-millis UTC. `None` when absent.
     pub quota_reset: Option<i64>,
+    /// Remaining quota fields as a JSON map. `None` when absent.
     pub quota_extras: Option<Value>,
 
     // EXTENSIBILITY
+    /// Forward-compatible JSON side-channel for fields without a dedicated
+    /// column. `None` when unused.
     pub extra: Option<Value>,
 }
 

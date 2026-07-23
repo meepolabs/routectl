@@ -1,4 +1,5 @@
 #![deny(rustdoc::broken_intra_doc_links)]
+#![warn(missing_docs)]
 //! Usage-accounting persistence for routectl.
 //!
 //! This crate owns the canonical `UsageRecord` shape, the closed
@@ -31,6 +32,5 @@ pub use query::{
     shadow_misfire_summary, ttfbs, would_trim_summary,
 };
 pub use record::{Outcome, ParseOutcomeError, UsageRecord};
-pub use retention::{PruneOutcome, prune};
-pub use schema::{META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION};
+pub use schema::SCHEMA_VERSION;
 pub use writer::{CHANNEL_CAPACITY, UsageWriter};

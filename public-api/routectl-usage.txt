@@ -162,52 +162,6 @@ pub fn routectl_usage::Outcome::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_usage::Outcome where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_usage::Outcome
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::Outcome
-pub enum routectl_usage::PruneOutcome
-pub routectl_usage::PruneOutcome::Pruned
-pub routectl_usage::PruneOutcome::Pruned::deleted: usize
-pub routectl_usage::PruneOutcome::Skipped
-impl core::clone::Clone for routectl_usage::PruneOutcome
-pub fn routectl_usage::PruneOutcome::clone(&self) -> routectl_usage::PruneOutcome
-impl core::cmp::Eq for routectl_usage::PruneOutcome
-impl core::cmp::PartialEq for routectl_usage::PruneOutcome
-pub fn routectl_usage::PruneOutcome::eq(&self, &routectl_usage::PruneOutcome) -> bool
-impl core::fmt::Debug for routectl_usage::PruneOutcome
-pub fn routectl_usage::PruneOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_usage::PruneOutcome
-impl core::marker::StructuralPartialEq for routectl_usage::PruneOutcome
-impl core::marker::Freeze for routectl_usage::PruneOutcome
-impl core::marker::Send for routectl_usage::PruneOutcome
-impl core::marker::Sync for routectl_usage::PruneOutcome
-impl core::marker::Unpin for routectl_usage::PruneOutcome
-impl core::marker::UnsafeUnpin for routectl_usage::PruneOutcome
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::PruneOutcome
-impl core::panic::unwind_safe::UnwindSafe for routectl_usage::PruneOutcome
-impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::PruneOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn routectl_usage::PruneOutcome::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for routectl_usage::PruneOutcome where U: core::convert::From<T>
-pub fn routectl_usage::PruneOutcome::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_usage::PruneOutcome where U: core::convert::Into<T>
-pub type routectl_usage::PruneOutcome::Error = core::convert::Infallible
-pub fn routectl_usage::PruneOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_usage::PruneOutcome where U: core::convert::TryFrom<T>
-pub type routectl_usage::PruneOutcome::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_usage::PruneOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_usage::PruneOutcome where T: core::clone::Clone
-pub type routectl_usage::PruneOutcome::Owned = T
-pub fn routectl_usage::PruneOutcome::clone_into(&self, &mut T)
-pub fn routectl_usage::PruneOutcome::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_usage::PruneOutcome where T: 'static + ?core::marker::Sized
-pub fn routectl_usage::PruneOutcome::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_usage::PruneOutcome where T: ?core::marker::Sized
-pub fn routectl_usage::PruneOutcome::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_usage::PruneOutcome where T: ?core::marker::Sized
-pub fn routectl_usage::PruneOutcome::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_usage::PruneOutcome where T: core::clone::Clone
-pub unsafe fn routectl_usage::PruneOutcome::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_usage::PruneOutcome
-pub fn routectl_usage::PruneOutcome::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_usage::PruneOutcome
-impl<T> tracing::instrument::WithSubscriber for routectl_usage::PruneOutcome
 pub enum routectl_usage::QueryError
 pub routectl_usage::QueryError::Sqlite(rusqlite::error::Error)
 impl core::convert::From<rusqlite::error::Error> for routectl_usage::QueryError
@@ -754,46 +708,6 @@ impl<T> core::convert::From<T> for routectl_usage::ShadowMisfireSummary
 pub fn routectl_usage::ShadowMisfireSummary::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::ShadowMisfireSummary
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::ShadowMisfireSummary
-pub struct routectl_usage::UsageCounters
-impl routectl_usage::UsageCounters
-pub fn routectl_usage::UsageCounters::dropped_disabled(&self) -> u64
-pub fn routectl_usage::UsageCounters::dropped_full(&self) -> u64
-pub fn routectl_usage::UsageCounters::enqueued(&self) -> u64
-pub fn routectl_usage::UsageCounters::learn_events_dropped_full(&self) -> u64
-pub fn routectl_usage::UsageCounters::learn_events_enqueued(&self) -> u64
-pub fn routectl_usage::UsageCounters::learn_events_persisted(&self) -> u64
-pub fn routectl_usage::UsageCounters::persisted(&self) -> u64
-pub fn routectl_usage::UsageCounters::prune_errors(&self) -> u64
-pub fn routectl_usage::UsageCounters::write_errors(&self) -> u64
-impl core::default::Default for routectl_usage::UsageCounters
-pub fn routectl_usage::UsageCounters::default() -> routectl_usage::UsageCounters
-impl core::fmt::Debug for routectl_usage::UsageCounters
-pub fn routectl_usage::UsageCounters::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl !core::marker::Freeze for routectl_usage::UsageCounters
-impl core::marker::Send for routectl_usage::UsageCounters
-impl core::marker::Sync for routectl_usage::UsageCounters
-impl core::marker::Unpin for routectl_usage::UsageCounters
-impl core::marker::UnsafeUnpin for routectl_usage::UsageCounters
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::UsageCounters
-impl core::panic::unwind_safe::UnwindSafe for routectl_usage::UsageCounters
-impl<T, U> core::convert::Into<U> for routectl_usage::UsageCounters where U: core::convert::From<T>
-pub fn routectl_usage::UsageCounters::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_usage::UsageCounters where U: core::convert::Into<T>
-pub type routectl_usage::UsageCounters::Error = core::convert::Infallible
-pub fn routectl_usage::UsageCounters::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_usage::UsageCounters where U: core::convert::TryFrom<T>
-pub type routectl_usage::UsageCounters::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_usage::UsageCounters::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for routectl_usage::UsageCounters where T: 'static + ?core::marker::Sized
-pub fn routectl_usage::UsageCounters::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_usage::UsageCounters where T: ?core::marker::Sized
-pub fn routectl_usage::UsageCounters::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_usage::UsageCounters where T: ?core::marker::Sized
-pub fn routectl_usage::UsageCounters::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for routectl_usage::UsageCounters
-pub fn routectl_usage::UsageCounters::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_usage::UsageCounters
-impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageCounters
 pub struct routectl_usage::UsageDb
 impl routectl_usage::UsageDb
 pub const fn routectl_usage::UsageDb::conn(&self) -> &rusqlite::Connection
@@ -826,7 +740,6 @@ impl<T> tracing::instrument::Instrument for routectl_usage::UsageDb
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageDb
 pub struct routectl_usage::UsageHandle
 impl routectl_usage::UsageHandle
-pub const fn routectl_usage::UsageHandle::counters(&self) -> &alloc::sync::Arc<routectl_usage::UsageCounters>
 pub fn routectl_usage::UsageHandle::is_enabled(&self) -> bool
 pub fn routectl_usage::UsageHandle::set_enabled(&self, bool)
 pub fn routectl_usage::UsageHandle::try_send(&self, routectl_usage::UsageRecord)
@@ -966,7 +879,6 @@ impl<T> tracing::instrument::Instrument for routectl_usage::UsageRecord
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageRecord
 pub struct routectl_usage::UsageWriter
 impl routectl_usage::UsageWriter
-pub const fn routectl_usage::UsageWriter::counters(&self) -> &alloc::sync::Arc<routectl_usage::UsageCounters>
 pub fn routectl_usage::UsageWriter::shutdown(self)
 pub fn routectl_usage::UsageWriter::start(std::path::PathBuf, usize, u32, bool) -> (routectl_usage::UsageHandle, Self)
 impl core::ops::drop::Drop for routectl_usage::UsageWriter
@@ -1048,12 +960,9 @@ pub fn routectl_usage::WouldTrimSummary::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::WouldTrimSummary
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::WouldTrimSummary
 pub const routectl_usage::CHANNEL_CAPACITY: usize
-pub const routectl_usage::META_CREATED_AT_MS: &str
-pub const routectl_usage::META_SCHEMA_VERSION: &str
 pub const routectl_usage::SCHEMA_VERSION: i64
 pub fn routectl_usage::aggregate(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<routectl_usage::AggRow>, routectl_usage::QueryError>
 pub fn routectl_usage::errors_by_class(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, alloc::string::String, i64)>, routectl_usage::QueryError>
-pub fn routectl_usage::estimate_cost(&routectl_usage::UsageRecord, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>
 pub fn routectl_usage::estimate_cost_tokens(i64, i64, i64, i64, i64, i64, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>
 pub fn routectl_usage::k_calibration_summary(&routectl_usage::UsageDb) -> core::result::Result<routectl_usage::KCalibration, routectl_usage::QueryError>
 pub fn routectl_usage::latest_quota(&routectl_usage::UsageDb) -> core::result::Result<core::option::Option<routectl_usage::QuotaSnapshot>, routectl_usage::QueryError>
@@ -1061,7 +970,6 @@ pub fn routectl_usage::m1_attribution_summary(&routectl_usage::UsageDb, i64, i64
 pub fn routectl_usage::open(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
 pub fn routectl_usage::open_readonly(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
 pub fn routectl_usage::open_readonly_fastfail(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
-pub fn routectl_usage::prune(&rusqlite::Connection, u32, i64) -> core::result::Result<routectl_usage::PruneOutcome, rusqlite::error::Error>
 pub fn routectl_usage::read_reuse_samples_since(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::ReuseSampleRow>>
 pub fn routectl_usage::shadow_misfire_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::ShadowMisfireSummary, routectl_usage::QueryError>
 pub fn routectl_usage::ttfbs(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, i64)>, routectl_usage::QueryError>
