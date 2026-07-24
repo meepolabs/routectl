@@ -127,6 +127,9 @@ fn anthropic_provider(base_url: String, allowed_betas: Vec<String>) -> Anthropic
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     })
 }
 

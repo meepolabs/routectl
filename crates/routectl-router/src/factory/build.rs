@@ -303,6 +303,9 @@ async fn build_provider_inner(
                 session_id,
                 cloak: cloak.clone(),
                 use_forwarded_bearer: is_forwarded,
+
+                #[cfg(feature = "bedrock")]
+                mantle: None,
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }

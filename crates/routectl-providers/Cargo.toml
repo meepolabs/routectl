@@ -115,6 +115,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-
 pretty_assertions = "1"
 insta.workspace = true
 tracing-test = "0.2"
+# Names `span::Current` for a bespoke capture subscriber that asserts the
+# mantle lane-context span fields. Already in the tree via `tracing`.
+tracing-core = "0.1"
 routectl-testkit.workspace = true
 
 [lints]

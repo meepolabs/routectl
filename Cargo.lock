@@ -2728,6 +2728,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-core",
  "tracing-test",
  "uuid",
  "wiremock",

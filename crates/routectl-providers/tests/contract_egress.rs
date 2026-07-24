@@ -45,6 +45,9 @@ fn anthropic_api_provider() -> AnthropicApiProvider {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     })
 }
 
@@ -421,6 +424,9 @@ mod forward_compat_pins {
             session_id: None,
             cloak: CloakConfig::default(),
             use_forwarded_bearer: false,
+
+            #[cfg(feature = "bedrock")]
+            mantle: None,
         })
     }
 

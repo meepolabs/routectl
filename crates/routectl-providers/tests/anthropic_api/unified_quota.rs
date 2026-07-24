@@ -266,6 +266,9 @@ async fn oauth_bearer_populates_upstream_meta_from_unified_headers() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = base_req("claude-3-opus", vec![user_msg("hi")]);

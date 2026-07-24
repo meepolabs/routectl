@@ -76,6 +76,9 @@ fn make_provider(base_url: &str) -> AnthropicApiProvider {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     AnthropicApiProvider::new(cfg)
 }

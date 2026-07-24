@@ -52,6 +52,8 @@ pub(crate) const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 use sse::SseState;
 
+#[cfg(feature = "bedrock")]
+pub use client::MantleAuth;
 pub use client::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
 pub use cloak::{CloakConfig, CloakMode, ToolRename};
 
@@ -80,8 +82,10 @@ impl Provider for AnthropicApiProvider {
         response::normalize(&self.cfg.id, raw)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        #[cfg(feature = "bedrock")]
+        self.record_mantle_span_fields();
         let forwarded_leg = self.forwarded_leg(&req);
         let mut body = self.normalize_request(&req)?;
         // Ensure stream is absent / false for the non-streaming path.
@@ -144,14 +148,22 @@ impl Provider for AnthropicApiProvider {
 
         let (rb, beta_decision) =
             self.build_headers(self.client.post(self.messages_url()), &req, &token);
-        let request = rb
+        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        let mut request = rb
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Mantle lane: SigV4/bearer-sign the built request before any
+        // header trace or execute so the trace shows the real auth header
+        // and the signed input matches the transmitted bytes. No-op on the
+        // first-party lane.
+        #[cfg(feature = "bedrock")]
+        self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth) from the built
         // request -- auth is only present after build_headers applies
-        // the resolved token. Opt-in via ROUTECTL_TRACE_HEADERS.
+        // the resolved token (and, on the mantle lane, after signing).
+        // Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
         let resp = self
             .client
@@ -266,8 +278,10 @@ impl Provider for AnthropicApiProvider {
         Ok(chat_resp)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        #[cfg(feature = "bedrock")]
+        self.record_mantle_span_fields();
         let forwarded_leg = self.forwarded_leg(&req);
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
@@ -306,11 +320,16 @@ impl Provider for AnthropicApiProvider {
 
         let (rb, beta_decision) =
             self.build_headers(self.client.post(self.messages_url()), &req, &token);
-        let request = rb
+        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        let mut request = rb
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Mantle lane: sign the built stream request before trace/execute
+        // (see complete()). No-op on the first-party lane.
+        #[cfg(feature = "bedrock")]
+        self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth) for the stream
         // path. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
@@ -495,8 +514,10 @@ impl Provider for AnthropicApiProvider {
     /// anthropic-version, header_extras, X-Claude-Code-* allowlist
     /// filter, auth) -- so a count_tokens call observes the same
     /// merged beta surface as the messages endpoint.
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        #[cfg(feature = "bedrock")]
+        self.record_mantle_span_fields();
         // No `forwarded_leg` local here: count_tokens is unsigned (no cch
         // re-sign) and its only body mutation is `cloak_body`, which
         // self-gates on the forwarded leg (see the FORWARDING TRANSPARENCY
@@ -518,14 +539,30 @@ impl Provider for AnthropicApiProvider {
 
         let token = self.resolve_effective_token(&req).await?;
 
-        // count_tokens is deliberately unsigned (matches upstream).
+        // On the first-party lane count_tokens is deliberately unsigned
+        // (matches upstream) and posts via `.json()`. On the mantle lane
+        // SigV4 must hash the body, so serialize to bytes and sign the
+        // built request -- the `.json()` unbuffered path cannot be signed.
         let (rb, beta_decision) =
             self.build_headers(self.client.post(self.count_tokens_url()), &req, &token);
-        let request = rb
-            .header("content-type", "application/json")
-            .json(&body)
-            .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        let request = if self.is_mantle() {
+            let body_bytes = serde_json::to_vec(&body)
+                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+            let mut request = rb
+                .header("content-type", "application/json")
+                .body(body_bytes)
+                .build()
+                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            #[cfg(feature = "bedrock")]
+            self.sign_mantle(&mut request).await?;
+            request
+        } else {
+            rb.header("content-type", "application/json")
+                .json(&body)
+                .build()
+                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?
+        };
         // Dir 2: outgoing request headers (incl. auth) for the
         // count_tokens probe. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());

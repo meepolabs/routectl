@@ -110,6 +110,9 @@ async fn probe_oauth_bearer_is_unsupported_with_zero_token_calls() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
 

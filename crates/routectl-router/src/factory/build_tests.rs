@@ -1108,6 +1108,9 @@ mod anthropic_api_config_propagation_tests {
         let cfg = AnthropicApiConfig::new("test", "sk-test");
         let cfg_with_flag = AnthropicApiConfig {
             use_forwarded_bearer: extracted,
+
+            #[cfg(feature = "bedrock")]
+            mantle: None,
             ..cfg
         };
 
@@ -1131,6 +1134,9 @@ mod anthropic_api_config_propagation_tests {
         let cfg = AnthropicApiConfig::new("test", "sk-test");
         let cfg_with_flag = AnthropicApiConfig {
             use_forwarded_bearer: extracted,
+
+            #[cfg(feature = "bedrock")]
+            mantle: None,
             ..cfg
         };
 

@@ -67,6 +67,8 @@ fn anthropic_api_provider(base_url: &str) -> AnthropicApiProvider {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        mantle: None,
     })
 }
 
