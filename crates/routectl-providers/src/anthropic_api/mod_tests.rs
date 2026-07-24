@@ -1945,27 +1945,13 @@ fn parse_aws_error_tokens_lifts_type_and_code() {
     assert_eq!(parse_aws_error_tokens(None), (None, None));
 }
 
-/// The AWS message lift accepts either `message` or `Message` casing.
-#[test]
-fn parse_aws_error_message_accepts_either_casing() {
-    let lower = serde_json::from_str::<Value>(r#"{"message":"lower"}"#).ok();
-    assert_eq!(
-        parse_aws_error_message(lower.as_ref()).as_deref(),
-        Some("lower")
-    );
-    let upper = serde_json::from_str::<Value>(r#"{"Message":"upper"}"#).ok();
-    assert_eq!(
-        parse_aws_error_message(upper.as_ref()).as_deref(),
-        Some("upper")
-    );
-    let none = serde_json::from_str::<Value>(r#"{"ok":true}"#).ok();
-    assert_eq!(parse_aws_error_message(none.as_ref()), None);
-}
-
 /// A mantle 403 carrying a namespaced AWS `__type` must surface the bare
 /// exception token in `upstream_type` (403 already classifies Auth by
-/// status; the lifted token is what makes the log truthful) and the AWS
-/// `message` as the extracted message.
+/// status; the lifted token is what makes the log truthful). The
+/// free-text message is scrubbed by the shared Bedrock 403 path -- every
+/// 403 collapses to the generic "bedrock access denied" client message
+/// (the actionable classifier survives in `upstream_type`), so an AWS
+/// AccessDenied body can never leak a principal ARN / account / resource.
 #[cfg(feature = "bedrock")]
 #[tokio::test]
 async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
@@ -1974,9 +1960,9 @@ async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
 
     let (msg, err) = read_anthropic_error("mantle_prod", 403, resp).await;
 
-    assert!(
-        msg.contains("does not match"),
-        "AWS `message` must be the extracted message: {msg:?}"
+    assert_eq!(
+        msg, "bedrock access denied",
+        "a 403 free-text message must collapse to the generic scrub: {msg:?}"
     );
     match err {
         Error::Upstream {
@@ -1989,11 +1975,15 @@ async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
             assert_eq!(status, 403);
             assert_eq!(upstream_type.as_deref(), Some("SignatureDoesNotMatch"));
             assert_eq!(upstream_code, None);
-            // No top-level `error` key, so the AWS body is not carried raw;
-            // the client-facing body is the sanitized extracted message.
+            // The AWS body is never carried raw on the mantle lift; the
+            // client-facing body is the scrubbed message.
             assert!(
                 !body.contains("__type"),
                 "AWS envelope must not be carried raw in .body: {body:?}"
+            );
+            assert_eq!(
+                body, "bedrock access denied",
+                "the client-facing body must be the scrubbed message: {body:?}"
             );
         }
         other => panic!("expected Error::Upstream, got {other:?}"),

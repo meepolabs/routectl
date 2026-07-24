@@ -63,7 +63,7 @@ pub async fn apply_with_service(
                     error = %e,
                     "bedrock auth failed",
                 );
-                Error::Auth(format!("{service}: invalid bearer key: {e}"))
+                Error::Auth("aws bearer credential invalid".into())
             })?;
             req.headers_mut().insert(AUTHORIZATION, value);
             Ok(())
@@ -78,7 +78,7 @@ pub async fn apply_with_service(
                     error = %e,
                     "bedrock auth failed",
                 );
-                Error::Auth(format!("{service}: credentials unavailable: {e}"))
+                Error::Auth("aws credentials unavailable".into())
             })?;
             sigv4_sign(req, &credentials, region, service)
         }
@@ -128,7 +128,7 @@ fn sigv4_sign(
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("{service}: signing params build failed: {e}"))
+            Error::Auth("aws request signing failed".into())
         })?;
     let signing_params = v4_params.into();
 
@@ -149,10 +149,7 @@ fn sigv4_sign(
                     error = %e,
                     "bedrock auth failed",
                 );
-                Error::Auth(format!(
-                    "{service}: header `{}` has non-ASCII value, cannot SigV4-sign: {e}",
-                    k.as_str()
-                ))
+                Error::Auth("aws request signing failed".into())
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -168,7 +165,7 @@ fn sigv4_sign(
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("{service}: signable request build failed: {e}"))
+            Error::Auth("aws request signing failed".into())
         })?;
 
     let (instructions, _signature) = sign(signable, &signing_params)
@@ -180,7 +177,7 @@ fn sigv4_sign(
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("{service}: SigV4 sign failed: {e}"))
+            Error::Auth("aws request signing failed".into())
         })?
         .into_parts();
 
@@ -195,7 +192,7 @@ fn sigv4_sign(
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("{service}: signed header name invalid: {e}"))
+            Error::Auth("aws request signing failed".into())
         })?;
         let value = HeaderValue::from_str(header.value()).map_err(|e| {
             tracing::error!(
@@ -204,7 +201,7 @@ fn sigv4_sign(
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("{service}: signed header value invalid: {e}"))
+            Error::Auth("aws request signing failed".into())
         })?;
         req.headers_mut().insert(name, value);
     }
@@ -219,9 +216,7 @@ fn sigv4_sign(
             params = ?added_params,
             "bedrock auth failed",
         );
-        return Err(Error::Auth(format!(
-            "{service}: unexpected SigV4 query-string params from signer: {added_params:?}"
-        )));
+        return Err(Error::Auth("aws request signing failed".into()));
     }
 
     Ok(())
@@ -307,7 +302,10 @@ mod tests {
         // Defends against the "header silently dropped from signing input"
         // class of bugs: the signed-header set must equal the actual sent
         // headers, otherwise AWS returns SignatureDoesNotMatch which is
-        // opaque to debug. We surface the offending header name up-front.
+        // opaque to debug. We fail fast rather than sign a mismatched set.
+        // The offending header name rides in structured tracing
+        // (failure_kind + header fields), NOT the outward Error payload,
+        // which is a fixed literal that leaks no request detail.
         let resolved = resolve(
             &BedrockCreds::Static {
                 access_key: "testkey-sign-xyz".into(),
@@ -333,10 +331,14 @@ mod tests {
             .await
             .expect_err("non-ASCII header must error explicitly");
         let msg = err.to_string();
-        assert!(msg.contains("x-routectl-bad"), "error names header: {msg}");
         assert!(
-            msg.contains("non-ASCII") || msg.contains("cannot SigV4-sign"),
-            "error explains why: {msg}"
+            msg.contains("aws request signing failed"),
+            "outward message is the fixed signing-failure literal: {msg}"
+        );
+        assert!(
+            !msg.contains("x-routectl-bad"),
+            "the offending header name must not leak into the outward Error \
+             payload; it rides in structured tracing instead: {msg}"
         );
     }
 
