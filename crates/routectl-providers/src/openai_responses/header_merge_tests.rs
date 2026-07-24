@@ -14,6 +14,8 @@ fn oauth_provider_with_extras(extras: Vec<(String, String)>) -> OpenAiResponsesP
         header_extras: extras,
         user_agent: None,
         session_id: None,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     OpenAiResponsesProvider::new(cfg)
 }
@@ -30,6 +32,8 @@ fn oauth_provider_with_session(session_id: Option<String>) -> OpenAiResponsesPro
         header_extras: Vec::new(),
         user_agent: None,
         session_id,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     OpenAiResponsesProvider::new(cfg)
 }
@@ -104,6 +108,8 @@ fn api_key_header_extras_not_blocked_by_fingerprint_filter() {
         header_extras: vec![("version".to_string(), "custom-1.0".to_string())],
         user_agent: None,
         session_id: None,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = OpenAiResponsesProvider::new(cfg);
     let rb = provider.client.post("https://api.openai.com/v1/responses");
@@ -292,6 +298,8 @@ fn api_key_path_stamps_no_session_header() {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: Some("session-stable-123".into()),
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = OpenAiResponsesProvider::new(cfg);
     let rb = provider.client.post("https://api.openai.com/v1/responses");
@@ -324,6 +332,8 @@ fn api_key_path_omits_generated_identity_headers() {
         header_extras: vec![("originator".to_string(), "codex_cli_rs".to_string())],
         user_agent: None,
         session_id: None,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = OpenAiResponsesProvider::new(cfg);
     let rb = provider.client.post("https://api.openai.com/v1/responses");

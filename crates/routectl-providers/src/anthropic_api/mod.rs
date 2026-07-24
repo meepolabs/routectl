@@ -53,7 +53,7 @@ pub(crate) const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 use sse::SseState;
 
 #[cfg(feature = "bedrock")]
-pub use client::MantleAuth;
+pub use crate::mantle::MantleAuth;
 pub use client::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
 pub use cloak::{CloakConfig, CloakMode, ToolRename};
 

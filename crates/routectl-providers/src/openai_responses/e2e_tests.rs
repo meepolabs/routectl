@@ -23,6 +23,8 @@ fn make_provider(base_url: &str) -> OpenAiResponsesProvider {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: None,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     OpenAiResponsesProvider::new(cfg)
 }
@@ -645,6 +647,8 @@ fn api_key_provider(base_url: &str) -> OpenAiResponsesProvider {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: None,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     OpenAiResponsesProvider::new(cfg)
 }
@@ -724,6 +728,8 @@ async fn probe_chatgpt_oauth_is_unsupported_with_zero_token_calls() {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: None,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = OpenAiResponsesProvider::new(cfg);
 

@@ -642,6 +642,44 @@ fn store_true_does_not_force_encrypted_reasoning_include() {
     );
 }
 
+/// A bedrock-mantle Responses config. The mantle lane must never persist
+/// (`store` forced false regardless of any operator or model override).
+fn cfg_bedrock_mantle() -> OpenAiResponsesConfig {
+    let mut c = OpenAiResponsesConfig::new("openai-responses:mantle", "literal:bedrock-bearer");
+    c.auth_kind = AuthKind::BedrockMantle;
+    c
+}
+
+/// The store guard reads the FINAL merged `provider_extras`. The router
+/// deep-merges provider-level and model-level `payload_extras` into
+/// `req.provider_extras` at dispatch, so a `store = true` arriving via that
+/// merged path (the origin the config-time provider-level reject cannot
+/// see) must still be forced inert on the mantle lane. Pins BOTH that the
+/// store flag stays false AND that the encrypted-reasoning include still
+/// fires (store=false keeps `finalize_reasoning_include` active).
+#[test]
+fn store_true_via_merged_extras_is_inert_on_mantle_lane() {
+    // Arrange: simulate the merged dispatch value carrying store=true.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"store": true}));
+
+    // Act
+    let v = translate_to_json(&cfg_bedrock_mantle(), &req);
+
+    // Assert: store forced false and the encrypted-reasoning carrier is on
+    // the wire for later replay.
+    assert_eq!(
+        v["store"],
+        json!(false),
+        "mantle lane must force store=false even from merged extras; got: {v}"
+    );
+    assert_eq!(
+        v["include"],
+        json!(["reasoning.encrypted_content"]),
+        "store=false must still force the encrypted-reasoning include; got: {v}"
+    );
+}
+
 #[test]
 fn explicit_operator_include_is_respected_not_overwritten() {
     // Arrange: operator pins include to a custom value; store false.
