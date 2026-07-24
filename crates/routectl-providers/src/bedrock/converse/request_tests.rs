@@ -16,6 +16,7 @@ use routectl_core::{
     ReasoningConfig, Role, SystemContent, ToolDef,
 };
 use serde_json::json;
+use tracing_test::traced_test;
 
 fn fake_cfg() -> BedrockConfig {
     BedrockConfig {
@@ -675,18 +676,16 @@ fn document_content_block_translates_to_aws_document_block() {
 }
 
 #[test]
-fn thinking_block_with_cache_control_does_not_emit_orphan_cache_point() {
-    // Arrange: thinking blocks drop on the Converse egress (no
-    // reasoningContent surface yet). When a thinking block carries
-    // cache_control, the loop must NOT emit a stray {cachePoint}
-    // entry -- AWS rejects a cachePoint without a preceding content
-    // block.
+fn dropped_image_url_with_cache_control_does_not_emit_orphan_cache_point() {
+    // Arrange: a non-data-URI image_url carries no inline bytes the JSON
+    // Converse wire can carry, so the translator drops it. When such a
+    // dropped block carries cache_control, the loop must NOT emit a stray
+    // {cachePoint} entry -- AWS rejects a cachePoint without a preceding
+    // content block.
     //
-    // Note: KnownContentPart::Thinking has no cache_control field
-    // by design, so this test exercises ContentPart::Other -- a
-    // forward-compat block that translate_content_part rejects --
-    // with cache_control set. Same orphan-cachePoint risk.
-    use serde_json::Map;
+    // (ContentPart::Other no longer exercises this path: it now passes
+    // through as a single-key union rather than dropping, so this guard
+    // uses a surface that still drops.)
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
@@ -694,11 +693,10 @@ fn thinking_block_with_cache_control_does_not_emit_orphan_cache_point() {
             refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Other {
-                    type_tag: "future_block".into(),
+                ContentPart::Known(KnownContentPart::ImageUrl {
+                    image_url: json!({"url": "https://example.com/x.png"}),
                     cache_control: Some(CacheControl::ephemeral_5m()),
-                    extras: Map::new(),
-                },
+                }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "anchor".into(),
                     citations: None,
@@ -716,11 +714,160 @@ fn thinking_block_with_cache_control_does_not_emit_orphan_cache_point() {
 
     let body = normalize_request(&cfg, &req).unwrap();
 
-    // Assert: the dropped Other block must not leave behind a
-    // cachePoint sibling. Only the surviving Text block is emitted.
+    // Assert: the dropped image_url must not leave behind a cachePoint
+    // sibling. Only the surviving Text block is emitted.
     let blocks = body["messages"][0]["content"].as_array().unwrap();
     assert_eq!(blocks.len(), 1, "expected only text, got {body}");
     assert_eq!(blocks[0]["text"], "anchor");
+}
+
+/// A canonical `ContentPart::Other` re-wraps as the AWS single-key union
+/// on the Converse request so a block preserved on a prior response turn
+/// replays instead of being dropped.
+#[test]
+fn other_content_part_passes_through_as_single_key_union() {
+    use serde_json::Map;
+    let cfg = fake_cfg();
+    let mut extras = Map::new();
+    extras.insert("format".into(), json!("mp4"));
+    extras.insert("source".into(), json!({"bytes": "AAAA"}));
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Other {
+                type_tag: "video".into(),
+                cache_control: None,
+                extras,
+            }]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    let blocks = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "got {body}");
+    assert_eq!(
+        blocks[0],
+        json!({"video": {"format": "mp4", "source": {"bytes": "AAAA"}}}),
+        "got {body}"
+    );
+}
+
+/// An `Other` with empty extras emits `{"<tag>": {}}` faithfully rather
+/// than a bare tag or a dropped block.
+#[test]
+fn other_content_part_empty_extras_emits_empty_object() {
+    use serde_json::Map;
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Other {
+                type_tag: "citationsContent".into(),
+                cache_control: None,
+                extras: Map::new(),
+            }]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    let blocks = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "got {body}");
+    assert_eq!(blocks[0], json!({"citationsContent": {}}), "got {body}");
+}
+
+/// An `Other` carrying cache_control passes through AND is immediately
+/// followed by its sibling `{cachePoint}` block -- the passthrough block
+/// is now the "preceding content block" that makes the cachePoint legal.
+#[test]
+fn other_content_part_with_cache_control_emits_sibling_cache_point() {
+    use serde_json::Map;
+    let cfg = fake_cfg();
+    let mut extras = Map::new();
+    extras.insert("format".into(), json!("mp4"));
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Other {
+                type_tag: "video".into(),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+                extras,
+            }]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    let blocks = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "expected [other, cachePoint], got {body}");
+    assert_eq!(blocks[0], json!({"video": {"format": "mp4"}}), "got {body}");
+    assert_eq!(blocks[1]["cachePoint"]["type"], "default", "got {body}");
+}
+
+/// A preserved `Other` must NOT fire the old drop WARN, and MUST log the
+/// passthrough at debug level. Pins the log-level change so a future edit
+/// that re-drops Other is caught.
+#[traced_test]
+#[test]
+fn preserved_other_logs_passthrough_not_drop() {
+    use serde_json::Map;
+    let cfg = fake_cfg();
+    let mut extras = Map::new();
+    extras.insert("format".into(), json!("mp4"));
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Other {
+                type_tag: "video".into(),
+                cache_control: None,
+                extras,
+            }]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        ..Default::default()
+    };
+
+    let _ = normalize_request(&cfg, &req).unwrap();
+
+    assert!(
+        !logs_contain("dropping unknown ContentPart::Other"),
+        "a preserved Other must not fire the drop WARN"
+    );
+    assert!(
+        logs_contain("passing ContentPart::Other through Converse egress as single-key union"),
+        "a preserved Other must log the passthrough at debug level"
+    );
 }
 
 #[test]

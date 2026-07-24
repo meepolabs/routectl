@@ -28,8 +28,19 @@ pub enum ContentPart {
     Known(KnownContentPart),
     /// Forward-compat catchall. Captures the original `type` discriminant,
     /// any `cache_control` marker, and all other fields verbatim. The
-    /// Anthropic egress re-emits this verbatim; non-Anthropic egresses
-    /// drop with a `tracing::warn!`.
+    /// Anthropic egress re-emits this verbatim; the Bedrock Converse
+    /// egress re-wraps it as the AWS single-key union (`{type: {extras}}`)
+    /// and passes it through, so an unmodeled block preserved on a prior
+    /// response turn replays losslessly. Other non-Anthropic egresses
+    /// still drop it with a tracing diagnostic.
+    ///
+    /// `extras` contract: when the Other originated from a Converse
+    /// response deserialization, `extras` is the inner fields of the
+    /// single-key union object. For Others created by other ingress
+    /// dialects the structure is dialect-dependent (typically the block's
+    /// flattened top-level fields minus `type`); the Converse egress
+    /// re-wrap is a best-effort union whose correctness for
+    /// non-Converse-provenance blocks is not guaranteed.
     Other {
         /// Original wire `type` discriminant.
         #[serde(rename = "type")]

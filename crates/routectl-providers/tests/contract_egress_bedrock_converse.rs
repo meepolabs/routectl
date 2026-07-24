@@ -234,3 +234,74 @@ mod scenario_5_cache_control_positions {
         });
     }
 }
+
+// =====================================================================
+// Scenario: unmodeled-block passthrough round-trip
+// =====================================================================
+//
+// An unmodeled Converse response block (a single-key AWS union such as
+// `{video: {...}}`) decodes to a canonical `ContentPart::Other` and must
+// re-emit byte-identically when that history is replayed on the next
+// request. This closes the asymmetry where the response side preserved
+// the block but the request side silently deleted it, breaking multi-turn
+// replay of forward-compat block types.
+
+mod scenario_other_passthrough_round_trip {
+    use super::*;
+    use routectl_core::{ChatRequest, ContentPart, Message, MessageContent, Role};
+    use serde_json::json;
+
+    #[test]
+    fn unmodeled_converse_block_round_trips_byte_identical() {
+        let provider = bedrock_converse_provider();
+
+        // A Converse response carrying an unmodeled single-key union block.
+        let video = json!({"format": "mp4", "source": {"bytes": "AAAA"}});
+        let raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"video": video}]
+                }
+            },
+            "stopReason": "end_turn"
+        });
+
+        // Decode: the unknown block preserves as a canonical Other part.
+        let resp = provider
+            .normalize_response(raw)
+            .expect("bedrock_converse normalize_response");
+        let parts = match &resp.choices[0].message.content {
+            MessageContent::Parts(p) => p.clone(),
+            other => panic!("expected Parts carrying the Other block, got {other:?}"),
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::Other { type_tag, .. } if type_tag == "video")),
+            "response decode must yield a canonical Other for the unknown block, got {parts:?}"
+        );
+
+        // Replay: the preserved part re-emits as the same single-key union.
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(parts),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        let body = provider
+            .normalize_request(&req)
+            .expect("bedrock_converse normalize_request");
+
+        let emitted = &body["messages"][0]["content"][0];
+        assert_eq!(*emitted, json!({"video": video}), "got {body}");
+    }
+}

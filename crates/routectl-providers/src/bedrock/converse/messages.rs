@@ -5,11 +5,13 @@
 //! the top-level `system` array by `system.rs`); Role::Tool becomes a
 //! synthesized user-role message carrying a `toolResult` block.
 //!
-//! Forward-compat catchalls: `ContentPart::Other` and unsupported known
-//! parts (e.g. `Document` when the canonical title/source can't be
-//! mapped) drop with a tracing diagnostic; the caller sees a partial
-//! body rather than a translation failure. Cache breakpoints survive as
-//! sibling `{cachePoint}` entries.
+//! Forward-compat catchalls: `ContentPart::Other` re-wraps as the AWS
+//! single-key union and passes through, so an unmodeled block preserved
+//! on a prior response turn replays losslessly. Unsupported known parts
+//! (e.g. `Document` when the canonical title/source can't be mapped, or
+//! a URL-shape image the JSON wire can't carry) drop with a tracing
+//! diagnostic; the caller sees a partial body rather than a translation
+//! failure. Cache breakpoints survive as sibling `{cachePoint}` entries.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
@@ -356,14 +358,24 @@ fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Result<Vec<Conv
 fn translate_content_part(id: &str, p: &ContentPart) -> Result<Option<ConverseContentBlock>> {
     match p {
         ContentPart::Known(k) => translate_known_part(id, k),
-        ContentPart::Other { type_tag, .. } => {
-            tracing::warn!(
+        // Re-wrap the catchall as the AWS single-key union -- the exact
+        // inverse of the response decoder's tag/extras split -- so an
+        // unmodeled Converse block preserved on a prior response turn
+        // replays losslessly next turn instead of being silently
+        // deleted. cache_control is handled by the caller
+        // (`content_blocks_from_parts` emits the sibling cachePoint), so
+        // it stays out of the raw union payload.
+        ContentPart::Other {
+            type_tag, extras, ..
+        } => {
+            let mut wrapper = serde_json::Map::new();
+            wrapper.insert(type_tag.clone(), Value::Object(extras.clone()));
+            tracing::debug!(
                 provider = id,
                 type_tag = %type_tag,
-                "dropping unknown ContentPart::Other on Converse egress; \
-                 forward-compat block types not yet modeled"
+                "passing ContentPart::Other through Converse egress as single-key union"
             );
-            Ok(None)
+            Ok(Some(ConverseContentBlock::Other(Value::Object(wrapper))))
         }
     }
 }
