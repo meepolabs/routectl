@@ -35,6 +35,9 @@ async fn oauth_bearer_does_not_auto_inject_beta_gate() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -74,6 +77,9 @@ async fn api_key_auth_can_set_beta_via_extra_headers() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -106,6 +112,9 @@ async fn user_agent_override_reaches_outbound() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = base_req("claude-3-opus", vec![user_msg("hi")]);

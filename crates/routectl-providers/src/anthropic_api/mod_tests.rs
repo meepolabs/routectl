@@ -153,6 +153,9 @@ fn cfg_with_allowlist(forward_client_headers: Vec<String>) -> AnthropicApiConfig
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     }
 }
 
@@ -271,6 +274,9 @@ fn client_forwarded_headers_override_header_extras_on_collision() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);
@@ -303,6 +309,9 @@ fn allowed_betas_filters_header_drops_unlisted_flag() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -342,6 +351,9 @@ fn operator_header_extras_beta_bypasses_allowlist() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let mut req = ChatRequest::default();
@@ -383,6 +395,9 @@ fn allowed_betas_empty_passes_all_through() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -424,6 +439,9 @@ fn model_level_operator_beta_bypasses_allowlist() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let mut req = ChatRequest::default();
@@ -474,6 +492,9 @@ fn oauth_cfg(
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     }
 }
 
@@ -602,6 +623,8 @@ fn oauth_cfg_with_session(
         session_id,
         cloak: CloakConfig::default(),
         use_forwarded_bearer,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     }
 }
 
@@ -809,6 +832,9 @@ fn beta_floor_context_management_stripped_when_emulation_active() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = ChatRequest::default();
@@ -845,6 +871,9 @@ fn beta_floor_absent_on_non_anthropic_host() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = ChatRequest::default();
@@ -874,6 +903,9 @@ fn beta_floor_absent_on_api_key_auth() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     let provider = AnthropicApiProvider::new(cfg);
     let req = ChatRequest::default();
@@ -1651,6 +1683,9 @@ fn oauth_provider_with_cloak(cloak: CloakConfig) -> AnthropicApiProvider {
         session_id: Some("session-stable-123".into()),
         cloak,
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     AnthropicApiProvider::new(cfg)
 }
@@ -2093,6 +2128,8 @@ fn oauth_cfg_with_auth(
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     }
 }
 
@@ -2533,4 +2570,328 @@ fn should_log_beta_4xx_gate_matrix() {
             "2xx/3xx status {status} must not fire"
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// Bedrock mantle lane: header composition + post-build signing.
+// -----------------------------------------------------------------------
+
+/// A mantle-lane config with a resolved bearer credential. The bearer
+/// path keeps `resolve` synchronous-cheap (no AWS chain load) while
+/// exercising the same `Some(mantle)` lane selection as SigV4.
+#[cfg(feature = "bedrock")]
+async fn mantle_cfg_bearer() -> AnthropicApiConfig {
+    let creds = crate::bedrock::auth::resolve(
+        &crate::bedrock::BedrockCreds::BearerKey {
+            key: "mantle-key-xyz".into(),
+        },
+        "us-west-2",
+    )
+    .await
+    .unwrap();
+    // api_key_ref is empty on the mantle lane -- the resolved creds carry
+    // auth, so the token is never presented as x-api-key.
+    let mut cfg = AnthropicApiConfig::new("mantle-test", "");
+    cfg.mantle = Some(MantleAuth {
+        region: "us-west-2".into(),
+        creds,
+    });
+    cfg
+}
+
+/// The mantle lane attaches NO `x-api-key` and NO `Authorization` in
+/// `build_headers` -- the signer owns auth and stamps it post-build.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn mantle_build_headers_omit_x_api_key_and_authorization() {
+    let provider = AnthropicApiProvider::new(mantle_cfg_bearer().await);
+    let req = ChatRequest::default();
+    let names = outbound_header_names(&provider, &req);
+    assert!(
+        !names.iter().any(|n| n == "x-api-key"),
+        "mantle lane must not attach x-api-key; got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "authorization"),
+        "build_headers must not attach Authorization on the mantle lane \
+         (the signer owns it); got: {names:?}"
+    );
+}
+
+/// anthropic-version stamps on the mantle lane exactly as on the
+/// first-party lane (default 2023-06-01 is correct for mantle).
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn mantle_build_headers_stamp_anthropic_version() {
+    let provider = AnthropicApiProvider::new(mantle_cfg_bearer().await);
+    let req = ChatRequest::default();
+    assert_eq!(
+        outbound_header_value(&provider, &req, "anthropic-version").as_deref(),
+        Some("2023-06-01"),
+    );
+}
+
+/// No Claude-Code SDK fingerprint reaches the wire on the mantle lane:
+/// the identity headers, session id, request id, and Stainless headers
+/// all gate on OauthBearer, which the mantle lane forbids.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn mantle_build_headers_emit_no_claude_code_fingerprint() {
+    let provider = AnthropicApiProvider::new(mantle_cfg_bearer().await);
+    let req = ChatRequest::default();
+    let names = outbound_header_names(&provider, &req);
+    assert!(
+        !names.iter().any(|n| n.starts_with("x-claude-code-")),
+        "no Claude-Code headers on the mantle lane; got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.starts_with("x-stainless-")),
+        "no Stainless SDK headers on the mantle lane; got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "x-client-request-id"),
+        "no Claude-Code request id on the mantle lane; got: {names:?}"
+    );
+}
+
+/// The mantle lane is api-key (OauthBearer is rejected at config
+/// validation), so the Claude-Code SDK User-Agent never fires: reqwest
+/// keeps its default UA.
+#[cfg(feature = "bedrock")]
+#[test]
+fn mantle_lane_resolves_no_claude_code_user_agent() {
+    assert_eq!(resolve_user_agent(None, AuthKind::ApiKey), None);
+}
+
+/// `is_mantle` is true exactly when a mantle sub-config is present.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn is_mantle_tracks_mantle_presence() {
+    let mantle = AnthropicApiProvider::new(mantle_cfg_bearer().await);
+    assert!(mantle.is_mantle());
+    let plain = AnthropicApiProvider::new(AnthropicApiConfig::new("plain", "k"));
+    assert!(!plain.is_mantle());
+}
+
+/// The signed request carries in-memory bytes (SigV4-hashable) and the
+/// bearer path attaches `Authorization: Bearer <key>` post-build -- the
+/// shape count_tokens relies on when it abandons `.json()` for `.body()`.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn sign_mantle_attaches_bearer_authorization_over_body_bytes() {
+    let provider = AnthropicApiProvider::new(mantle_cfg_bearer().await);
+    let client = reqwest::Client::new();
+    let mut request = client
+        .post("https://bedrock-mantle.us-west-2.api.aws/anthropic/v1/messages/count_tokens")
+        .body(serde_json::to_vec(&serde_json::json!({ "model": "m" })).unwrap())
+        .build()
+        .unwrap();
+    provider.sign_mantle(&mut request).await.unwrap();
+    assert_eq!(
+        request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer mantle-key-xyz"),
+    );
+    assert!(
+        request.body().and_then(|b| b.as_bytes()).is_some(),
+        "mantle body must resolve to signable in-memory bytes"
+    );
+}
+
+/// `auth_mode` reflects the resolved credential shape for the lane
+/// observability fields.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn mantle_auth_mode_reflects_creds_shape() {
+    let bearer = mantle_cfg_bearer().await;
+    assert_eq!(bearer.mantle.as_ref().unwrap().auth_mode(), "bearer");
+
+    let sigv4_creds = crate::bedrock::auth::resolve(
+        &crate::bedrock::BedrockCreds::Static {
+            access_key: "AKIAtest".into(),
+            secret_key: "s".into(),
+            session_token: None,
+        },
+        "us-west-2",
+    )
+    .await
+    .unwrap();
+    let mantle = MantleAuth {
+        region: "us-west-2".into(),
+        creds: sigv4_creds,
+    };
+    assert_eq!(mantle.auth_mode(), "sigv4");
+}
+
+/// MantleAuth Debug shows only the region and auth-mode discriminator;
+/// no credential material ever renders.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn mantle_auth_debug_redacts_credentials() {
+    let creds = crate::bedrock::auth::resolve(
+        &crate::bedrock::BedrockCreds::Static {
+            access_key: "AKIAsecret123".into(),
+            secret_key: "supersecret".into(),
+            session_token: Some("session-tok".into()),
+        },
+        "us-west-2",
+    )
+    .await
+    .unwrap();
+    let mantle = MantleAuth {
+        region: "us-west-2".into(),
+        creds,
+    };
+    let rendered = format!("{mantle:?}");
+    assert!(rendered.contains("us-west-2"), "region shown: {rendered}");
+    assert!(rendered.contains("sigv4"), "auth mode shown: {rendered}");
+    assert!(
+        !rendered.contains("supersecret"),
+        "secret key must not leak: {rendered}"
+    );
+    assert!(
+        !rendered.contains("AKIAsecret123"),
+        "access key must not leak: {rendered}"
+    );
+    assert!(
+        !rendered.contains("session-tok"),
+        "session token must not leak: {rendered}"
+    );
+}
+
+/// A minimal subscriber that captures span `record` field values, so the
+/// mantle lane-context contract (`lane`/`auth_mode`/`region`) can be
+/// asserted deterministically. The shared testkit capture subscriber
+/// treats span `record` as a no-op, so a dedicated one is needed here.
+/// `current_span` is implemented so `Span::current()` inside
+/// `record_mantle_span_fields` resolves to the entered span rather than a
+/// disabled one.
+#[cfg(feature = "bedrock")]
+struct SpanFieldCapture {
+    fields: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    meta: std::sync::Mutex<Option<&'static tracing::Metadata<'static>>>,
+    depth: std::sync::Mutex<usize>,
+}
+
+#[cfg(feature = "bedrock")]
+impl SpanFieldCapture {
+    fn new(fields: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) -> Self {
+        Self {
+            fields,
+            meta: std::sync::Mutex::new(None),
+            depth: std::sync::Mutex::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "bedrock")]
+impl tracing::Subscriber for SpanFieldCapture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        *self.meta.lock().unwrap() = Some(attrs.metadata());
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+        struct Visitor(std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>);
+        impl tracing::field::Visit for Visitor {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((field.name().to_string(), value.to_string()));
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((field.name().to_string(), format!("{value:?}")));
+            }
+        }
+        values.record(&mut Visitor(std::sync::Arc::clone(&self.fields)));
+    }
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {
+        *self.depth.lock().unwrap() += 1;
+    }
+    fn exit(&self, _: &tracing::span::Id) {
+        let mut depth = self.depth.lock().unwrap();
+        *depth = depth.saturating_sub(1);
+    }
+    fn current_span(&self) -> tracing_core::span::Current {
+        if *self.depth.lock().unwrap() > 0
+            && let Some(meta) = *self.meta.lock().unwrap()
+        {
+            return tracing_core::span::Current::new(tracing::span::Id::from_u64(1), meta);
+        }
+        tracing_core::span::Current::none()
+    }
+}
+
+/// On the mantle lane, `record_mantle_span_fields` stamps the request
+/// span with `lane="bedrock-mantle"`, `auth_mode`, and `region` -- the
+/// lane context the shared upstream-failure WARN inherits.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn record_mantle_span_fields_stamps_lane_auth_mode_region() {
+    let provider = AnthropicApiProvider::new(mantle_cfg_bearer().await);
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = SpanFieldCapture::new(std::sync::Arc::clone(&captured));
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::info_span!(
+            "test",
+            lane = tracing::field::Empty,
+            auth_mode = tracing::field::Empty,
+            region = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+        provider.record_mantle_span_fields();
+    });
+    let fields = captured.lock().unwrap().clone();
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "lane" && v == "bedrock-mantle"),
+        "lane field must be recorded; got {fields:?}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "auth_mode" && v == "bearer"),
+        "auth_mode field must be recorded; got {fields:?}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "region" && v == "us-west-2"),
+        "region field must be recorded; got {fields:?}"
+    );
+}
+
+/// The first-party lane records no lane context: `record_mantle_span_fields`
+/// is a no-op when `mantle` is `None`.
+#[cfg(feature = "bedrock")]
+#[test]
+fn record_mantle_span_fields_is_noop_without_mantle() {
+    let provider = AnthropicApiProvider::new(AnthropicApiConfig::new("plain", "k"));
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = SpanFieldCapture::new(std::sync::Arc::clone(&captured));
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::info_span!(
+            "test",
+            lane = tracing::field::Empty,
+            auth_mode = tracing::field::Empty,
+            region = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+        provider.record_mantle_span_fields();
+    });
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "first-party lane must record no lane fields"
+    );
 }

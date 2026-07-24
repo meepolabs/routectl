@@ -41,6 +41,9 @@ fn make_provider(base_url: &str) -> AnthropicApiProvider {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     };
     AnthropicApiProvider::new(cfg)
 }
@@ -107,6 +110,9 @@ mod cache_control;
 mod count_tokens;
 #[path = "anthropic_api/integration.rs"]
 mod integration;
+#[cfg(feature = "bedrock")]
+#[path = "anthropic_api/mantle.rs"]
+mod mantle;
 #[path = "anthropic_api/probe.rs"]
 mod probe;
 #[path = "anthropic_api/request_normalization.rs"]

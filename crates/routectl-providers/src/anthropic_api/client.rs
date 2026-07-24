@@ -29,6 +29,50 @@ pub enum AuthKind {
     OauthBearer,
 }
 
+/// Bedrock mantle authentication for an anthropic-api provider.
+///
+/// Present (`AnthropicApiConfig::mantle` is `Some`) selects the mantle
+/// lane: the request body is serialized to bytes and SigV4/bearer-signed
+/// under the `bedrock-mantle` scope before egress, and the first-party
+/// `x-api-key` / Claude-Code header plumbing is bypassed. `region` is the
+/// single source of truth for both the derived endpoint host and the
+/// SigV4 signing scope; `creds` carries the resolved AWS credential shape
+/// (bearer key or SigV4 provider).
+#[cfg(feature = "bedrock")]
+#[derive(Clone)]
+pub struct MantleAuth {
+    /// AWS region driving the derived host and the SigV4 signing scope.
+    pub region: String,
+    /// Resolved credential shape (bearer key or SigV4 provider).
+    pub creds: crate::bedrock::auth::ResolvedCreds,
+}
+
+#[cfg(feature = "bedrock")]
+impl MantleAuth {
+    /// Observability discriminator for the credential shape:
+    /// `"bearer"` for a Bedrock console API key, `"sigv4"` for a signed
+    /// AWS credential. Never carries any secret material.
+    pub(super) const fn auth_mode(&self) -> &'static str {
+        match self.creds {
+            crate::bedrock::auth::ResolvedCreds::Bearer { .. } => "bearer",
+            crate::bedrock::auth::ResolvedCreds::Sigv4 { .. } => "sigv4",
+        }
+    }
+}
+
+#[cfg(feature = "bedrock")]
+impl std::fmt::Debug for MantleAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The region is non-secret. `creds` carries credential material,
+        // so surface only its shape discriminator (never the key or the
+        // provider), mirroring the redacting Debug on `BedrockCreds`.
+        f.debug_struct("MantleAuth")
+            .field("region", &self.region)
+            .field("auth_mode", &self.auth_mode())
+            .finish()
+    }
+}
+
 /// Configuration for an anthropic-api egress provider.
 #[derive(Clone)]
 pub struct AnthropicApiConfig {
@@ -116,6 +160,14 @@ pub struct AnthropicApiConfig {
     /// never consumes a floating forwarded bearer, even one captured for
     /// a sibling forwarded provider on the same router.
     pub use_forwarded_bearer: bool,
+    /// Bedrock mantle authentication. `Some` selects the mantle lane
+    /// (SigV4/bearer signing under the `bedrock-mantle` scope, no
+    /// first-party `x-api-key`/Claude-Code plumbing, a no-redirect
+    /// client). `None` (default) keeps the first-party api.anthropic.com
+    /// behavior byte-for-byte. Resolved at the factory from a
+    /// `bedrock_mantle` sub-config.
+    #[cfg(feature = "bedrock")]
+    pub mantle: Option<MantleAuth>,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -123,8 +175,8 @@ impl std::fmt::Debug for AnthropicApiConfig {
         // Hand-rolled Debug elides the auth source (its own Debug
         // already redacts, but this saves one round-trip if a
         // future TokenSource impl ever leaks).
-        f.debug_struct("AnthropicApiConfig")
-            .field("id", &self.id)
+        let mut d = f.debug_struct("AnthropicApiConfig");
+        d.field("id", &self.id)
             .field("auth", &"[REDACTED]")
             .field("base_url", &self.base_url)
             .field("anthropic_version", &self.anthropic_version)
@@ -151,8 +203,12 @@ impl std::fmt::Debug for AnthropicApiConfig {
                 "cloak_sensitive_words_count",
                 &self.cloak.sensitive_words.len(),
             )
-            .field("use_forwarded_bearer", &self.use_forwarded_bearer)
-            .finish()
+            .field("use_forwarded_bearer", &self.use_forwarded_bearer);
+        // Mantle lane presence + its own redacting Debug (region + auth
+        // shape only, never credential material).
+        #[cfg(feature = "bedrock")]
+        d.field("mantle", &self.mantle);
+        d.finish()
     }
 }
 
@@ -196,6 +252,8 @@ impl AnthropicApiConfig {
             session_id: None,
             cloak: CloakConfig::default(),
             use_forwarded_bearer: false,
+            #[cfg(feature = "bedrock")]
+            mantle: None,
         }
     }
 }
@@ -278,6 +336,19 @@ impl AnthropicApiProvider {
     /// Build a provider from its configuration.
     pub fn new(cfg: AnthropicApiConfig) -> Self {
         let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind);
+        // The mantle lane uses a no-redirect client: a signed POST must
+        // never be auto-followed across a 3xx, since replaying the SigV4
+        // signature against a different host always fails and a redirect
+        // on this lane is an upstream fault to surface, not to chase. The
+        // first-party lane keeps the stock (redirect-following) client.
+        #[cfg(feature = "bedrock")]
+        let client = if cfg.mantle.is_some() {
+            crate::http_client::build_no_redirect(ua.as_deref())
+                .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup")
+        } else {
+            crate::http_client::build(ua.as_deref())
+        };
+        #[cfg(not(feature = "bedrock"))]
         let client = crate::http_client::build(ua.as_deref());
         let cap = std::num::NonZeroUsize::new(context_management::THINKING_CACHE_CAP)
             .expect("THINKING_CACHE_CAP is non-zero");
@@ -333,6 +404,49 @@ impl AnthropicApiProvider {
             "{}/v1/messages/count_tokens",
             self.cfg.base_url.trim_end_matches('/')
         )
+    }
+
+    /// True when this provider egresses on the Bedrock mantle lane. On
+    /// this lane the signer owns auth (no `x-api-key`), the body is
+    /// serialized to signable bytes, and a no-redirect client is used.
+    /// Always `false` in a build without the `bedrock` feature.
+    pub(super) const fn is_mantle(&self) -> bool {
+        #[cfg(feature = "bedrock")]
+        {
+            self.cfg.mantle.is_some()
+        }
+        #[cfg(not(feature = "bedrock"))]
+        {
+            false
+        }
+    }
+
+    /// SigV4/bearer-sign a built request in place on the mantle lane; a
+    /// no-op on the first-party lane. Signing runs AFTER the request is
+    /// fully built (method, URL, headers, body bytes) and BEFORE any
+    /// header trace or execute, so the trace shows the real auth header
+    /// and the signed input matches the transmitted bytes.
+    #[cfg(feature = "bedrock")]
+    pub(super) async fn sign_mantle(&self, request: &mut reqwest::Request) -> Result<()> {
+        if let Some(mantle) = self.cfg.mantle.as_ref() {
+            crate::mantle::sign(request, &mantle.creds, &mantle.region).await?;
+        }
+        Ok(())
+    }
+
+    /// Record the mantle lane context (`lane`, `auth_mode`, `region`) on
+    /// the current tracing span so every event within it -- including the
+    /// shared upstream-failure WARN -- carries the lane fields. A no-op on
+    /// the first-party lane, where the span's `Empty` fields stay unset
+    /// and never render.
+    #[cfg(feature = "bedrock")]
+    pub(super) fn record_mantle_span_fields(&self) {
+        if let Some(mantle) = self.cfg.mantle.as_ref() {
+            let span = tracing::Span::current();
+            span.record("lane", crate::mantle::MANTLE_SERVICE);
+            span.record("auth_mode", mantle.auth_mode());
+            span.record("region", mantle.region.as_str());
+        }
     }
 
     /// Resolve the token to stamp as the outbound Anthropic credential,
@@ -392,6 +506,12 @@ impl AnthropicApiProvider {
     ) -> (reqwest::RequestBuilder, BetaDecision) {
         let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
         rb = match self.cfg.auth_kind {
+            // Mantle lane: the SigV4/bearer signer owns auth and attaches
+            // it post-build, so no `x-api-key` here (the token is empty by
+            // config validation anyway). anthropic-version still stamps
+            // above, and the OauthBearer-gated Claude-Code identity headers
+            // / UA never fire on this ApiKey lane.
+            AuthKind::ApiKey if self.is_mantle() => rb,
             AuthKind::ApiKey => rb.header("x-api-key", token),
             AuthKind::OauthBearer => rb.header("authorization", format!("Bearer {token}")),
         };
