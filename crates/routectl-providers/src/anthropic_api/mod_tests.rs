@@ -1868,6 +1868,186 @@ async fn read_anthropic_error_sanitizes_non_json_body() {
     }
 }
 
+/// `strip_aws_namespace` reduces a namespaced AWS exception token to its
+/// bare name and leaves an already-bare token untouched.
+#[test]
+fn strip_aws_namespace_reduces_to_bare_token() {
+    assert_eq!(
+        strip_aws_namespace("com.amazonaws.bedrock#ThrottlingException"),
+        "ThrottlingException"
+    );
+    assert_eq!(
+        strip_aws_namespace("SignatureDoesNotMatch"),
+        "SignatureDoesNotMatch"
+    );
+    // Only the final `#` splits, and an empty bare token stays empty.
+    assert_eq!(strip_aws_namespace("a#b#Trailing"), "Trailing");
+    assert_eq!(strip_aws_namespace("prefix#"), "");
+}
+
+/// The AWS envelope lift reads `__type` (namespace-stripped) and a
+/// top-level `code`, and is inert on Anthropic-shaped or tokenless JSON.
+#[test]
+fn parse_aws_error_tokens_lifts_type_and_code() {
+    let namespaced =
+        serde_json::from_str::<Value>(r#"{"__type":"com.amazonaws.bedrock#ThrottlingException"}"#)
+            .ok();
+    assert_eq!(
+        parse_aws_error_tokens(namespaced.as_ref()),
+        (Some("ThrottlingException".to_string()), None)
+    );
+
+    let with_code = serde_json::from_str::<Value>(r#"{"code":"SignatureDoesNotMatch"}"#).ok();
+    assert_eq!(
+        parse_aws_error_tokens(with_code.as_ref()),
+        (None, Some("SignatureDoesNotMatch".to_string()))
+    );
+
+    // A JSON body carrying neither token yields no lift.
+    let tokenless = serde_json::from_str::<Value>(r#"{"ok":true}"#).ok();
+    assert_eq!(parse_aws_error_tokens(tokenless.as_ref()), (None, None));
+    // A non-JSON body yields no lift.
+    assert_eq!(parse_aws_error_tokens(None), (None, None));
+}
+
+/// The AWS message lift accepts either `message` or `Message` casing.
+#[test]
+fn parse_aws_error_message_accepts_either_casing() {
+    let lower = serde_json::from_str::<Value>(r#"{"message":"lower"}"#).ok();
+    assert_eq!(
+        parse_aws_error_message(lower.as_ref()).as_deref(),
+        Some("lower")
+    );
+    let upper = serde_json::from_str::<Value>(r#"{"Message":"upper"}"#).ok();
+    assert_eq!(
+        parse_aws_error_message(upper.as_ref()).as_deref(),
+        Some("upper")
+    );
+    let none = serde_json::from_str::<Value>(r#"{"ok":true}"#).ok();
+    assert_eq!(parse_aws_error_message(none.as_ref()), None);
+}
+
+/// A mantle 403 carrying a namespaced AWS `__type` must surface the bare
+/// exception token in `upstream_type` (403 already classifies Auth by
+/// status; the lifted token is what makes the log truthful) and the AWS
+/// `message` as the extracted message.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
+    let raw = r#"{"__type":"com.amazonaws.bedrock#SignatureDoesNotMatch","message":"The request signature we calculated does not match."}"#;
+    let resp = reqwest_response(403, raw);
+
+    let (msg, err) = read_anthropic_error("mantle_prod", 403, resp).await;
+
+    assert!(
+        msg.contains("does not match"),
+        "AWS `message` must be the extracted message: {msg:?}"
+    );
+    match err {
+        Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            body,
+            ..
+        } => {
+            assert_eq!(status, 403);
+            assert_eq!(upstream_type.as_deref(), Some("SignatureDoesNotMatch"));
+            assert_eq!(upstream_code, None);
+            // No top-level `error` key, so the AWS body is not carried raw;
+            // the client-facing body is the sanitized extracted message.
+            assert!(
+                !body.contains("__type"),
+                "AWS envelope must not be carried raw in .body: {body:?}"
+            );
+        }
+        other => panic!("expected Error::Upstream, got {other:?}"),
+    }
+}
+
+/// A mantle 429 carrying a bare AWS `code` token must surface it in
+/// `upstream_code`.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn read_anthropic_error_lifts_aws_throttling_code_from_429() {
+    let raw = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
+    let resp = reqwest_response(429, raw);
+
+    let (msg, err) = read_anthropic_error("mantle_prod", 429, resp).await;
+
+    assert!(msg.contains("Too many requests"), "extracted msg: {msg:?}");
+    match err {
+        Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            ..
+        } => {
+            assert_eq!(status, 429);
+            assert_eq!(upstream_type, None);
+            assert_eq!(upstream_code.as_deref(), Some("ThrottlingException"));
+        }
+        other => panic!("expected Error::Upstream, got {other:?}"),
+    }
+}
+
+/// The Anthropic `error.type` shape wins over any sibling AWS keys, so a
+/// body carrying both keeps the Anthropic classifier and never lifts the
+/// AWS token.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn read_anthropic_error_prefers_anthropic_shape_over_aws() {
+    let raw = r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"},"__type":"com.amazonaws.bedrock#ThrottlingException"}"#;
+    let resp = reqwest_response(529, raw);
+
+    let (_msg, err) = read_anthropic_error("mantle_prod", 529, resp).await;
+
+    match err {
+        Error::Upstream {
+            upstream_type,
+            upstream_code,
+            ..
+        } => {
+            assert_eq!(upstream_type.as_deref(), Some("overloaded_error"));
+            assert_eq!(upstream_code, None);
+        }
+        other => panic!("expected Error::Upstream, got {other:?}"),
+    }
+}
+
+/// Arbitrary JSON, non-JSON, empty, and oversized bodies must never
+/// panic and must degrade to the sanitized-excerpt fallback with no
+/// lifted tokens.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn read_anthropic_error_never_panics_on_malformed_bodies() {
+    let huge = "x".repeat(crate::http_client::MAX_RESPONSE_BODY_BYTES * 2);
+    let cases: [&str; 5] = [
+        "",
+        "not json at all",
+        r#"{"random":[1,2,3],"nested":{"deep":true}}"#,
+        r#"{"__type":42,"code":{"not":"a string"}}"#,
+        &huge,
+    ];
+    for (idx, body) in cases.into_iter().enumerate() {
+        let resp = reqwest_response(400, body);
+        let (_msg, err) = read_anthropic_error("mantle_prod", 400, resp).await;
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(status, 400);
+                assert_eq!(upstream_type, None, "case {idx}");
+                assert_eq!(upstream_code, None, "case {idx}");
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+}
+
 // -- forwarded-bearer host-pinned token resolution --------------------
 
 /// A `TokenSource` whose `token()` ALWAYS errors. Used to PROVE that
