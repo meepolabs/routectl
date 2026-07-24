@@ -46,7 +46,7 @@ use routectl_core::{
 use sse::ThinkTagAccumulator;
 
 #[cfg(feature = "bedrock")]
-use crate::anthropic_api::MantleAuth;
+use crate::mantle::MantleAuth;
 
 /// Provider-kind discriminator string used in tracing fields. Single
 /// source of truth so call sites grep clean (`provider_kind=openai-compat`)
@@ -1498,8 +1498,8 @@ mod helper_tests {
 #[cfg(all(test, feature = "bedrock"))]
 mod mantle_header_tests {
     use super::{HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
-    use crate::anthropic_api::MantleAuth;
     use crate::bedrock::auth::ResolvedCreds;
+    use crate::mantle::MantleAuth;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
     use routectl_core::ChatRequest;
 
