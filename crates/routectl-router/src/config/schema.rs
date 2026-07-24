@@ -2133,16 +2133,27 @@ impl ProviderEntry {
         match self {
             // The Bedrock mantle lane authenticates with
             // `bedrock_mantle.creds`, not `api_key_ref` (validation REQUIRES
-            // the latter empty), so the empty ref is not a secret URI to
-            // resolve -- surfacing it would fail `SecretRef::parse` with a
-            // spurious "unrecognized scheme" error on an otherwise-clean
-            // mantle provider. Mirrors the AnthropicApi empty-ref skip below.
+            // the latter empty), so the empty ref is not surfaced -- doing so
+            // would fail `SecretRef::parse` with a spurious "unrecognized
+            // scheme" error on an otherwise-clean mantle provider. The creds
+            // descriptor IS walked so a malformed creds ref scheme fails at
+            // config check rather than only at build/probe.
             #[cfg(feature = "bedrock")]
             Self::OpenaiCompat {
-                bedrock_mantle: Some(_),
+                bedrock_mantle: Some(mantle),
                 ..
-            } => Vec::new(),
+            } => mantle.creds.secret_uris(),
             Self::OpenaiCompat { api_key_ref, .. } => vec![api_key_ref.as_str()],
+            // A mantle AnthropicApi entry also authenticates with
+            // `bedrock_mantle.creds` and REQUIRES an empty `api_key_ref`;
+            // walk the creds descriptor (not the empty ref) so its scheme is
+            // checked. Must precede the empty-ref guard below, which the
+            // mantle shape would otherwise fall into.
+            #[cfg(feature = "bedrock")]
+            Self::AnthropicApi {
+                bedrock_mantle: Some(mantle),
+                ..
+            } => mantle.creds.secret_uris(),
             // A `forwarded` entry's `api_key_ref` is intentionally empty
             // (validated by `validate_provider_credential_sources`, not
             // resolved through a `SecretStore`) -- an empty ref is not a
@@ -2155,9 +2166,9 @@ impl ProviderEntry {
             Self::Bedrock { creds, .. } => creds.secret_uris(),
             #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
             Self::OpenaiResponses {
-                bedrock_mantle: Some(_),
+                bedrock_mantle: Some(mantle),
                 ..
-            } => Vec::new(),
+            } => mantle.creds.secret_uris(),
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses {
                 api_key_ref,
@@ -2201,8 +2212,11 @@ impl BedrockCredsConfig {
     }
 
     /// Enumerate every secret-URI string a config check should resolve.
+    /// Empty ref slots are skipped: an empty string fed to `SecretRef::parse`
+    /// fails as an "unrecognized scheme", a spurious error on the config-check
+    /// walk. A genuinely-required-but-empty ref is caught by the validator.
     pub fn secret_uris(&self) -> Vec<&str> {
-        match self {
+        let refs: Vec<&str> = match self {
             Self::BearerKey { key_ref } => vec![key_ref.as_str()],
             Self::Static {
                 access_key_ref,
@@ -2216,7 +2230,8 @@ impl BedrockCredsConfig {
                 v
             }
             Self::Profile { .. } | Self::DefaultChain => Vec::new(),
-        }
+        };
+        refs.into_iter().filter(|r| !r.is_empty()).collect()
     }
 }
 

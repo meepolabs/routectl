@@ -11,6 +11,8 @@ pub use build::{
     build_resolved_models,
 };
 #[cfg(feature = "bedrock")]
+pub use validate::validate_bedrock_creds_refs;
+#[cfg(feature = "bedrock")]
 pub use validate::validate_bedrock_global_config;
 #[cfg(feature = "bedrock")]
 pub use validate::validate_provider_bedrock_mantle;

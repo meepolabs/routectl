@@ -550,6 +550,143 @@ mod bedrock_validation_tests {
 }
 
 #[cfg(test)]
+#[cfg(feature = "bedrock")]
+mod bedrock_creds_ref_validation_tests {
+    //! Tests for `validate_bedrock_creds_refs`: a present-but-empty
+    //! required creds ref is a config error on the native Bedrock lane and
+    //! on the three `bedrock_mantle` lanes. Configs are parsed from TOML to
+    //! exercise the real deserialization path an operator hits.
+
+    use super::validate_bedrock_creds_refs;
+    use crate::config::Config;
+
+    fn config_from(toml_text: &str) -> Config {
+        toml::from_str(toml_text).expect("config must parse")
+    }
+
+    #[test]
+    fn empty_key_ref_on_native_bedrock_is_rejected() {
+        let cfg = config_from(
+            r#"
+[providers.native]
+kind = "bedrock"
+region = "us-west-2"
+creds = { kind = "bearer-key", key_ref = "" }
+"#,
+        );
+
+        let err = validate_bedrock_creds_refs(&cfg).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("native"), "msg: {msg}");
+        assert!(msg.contains("key_ref"), "msg: {msg}");
+    }
+
+    #[test]
+    fn empty_access_key_ref_on_mantle_lane_is_rejected() {
+        let cfg = config_from(
+            r#"
+[providers.compat-mantle]
+kind = "openai-compat"
+api_key_ref = ""
+
+[providers.compat-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.compat-mantle.bedrock_mantle.creds]
+kind = "static"
+access_key_ref = ""
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+"#,
+        );
+
+        let err = validate_bedrock_creds_refs(&cfg).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("compat-mantle"), "msg: {msg}");
+        assert!(msg.contains("access_key_ref"), "msg: {msg}");
+    }
+
+    #[test]
+    fn present_but_empty_session_token_ref_is_rejected() {
+        let cfg = config_from(
+            r#"
+[providers.native]
+kind = "bedrock"
+region = "us-west-2"
+
+[providers.native.creds]
+kind = "static"
+access_key_ref = "env://AWS_ACCESS_KEY_ID"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+session_token_ref = ""
+"#,
+        );
+
+        let err = validate_bedrock_creds_refs(&cfg).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("session_token_ref"), "msg: {msg}");
+    }
+
+    #[test]
+    fn valid_creds_refs_pass_on_native_and_mantle_lanes() {
+        let cfg = config_from(
+            r#"
+[providers.native]
+kind = "bedrock"
+region = "us-west-2"
+
+[providers.native.creds]
+kind = "static"
+access_key_ref = "env://AWS_ACCESS_KEY_ID"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+
+[providers.anthropic-mantle]
+kind = "anthropic-api"
+bedrock_mantle = { region = "us-west-2", creds = { kind = "bearer-key", key_ref = "file:///tmp/whatever" } }
+
+[providers.profile-native]
+kind = "bedrock"
+region = "us-west-2"
+creds = { kind = "profile", name = "bedrock-prod" }
+
+[providers.chain-native]
+kind = "bedrock"
+region = "us-west-2"
+creds = { kind = "default-chain" }
+"#,
+        );
+
+        assert!(
+            validate_bedrock_creds_refs(&cfg).is_ok(),
+            "valid creds refs on every lane must pass"
+        );
+    }
+
+    #[test]
+    fn omitted_session_token_ref_is_valid() {
+        let cfg = config_from(
+            r#"
+[providers.native]
+kind = "bedrock"
+region = "us-west-2"
+
+[providers.native.creds]
+kind = "static"
+access_key_ref = "env://AWS_ACCESS_KEY_ID"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+"#,
+        );
+
+        assert!(
+            validate_bedrock_creds_refs(&cfg).is_ok(),
+            "an omitted optional session_token_ref must pass"
+        );
+    }
+}
+
+#[cfg(test)]
 mod validate_alias_chain_targets_tests {
     //! Tests for the v0.6.0 alias-chain validator. Each test pins
     //! one validator branch (clean pass, unknown nickname, disabled

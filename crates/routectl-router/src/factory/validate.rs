@@ -998,6 +998,97 @@ pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Reject a present-but-empty required credential ref inside a
+/// [`BedrockCredsConfig`]. The config-check secret-ref parse walk skips
+/// empty ref slots (an empty string is not a parseable secret URI), so
+/// without this check an operator typo like `key_ref = ""` on a required
+/// slot would pass config validation and only surface as a confusing
+/// failure at provider build / first request time.
+///
+/// Rejected (after trim):
+///   - `BearerKey.key_ref` empty.
+///   - `Static.access_key_ref` or `Static.secret_key_ref` empty.
+///   - `Static.session_token_ref` present-but-empty (`Some("")`) -- an
+///     optional slot that is explicitly set to empty is still a typo.
+///     Omitting it entirely (`None`) is valid.
+///
+/// `Profile` and `DefaultChain` carry no secret-ref slots to check. The
+/// error names the provider and the offending field; no secret value is
+/// echoed.
+#[cfg(feature = "bedrock")]
+fn validate_bedrock_creds(name: &str, creds: &crate::config::BedrockCredsConfig) -> Result<()> {
+    use crate::config::BedrockCredsConfig;
+    use routectl_core::Error;
+
+    let empty = |field: &str| {
+        Error::Config(format!(
+            "provider `{name}`: bedrock creds `{field}` is set but empty; \
+             give it a secret ref (env://, file://, or literal:) or remove the field \
+             where it is optional"
+        ))
+    };
+
+    match creds {
+        BedrockCredsConfig::BearerKey { key_ref } => {
+            if key_ref.trim().is_empty() {
+                return Err(empty("key_ref"));
+            }
+        }
+        BedrockCredsConfig::Static {
+            access_key_ref,
+            secret_key_ref,
+            session_token_ref,
+        } => {
+            if access_key_ref.trim().is_empty() {
+                return Err(empty("access_key_ref"));
+            }
+            if secret_key_ref.trim().is_empty() {
+                return Err(empty("secret_key_ref"));
+            }
+            if session_token_ref
+                .as_deref()
+                .is_some_and(|s| s.trim().is_empty())
+            {
+                return Err(empty("session_token_ref"));
+            }
+        }
+        BedrockCredsConfig::Profile { .. } | BedrockCredsConfig::DefaultChain => {}
+    }
+
+    Ok(())
+}
+
+/// Reject a present-but-empty required Bedrock credential ref wherever a
+/// [`BedrockCredsConfig`] appears: the native Bedrock lane (`creds`) and
+/// all three `bedrock_mantle` lanes (`bedrock_mantle.creds` on
+/// `anthropic-api` / `openai-compat` / `openai-responses`). One shared
+/// per-descriptor check, so the four lanes cannot drift. Runs on every
+/// config-validation path via [`collect_config_validation`], not only
+/// serve startup.
+#[cfg(feature = "bedrock")]
+pub fn validate_bedrock_creds_refs(config: &Config) -> Result<()> {
+    for (name, entry) in &config.providers {
+        match entry {
+            ProviderEntry::Bedrock { creds, .. } => validate_bedrock_creds(name, creds)?,
+            ProviderEntry::AnthropicApi {
+                bedrock_mantle: Some(mantle),
+                ..
+            }
+            | ProviderEntry::OpenaiCompat {
+                bedrock_mantle: Some(mantle),
+                ..
+            } => validate_bedrock_creds(name, &mantle.creds)?,
+            #[cfg(feature = "openai-responses")]
+            ProviderEntry::OpenaiResponses {
+                bedrock_mantle: Some(mantle),
+                ..
+            } => validate_bedrock_creds(name, &mantle.creds)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Reject any float config leaf that is non-finite (NaN or +/-inf), plus a
 /// non-positive `retry.backoff_multiplier`. Non-finite is the latent hole:
 /// NaN and inf both slip past the `wm < sentinel` / `rm <= 0.0` overlay
@@ -1192,6 +1283,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     }
     #[cfg(feature = "bedrock")]
     if let Err(e) = validate_provider_openai_mantle(config) {
+        errors.push(bare_validation_message(e));
+    }
+    #[cfg(feature = "bedrock")]
+    if let Err(e) = validate_bedrock_creds_refs(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = crate::catalog::validate_overrides(&config.cache_pricing) {
