@@ -1126,7 +1126,13 @@ pub enum ProviderEntry {
     /// OpenAI-compatible chat-completions provider.
     #[non_exhaustive]
     OpenaiCompat {
-        /// Endpoint base URL.
+        /// Endpoint base URL. Required (non-empty) on the standard lane
+        /// -- validation rejects an omitted / empty value. Defaulted
+        /// (empty) only so the mantle lane may omit it: when
+        /// `bedrock_mantle` is set the factory derives the URL from
+        /// `bedrock_mantle.region`, and validation then REQUIRES this be
+        /// left unset.
+        #[serde(default)]
         base_url: String,
         /// Reference to the API key. One of:
         ///   - `env://VAR_NAME`             (process env var)
@@ -1166,6 +1172,18 @@ pub enum ProviderEntry {
         /// lives outside `runtime`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reduction_enabled: Option<bool>,
+        /// Opt-in AWS Bedrock mantle lane (OpenAI Chat Completions shape).
+        /// Present -> this provider egresses through Bedrock's managed
+        /// OpenAI-compatible surface: the factory derives `base_url` from
+        /// `bedrock_mantle.region` and authenticates with
+        /// `bedrock_mantle.creds`. Omitted (default) -> the standard
+        /// OpenAI-compatible lane. When set, `api_key_ref` must be empty
+        /// and `base_url` left unset -- validation rejects every other
+        /// combination (region is the single source of truth for the
+        /// endpoint, and the credential lives in `creds`).
+        #[cfg(feature = "bedrock")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bedrock_mantle: Option<BedrockMantleConfig>,
         /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
@@ -1347,6 +1365,20 @@ pub enum ProviderEntry {
         /// policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reduction_enabled: Option<bool>,
+        /// Opt-in AWS Bedrock mantle lane (OpenAI Responses shape).
+        /// Present -> this provider egresses through Bedrock's managed
+        /// Responses surface: the factory derives `base_url` from
+        /// `bedrock_mantle.region` and authenticates with
+        /// `bedrock_mantle.creds`. Omitted (default) -> the standard
+        /// Responses lane. When set, `auth_kind` must be `bedrock-mantle`
+        /// (or omitted -- the factory sets the marker), `account_id_ref`
+        /// and `api_key_ref` empty, and `base_url` left unset --
+        /// validation rejects every other combination. Setting
+        /// `auth_kind = "bedrock-mantle"` WITHOUT this block is a hard
+        /// error (the legacy bearer-only surface is closed).
+        #[cfg(feature = "bedrock")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bedrock_mantle: Option<BedrockMantleConfig>,
         /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
@@ -1807,6 +1839,8 @@ impl ProviderEntry {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1854,6 +1888,8 @@ impl ProviderEntry {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }

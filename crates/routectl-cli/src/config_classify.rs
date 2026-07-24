@@ -372,6 +372,59 @@ mod tests {
         );
     }
 
+    /// The mantle lane selector is egress-defining on the OpenAI-shape
+    /// providers too. `collect_high_consequence_changes` reads
+    /// `bedrock_mantle` off the serialized entry, so it flags a change on
+    /// `openai-compat` / `openai-responses` identically to `anthropic-api`
+    /// -- pin that here so a future refactor of the projection cannot
+    /// silently drop the OpenAI lanes. Relies on routectl-router's default
+    /// features (bedrock + openai-responses) being on, same as the
+    /// `anthropic-api` mantle test above.
+    #[test]
+    fn high_consequence_flags_openai_mantle_lanes() {
+        // openai-compat: adding the mantle block is high-consequence.
+        let prev: Config = toml::from_str(
+            "[providers.oc]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://example.invalid/v1\"\n\
+             api_key_ref = \"env://KEY\"\n",
+        )
+        .expect("compat config parses");
+        let next: Config = toml::from_str(
+            "[providers.oc]\n\
+             kind = \"openai-compat\"\n\
+             api_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n",
+        )
+        .expect("compat mantle config parses");
+        let changes = collect_high_consequence_changes(&prev, &next);
+        assert!(
+            changes.contains(&"providers.bedrock_mantle"),
+            "compat mantle add must flag: {changes:?}"
+        );
+
+        // openai-responses: changing the mantle region is high-consequence.
+        let prev: Config = toml::from_str(
+            "[providers.or]\n\
+             kind = \"openai-responses\"\n\
+             api_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n",
+        )
+        .expect("responses mantle config parses");
+        let next: Config = toml::from_str(
+            "[providers.or]\n\
+             kind = \"openai-responses\"\n\
+             api_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"eu-west-1\", creds = { kind = \"default-chain\" } }\n",
+        )
+        .expect("responses mantle config parses");
+        let changes = collect_high_consequence_changes(&prev, &next);
+        assert!(
+            changes.contains(&"providers.bedrock_mantle"),
+            "responses mantle region change must flag: {changes:?}"
+        );
+    }
+
     #[test]
     fn high_consequence_flags_mitm_egress_absent_on_no_op() {
         use routectl_router::MitmConfig;

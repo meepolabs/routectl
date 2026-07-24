@@ -798,8 +798,20 @@
               ]
             },
             "base_url": {
-              "description": "Endpoint base URL.",
+              "default": "",
+              "description": "Endpoint base URL. Required (non-empty) on the standard lane\n-- validation rejects an omitted / empty value. Defaulted\n(empty) only so the mantle lane may omit it: when\n`bedrock_mantle` is set the factory derives the URL from\n`bedrock_mantle.region`, and validation then REQUIRES this be\nleft unset.",
               "type": "string"
+            },
+            "bedrock_mantle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BedrockMantleConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opt-in AWS Bedrock mantle lane (OpenAI Chat Completions shape).\nPresent -> this provider egresses through Bedrock's managed\nOpenAI-compatible surface: the factory derives `base_url` from\n`bedrock_mantle.region` and authenticates with\n`bedrock_mantle.creds`. Omitted (default) -> the standard\nOpenAI-compatible lane. When set, `api_key_ref` must be empty\nand `base_url` left unset -- validation rejects every other\ncombination (region is the single source of truth for the\nendpoint, and the credential lives in `creds`)."
             },
             "cache_capability": {
               "anyOf": [
@@ -911,7 +923,6 @@
           },
           "required": [
             "kind",
-            "base_url",
             "api_key_ref"
           ],
           "type": "object"
@@ -1151,6 +1162,17 @@
                 "string",
                 "null"
               ]
+            },
+            "bedrock_mantle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BedrockMantleConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opt-in AWS Bedrock mantle lane (OpenAI Responses shape).\nPresent -> this provider egresses through Bedrock's managed\nResponses surface: the factory derives `base_url` from\n`bedrock_mantle.region` and authenticates with\n`bedrock_mantle.creds`. Omitted (default) -> the standard\nResponses lane. When set, `auth_kind` must be `bedrock-mantle`\n(or omitted -- the factory sets the marker), `account_id_ref`\nand `api_key_ref` empty, and `base_url` left unset --\nvalidation rejects every other combination. Setting\n`auth_kind = \"bedrock-mantle\"` WITHOUT this block is a hard\nerror (the legacy bearer-only surface is closed)."
             },
             "cache_capability": {
               "anyOf": [

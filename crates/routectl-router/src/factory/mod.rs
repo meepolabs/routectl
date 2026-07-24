@@ -14,6 +14,8 @@ pub use build::{
 pub use validate::validate_bedrock_global_config;
 #[cfg(feature = "bedrock")]
 pub use validate::validate_provider_bedrock_mantle;
+#[cfg(feature = "bedrock")]
+pub use validate::validate_provider_openai_mantle;
 pub use validate::{
     ConfigValidation, collect_config_validation, validate_alias_chain_targets,
     validate_alias_patterns, validate_class_policy, validate_mitm_config,

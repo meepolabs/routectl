@@ -116,6 +116,8 @@ pub use doctor::{
 pub use factory::validate_bedrock_global_config;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_provider_bedrock_mantle;
+#[cfg(feature = "bedrock")]
+pub use factory::validate_provider_openai_mantle;
 pub use factory::{
     BuildOptions, ConfigValidation, apply_catalog_overlay, build_provider,
     build_provider_with_options, build_resolved_models, class_policy_warnings,

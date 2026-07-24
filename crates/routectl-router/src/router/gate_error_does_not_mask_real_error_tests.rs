@@ -90,6 +90,8 @@ fn router_with_two_entry_chain() -> Router {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy {
                 circuit_failures: Some(1),
                 circuit_cooldown_ms: Some(60_000),

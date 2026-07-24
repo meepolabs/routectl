@@ -870,6 +870,134 @@ pub fn validate_provider_bedrock_mantle(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Reject an incoherent Bedrock mantle lane on either OpenAI-shape provider
+/// (`openai-compat` / `openai-responses`) and close the legacy bearer-only
+/// surface. The sibling of [`validate_provider_bedrock_mantle`] for the
+/// OpenAI lanes: the PRESENCE of a `bedrock_mantle` sub-table selects the
+/// lane, on which the endpoint (`region`) and credential (`creds`) come from
+/// the sub-table, so every other credential/endpoint knob must be neutral.
+///
+/// With `bedrock_mantle` set, this rejects on either lane:
+///   - a non-empty `api_key_ref` -- `creds` is the single credential source.
+///   - a non-empty `base_url` -- `region` derives the endpoint.
+///   - an empty / whitespace-only `region`.
+///
+/// On `openai-responses` additionally:
+///   - a set `account_id_ref` -- it belongs to the ChatGPT-OAuth surface,
+///     never the mantle lane.
+///   - a `store` key in `payload_extras` -- the Responses `store` flag is
+///     forced off on the mantle lane, so operator config must not carry it.
+///
+/// LEGACY CLOSURE (`openai-responses`): `auth_kind = "bedrock-mantle"` with
+/// NO `bedrock_mantle` block is a hard error naming the block form. The
+/// bearer-only lane cannot meet the SigV4 posture and has no known
+/// production user; the mantle lane is selected exclusively by the block.
+/// When the block IS present the factory sets the runtime marker itself, so
+/// `auth_kind` may be stated redundantly or omitted -- it never selects the
+/// lane alone.
+#[cfg(feature = "bedrock")]
+pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
+    use routectl_core::Error;
+
+    for (name, entry) in &config.providers {
+        match entry {
+            ProviderEntry::OpenaiCompat {
+                api_key_ref,
+                base_url,
+                bedrock_mantle: Some(mantle),
+                ..
+            } => {
+                if !api_key_ref.is_empty() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle is set but api_key_ref is non-empty -- \
+                         the mantle lane's credential comes from bedrock_mantle.creds; remove \
+                         api_key_ref"
+                    )));
+                }
+                if !base_url.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle is set but base_url is non-empty -- \
+                         bedrock_mantle.region is the single source of truth for the endpoint \
+                         (the factory derives the URL from it); remove base_url"
+                    )));
+                }
+                if mantle.region.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle.region is empty -- it must name an AWS \
+                         region (e.g. \"us-east-1\"); the endpoint host and SigV4 scope derive \
+                         from it"
+                    )));
+                }
+            }
+            #[cfg(feature = "openai-responses")]
+            ProviderEntry::OpenaiResponses {
+                api_key_ref,
+                account_id_ref,
+                base_url,
+                auth_kind,
+                payload_extras,
+                bedrock_mantle,
+                ..
+            } => {
+                if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle && bedrock_mantle.is_none()
+                {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: auth_kind = \"bedrock-mantle\" but no bedrock_mantle \
+                         block is set -- the legacy bearer-only surface is closed; set \
+                         [providers.{name}.bedrock_mantle] with region and creds to select the \
+                         mantle lane"
+                    )));
+                }
+                let Some(mantle) = bedrock_mantle else {
+                    continue;
+                };
+                if !api_key_ref.is_empty() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle is set but api_key_ref is non-empty -- \
+                         the mantle lane's credential comes from bedrock_mantle.creds; remove \
+                         api_key_ref"
+                    )));
+                }
+                if account_id_ref.is_some() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle is set but account_id_ref is set -- it \
+                         belongs to the chatgpt-oauth surface, not the mantle lane; remove \
+                         account_id_ref"
+                    )));
+                }
+                if base_url.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle is set but base_url is non-empty -- \
+                         bedrock_mantle.region is the single source of truth for the endpoint \
+                         (the factory derives the URL from it); remove base_url"
+                    )));
+                }
+                if payload_extras
+                    .as_ref()
+                    .and_then(|v| v.as_object())
+                    .is_some_and(|obj| obj.contains_key("store"))
+                {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle is set but payload_extras carries a \
+                         `store` key -- the Responses store flag is forced off on the mantle lane \
+                         and cannot be configured; remove it from payload_extras"
+                    )));
+                }
+                if mantle.region.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: bedrock_mantle.region is empty -- it must name an AWS \
+                         region (e.g. \"us-east-1\"); the endpoint host and SigV4 scope derive \
+                         from it"
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// Reject any float config leaf that is non-finite (NaN or +/-inf), plus a
 /// non-positive `retry.backoff_multiplier`. Non-finite is the latent hole:
 /// NaN and inf both slip past the `wm < sentinel` / `rm <= 0.0` overlay
@@ -940,9 +1068,35 @@ fn validate_base_urls(config: &Config) -> Result<()> {
     use routectl_core::Error;
 
     for (name, entry) in &config.providers {
+        // openai-compat base_url is REQUIRED (non-empty) on the standard
+        // lane -- it has no kind default. It is defaulted (empty) in the
+        // schema only so the mantle lane may omit it; there the factory
+        // derives the URL from bedrock_mantle.region, so an empty value is
+        // valid and this check is skipped (validate_provider_openai_mantle
+        // owns the mantle-lane coherence instead).
+        if let ProviderEntry::OpenaiCompat { base_url, .. } = entry {
+            #[cfg(feature = "bedrock")]
+            if matches!(
+                entry,
+                ProviderEntry::OpenaiCompat {
+                    bedrock_mantle: Some(_),
+                    ..
+                }
+            ) {
+                continue;
+            }
+            if base_url.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "provider `{name}`: openai-compat base_url is required and must be non-empty; \
+                     set an explicit endpoint URL"
+                )));
+            }
+            continue;
+        }
+
         let is_empty = match entry {
-            ProviderEntry::OpenaiCompat { base_url, .. }
-            | ProviderEntry::AnthropicApi { base_url, .. } => base_url.trim().is_empty(),
+            ProviderEntry::OpenaiCompat { .. } => false,
+            ProviderEntry::AnthropicApi { base_url, .. } => base_url.trim().is_empty(),
             #[cfg(feature = "gemini")]
             ProviderEntry::Gemini { base_url, .. } => base_url.trim().is_empty(),
             #[cfg(feature = "openai-responses")]
@@ -1034,6 +1188,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     }
     #[cfg(feature = "bedrock")]
     if let Err(e) = validate_provider_bedrock_mantle(config) {
+        errors.push(bare_validation_message(e));
+    }
+    #[cfg(feature = "bedrock")]
+    if let Err(e) = validate_provider_openai_mantle(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = crate::catalog::validate_overrides(&config.cache_pricing) {
