@@ -47,6 +47,47 @@ pub async fn sign(
     crate::bedrock::signing::apply_with_service(req, creds, region, MANTLE_SERVICE).await
 }
 
+/// Probe a mantle lane by resolving its credential, mirroring the Bedrock
+/// provider's probe posture.
+///
+/// The mantle endpoint authenticates with SigV4/bearer, not the
+/// first-party `x-api-key`, and exposes no free models-list surface, so a
+/// reachability probe must NOT dial the inference host. Instead it checks
+/// the credential is live: a `Bearer` key is a static secret (trivially
+/// reachable), a `Sigv4` provider re-provides its chain (catching an
+/// expired SSO / broken profile after startup). Reason strings are fixed
+/// literals so no profile name, ARN, or SDK detail leaks into an
+/// operator-facing message.
+#[cfg(feature = "bedrock")]
+pub async fn probe(creds: &crate::bedrock::auth::ResolvedCreds) -> routectl_core::ProbeOutcome {
+    use aws_credential_types::provider::ProvideCredentials;
+
+    use crate::bedrock::auth::ResolvedCreds;
+
+    match creds {
+        ResolvedCreds::Bearer { .. } => routectl_core::ProbeOutcome::Reachable,
+        ResolvedCreds::Sigv4 { provider } => {
+            match tokio::time::timeout(crate::probe::PROBE_TIMEOUT, provider.provide_credentials())
+                .await
+            {
+                Ok(Ok(_)) => routectl_core::ProbeOutcome::Reachable,
+                Ok(Err(e)) => {
+                    // Log the real SDK error server-side (an expired SSO,
+                    // missing profile, and unreachable IMDS look identical
+                    // otherwise), but keep a fixed literal in the outcome so
+                    // no profile name, ARN, or SDK detail leaks to the
+                    // operator surface -- mirrors `bedrock::auth::resolve`.
+                    tracing::warn!(error = %e, "mantle credential resolution failed");
+                    routectl_core::ProbeOutcome::AuthFailed("credential resolution failed".into())
+                }
+                Err(_) => routectl_core::ProbeOutcome::Unreachable(
+                    "credential resolution timed out".into(),
+                ),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{mantle_anthropic_base, mantle_host, mantle_openai_base};

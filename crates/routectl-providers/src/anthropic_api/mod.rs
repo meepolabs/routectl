@@ -663,7 +663,19 @@ impl Provider for AnthropicApiProvider {
     /// and the CLI orchestration layer owns oauth reachability. On the
     /// `ApiKey` lane the resolved key is a `StaticToken`, so reading it
     /// here does no refresh.
+    ///
+    /// On the mantle lane (`cfg.mantle` is `Some`, cfg `bedrock`) this
+    /// delegates to `mantle::probe` instead: that endpoint signs with
+    /// SigV4/bearer and has no free models-list surface, so the probe
+    /// resolves the credential rather than dialing the inference host.
     async fn probe(&self) -> routectl_core::ProbeOutcome {
+        // Mantle lane: the endpoint signs with SigV4/bearer and exposes no
+        // free models-list surface, so probe the credential rather than
+        // dialing the inference host with an x-api-key GET.
+        #[cfg(feature = "bedrock")]
+        if let Some(mantle) = &self.cfg.mantle {
+            return crate::mantle::probe(&mantle.creds).await;
+        }
         if self.cfg.auth_kind != AuthKind::ApiKey {
             return routectl_core::ProbeOutcome::UnsupportedFreeProbe;
         }
