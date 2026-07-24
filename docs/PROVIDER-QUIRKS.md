@@ -228,6 +228,24 @@ per-model budget, or split sensitive models across multiple
 `[providers.X]` blocks (e.g. distinct `[providers.bedrock-sonnet]` /
 `[providers.bedrock-haiku]` entries) to keep buckets isolated.
 
+**Converse: unsupported request features.** The Converse egress models
+the common request surface; a handful of features have no routectl
+request knob:
+
+- **Guardrails.** No `guardrailConfig` request surface, so Converse is
+  unsuitable for guardrail-dependent workloads. The passive
+  `guardrail_intervened` stopReason still passes through on responses --
+  only the request-side attachment is missing.
+- **URL-shape images and non-base64 / `file_id` documents.** Dropped
+  with a diagnostic; the JSON Converse wire carries only inline base64
+  bytes. Send images and documents as base64 data URIs.
+- **`video` / `citationsContent`.** Not modeled as typed blocks, but not
+  dropped either: an unmodeled block preserved from a prior response turn
+  passes through verbatim as a single-key union and AWS validates it (the
+  caller owns the outcome). This is the escape hatch, not a drop.
+- **`promptVariables` / `requestMetadata` / `performanceConfig`.** Not
+  exposed; no request surface.
+
 **Example provider + model:**
 
 ```toml
