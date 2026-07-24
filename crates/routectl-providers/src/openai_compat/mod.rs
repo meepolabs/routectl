@@ -682,21 +682,44 @@ fn map_openai_compat_upstream_error(
     } else {
         None
     };
-    // Best-effort lift of the upstream classifier so an SDK that branches on
-    // `error.type` / `error.code` keeps the upstream signal. Attempted on the
-    // body (the capped prefix on a cap trip); a truncated envelope simply
-    // fails to parse and yields (None, None).
-    let (upstream_type, upstream_code) = parse_openai_error_classifier(body_text);
+    // A first-party OpenAI error is a nested `{"error":{...}}` envelope; a
+    // mantle (Bedrock) upstream returns a flat body instead (`{"__type":...}`
+    // or a bare `{"message":...}` -- the AWS exception type often arrives
+    // ONLY in the `x-amzn-errortype` header, not the body). The native
+    // envelope WINS: its `error.type` / `error.code` classifier is lifted and
+    // its raw body is carried unchanged. Any NON-envelope body is treated as
+    // a potential AWS body: its classifier tokens are lifted best-effort and,
+    // crucially, its free text routes through the shared Bedrock scrub. This
+    // gates the scrub on shape (not on a lifted token) so a 403 AccessDenied
+    // body cannot leak the principal ARN / account / resource even when AWS
+    // omits the top-level `__type` / `code` tokens.
+    let is_native_envelope = is_json_error_envelope(body_text);
+    let (upstream_type, upstream_code) = if is_native_envelope {
+        parse_openai_error_classifier(body_text)
+    } else {
+        let parsed = serde_json::from_str::<Value>(body_text).ok();
+        crate::aws_error::lift_aws_error_tokens(parsed.as_ref())
+    };
+    // A non-envelope body routes its free text through the shared Bedrock
+    // scrub: a 403 collapses to the IAM action only, while every other status
+    // yields the same sanitized-and-capped excerpt `extract_upstream_message`
+    // already produces for a body with no `/error/message`, so non-403
+    // non-envelope bodies stay byte-unchanged. A native envelope keeps its
+    // first-party `/error/message` verbatim.
+    let client_msg = if is_native_envelope {
+        extract_upstream_message(body_text)
+    } else {
+        crate::aws_error::classify_client_error_message(status, body_text)
+    };
     // The upstream-failure WARN fires on every 4xx/5xx -- cap trips included,
     // so an operator sees the same failure signal regardless. On a cap trip
     // its excerpt is the fixed cap message: the truncated prefix never appears
     // at WARN level. openai-compat carries no AuthKind, so the auth_kind field
     // is omitted.
-    let sanitized = extract_upstream_message(body_text);
     let warn_excerpt = if hit_cap {
         crate::http_client::body_cap_exceeded_message()
     } else {
-        sanitize_for_log(&sanitized)
+        sanitize_for_log(&client_msg)
     };
     crate::upstream_log::warn_upstream_failure(
         provider_id,
@@ -706,19 +729,29 @@ fn map_openai_compat_upstream_error(
         "openai-compat",
     );
     // Full (capped) upstream body at debug level -- the only path where the
-    // truncated prefix bytes may surface, DEBUG-gated and bounded.
-    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
-    // Client body: on a cap trip the truncated body is untrustworthy, so
-    // collapse to the fixed cap message (never an echo of the partial body)
-    // while preserving the status + retry_after. Otherwise carry the RAW
-    // `{error:...}` envelope so the ingress sanitizer can re-extract the
-    // upstream message, or the sanitized excerpt for a non-envelope body.
-    let err_body = if hit_cap {
-        crate::http_client::body_cap_exceeded_message()
-    } else if is_json_error_envelope(body_text) {
+    // truncated prefix bytes may surface, DEBUG-gated and bounded. A
+    // non-envelope 403 body collapses to the IAM action only so no ARN /
+    // account / resource identifier reaches the DEBUG log; native envelopes
+    // and non-403 bodies log unchanged.
+    let debug_body = if is_native_envelope {
         body_text.to_string()
     } else {
-        sanitized
+        crate::aws_error::sanitized_debug_body(status, body_text)
+    };
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &debug_body);
+    // Client body: on a cap trip the truncated body is untrustworthy, so
+    // collapse to the fixed cap message (never an echo of the partial body)
+    // while preserving the status + retry_after. A native `{error:...}`
+    // envelope is carried RAW so the ingress sanitizer can re-extract the
+    // upstream message. A non-envelope body carries the already-scrubbed
+    // message -- a raw AWS envelope naming principal identifiers is never
+    // echoed.
+    let err_body = if hit_cap {
+        crate::http_client::body_cap_exceeded_message()
+    } else if is_native_envelope {
+        body_text.to_string()
+    } else {
+        client_msg
     };
     Error::upstream_full(
         provider_id,
@@ -1108,6 +1141,171 @@ mod helper_tests {
                 );
             }
             other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A mantle 403 carrying a namespaced AWS `__type` (the flat AWS
+    /// envelope, no native OpenAI `/error` shape) must lift the bare
+    /// exception token into `upstream_type`. 403 already classifies Auth by
+    /// status; the lifted token is what makes the log truthful.
+    #[test]
+    fn map_upstream_error_lifts_aws_signature_token_from_403() {
+        let body = r#"{"__type":"com.amazonaws.bedrock#SignatureDoesNotMatch","message":"The request signature we calculated does not match."}"#;
+        let err = map_openai_compat_upstream_error("p", 403, &HeaderMap::new(), body, false);
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 403);
+                assert_eq!(upstream_type.as_deref(), Some("SignatureDoesNotMatch"));
+                assert_eq!(upstream_code, None);
+                // A 403 free-text message collapses to the generic scrub; the
+                // raw AWS envelope must never be carried.
+                assert_eq!(body, "bedrock access denied");
+                assert!(!body.contains("__type"));
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A mantle 429 carrying a bare AWS `code` token must lift it into
+    /// `upstream_code` so the rate-limit failure logs truthfully.
+    #[test]
+    fn map_upstream_error_lifts_aws_throttling_code_from_429() {
+        let body = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
+        let err = map_openai_compat_upstream_error("p", 429, &HeaderMap::new(), body, false);
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(status, 429);
+                assert_eq!(upstream_type, None);
+                assert_eq!(upstream_code.as_deref(), Some("ThrottlingException"));
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A real AWS 403 AccessDenied body names the principal ARN, account id,
+    /// and resource ARN. The client body, the WARN excerpt, and the DEBUG
+    /// line must surface ONLY the IAM action -- never the principal / account
+    /// / resource identifiers.
+    #[test]
+    fn map_upstream_error_403_scrubs_aws_access_denied_arn() {
+        let body = r#"{"__type":"com.amazonaws.bedrock#AccessDeniedException","message":"User: arn:aws:iam::123456789012:role/App is not authorized to perform: bedrock-runtime:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5"}"#;
+        let err = map_openai_compat_upstream_error("p", 403, &HeaderMap::new(), body, false);
+        match err {
+            Error::Upstream {
+                upstream_type,
+                body,
+                ..
+            } => {
+                assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
+                assert_eq!(
+                    body,
+                    "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+                );
+                assert!(!body.contains("arn:aws:"), "leaked ARN: {body}");
+                assert!(!body.contains("123456789012"), "leaked account id: {body}");
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A mantle 403 whose body carries the ARN-laden AccessDenied message but
+    /// NO top-level `__type` / `code` token (the AWS exception type arrives
+    /// only in the `x-amzn-errortype` header) must STILL be scrubbed on every
+    /// surface. The scrub is gated on the non-envelope shape, not on a lifted
+    /// token, so this leak class cannot slip through.
+    #[test]
+    fn map_upstream_error_403_scrubs_aws_body_without_type_token() {
+        let body = r#"{"message":"User: arn:aws:iam::123456789012:role/App is not authorized to perform: bedrock-runtime:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5"}"#;
+        let events = routectl_testkit::capture_events(|| {
+            let err = map_openai_compat_upstream_error("p", 403, &HeaderMap::new(), body, false);
+            match err {
+                Error::Upstream { body, .. } => {
+                    assert_eq!(
+                        body,
+                        "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+                    );
+                    assert!(!body.contains("arn:aws:"), "client body leaked ARN: {body}");
+                    assert!(
+                        !body.contains("123456789012"),
+                        "client body leaked account id: {body}"
+                    );
+                }
+                other => panic!("expected Error::Upstream, got: {other:?}"),
+            }
+        });
+        // No log event at any level may echo the principal ARN or account id.
+        assert!(
+            events.iter().all(|e| e
+                .fields
+                .iter()
+                .all(|(_, v)| !v.contains("arn:aws:") && !v.contains("123456789012"))),
+            "a log event leaked an ARN / account id"
+        );
+    }
+
+    /// The native OpenAI `/error` shape WINS over any sibling top-level AWS
+    /// key: a body carrying both keeps the OpenAI classifier and carries the
+    /// raw envelope, never routing through the AWS scrub.
+    #[test]
+    fn map_upstream_error_openai_shape_wins_over_aws() {
+        let body = r#"{"error":{"type":"rate_limit_exceeded","code":"slow_down","message":"slow down"},"__type":"com.amazonaws.bedrock#ThrottlingException"}"#;
+        let err = map_openai_compat_upstream_error("p", 429, &HeaderMap::new(), body, false);
+        match err {
+            Error::Upstream {
+                upstream_type,
+                upstream_code,
+                body,
+                ..
+            } => {
+                assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(upstream_code.as_deref(), Some("slow_down"));
+                // Native shape -> raw envelope carried (not the AWS scrub).
+                let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(
+                    parsed.pointer("/error/type").and_then(|v| v.as_str()),
+                    Some("rate_limit_exceeded")
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// Arbitrary, non-JSON, empty, and oversized bodies must never panic and
+    /// must degrade to a canonical `Error::Upstream` with no lifted tokens.
+    #[test]
+    fn map_upstream_error_never_panics_on_malformed_bodies() {
+        let huge = "x".repeat(crate::http_client::MAX_RESPONSE_BODY_BYTES * 2);
+        let cases: [&str; 5] = [
+            "",
+            "not json at all",
+            r#"{"random":[1,2,3],"nested":{"deep":true}}"#,
+            r#"{"__type":42,"code":{"not":"a string"}}"#,
+            &huge,
+        ];
+        for body in cases {
+            let err = map_openai_compat_upstream_error("p", 400, &HeaderMap::new(), body, false);
+            match err {
+                Error::Upstream {
+                    upstream_type,
+                    upstream_code,
+                    ..
+                } => {
+                    assert_eq!(upstream_type, None);
+                    assert_eq!(upstream_code, None);
+                }
+                other => panic!("expected Error::Upstream, got: {other:?}"),
+            }
         }
     }
 

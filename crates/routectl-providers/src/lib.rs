@@ -129,13 +129,21 @@ pub(crate) mod claude_signing;
 #[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
 pub(crate) mod anthropic_error;
 
-// Shared redaction for AWS/Bedrock upstream error envelopes. A 403
-// AccessDenied body names the caller principal ARN, account id, and
+// Shared redaction + token lift for AWS/Bedrock upstream error envelopes. A
+// 403 AccessDenied body names the caller principal ARN, account id, and
 // resource ARN; the single classifier here keeps that out of both the
-// client-facing message and the log line. Used by the native bedrock lane
-// AND the anthropic-api mantle lift, so it is crate-level (NOT bedrock-only)
-// -- the lean anthropic-api build lifts AWS error bodies without the SDK.
-#[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
+// client-facing message and the log line. Used by the native bedrock lane,
+// the anthropic-api mantle lift, AND both OpenAI readers (which lift AWS
+// tokens as a fallback when a mantle upstream returns a flat AWS envelope
+// instead of the native error shape), so it is crate-level -- every lane
+// that can front a mantle (Bedrock) upstream sees it, and no lane links the
+// AWS SDK just to redact an error body.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-compat",
+    feature = "openai-responses"
+))]
 pub(crate) mod aws_error;
 
 #[cfg(feature = "openai-compat")]
