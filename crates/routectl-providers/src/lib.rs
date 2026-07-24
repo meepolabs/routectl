@@ -38,6 +38,13 @@ pub(crate) mod probe;
 // effort vocabulary).
 pub mod effort;
 
+// Shared helpers for the Bedrock mantle lanes. The URL builders and the
+// service-scope constant are pure and dependency-free, so they stay
+// unconditional (`routectl-router` derives lane base URLs from a region
+// without pulling in the AWS SDK); only the `sign` wrapper, which reaches
+// into the bedrock signer, is gated on `bedrock`.
+pub mod mantle;
+
 // Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Unconditional
 // like `http_client` (both lean on `reqwest`, which any provider feature
 // pulls in); every provider calls into it, so there is no dead code in a

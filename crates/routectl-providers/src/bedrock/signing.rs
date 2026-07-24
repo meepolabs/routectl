@@ -11,8 +11,10 @@
 //!    headers (`Authorization`, `x-amz-date`, `x-amz-content-sha256`,
 //!    `x-amz-security-token` when present) into the request.
 //!
-//! All signing is in the `bedrock` service scope. The region comes
-//! from `BedrockConfig.region` and is part of the signing scope.
+//! The signing service scope is a parameter: `apply` signs in the
+//! `bedrock` scope, while `apply_with_service` lets other AWS-signed
+//! lanes (e.g. mantle) pass their own scope. The region comes from the
+//! caller and is also part of the signing scope.
 
 use std::time::SystemTime;
 
@@ -25,38 +27,60 @@ use routectl_core::{Error, Result};
 
 use super::auth::ResolvedCreds;
 
-/// Apply the appropriate authentication scheme to `req` in place.
+/// Apply the appropriate authentication scheme to `req` in place,
+/// signing SigV4 requests in the `bedrock` service scope.
 ///
 /// For `Bearer` -- attaches `Authorization: Bearer <key>`.
 /// For `Sigv4`  -- fetches the latest credentials from the provider,
 /// SigV4-signs the request, and merges the auth headers into `req`.
 pub async fn apply(req: &mut reqwest::Request, creds: &ResolvedCreds, region: &str) -> Result<()> {
+    apply_with_service(req, creds, region, "bedrock").await
+}
+
+/// Apply the appropriate authentication scheme to `req` in place,
+/// signing SigV4 requests in the given `service` scope.
+///
+/// Identical to [`apply`] except the SigV4 service name is a parameter,
+/// letting non-`bedrock` AWS-signed lanes select their own scope.
+///
+/// For `Bearer` -- attaches `Authorization: Bearer <key>`.
+/// For `Sigv4`  -- fetches the latest credentials from the provider,
+/// SigV4-signs the request in `service` scope, and merges the auth
+/// headers into `req`.
+pub async fn apply_with_service(
+    req: &mut reqwest::Request,
+    creds: &ResolvedCreds,
+    region: &str,
+    service: &str,
+) -> Result<()> {
     match creds {
         ResolvedCreds::Bearer { key } => {
-            tracing::debug!(auth_kind = "Bearer", region = %region, "applying bedrock auth");
+            tracing::debug!(auth_kind = "Bearer", region = %region, service = %service, "applying bedrock auth");
             let value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| {
                 tracing::error!(
                     failure_kind = "bearer_header_invalid",
+                    service = %service,
                     error = %e,
                     "bedrock auth failed",
                 );
-                Error::Auth(format!("bedrock: invalid bearer key: {e}"))
+                Error::Auth(format!("{service}: invalid bearer key: {e}"))
             })?;
             req.headers_mut().insert(AUTHORIZATION, value);
             Ok(())
         }
         ResolvedCreds::Sigv4 { provider } => {
-            tracing::debug!(auth_kind = "Sigv4", region = %region, "applying bedrock auth");
+            tracing::debug!(auth_kind = "Sigv4", region = %region, service = %service, "applying bedrock auth");
             let credentials = provider.provide_credentials().await.map_err(|e| {
                 tracing::error!(
                     failure_kind = "creds_unavailable",
                     region = %region,
+                    service = %service,
                     error = %e,
                     "bedrock auth failed",
                 );
-                Error::Auth(format!("bedrock: credentials unavailable: {e}"))
+                Error::Auth(format!("{service}: credentials unavailable: {e}"))
             })?;
-            sigv4_sign(req, &credentials, region)
+            sigv4_sign(req, &credentials, region, service)
         }
     }
 }
@@ -65,6 +89,7 @@ fn sigv4_sign(
     req: &mut reqwest::Request,
     credentials: &aws_credential_types::Credentials,
     region: &str,
+    service: &str,
 ) -> Result<()> {
     // Materialize body bytes for the canonical-request hash. Bedrock
     // request bodies are JSON we built ourselves with `.body(Vec<u8>)`,
@@ -78,12 +103,11 @@ fn sigv4_sign(
     // SignableRequest synchronously, so the borrow is released before we
     // touch `req.headers_mut()` below. Avoids a per-request copy.
     let body_bytes = req.body().and_then(|b| b.as_bytes()).ok_or_else(|| {
-        tracing::error!(failure_kind = "body_unbuffered", "bedrock auth failed",);
-        Error::Auth(
-            "bedrock: cannot SigV4-sign a streaming or unbuffered body; \
+        tracing::error!(failure_kind = "body_unbuffered", service = %service, "bedrock auth failed",);
+        Error::Auth(format!(
+            "{service}: cannot SigV4-sign a streaming or unbuffered body; \
                  body() must resolve to in-memory bytes"
-                .into(),
-        )
+        ))
     })?;
     let body = SignableBody::Bytes(body_bytes);
 
@@ -93,17 +117,18 @@ fn sigv4_sign(
     let v4_params = v4::SigningParams::builder()
         .identity(&identity)
         .region(region)
-        .name("bedrock")
+        .name(service)
         .time(SystemTime::now())
         .settings(signing_settings)
         .build()
         .map_err(|e| {
             tracing::error!(
                 failure_kind = "signing_params_build",
+                service = %service,
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("bedrock: signing params build failed: {e}"))
+            Error::Auth(format!("{service}: signing params build failed: {e}"))
         })?;
     let signing_params = v4_params.into();
 
@@ -120,11 +145,12 @@ fn sigv4_sign(
                 tracing::error!(
                     failure_kind = "non_ascii_header",
                     header = %k.as_str(),
+                    service = %service,
                     error = %e,
                     "bedrock auth failed",
                 );
                 Error::Auth(format!(
-                    "bedrock: header `{}` has non-ASCII value, cannot SigV4-sign: {e}",
+                    "{service}: header `{}` has non-ASCII value, cannot SigV4-sign: {e}",
                     k.as_str()
                 ))
             })
@@ -138,10 +164,11 @@ fn sigv4_sign(
         SignableRequest::new(method, url, header_pairs.into_iter(), body).map_err(|e| {
             tracing::error!(
                 failure_kind = "signable_request_build",
+                service = %service,
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("bedrock: signable request build failed: {e}"))
+            Error::Auth(format!("{service}: signable request build failed: {e}"))
         })?;
 
     let (instructions, _signature) = sign(signable, &signing_params)
@@ -149,10 +176,11 @@ fn sigv4_sign(
             tracing::error!(
                 failure_kind = "sigv4_sign",
                 region = %region,
+                service = %service,
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("bedrock: SigV4 sign failed: {e}"))
+            Error::Auth(format!("{service}: SigV4 sign failed: {e}"))
         })?
         .into_parts();
 
@@ -163,33 +191,36 @@ fn sigv4_sign(
             tracing::error!(
                 failure_kind = "signed_header_name_invalid",
                 name = %header.name(),
+                service = %service,
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("bedrock: signed header name invalid: {e}"))
+            Error::Auth(format!("{service}: signed header name invalid: {e}"))
         })?;
         let value = HeaderValue::from_str(header.value()).map_err(|e| {
             tracing::error!(
                 failure_kind = "signed_header_value_invalid",
+                service = %service,
                 error = %e,
                 "bedrock auth failed",
             );
-            Error::Auth(format!("bedrock: signed header value invalid: {e}"))
+            Error::Auth(format!("{service}: signed header value invalid: {e}"))
         })?;
         req.headers_mut().insert(name, value);
     }
 
     if !added_params.is_empty() {
-        // SigV4 query-string signing isn't expected for Bedrock POST
+        // SigV4 query-string signing isn't expected for these POST
         // requests (we use header signing). If the SDK ever returns
         // params, surface that loudly so we can investigate.
         tracing::error!(
             failure_kind = "unexpected_query_params",
+            service = %service,
             params = ?added_params,
             "bedrock auth failed",
         );
         return Err(Error::Auth(format!(
-            "bedrock: unexpected SigV4 query-string params from signer: {added_params:?}"
+            "{service}: unexpected SigV4 query-string params from signer: {added_params:?}"
         )));
     }
 
