@@ -37,3 +37,9 @@ crates/routectl-cli/tests/fixtures/captured/
 # Local research scratch -- personal notes, config references, experiments.
 scratch/
 .cargo-target-*/
+
+# Default output dir for scripts/bench.sh baseline records, plus the
+# per-run hermetic scratch it creates on real disk. Baselines that matter
+# are archived out-of-repo by the operator; these are throwaway.
+bench-results/
+.routectl-bench-work/
