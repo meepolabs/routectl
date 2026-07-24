@@ -738,11 +738,23 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
             api_key_ref,
             base_url,
             credential_source,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle,
             ..
         } = entry
         else {
             continue;
         };
+
+        // The Bedrock mantle lane authenticates with `bedrock_mantle.creds`,
+        // not `api_key_ref`, so it legitimately runs `own` with an empty
+        // `api_key_ref`. `validate_provider_bedrock_mantle` owns the
+        // coherence checks for that lane; the `own`-requires-a-key rule
+        // below must not fire on it.
+        #[cfg(feature = "bedrock")]
+        let is_mantle_lane = bedrock_mantle.is_some();
+        #[cfg(not(feature = "bedrock"))]
+        let is_mantle_lane = false;
 
         match credential_source {
             CredentialSource::Forwarded => {
@@ -765,13 +777,93 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
                 }
             }
             CredentialSource::Own => {
-                if api_key_ref.is_empty() {
+                if !is_mantle_lane && api_key_ref.is_empty() {
                     return Err(Error::Config(format!(
                         "provider `{name}`: credential_source = \"own\" (the default) requires \
                          a non-empty api_key_ref"
                     )));
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Reject an incoherent `bedrock_mantle` sub-config on any
+/// `[providers.X]` `anthropic-api` entry. The mere PRESENCE of the
+/// sub-table selects the Bedrock mantle lane, on which every other
+/// credential/endpoint knob is derived from the sub-table itself --
+/// `region` yields the endpoint host and SigV4 scope, `creds` carries the
+/// credential. So the standard direct-to-Anthropic knobs must be left at
+/// their neutral defaults; any operator value on them is a
+/// misconfiguration that would silently contradict the lane. Runs on every
+/// config-validation path (not only serve startup), same as
+/// [`validate_provider_credential_sources`].
+///
+/// With `bedrock_mantle` set, this rejects:
+///   - `auth_kind = "oauth-bearer"` -- the mantle lane authenticates via
+///     the bearer key or SigV4 in `creds`, never a Claude-Code OAuth token
+///     (whose identity headers / UA must never reach AWS).
+///   - a non-default `credential_source` -- the credential comes from
+///     `creds`, so `own` (the default) is the only coherent value.
+///   - a non-empty `api_key_ref` -- `creds` is the single credential
+///     source; a stray `api_key_ref` is dead config.
+///   - a non-default `base_url` -- `region` is the single source of truth
+///     for the endpoint; the factory derives the URL, so a manual
+///     `base_url` would drift from the region.
+///   - an empty / whitespace-only `region`.
+#[cfg(feature = "bedrock")]
+pub fn validate_provider_bedrock_mantle(config: &Config) -> Result<()> {
+    use crate::config::default_anthropic_base;
+    use routectl_core::Error;
+    use routectl_providers::anthropic_api::AuthKind;
+
+    for (name, entry) in &config.providers {
+        let ProviderEntry::AnthropicApi {
+            api_key_ref,
+            base_url,
+            auth_kind,
+            credential_source,
+            bedrock_mantle: Some(mantle),
+            ..
+        } = entry
+        else {
+            continue;
+        };
+
+        if *auth_kind == AuthKind::OauthBearer {
+            return Err(Error::Config(format!(
+                "provider `{name}`: bedrock_mantle is set but auth_kind = \"oauth-bearer\" -- \
+                 the mantle lane authenticates with bedrock_mantle.creds (bearer key or SigV4), \
+                 never a Claude Code OAuth token; remove auth_kind or set it to \"api-key\""
+            )));
+        }
+        if *credential_source != CredentialSource::Own {
+            return Err(Error::Config(format!(
+                "provider `{name}`: bedrock_mantle is set but credential_source is not \"own\" \
+                 -- the mantle lane's credential comes from bedrock_mantle.creds; remove \
+                 credential_source or set it to \"own\""
+            )));
+        }
+        if !api_key_ref.is_empty() {
+            return Err(Error::Config(format!(
+                "provider `{name}`: bedrock_mantle is set but api_key_ref is non-empty -- the \
+                 mantle lane's credential comes from bedrock_mantle.creds; remove api_key_ref"
+            )));
+        }
+        if base_url != &default_anthropic_base() {
+            return Err(Error::Config(format!(
+                "provider `{name}`: bedrock_mantle is set but base_url is not its default -- \
+                 bedrock_mantle.region is the single source of truth for the endpoint (the \
+                 factory derives the URL from it); remove base_url"
+            )));
+        }
+        if mantle.region.trim().is_empty() {
+            return Err(Error::Config(format!(
+                "provider `{name}`: bedrock_mantle.region is empty -- it must name an AWS \
+                 region (e.g. \"us-east-1\"); the endpoint host and SigV4 scope derive from it"
+            )));
         }
     }
 
@@ -938,6 +1030,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_provider_credential_sources(config) {
+        errors.push(bare_validation_message(e));
+    }
+    #[cfg(feature = "bedrock")]
+    if let Err(e) = validate_provider_bedrock_mantle(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = crate::catalog::validate_overrides(&config.cache_pricing) {

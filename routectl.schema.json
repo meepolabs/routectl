@@ -173,6 +173,25 @@
       },
       "type": "object"
     },
+    "BedrockMantleConfig": {
+      "additionalProperties": false,
+      "description": "Shared mantle sub-config for AWS Bedrock's managed inference lane. Its\nPRESENCE on a provider entry selects the mantle lane: the factory\nderives the endpoint base URL from `region` (region is the single\nsource of truth -- no manual `base_url`) and authenticates with\n`creds`. Naming is deliberately lane-neutral so the OpenAI-shape lanes\nreuse this exact type.",
+      "properties": {
+        "creds": {
+          "$ref": "#/$defs/BedrockCredsConfig",
+          "description": "Credential descriptor for this lane: a long-term bearer key or a\nSigV4 credential source (static keys, named profile, or the AWS\ndefault provider chain)."
+        },
+        "region": {
+          "description": "AWS region the mantle endpoint lives in (e.g. `us-east-1`). The\nfactory derives both the endpoint host and the SigV4 signing scope\nfrom this single value, so it must be non-empty.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "region",
+        "creds"
+      ],
+      "type": "object"
+    },
     "CacheCapability": {
       "additionalProperties": false,
       "description": "Describes what a provider supports re: Anthropic-style prompt-cache\nbreakpoints. The dispatch path consults this to decide whether to\nauto-emit a top-level `cache_control` breakpoint -- it does so only\nfor providers that actually honor one (anthropic-api) and never for\nproviders that ignore or silently drop it (OpenAI-shape; Bedrock,\nwhich caches only off per-block markers, not a top-level one).\n\nPer-kind defaults are deliberately conservative; an unknown provider\nkind is treated as supporting nothing so routectl never emits a\nbreakpoint to an upstream whose behavior it cannot vouch for.\nOperators override per-entry via the `cache_capability` TOML key\nwhen a non-Anthropic upstream behind an anthropic-api-shaped provider\ndiffers from the default.",
@@ -935,6 +954,17 @@
               "default": "https://api.anthropic.com",
               "description": "Endpoint base URL.",
               "type": "string"
+            },
+            "bedrock_mantle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BedrockMantleConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opt-in AWS Bedrock mantle lane. Present -> this provider\negresses through Bedrock's managed Anthropic Messages surface:\nthe factory derives `base_url` from `bedrock_mantle.region` and\nauthenticates with `bedrock_mantle.creds`. Omitted (default) ->\nthe standard direct-to-Anthropic lane. When set, `auth_kind`\nmust be `api-key`, `credential_source` `own`, `api_key_ref`\nempty, and `base_url` left at its default -- validation rejects\nevery other combination (region is the single source of truth\nfor the endpoint, and the credential lives in `creds`)."
             },
             "cache_capability": {
               "anyOf": [

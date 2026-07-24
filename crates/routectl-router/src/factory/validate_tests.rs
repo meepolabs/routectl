@@ -1632,3 +1632,153 @@ mod collect_config_validation_tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "bedrock"))]
+mod validate_provider_bedrock_mantle_tests {
+    //! Config-BOUNDARY tests (parse via `toml::from_str`) for the Bedrock
+    //! mantle lane's field-coherence validator. The PRESENCE of a
+    //! `bedrock_mantle` sub-table selects the lane; every other
+    //! credential/endpoint knob must be left at its neutral default, since
+    //! the lane derives the endpoint from `region` and the credential from
+    //! `creds`.
+
+    use super::{collect_config_validation, validate_provider_bedrock_mantle};
+    use crate::config::Config;
+
+    /// Minimal mantle lane on the default-chain credential shape: no
+    /// api_key_ref, default auth_kind / credential_source / base_url. Must
+    /// parse and pass the whole validation suite (not just the mantle
+    /// validator -- the `own`-requires-a-key rule must exempt it).
+    #[test]
+    fn default_chain_mantle_lane_parses_and_validates() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("default-chain mantle must parse");
+        validate_provider_bedrock_mantle(&cfg).expect("clean default-chain mantle validates");
+        assert!(
+            collect_config_validation(&cfg).errors.is_empty(),
+            "clean mantle lane must pass the whole suite: {:?}",
+            collect_config_validation(&cfg).errors
+        );
+    }
+
+    /// Mantle lane on the bearer-key credential shape.
+    #[test]
+    fn bearer_key_mantle_lane_parses_and_validates() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+bedrock_mantle = { region = "eu-west-1", creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("bearer-key mantle must parse");
+        validate_provider_bedrock_mantle(&cfg).expect("clean bearer-key mantle validates");
+        assert!(
+            collect_config_validation(&cfg).errors.is_empty(),
+            "clean bearer-key mantle must pass the whole suite: {:?}",
+            collect_config_validation(&cfg).errors
+        );
+    }
+
+    #[test]
+    fn rejects_mantle_with_oauth_bearer_auth_kind() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+auth_kind = "oauth-bearer"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mantle"), "msg: {msg}");
+        assert!(msg.contains("oauth-bearer"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_mantle_with_forwarded_credential_source() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+credential_source = "forwarded"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mantle"), "msg: {msg}");
+        assert!(msg.contains("credential_source"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_mantle_with_nonempty_api_key_ref() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+api_key_ref = "literal:should-not-be-here"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mantle"), "msg: {msg}");
+        assert!(msg.contains("api_key_ref"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_mantle_with_nondefault_base_url() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mantle"), "msg: {msg}");
+        assert!(msg.contains("base_url"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_mantle_with_empty_region() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mantle"), "msg: {msg}");
+        assert!(msg.contains("region"), "msg: {msg}");
+    }
+}
+
+#[cfg(all(test, not(feature = "bedrock")))]
+mod bedrock_mantle_feature_off_tests {
+    //! With the `bedrock` feature off, the `bedrock_mantle` field does not
+    //! exist on the `AnthropicApi` variant. A config carrying the key must
+    //! fail to parse via `deny_unknown_fields` -- a clean rejection, never
+    //! a silent drop.
+
+    use crate::config::Config;
+
+    #[test]
+    fn bedrock_mantle_key_is_rejected_when_feature_off() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("bedrock_mantle must be rejected as an unknown field with bedrock off");
+        assert!(
+            err.to_string().contains("bedrock_mantle"),
+            "the unknown-field error should name the key: {err}"
+        );
+    }
+}

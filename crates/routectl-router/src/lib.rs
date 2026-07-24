@@ -88,7 +88,9 @@ pub use config::{
     preflight_legacy_mitm_credential_source, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
-pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
+pub use config::{
+    BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig, BedrockMantleConfig,
+};
 pub use config_effective::{
     ClassPolicyCell, ClassPolicySource, EffectiveView, ModelCell, derive_effective_view,
 };
@@ -112,6 +114,8 @@ pub use doctor::{
 };
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
+#[cfg(feature = "bedrock")]
+pub use factory::validate_provider_bedrock_mantle;
 pub use factory::{
     BuildOptions, ConfigValidation, apply_catalog_overlay, build_provider,
     build_provider_with_options, build_resolved_models, class_policy_warnings,

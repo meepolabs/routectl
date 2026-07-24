@@ -162,6 +162,8 @@ fn anthropic_entry_provider_disabled() -> ProviderEntry {
         auto_emit_top_level_breakpoint: Some(false),
         reduction_enabled: None,
         cloak: routectl_providers::anthropic_api::CloakConfig::default(),
+        #[cfg(feature = "bedrock")]
+        bedrock_mantle: None,
         runtime: ProviderRuntimePolicy::default(),
     }
 }

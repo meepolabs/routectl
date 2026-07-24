@@ -1276,6 +1276,18 @@ pub enum ProviderEntry {
         /// `[[providers.X.cloak.tool_rename]] from=.. to=..`.
         #[serde(default)]
         cloak: CloakConfig,
+        /// Opt-in AWS Bedrock mantle lane. Present -> this provider
+        /// egresses through Bedrock's managed Anthropic Messages surface:
+        /// the factory derives `base_url` from `bedrock_mantle.region` and
+        /// authenticates with `bedrock_mantle.creds`. Omitted (default) ->
+        /// the standard direct-to-Anthropic lane. When set, `auth_kind`
+        /// must be `api-key`, `credential_source` `own`, `api_key_ref`
+        /// empty, and `base_url` left at its default -- validation rejects
+        /// every other combination (region is the single source of truth
+        /// for the endpoint, and the credential lives in `creds`).
+        #[cfg(feature = "bedrock")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bedrock_mantle: Option<BedrockMantleConfig>,
         /// Shared runtime and rate-limit policy for this provider.
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
@@ -1506,6 +1518,27 @@ pub enum BedrockCredsConfig {
     },
     /// The AWS default credential provider chain.
     DefaultChain,
+}
+
+/// Shared mantle sub-config for AWS Bedrock's managed inference lane. Its
+/// PRESENCE on a provider entry selects the mantle lane: the factory
+/// derives the endpoint base URL from `region` (region is the single
+/// source of truth -- no manual `base_url`) and authenticates with
+/// `creds`. Naming is deliberately lane-neutral so the OpenAI-shape lanes
+/// reuse this exact type.
+#[cfg(feature = "bedrock")]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BedrockMantleConfig {
+    /// AWS region the mantle endpoint lives in (e.g. `us-east-1`). The
+    /// factory derives both the endpoint host and the SigV4 signing scope
+    /// from this single value, so it must be non-empty.
+    pub region: String,
+    /// Credential descriptor for this lane: a long-term bearer key or a
+    /// SigV4 credential source (static keys, named profile, or the AWS
+    /// default provider chain).
+    pub creds: BedrockCredsConfig,
 }
 
 impl ProviderEntry {
@@ -1798,6 +1831,8 @@ impl ProviderEntry {
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
             cloak: CloakConfig::default(),
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -2254,7 +2289,7 @@ pub enum SeatSelection {
     StickyLeastLoaded,
 }
 
-fn default_anthropic_base() -> String {
+pub fn default_anthropic_base() -> String {
     "https://api.anthropic.com".into()
 }
 
