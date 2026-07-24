@@ -489,6 +489,131 @@ does not refresh them, so they are unsuitable for a long-running daemon.
 present in TOML but the binary was built without `bedrock`, config load
 fails with a clean feature-gated-field error.
 
+## `[providers.X.bedrock_mantle]` -- Bedrock mantle OpenAI lanes
+
+The same `[providers.X.bedrock_mantle]` sub-table reaches the mantle
+endpoint's OpenAI vocabularies from an `openai-responses`-kind or
+`openai-compat`-kind provider. As on the Anthropic lane, the mere PRESENCE
+of the sub-table selects the lane: every request is SigV4/bearer-signed
+under the `bedrock-mantle` service scope, NO first-party `Authorization:
+Bearer` is sent, and the client follows no redirects. `region` is the
+single source of truth -- the factory derives the endpoint host
+(`https://bedrock-mantle.<region>.api.aws/openai/v1`) and the SigV4 scope
+from it; do NOT set `base_url`. The `creds` descriptor takes the same four
+`kind` shapes documented for the Anthropic lane above (`bearer-key`,
+`static`, `profile`, `default-chain`).
+
+### `openai-responses` mantle lane
+
+```toml
+[providers.mantle-responses]
+kind = "openai-responses"
+
+[providers.mantle-responses.bedrock_mantle]
+region = "us-east-1"
+creds  = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+
+[models.gpt-oss-mantle]
+provider = "mantle-responses"
+upstream = "openai.gpt-oss-120b"   # bare model id
+```
+
+The Responses lane persists nothing: `store` is forced `false` on every
+request (and the `reasoning.encrypted_content` include is forced on so
+reasoning survives across turns without server-side storage). A `store`
+key in `payload_extras` is REJECTED at config load -- the flag is not a
+knob on this lane.
+
+Validation (build, reload, `config check`) rejects an incoherent entry:
+
+- a non-empty `api_key_ref` -- REJECTED (`creds` is the single credential
+  source).
+- a set `account_id_ref` -- REJECTED (a ChatGPT-account id has no meaning
+  on the mantle lane).
+- a non-default `base_url` -- REJECTED (`region` derives the endpoint).
+- an empty / whitespace-only `region` -- REJECTED.
+- a `store` key in `payload_extras` -- REJECTED (see above).
+- `auth_kind = "bedrock-mantle"` WITHOUT the sub-table -- REJECTED with a
+  hard error naming the block form. See the migration note below.
+
+Migration from the legacy `auth_kind = "bedrock-mantle"` form: earlier
+builds selected a bearer-only mantle Responses lane with
+`auth_kind = "bedrock-mantle"` plus an `api_key_ref`. That form is closed
+-- it silently defaulted the region and could not meet the SigV4 posture.
+Replace it with the `[providers.X.bedrock_mantle]` sub-table carrying
+`region` and `creds`:
+
+```toml
+# OLD (rejected):
+# [providers.mantle-responses]
+# kind        = "openai-responses"
+# auth_kind   = "bedrock-mantle"
+# api_key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+
+# NEW:
+[providers.mantle-responses]
+kind = "openai-responses"
+
+[providers.mantle-responses.bedrock_mantle]
+region = "us-east-1"
+creds  = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+```
+
+Stating `auth_kind = "bedrock-mantle"` ALONGSIDE the sub-table is
+redundant but accepted (the factory sets the runtime marker from the
+block's presence).
+
+### `openai-compat` mantle lane
+
+```toml
+[providers.mantle-compat]
+kind        = "openai-compat"
+api_key_ref = ""   # empty; the sub-table carries the credential
+
+[providers.mantle-compat.bedrock_mantle]
+region = "us-east-1"
+creds  = { kind = "default-chain" }
+
+[models.gpt-oss-compat]
+provider = "mantle-compat"
+upstream = "openai.gpt-oss-20b"   # bare model id
+```
+
+`base_url` is optional on an `openai-compat` provider only when the
+mantle sub-table is present (the region derives the endpoint). A
+non-mantle `openai-compat` provider still requires a non-empty `base_url`.
+
+Validation rejects an incoherent entry:
+
+- a non-empty `api_key_ref` -- REJECTED (`creds` is the single credential
+  source).
+- a non-empty `base_url` -- REJECTED (`region` derives the endpoint).
+- an empty / whitespace-only `region` -- REJECTED.
+
+`count_tokens` on the mantle compat lane returns a deterministic 501
+(`NotImplemented`): the router never walks the compat lane for token
+counting, so it never dials the signed endpoint for it.
+
+### Shared behavior and production guidance
+
+Both OpenAI lanes share the Anthropic lane's no-redirect posture and
+AWS-error handling: a 3xx on the signed POST is surfaced as an upstream
+fault (never followed), and AWS-shaped error envelopes are lifted into the
+classified failure (a 403 -> Auth, a `ThrottlingException` 429 ->
+RateLimited with the `Retry-After` reset preserved). A 403 free-text body
+is scrubbed to the IAM action only -- the principal ARN, account id, and
+resource ARN never reach the client body or the logs.
+
+Production credential guidance matches the Anthropic lane: use a SigV4
+source (`static` with long-term keys, `profile`, or `default-chain`) or a
+long-term Bedrock API key (`bearer-key`). Short-term credentials (a
+console `bearer-key` or a `static` entry with `session_token_ref`) expire
+and are DEV-ONLY -- the lane does not refresh them.
+
+Both lanes require the `bedrock` build feature; the `bedrock_mantle` key
+on an OpenAI provider fails config load with a clean feature-gated-field
+error when the binary was built without it.
+
 ## `[providers.X]` Gemini (`kind = "gemini"`)
 
 A `gemini`-kind provider talks to the native Google Gemini REST API
