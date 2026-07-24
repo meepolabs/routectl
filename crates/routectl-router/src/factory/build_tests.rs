@@ -1425,3 +1425,120 @@ mod gemini_cloud_code_factory_tests {
         }
     }
 }
+
+#[cfg(feature = "bedrock")]
+mod mantle_lane_factory_tests {
+    //! Factory wiring for the Bedrock mantle anthropic-api lane: region
+    //! derives the endpoint, credentials resolve fail-fast, and the probe
+    //! stays a credential-resolve (never an inference-host dial).
+
+    use super::*;
+    use crate::config::{
+        BedrockCredsConfig, BedrockMantleConfig, Config, ModelEntry, ProviderEntry,
+    };
+    use routectl_auth::MemoryStore;
+    use routectl_core::ProbeOutcome;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    /// Build an anthropic-api entry on the mantle lane: empty api_key_ref
+    /// (the credential rides `bedrock_mantle.creds`) and base_url left at
+    /// its default (the factory derives it from region).
+    fn mantle_entry(region: &str, creds: BedrockCredsConfig) -> ProviderEntry {
+        let mut entry = ProviderEntry::anthropic_api("");
+        if let ProviderEntry::AnthropicApi { bedrock_mantle, .. } = &mut entry {
+            *bedrock_mantle = Some(BedrockMantleConfig {
+                region: region.to_string(),
+                creds,
+            });
+        }
+        entry
+    }
+
+    fn bearer_creds() -> BedrockCredsConfig {
+        BedrockCredsConfig::BearerKey {
+            key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mantle_bearer_entry_builds_and_probes_reachable() {
+        // A bearer mantle entry builds with no network: the credential
+        // resolves from the file ref, the provider keeps the anthropic-api
+        // id, and the credential-resolve probe reports Reachable for a
+        // bearer key rather than dialing the inference host.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = mantle_entry("eu-west-1", bearer_creds());
+
+        let provider = build_provider("br-mantle", &entry, store)
+            .await
+            .expect("mantle bearer provider must build");
+        assert_eq!(provider.id(), "anthropic-api:br-mantle");
+        assert_eq!(provider.probe().await, ProbeOutcome::Reachable);
+    }
+
+    #[tokio::test]
+    async fn mantle_profile_missing_profile_fails_fast_at_build() {
+        // Profile / DefaultChain resolve probe-once at build, so a named
+        // profile that does not exist must surface as a build error here,
+        // not on the first chat request. A missing named profile fails
+        // during local aws-config chain construction (no network).
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let creds = BedrockCredsConfig::Profile {
+            name: "routectl-nonexistent-mantle-profile".to_string(),
+        };
+        let entry = mantle_entry("us-east-1", creds);
+
+        let result = build_provider("br-mantle", &entry, store).await;
+        assert!(
+            result.is_err(),
+            "a mantle entry whose profile does not exist must fail fast at build"
+        );
+    }
+
+    #[tokio::test]
+    async fn mantle_model_resolves_end_to_end_without_network() {
+        // config -> router build: a model referencing a bearer mantle
+        // provider resolves through `build_resolved_models` (the path the
+        // hot-reload loader drives) with no failures and no network.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let mut providers = BTreeMap::new();
+        providers.insert("br".to_string(), mantle_entry("us-east-1", bearer_creds()));
+        let mut models = BTreeMap::new();
+        models.insert(
+            "opus".to_string(),
+            ModelEntry::new("br", "anthropic.claude-opus"),
+        );
+        let cfg = Config {
+            providers,
+            models,
+            ..Config::default()
+        };
+
+        let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("router build must succeed");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = resolved.get("opus").expect("opus model resolved");
+        assert_eq!(opus.provider.probe().await, ProbeOutcome::Reachable);
+    }
+
+    #[tokio::test]
+    async fn mantle_bearer_resolve_does_not_block_the_reload_path() {
+        // The mantle lane resolves credentials through the async
+        // `bedrock::auth::resolve` seam, exactly as the Bedrock provider
+        // does -- never a blocking call on the async reload path. A bearer
+        // key short-circuits with no round-trip, so the build completes
+        // well within a tight deadline.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = mantle_entry("us-east-1", bearer_creds());
+
+        let built = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            build_provider("br-mantle", &entry, store),
+        )
+        .await
+        .expect("mantle bearer build must not block the reload path");
+        built.expect("bearer mantle build must succeed");
+    }
+}

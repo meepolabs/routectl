@@ -18,6 +18,8 @@ use routectl_auth::{SecretRef, SecretStore};
 #[cfg(feature = "gemini")]
 use routectl_core::CloudProjectCache;
 use routectl_core::{Provider, Result};
+#[cfg(feature = "bedrock")]
+use routectl_providers::anthropic_api::MantleAuth;
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
 #[cfg(feature = "bedrock")]
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
@@ -228,9 +230,63 @@ async fn build_provider_inner(
             reduction_enabled: _,
             cloak,
             #[cfg(feature = "bedrock")]
-                bedrock_mantle: _,
+            bedrock_mantle,
             runtime: _,
         } => {
+            // Bedrock mantle lane. Its presence flips this provider onto
+            // region-derived, SigV4/bearer-signed egress under the
+            // `bedrock-mantle` scope. Config validation guarantees
+            // auth_kind = api-key, an empty api_key_ref,
+            // credential_source = own, and base_url at its default -- so
+            // the region is the single source of truth for the endpoint
+            // (never the operator base_url) and no first-party token is
+            // presented. Credentials resolve here, fail-fast probing
+            // Profile/DefaultChain exactly as the Bedrock provider does.
+            #[cfg(feature = "bedrock")]
+            if let Some(m) = bedrock_mantle {
+                debug_assert_eq!(
+                    base_url,
+                    &crate::config::default_anthropic_base(),
+                    "mantle lane requires base_url at its default; validation must reject a manual base_url"
+                );
+                let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
+                let resolved =
+                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
+                let cfg = AnthropicApiConfig {
+                    id: format!("anthropic-api:{name}"),
+                    auth: Arc::new(routectl_core::StaticToken::new(String::new())),
+                    base_url: routectl_providers::mantle::mantle_anthropic_base(&m.region),
+                    anthropic_version: anthropic_version.clone(),
+                    // Force api-key on the lane rather than copying the
+                    // config value: the mantle credential rides the signed
+                    // request, and OauthBearer would re-engage the
+                    // first-party `Authorization: Bearer` / Claude-Code
+                    // header plumbing this lane must bypass. Validation
+                    // already rejects a non-api-key mantle entry; this is
+                    // the factory-side belt-and-braces.
+                    auth_kind: routectl_providers::anthropic_api::AuthKind::ApiKey,
+                    header_extras: header_extras
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    user_agent: user_agent.clone(),
+                    allowed_betas: allowed_betas.clone(),
+                    forward_client_headers: forward_client_headers.clone(),
+                    context_management: *context_management,
+                    max_thinking_entry_bytes: resolve_max_thinking_entry_bytes(
+                        name,
+                        *max_thinking_entry_bytes,
+                    ),
+                    session_id: None,
+                    cloak: cloak.clone(),
+                    use_forwarded_bearer: false,
+                    mantle: Some(MantleAuth {
+                        region: m.region.clone(),
+                        creds: resolved,
+                    }),
+                };
+                return Ok(Arc::new(AnthropicApiProvider::new(cfg)));
+            }
             validate_base_url_scheme(name, base_url)?;
             let is_forwarded = *credential_source == CredentialSource::Forwarded;
             // OAuth-aware: for `oauth://<provider>` refs the provider
