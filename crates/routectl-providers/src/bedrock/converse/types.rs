@@ -122,7 +122,6 @@ pub struct ConverseMessage {
 /// serde_json::Value the operator supplied.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-#[allow(dead_code)] // Other(Value) is the forward-compat passthrough variant
 pub enum ConverseContentBlock {
     Text {
         text: String,
@@ -158,10 +157,11 @@ pub enum ConverseContentBlock {
         #[serde(rename = "reasoningContent")]
         reasoning_content: ConverseRequestReasoningBlock,
     },
-    /// Forward-compat passthrough -- caller-supplied raw JSON. Used when
-    /// an operator's `provider_extras` contains a future block type
-    /// (citationsContent, video, ...) routectl doesn't model yet. The
-    /// Value is serialized as-is.
+    /// Forward-compat passthrough -- raw single-key union JSON. The
+    /// message translator re-wraps a canonical `ContentPart::Other` into
+    /// this variant (`{type_tag: {extras}}`) so an unmodeled block type
+    /// (citationsContent, video, ...) replays through Converse egress
+    /// instead of being dropped. The Value is serialized as-is.
     Other(Value),
 }
 
