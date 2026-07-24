@@ -300,6 +300,7 @@ pub fn classify(err: &Error, provider_kind: Option<&str>) -> ClassifiedFailure {
             provider_kind,
         ),
         Error::Streaming(_) => by_variant(FailureClass::NetworkError),
+        Error::Auth(_) => by_variant(FailureClass::Auth),
         _ => by_variant(FailureClass::Unknown),
     }
 }
@@ -831,14 +832,14 @@ mod tests {
 
     #[test]
     fn non_upstream_variants_are_unknown_matched_by_variant() {
-        // Arrange: one representative of every non-upstream variant. The
-        // `Auth` string variant is NOT the `Auth` class -- that class only
-        // comes from an upstream 401 / 403 / 407 status.
+        // Arrange: one representative of every non-upstream variant that
+        // has no confident classification. `Error::Streaming` (NetworkError)
+        // and `Error::Auth` (Auth) are classified by variant and covered
+        // by their own tests.
         let errs = [
             Error::NormalizeRequest("p".into(), "m".into()),
             Error::NormalizeResponse("p".into(), "m".into()),
             Error::UnknownAlias("a".into()),
-            Error::Auth("bad token".into()),
             Error::Config("bad config".into()),
             Error::Internal("boom".into()),
             Error::Validation("bad body".into()),
@@ -858,6 +859,24 @@ mod tests {
                 "variant {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn auth_error_variant_is_auth_matched_by_variant() {
+        // Arrange: a local credential/signing failure with no HTTP status.
+        let err = Error::Auth("bad token".into());
+
+        // Act
+        let got = classify(&err, None);
+
+        // Assert: the variant alone decides Auth, without an upstream status.
+        assert_eq!(
+            got,
+            ClassifiedFailure {
+                class: FailureClass::Auth,
+                matched_by: MatchedBy::Variant,
+            }
+        );
     }
 
     // --- Totality + Timeout is never produced ---
