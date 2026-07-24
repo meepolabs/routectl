@@ -56,6 +56,13 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serial_test = "3"
 wiremock.workspace = true
 routectl-testkit.workspace = true
+criterion = { workspace = true }
+
+# ChatRequest::clone() cost on the dispatch hot path. `harness = false`:
+# the bench owns `main` to install the allocation-counting allocator.
+[[bench]]
+name = "dispatch_clone"
+harness = false
 
 [lints]
 workspace = true

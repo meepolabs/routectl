@@ -122,6 +122,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 insta.workspace = true
 serial_test = "3"
 routectl-testkit.workspace = true
+criterion = { workspace = true }
 # The config-migrate tests race config.toml through the SAME advisory
 # write lock the config writer holds (config_write::edit_config_toml), so
 # a test can gate run_at's config-phase re-read on an out-of-band write.
@@ -132,6 +133,13 @@ fd-lock = "4"
 # process. Confined to `cfg(unix)` test paths.
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.31", features = ["signal"] }
+
+# Ingress hot-path micro-benches (parse, token estimate, response render).
+# `harness = false`: the bench provides its own `main` so it can install the
+# allocation-counting global allocator and expose the alloc-count mode.
+[[bench]]
+name = "hotpath"
+harness = false
 
 # cargo-deb metadata. Preserved so a future PR can re-enable .deb
 # packaging in .github/workflows/release.yml without re-deriving these
