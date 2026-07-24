@@ -740,3 +740,363 @@ async fn probe_chatgpt_oauth_is_unsupported_with_zero_token_calls() {
         "the oauth probe guard must never resolve a token",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bedrock mantle lane wire behavior (responses): SigV4/bearer-signed egress,
+// store:false + encrypted-reasoning include on the wire, a no-redirect client,
+// and the shared AWS error lift + scrub surfaced end-to-end. The
+// credential-scope and URL-builder units live in `mantle.rs`; the reader's
+// token-lift + scrub units live in `excerpt_tests.rs`. These pin the full
+// runtime lane against a mock upstream.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "bedrock")]
+mod mantle_wire {
+    use futures::StreamExt;
+    use routectl_core::failure_class::{FailureClass, classify};
+    use routectl_core::{ChatRequest, Error, Message, MessageContent, Provider, Role, StaticToken};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::super::{AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider};
+    use crate::bedrock::BedrockCreds;
+    use crate::bedrock::auth::resolve;
+    use crate::mantle::MantleAuth;
+
+    const MODEL: &str = "openai.gpt-oss-120b";
+
+    /// A mantle-lane responses provider posting to `base_url` with a
+    /// resolved credential. `base_url` points at wiremock; the region scopes
+    /// the SigV4 signature. `api_key` is empty (the empty auth mirrors the
+    /// config-validation invariant on the lane).
+    async fn mantle_provider(base_url: &str, creds: BedrockCreds) -> OpenAiResponsesProvider {
+        let resolved = resolve(&creds, "us-west-2").await.unwrap();
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:mantle".into(),
+            auth: Arc::new(StaticToken::new("")),
+            account_id: None,
+            base_url: base_url.to_string(),
+            auth_kind: AuthKind::BedrockMantle,
+            header_extras: Vec::new(),
+            user_agent: None,
+            session_id: None,
+            mantle: Some(MantleAuth {
+                region: "us-west-2".into(),
+                creds: resolved,
+            }),
+        };
+        OpenAiResponsesProvider::new(cfg)
+    }
+
+    fn bearer_creds() -> BedrockCreds {
+        BedrockCreds::BearerKey {
+            key: "mantle-bearer-key".into(),
+        }
+    }
+
+    fn sigv4_creds() -> BedrockCreds {
+        BedrockCreds::Static {
+            access_key: "AKIAmantlewire000000".into(),
+            secret_key: "mantle-wire-secret-key".into(),
+            session_token: None,
+        }
+    }
+
+    fn mantle_req() -> ChatRequest {
+        ChatRequest {
+            model: MODEL.into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("ping".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            max_tokens: Some(64),
+            ..Default::default()
+        }
+    }
+
+    /// A minimal `response.completed` SSE body; `complete()` forces
+    /// `stream:true` and drains SSE until this terminal event lands.
+    fn completed_sse() -> String {
+        let completed = json!({
+            "id": "resp_mantle",
+            "object": "response",
+            "status": "completed",
+            "model": MODEL,
+            "output": [{
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "pong"}]
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        });
+        format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{}}}\n\n",
+            serde_json::to_string(&completed).unwrap()
+        )
+    }
+
+    async fn mount_ok_sse(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(completed_sse()),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// complete() on the bearer lane signs the request as
+    /// `Authorization: Bearer <mantle-key>` (never a stray empty first-party
+    /// Bearer) and the wire body carries `store:false` plus the forced
+    /// `reasoning.encrypted_content` include and the bare model id.
+    #[tokio::test]
+    async fn bearer_lane_signs_and_forces_store_false_with_include() {
+        let server = MockServer::start().await;
+        mount_ok_sse(&server).await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        provider
+            .complete(mantle_req())
+            .await
+            .expect("mantle complete");
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        let auth = received[0]
+            .headers
+            .get("authorization")
+            .expect("mantle lane must attach Authorization")
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            auth, "Bearer mantle-bearer-key",
+            "bearer creds must sign as the mantle key, never an empty first-party Bearer"
+        );
+        let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(
+            body["store"],
+            json!(false),
+            "the mantle lane must force store=false on the wire; got: {body}"
+        );
+        assert_eq!(
+            body["include"],
+            json!(["reasoning.encrypted_content"]),
+            "store=false must force the encrypted-reasoning include on the wire; got: {body}"
+        );
+        assert_eq!(
+            body["model"].as_str(),
+            Some(MODEL),
+            "the bare model id must reach the wire body verbatim"
+        );
+        assert!(
+            body["stream"].as_bool().unwrap_or(false),
+            "complete() forces stream:true on the wire; got: {body}"
+        );
+    }
+
+    /// complete() on the SigV4 lane signs with an `AWS4-HMAC-SHA256`
+    /// Authorization scoped to `.../us-west-2/bedrock-mantle/aws4_request`
+    /// and stamps `x-amz-date`.
+    #[tokio::test]
+    async fn sigv4_lane_signs_wire_with_mantle_service_scope() {
+        let server = MockServer::start().await;
+        mount_ok_sse(&server).await;
+
+        let provider = mantle_provider(&server.uri(), sigv4_creds()).await;
+        provider
+            .complete(mantle_req())
+            .await
+            .expect("mantle complete");
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        let auth = received[0]
+            .headers
+            .get("authorization")
+            .expect("SigV4 lane must attach Authorization")
+            .to_str()
+            .unwrap();
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256 "),
+            "SigV4 lane must sign with AWS4-HMAC-SHA256; got {auth}"
+        );
+        assert!(
+            auth.contains("/us-west-2/bedrock-mantle/aws4_request"),
+            "credential scope must name the mantle service under the lane region; got {auth}"
+        );
+        assert!(
+            received[0].headers.get("x-amz-date").is_some(),
+            "SigV4 lane must stamp x-amz-date"
+        );
+    }
+
+    /// The mantle lane uses a no-redirect client: a 3xx on the signed POST is
+    /// surfaced as an error and its `Location` target is NEVER dialed
+    /// (auto-following would replay the signature cross-host).
+    #[tokio::test]
+    async fn mantle_lane_does_not_follow_redirects() {
+        let server = MockServer::start().await;
+        let redirect_target = format!("{}/redirected", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", redirect_target.as_str()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/redirected"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(completed_sse()),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let result = provider.complete(mantle_req()).await;
+        assert!(
+            result.is_err(),
+            "a 302 on the signed lane must not resolve to a success"
+        );
+
+        let received = server.received_requests().await.unwrap();
+        let followed = received
+            .iter()
+            .filter(|r| r.url.path() == "/redirected")
+            .count();
+        assert_eq!(
+            followed, 0,
+            "no-redirect client must not follow the 302 to its Location target"
+        );
+    }
+
+    /// End-to-end AWS 403: the ARN-laden AccessDenied body lifts the AWS
+    /// exception token, scrubs the client body to the IAM action only (no
+    /// principal ARN / account id), and classifies as `FailureClass::Auth`.
+    #[tokio::test]
+    async fn aws_403_lifts_token_scrubs_body_and_classifies_auth() {
+        let server = MockServer::start().await;
+        let body = r#"{"__type":"com.amazonaws.bedrock#AccessDeniedException","message":"User: arn:aws:iam::123456789012:role/App is not authorized to perform: bedrock-runtime:InvokeModel on resource: arn:aws:bedrock:us-west-2::foundation-model/openai.gpt-oss-120b"}"#;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(ResponseTemplate::new(403).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let err = provider.complete(mantle_req()).await.unwrap_err();
+
+        match &err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                body,
+                ..
+            } => {
+                assert_eq!(*status, 403);
+                assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
+                assert!(!body.contains("arn:aws:"), "client body leaked ARN: {body}");
+                assert!(
+                    !body.contains("123456789012"),
+                    "client body leaked account id: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+        assert_eq!(
+            classify(&err, Some("openai-responses")).class,
+            FailureClass::Auth,
+            "a mantle 403 must classify as Auth"
+        );
+    }
+
+    /// End-to-end AWS 429: the `Retry-After` reset hint is preserved on the
+    /// canonical error and the bare AWS throttling `code` token is lifted.
+    #[tokio::test]
+    async fn aws_429_preserves_retry_after_and_lifts_code() {
+        let server = MockServer::start().await;
+        let body = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "30")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let err = provider.complete(mantle_req()).await.unwrap_err();
+
+        match err {
+            Error::Upstream {
+                status,
+                retry_after,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(status, 429);
+                assert_eq!(
+                    retry_after,
+                    Some(Duration::from_secs(30)),
+                    "the Retry-After reset hint must be preserved"
+                );
+                assert_eq!(upstream_code.as_deref(), Some("ThrottlingException"));
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// stream() on the bearer lane is signed by the time it returns, so the
+    /// wire assertion holds without draining the SSE body.
+    #[tokio::test]
+    async fn stream_bearer_lane_is_signed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(completed_sse()),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let mut stream = provider.stream(mantle_req()).await.unwrap();
+        // Drain so the request is fully issued and the mock records it.
+        while stream.next().await.is_some() {}
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0]
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer mantle-bearer-key"),
+            "mantle stream() must be signed with the mantle key"
+        );
+        let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(
+            body["store"],
+            json!(false),
+            "the mantle lane must force store=false on the streamed wire body; got: {body}"
+        );
+    }
+}
