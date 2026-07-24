@@ -414,6 +414,81 @@ Both shapes are wired for Anthropic models on Bedrock; see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region) for the
 adaptive-thinking interaction.
 
+## `[providers.X.bedrock_mantle]` -- Bedrock mantle Anthropic lane
+
+An `anthropic-api`-kind provider reaches AWS Bedrock's managed mantle
+endpoint (Anthropic Messages vocabulary, AWS-authenticated) by adding a
+`[providers.X.bedrock_mantle]` sub-table. The mere PRESENCE of the
+sub-table selects the lane. The provider speaks the ordinary Anthropic
+Messages API (`complete`, `stream`, `count_tokens`), but every request is
+SigV4/bearer-signed under the `bedrock-mantle` service scope and NO
+`x-api-key` is sent.
+
+```toml
+[providers.bedrock-mantle]
+kind = "anthropic-api"
+
+[providers.bedrock-mantle.bedrock_mantle]
+region = "us-east-1"
+creds  = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+
+[models.claude-mantle]
+provider = "bedrock-mantle"
+upstream = "claude-haiku-4-5-20251001-v1:0"   # bare model id, no "us." prefix
+```
+
+Fields:
+
+- `region` (required, non-empty) -- the AWS region the mantle endpoint
+  lives in (e.g. `us-east-1`). It is the SINGLE source of truth: the
+  factory derives both the endpoint host
+  (`https://bedrock-mantle.<region>.api.aws/anthropic`) and the SigV4
+  signing scope from it. Do NOT set `base_url` on a mantle provider.
+- `creds` (required) -- the credential descriptor. A `kind` tag selects
+  one of four shapes:
+  - `{ kind = "bearer-key", key_ref = "<secret-uri>" }` -- a long-term
+    Bedrock API key sent as `Authorization: Bearer`. `key_ref` resolves a
+    secret URI (`env://`, `file://`, `literal:`).
+  - `{ kind = "static", access_key_ref = "<uri>", secret_key_ref = "<uri>", session_token_ref = "<uri>" }`
+    -- static AWS access/secret keys signed with SigV4. `session_token_ref`
+    is optional (set it for short-term STS credentials).
+  - `{ kind = "profile", name = "<profile>" }` -- a named profile from the
+    AWS shared-credentials file; SigV4-signed.
+  - `{ kind = "default-chain" }` -- the AWS default credential provider
+    chain (environment, profile, SSO, container/instance roles);
+    SigV4-signed.
+
+Validation (enforced on build, reload, and `config check`) rejects an
+incoherent mantle entry:
+
+- `auth_kind = "oauth-bearer"` -- REJECTED. The lane never carries a
+  Claude Code OAuth token (whose identity headers and User-Agent must
+  never reach AWS); leave `auth_kind` at its `"api-key"` default.
+- `credential_source` not `"own"` -- REJECTED. The credential comes from
+  `bedrock_mantle.creds`; `own` (the default) is the only coherent value.
+- a non-empty `api_key_ref` -- REJECTED. `creds` is the single credential
+  source, so a stray `api_key_ref` is dead config.
+- a non-default `base_url` -- REJECTED. `region` derives the endpoint, so a
+  manual `base_url` would drift from it.
+- an empty / whitespace-only `region` -- REJECTED.
+
+The mantle lane uses a no-redirect client: any 3xx from the upstream is a
+fault to surface, never followed (auto-following a signed POST would
+replay the SigV4 signature cross-host). AWS-shaped error envelopes
+(`SignatureDoesNotMatch`, `ThrottlingException`, `RequestTimeTooSkewed`)
+are lifted into the classified failure so a bad credential surfaces as an
+auth failure and a throttle as rate-limited.
+
+Production credential guidance: use a SigV4 source (`static` with
+long-term keys, `profile`, or `default-chain`) or a long-term Bedrock API
+key (`bearer-key`). Short-term keys (a `bearer-key` from the console or
+`static` with a `session_token_ref`) expire and are DEV-ONLY -- the lane
+does not refresh them, so they are unsuitable for a long-running daemon.
+
+`bedrock_mantle` requires the `bedrock` build feature. If the key is
+present in TOML but the binary was built without `bedrock`, config load
+fails with a clean feature-gated-field error.
+
 ## `[providers.X]` Gemini (`kind = "gemini"`)
 
 A `gemini`-kind provider talks to the native Google Gemini REST API
