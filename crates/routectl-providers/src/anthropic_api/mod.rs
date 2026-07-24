@@ -742,40 +742,6 @@ fn parse_anthropic_error_type(parsed: Option<&Value>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Lift AWS/Bedrock error-envelope tokens from an already-parsed error
-/// body, used when the Anthropic `error.type` shape is absent. The AWS
-/// envelope is flat (`{"__type": "...", "code": "...", "message": "..."}`)
-/// rather than the nested `{"error": {...}}` Anthropic uses, so a mantle
-/// 403/429 would otherwise carry no classifier token.
-///
-/// `__type` is frequently namespaced
-/// (`"com.amazonaws.bedrock#ThrottlingException"`); the classifier and
-/// logs want the bare exception name, so everything up to and including
-/// the final `#` is stripped. Returns `(upstream_type, upstream_code)`:
-/// `__type` (namespace-stripped) becomes the type, a top-level `code`
-/// becomes the code. Best-effort -- `(None, None)` when the body was not
-/// JSON or carried neither token.
-fn parse_aws_error_tokens(parsed: Option<&Value>) -> (Option<String>, Option<String>) {
-    let Some(v) = parsed else {
-        return (None, None);
-    };
-    let upstream_type = v
-        .get("__type")
-        .and_then(Value::as_str)
-        .map(strip_aws_namespace);
-    let upstream_code = v.get("code").and_then(Value::as_str).map(str::to_string);
-    (upstream_type, upstream_code)
-}
-
-/// Strip an AWS namespace prefix from an exception token:
-/// `"com.amazonaws.bedrock#ThrottlingException"` -> `"ThrottlingException"`.
-/// A token with no `#` is returned unchanged.
-fn strip_aws_namespace(raw: &str) -> String {
-    raw.rsplit_once('#')
-        .map_or(raw, |(_, bare)| bare)
-        .to_string()
-}
-
 /// Read a 4xx/5xx upstream response body and build a routectl
 /// `Error::Upstream` from it. Encapsulates the
 /// "text-first-then-opportunistic-JSON" pattern shared by
@@ -862,7 +828,7 @@ async fn read_anthropic_error(
     // free-text message needs the scrub.
     let (upstream_type, upstream_code) = match anthropic_type {
         Some(ty) => (Some(ty), None),
-        None => parse_aws_error_tokens(parsed.as_ref()),
+        None => crate::aws_error::lift_aws_error_tokens(parsed.as_ref()),
     };
     if hit_cap {
         // A body truncated at the cap is untrustworthy: never echo it to the

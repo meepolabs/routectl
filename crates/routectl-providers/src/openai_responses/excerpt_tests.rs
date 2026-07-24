@@ -193,3 +193,207 @@ fn map_upstream_error_over_cap_warn_excerpt_is_fixed_message() {
         "no WARN-level event may echo the truncated prefix"
     );
 }
+
+/// A mantle 403 carrying a namespaced AWS `__type` (the flat AWS envelope,
+/// no native OpenAI `/error` shape) must lift the bare exception token into
+/// `upstream_type` -- which this reader carried as ALWAYS None before the
+/// `upstream_with_retry_after` -> `upstream_full` switch. The 403 free-text
+/// message collapses to the generic scrub; the raw envelope is never carried.
+#[test]
+fn map_upstream_error_lifts_aws_signature_token_from_403() {
+    let body = r#"{"__type":"com.amazonaws.bedrock#SignatureDoesNotMatch","message":"The request signature we calculated does not match."}"#;
+    let err =
+        map_responses_upstream_error("p", 403, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    match err {
+        Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            body,
+            ..
+        } => {
+            assert_eq!(status, 403);
+            assert_eq!(upstream_type.as_deref(), Some("SignatureDoesNotMatch"));
+            assert_eq!(upstream_code, None);
+            assert_eq!(body, "bedrock access denied");
+            assert!(!body.contains("__type"));
+        }
+        other => panic!("expected Error::Upstream, got: {other:?}"),
+    }
+}
+
+/// A mantle 429 carrying a bare AWS `code` token must lift it into
+/// `upstream_code`.
+#[test]
+fn map_upstream_error_lifts_aws_throttling_code_from_429() {
+    let body = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
+    let err =
+        map_responses_upstream_error("p", 429, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    match err {
+        Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            ..
+        } => {
+            assert_eq!(status, 429);
+            assert_eq!(upstream_type, None);
+            assert_eq!(upstream_code.as_deref(), Some("ThrottlingException"));
+        }
+        other => panic!("expected Error::Upstream, got: {other:?}"),
+    }
+}
+
+/// A real AWS 403 AccessDenied body names the principal ARN, account id, and
+/// resource ARN. The client body must surface ONLY the IAM action -- never
+/// the principal / account / resource identifiers.
+#[test]
+fn map_upstream_error_403_scrubs_aws_access_denied_arn() {
+    let body = r#"{"__type":"com.amazonaws.bedrock#AccessDeniedException","message":"User: arn:aws:iam::123456789012:role/App is not authorized to perform: bedrock-runtime:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5"}"#;
+    let err =
+        map_responses_upstream_error("p", 403, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    match err {
+        Error::Upstream {
+            upstream_type,
+            body,
+            ..
+        } => {
+            assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
+            assert_eq!(
+                body,
+                "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+            );
+            assert!(!body.contains("arn:aws:"), "leaked ARN: {body}");
+            assert!(!body.contains("123456789012"), "leaked account id: {body}");
+        }
+        other => panic!("expected Error::Upstream, got: {other:?}"),
+    }
+}
+
+/// A mantle 403 whose body carries the ARN-laden AccessDenied message but NO
+/// top-level `__type` / `code` token (the AWS exception type arrives only in
+/// the `x-amzn-errortype` header) must STILL be scrubbed on every surface.
+/// The scrub is gated on the non-envelope shape, not on a lifted token.
+#[test]
+fn map_upstream_error_403_scrubs_aws_body_without_type_token() {
+    let body = r#"{"message":"User: arn:aws:iam::123456789012:role/App is not authorized to perform: bedrock-runtime:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5"}"#;
+    let events = routectl_testkit::capture_events(|| {
+        let err = map_responses_upstream_error(
+            "p",
+            403,
+            &HeaderMap::new(),
+            &AuthKind::ApiKey,
+            body,
+            false,
+        );
+        match err {
+            Error::Upstream { body, .. } => {
+                assert_eq!(
+                    body,
+                    "bedrock access denied: missing IAM action bedrock-runtime:InvokeModel"
+                );
+                assert!(!body.contains("arn:aws:"), "client body leaked ARN: {body}");
+                assert!(
+                    !body.contains("123456789012"),
+                    "client body leaked account id: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    });
+    assert!(
+        events.iter().all(|e| e
+            .fields
+            .iter()
+            .all(|(_, v)| !v.contains("arn:aws:") && !v.contains("123456789012"))),
+        "a log event leaked an ARN / account id"
+    );
+}
+
+/// The native Responses `/error` shape WINS over any sibling top-level AWS
+/// key: a body carrying both keeps the native message and never routes
+/// through the AWS scrub. The AWS lift reads TOP-LEVEL keys, so it stays
+/// inert and the tokens remain None (this reader lifts only AWS tokens).
+#[test]
+fn map_upstream_error_native_shape_wins_over_aws() {
+    let body =
+        r#"{"error":{"type":"invalid_request_error","message":"bad model id"},"x_trace":"t-7"}"#;
+    let err =
+        map_responses_upstream_error("p", 400, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    match err {
+        Error::Upstream {
+            upstream_type,
+            upstream_code,
+            body,
+            ..
+        } => {
+            // No top-level AWS token -> no lift; the native envelope is
+            // carried raw for the ingress sanitizer.
+            assert_eq!(upstream_type, None);
+            assert_eq!(upstream_code, None);
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                parsed.pointer("/error/message").and_then(|v| v.as_str()),
+                Some("bad model id")
+            );
+        }
+        other => panic!("expected Error::Upstream, got: {other:?}"),
+    }
+}
+
+/// End-to-end classify() pin: a mantle 429 error built by this reader now
+/// carries the lifted AWS `code` token AND classifies as RateLimited. Before
+/// the `upstream_full` switch this reader dropped the token to None, so the
+/// classifier lost the upstream signal.
+#[test]
+fn map_upstream_error_tokens_reach_classify() {
+    let body = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
+    let err =
+        map_responses_upstream_error("p", 429, &HeaderMap::new(), &AuthKind::ApiKey, body, false);
+    let classified = routectl_core::failure_class::classify(&err, Some("openai-responses"));
+    assert_eq!(
+        classified.class,
+        routectl_core::failure_class::FailureClass::RateLimited
+    );
+    match err {
+        Error::Upstream { upstream_code, .. } => {
+            assert_eq!(upstream_code.as_deref(), Some("ThrottlingException"));
+        }
+        other => panic!("expected Error::Upstream, got: {other:?}"),
+    }
+}
+
+/// Arbitrary, non-JSON, empty, and oversized bodies must never panic and
+/// must degrade to a canonical `Error::Upstream` with no lifted tokens.
+#[test]
+fn map_upstream_error_never_panics_on_malformed_bodies() {
+    let huge = "x".repeat(crate::http_client::MAX_RESPONSE_BODY_BYTES * 2);
+    let cases: [&str; 5] = [
+        "",
+        "not json at all",
+        r#"{"random":[1,2,3],"nested":{"deep":true}}"#,
+        r#"{"__type":42,"code":{"not":"a string"}}"#,
+        &huge,
+    ];
+    for body in cases {
+        let err = map_responses_upstream_error(
+            "p",
+            400,
+            &HeaderMap::new(),
+            &AuthKind::ApiKey,
+            body,
+            false,
+        );
+        match err {
+            Error::Upstream {
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(upstream_type, None);
+                assert_eq!(upstream_code, None);
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+}

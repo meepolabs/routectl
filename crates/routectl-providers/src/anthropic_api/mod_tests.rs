@@ -1903,48 +1903,6 @@ async fn read_anthropic_error_sanitizes_non_json_body() {
     }
 }
 
-/// `strip_aws_namespace` reduces a namespaced AWS exception token to its
-/// bare name and leaves an already-bare token untouched.
-#[test]
-fn strip_aws_namespace_reduces_to_bare_token() {
-    assert_eq!(
-        strip_aws_namespace("com.amazonaws.bedrock#ThrottlingException"),
-        "ThrottlingException"
-    );
-    assert_eq!(
-        strip_aws_namespace("SignatureDoesNotMatch"),
-        "SignatureDoesNotMatch"
-    );
-    // Only the final `#` splits, and an empty bare token stays empty.
-    assert_eq!(strip_aws_namespace("a#b#Trailing"), "Trailing");
-    assert_eq!(strip_aws_namespace("prefix#"), "");
-}
-
-/// The AWS envelope lift reads `__type` (namespace-stripped) and a
-/// top-level `code`, and is inert on Anthropic-shaped or tokenless JSON.
-#[test]
-fn parse_aws_error_tokens_lifts_type_and_code() {
-    let namespaced =
-        serde_json::from_str::<Value>(r#"{"__type":"com.amazonaws.bedrock#ThrottlingException"}"#)
-            .ok();
-    assert_eq!(
-        parse_aws_error_tokens(namespaced.as_ref()),
-        (Some("ThrottlingException".to_string()), None)
-    );
-
-    let with_code = serde_json::from_str::<Value>(r#"{"code":"SignatureDoesNotMatch"}"#).ok();
-    assert_eq!(
-        parse_aws_error_tokens(with_code.as_ref()),
-        (None, Some("SignatureDoesNotMatch".to_string()))
-    );
-
-    // A JSON body carrying neither token yields no lift.
-    let tokenless = serde_json::from_str::<Value>(r#"{"ok":true}"#).ok();
-    assert_eq!(parse_aws_error_tokens(tokenless.as_ref()), (None, None));
-    // A non-JSON body yields no lift.
-    assert_eq!(parse_aws_error_tokens(None), (None, None));
-}
-
 /// A mantle 403 carrying a namespaced AWS `__type` must surface the bare
 /// exception token in `upstream_type` (403 already classifies Auth by
 /// status; the lifted token is what makes the log truthful). The

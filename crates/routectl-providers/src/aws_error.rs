@@ -1,18 +1,59 @@
-//! Shared redaction for AWS/Bedrock upstream error envelopes.
+//! Shared redaction + token lift for AWS/Bedrock upstream error envelopes.
 //!
-//! Both the native Bedrock lane (`bedrock/mod.rs`) and the anthropic-api
-//! mantle lift (`anthropic_api/mod.rs`, which routes Messages-shaped
-//! requests to AWS Bedrock) receive AWS error bodies. A 403 AccessDenied
-//! body names the caller principal ARN, the account id, and the resource
-//! ARN; none of that may reach a log line or a client-facing message. The
-//! single classifier here is the one source both lanes derive from, so the
-//! client path and the log path cannot drift on what a 403 exposes.
+//! The native Bedrock lane (`bedrock/mod.rs`), the anthropic-api mantle lift
+//! (`anthropic_api/mod.rs`), and both OpenAI readers (`openai_compat` /
+//! `openai_responses`, when a `bedrock_mantle` upstream returns a flat AWS
+//! envelope instead of the native error shape) all receive AWS error bodies.
+//! A 403 AccessDenied body names the caller principal ARN, the account id,
+//! and the resource ARN; none of that may reach a log line or a
+//! client-facing message. The single classifier here is the one source every
+//! lane derives from, so the client path and the log path cannot drift on
+//! what a 403 exposes.
 //!
-//! Gated on `anthropic-api` OR `bedrock` (crate-level, NOT bedrock-only) so
-//! the lean anthropic-api build -- which lifts AWS error bodies on the
-//! mantle lane without linking the AWS SDK -- still sees it.
+//! Gated on `anthropic-api` OR `bedrock` OR either OpenAI feature
+//! (crate-level, NOT bedrock-only) so every lean build that can front a
+//! mantle upstream lifts + redacts AWS error bodies without linking the AWS
+//! SDK.
 
 use routectl_core::sanitize_for_log;
+use serde_json::Value;
+
+/// Lift AWS/Bedrock error-envelope tokens from an already-parsed error body,
+/// used when the native error shape (Anthropic `error.type`, OpenAI
+/// `error.type` / `error.code`) is absent. The AWS envelope is flat
+/// (`{"__type": "...", "code": "...", "message": "..."}`) rather than the
+/// nested `{"error": {...}}` the first-party APIs use, so a mantle 403/429
+/// would otherwise carry no classifier token.
+///
+/// `__type` is frequently namespaced
+/// (`"com.amazonaws.bedrock#ThrottlingException"`); the classifier and logs
+/// want the bare exception name, so everything up to and including the final
+/// `#` is stripped. Returns `(upstream_type, upstream_code)`: `__type`
+/// (namespace-stripped) becomes the type, a top-level `code` becomes the
+/// code. Best-effort -- `(None, None)` when the body was not JSON or carried
+/// neither token. These are top-level keys, so the lift is inert on a native
+/// nested `{"error": {...}}` body and never overrides a first-party
+/// classifier.
+pub fn lift_aws_error_tokens(parsed: Option<&Value>) -> (Option<String>, Option<String>) {
+    let Some(v) = parsed else {
+        return (None, None);
+    };
+    let upstream_type = v
+        .get("__type")
+        .and_then(Value::as_str)
+        .map(strip_aws_namespace);
+    let upstream_code = v.get("code").and_then(Value::as_str).map(str::to_string);
+    (upstream_type, upstream_code)
+}
+
+/// Strip an AWS namespace prefix from an exception token:
+/// `"com.amazonaws.bedrock#ThrottlingException"` -> `"ThrottlingException"`.
+/// A token with no `#` is returned unchanged.
+fn strip_aws_namespace(raw: &str) -> String {
+    raw.rsplit_once('#')
+        .map_or(raw, |(_, bare)| bare)
+        .to_string()
+}
 
 /// Shared 403-vs-other classification for an AWS/Bedrock upstream error.
 /// Both the client-facing message ([`classify_client_error_message`]) and
@@ -155,6 +196,61 @@ fn extract_iam_action(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `strip_aws_namespace` reduces a namespaced AWS exception token to its
+    /// bare name and leaves an already-bare token untouched.
+    #[test]
+    fn strip_aws_namespace_reduces_to_bare_token() {
+        assert_eq!(
+            strip_aws_namespace("com.amazonaws.bedrock#ThrottlingException"),
+            "ThrottlingException"
+        );
+        assert_eq!(
+            strip_aws_namespace("SignatureDoesNotMatch"),
+            "SignatureDoesNotMatch"
+        );
+        // Only the final `#` splits, and an empty bare token stays empty.
+        assert_eq!(strip_aws_namespace("a#b#Trailing"), "Trailing");
+        assert_eq!(strip_aws_namespace("prefix#"), "");
+    }
+
+    /// The AWS envelope lift reads `__type` (namespace-stripped) and a
+    /// top-level `code`, and is inert on native-shaped or tokenless JSON.
+    #[test]
+    fn lift_aws_error_tokens_lifts_type_and_code() {
+        let namespaced = serde_json::from_str::<Value>(
+            r#"{"__type":"com.amazonaws.bedrock#ThrottlingException"}"#,
+        )
+        .ok();
+        assert_eq!(
+            lift_aws_error_tokens(namespaced.as_ref()),
+            (Some("ThrottlingException".to_string()), None)
+        );
+
+        let with_code = serde_json::from_str::<Value>(r#"{"code":"SignatureDoesNotMatch"}"#).ok();
+        assert_eq!(
+            lift_aws_error_tokens(with_code.as_ref()),
+            (None, Some("SignatureDoesNotMatch".to_string()))
+        );
+
+        // A JSON body carrying neither token yields no lift.
+        let tokenless = serde_json::from_str::<Value>(r#"{"ok":true}"#).ok();
+        assert_eq!(lift_aws_error_tokens(tokenless.as_ref()), (None, None));
+        // A non-JSON body yields no lift.
+        assert_eq!(lift_aws_error_tokens(None), (None, None));
+    }
+
+    /// The lift reads TOP-LEVEL keys, so a native nested `{"error": {...}}`
+    /// envelope (Anthropic or OpenAI shape) never triggers it -- the
+    /// first-party classifier always wins.
+    #[test]
+    fn lift_aws_error_tokens_is_inert_on_native_nested_shape() {
+        let native = serde_json::from_str::<Value>(
+            r#"{"error":{"type":"rate_limit_exceeded","code":"slow_down"}}"#,
+        )
+        .ok();
+        assert_eq!(lift_aws_error_tokens(native.as_ref()), (None, None));
+    }
 
     #[test]
     fn extract_iam_action_pulls_action_from_aws_403_body() {
