@@ -1542,3 +1542,227 @@ mod mantle_lane_factory_tests {
         built.expect("bearer mantle build must succeed");
     }
 }
+
+#[cfg(feature = "bedrock")]
+mod openai_mantle_factory_tests {
+    //! Factory wiring for the Bedrock mantle OpenAI lanes (openai-compat and
+    //! openai-responses): region derives the endpoint, credentials resolve
+    //! fail-fast, and the probe stays a credential-resolve (never an
+    //! inference-host dial). Sibling of `mantle_lane_factory_tests` for the
+    //! anthropic-api lane.
+
+    use super::*;
+    use crate::config::{BedrockCredsConfig, BedrockMantleConfig, ProviderEntry};
+    use routectl_auth::MemoryStore;
+    use routectl_core::ProbeOutcome;
+    use std::sync::Arc;
+    #[cfg(feature = "openai-responses")]
+    use {
+        crate::config::{Config, ModelEntry},
+        std::collections::BTreeMap,
+    };
+
+    fn bearer_creds() -> BedrockCredsConfig {
+        BedrockCredsConfig::BearerKey {
+            key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
+        }
+    }
+
+    /// Build an openai-compat entry on the mantle lane: empty api_key_ref and
+    /// empty base_url (both derived from `bedrock_mantle`).
+    fn compat_mantle_entry(region: &str, creds: BedrockCredsConfig) -> ProviderEntry {
+        let mut entry = ProviderEntry::openai_compat("", "");
+        if let ProviderEntry::OpenaiCompat { bedrock_mantle, .. } = &mut entry {
+            *bedrock_mantle = Some(BedrockMantleConfig {
+                region: region.to_string(),
+                creds,
+            });
+        }
+        entry
+    }
+
+    /// Build an openai-responses entry on the mantle lane: empty api_key_ref,
+    /// no base_url, `auth_kind = bedrock-mantle`, and the `bedrock_mantle`
+    /// block set.
+    #[cfg(feature = "openai-responses")]
+    fn responses_mantle_entry(region: &str, creds: BedrockCredsConfig) -> ProviderEntry {
+        let mut entry = ProviderEntry::openai_responses("")
+            .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::BedrockMantle);
+        if let ProviderEntry::OpenaiResponses { bedrock_mantle, .. } = &mut entry {
+            *bedrock_mantle = Some(BedrockMantleConfig {
+                region: region.to_string(),
+                creds,
+            });
+        }
+        entry
+    }
+
+    #[tokio::test]
+    async fn compat_mantle_bearer_entry_builds_and_probes_reachable() {
+        // A bearer compat mantle entry builds with no network: the credential
+        // resolves from the file ref, the provider keeps the openai-compat
+        // id, and the credential-resolve probe reports Reachable for a bearer
+        // key rather than dialing the upstream `/models`.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = compat_mantle_entry("eu-west-1", bearer_creds());
+
+        let provider = build_provider("oc-mantle", &entry, store)
+            .await
+            .expect("compat mantle bearer provider must build");
+        assert_eq!(provider.id(), "openai-compat:oc-mantle");
+        assert_eq!(provider.probe().await, ProbeOutcome::Reachable);
+    }
+
+    #[tokio::test]
+    async fn compat_mantle_profile_missing_profile_fails_fast_at_build() {
+        // Profile / DefaultChain resolve probe-once at build, so a named
+        // profile that does not exist must surface as a build error here,
+        // not on the first chat request.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let creds = BedrockCredsConfig::Profile {
+            name: "routectl-nonexistent-mantle-profile".to_string(),
+        };
+        let entry = compat_mantle_entry("us-east-1", creds);
+
+        let result = build_provider("oc-mantle", &entry, store).await;
+        assert!(
+            result.is_err(),
+            "a compat mantle entry whose profile does not exist must fail fast at build"
+        );
+    }
+
+    #[tokio::test]
+    async fn compat_mantle_bearer_resolve_does_not_block_the_reload_path() {
+        // The mantle lane resolves credentials through the async
+        // `bedrock::auth::resolve` seam, never a blocking call on the async
+        // reload path. A bearer key short-circuits with no round-trip, so the
+        // build completes well within a tight deadline.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = compat_mantle_entry("us-east-1", bearer_creds());
+
+        let built = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            build_provider("oc-mantle", &entry, store),
+        )
+        .await
+        .expect("compat mantle bearer build must not block the reload path");
+        built.expect("compat bearer mantle build must succeed");
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[tokio::test]
+    async fn responses_mantle_bearer_entry_builds_and_probes_reachable() {
+        // A bearer responses mantle entry builds with no network: the
+        // credential resolves from the file ref, the provider keeps the
+        // openai-responses id, and the credential-resolve probe reports
+        // Reachable for a bearer key rather than dialing the upstream.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = responses_mantle_entry("ap-southeast-2", bearer_creds());
+
+        let provider = build_provider("or-mantle", &entry, store)
+            .await
+            .expect("responses mantle bearer provider must build");
+        assert_eq!(provider.id(), "openai-responses:or-mantle");
+        assert_eq!(provider.probe().await, ProbeOutcome::Reachable);
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[tokio::test]
+    async fn responses_mantle_profile_missing_profile_fails_fast_at_build() {
+        // A named profile that does not exist must surface as a build error
+        // at construction, not on the first chat request.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let creds = BedrockCredsConfig::Profile {
+            name: "routectl-nonexistent-mantle-profile".to_string(),
+        };
+        let entry = responses_mantle_entry("us-east-1", creds);
+
+        let result = build_provider("or-mantle", &entry, store).await;
+        assert!(
+            result.is_err(),
+            "a responses mantle entry whose profile does not exist must fail fast at build"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[tokio::test]
+    async fn both_openai_mantle_lanes_resolve_end_to_end_without_network() {
+        // config -> router build: one config carrying BOTH a mantle responses
+        // provider and a mantle compat provider resolves through
+        // `build_resolved_models` (the path the hot-reload loader drives) with
+        // no failures and no network. Both models probe Reachable.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "resp".to_string(),
+            responses_mantle_entry("us-east-1", bearer_creds()),
+        );
+        providers.insert(
+            "compat".to_string(),
+            compat_mantle_entry("eu-west-1", bearer_creds()),
+        );
+        let mut models = BTreeMap::new();
+        models.insert("gpt".to_string(), ModelEntry::new("resp", "gpt-5"));
+        models.insert(
+            "deepseek".to_string(),
+            ModelEntry::new("compat", "deepseek-chat"),
+        );
+        let cfg = Config {
+            providers,
+            models,
+            ..Config::default()
+        };
+
+        let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("router build must succeed");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let gpt = resolved.get("gpt").expect("gpt model resolved");
+        assert_eq!(gpt.provider.probe().await, ProbeOutcome::Reachable);
+        let deepseek = resolved.get("deepseek").expect("deepseek model resolved");
+        assert_eq!(deepseek.provider.probe().await, ProbeOutcome::Reachable);
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[tokio::test]
+    async fn responses_mantle_bearer_resolve_does_not_block_the_reload_path() {
+        // The responses mantle lane resolves credentials through the async
+        // `bedrock::auth::resolve` seam, never a blocking call on the async
+        // reload path. A bearer key short-circuits with no round-trip, so the
+        // build completes well within a tight deadline.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = responses_mantle_entry("us-east-1", bearer_creds());
+
+        let built = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            build_provider("or-mantle", &entry, store),
+        )
+        .await
+        .expect("responses mantle bearer build must not block the reload path");
+        built.expect("responses bearer mantle build must succeed");
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[tokio::test]
+    async fn responses_bedrock_mantle_marker_without_block_fails_cleanly() {
+        // The legacy bearer-only surface is closed: an entry that carries the
+        // `bedrock-mantle` auth_kind but NO `bedrock_mantle` block must fail
+        // with a clean Config error, never a panic. This exercises the
+        // unvalidated `build_provider` path (as `provider probe` does), which
+        // bypasses `collect_config_validation`, so the factory itself has to
+        // refuse the marker rather than fall through to a base_url default.
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = ProviderEntry::openai_responses("")
+            .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::BedrockMantle);
+
+        let err = match build_provider("or-legacy", &entry, store).await {
+            Ok(_) => panic!("bedrock-mantle marker without a block must be refused"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bedrock_mantle") && msg.contains("closed"),
+            "error must name the missing block and the closed surface: {msg}"
+        );
+    }
+}
