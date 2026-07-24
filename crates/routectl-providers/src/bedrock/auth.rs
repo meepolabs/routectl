@@ -89,7 +89,7 @@ pub async fn resolve(creds: &BedrockCreds, region: &str) -> Result<ResolvedCreds
                     error = %e,
                     "bedrock credential resolution failed",
                 );
-                Error::Auth(format!("bedrock: failed to load AWS profile `{name}`: {e}"))
+                Error::Auth("aws credentials unavailable".into())
             })?;
             Ok(ResolvedCreds::Sigv4 {
                 provider: SharedCredentialsProvider::new(provider),
@@ -111,9 +111,7 @@ pub async fn resolve(creds: &BedrockCreds, region: &str) -> Result<ResolvedCreds
                     error = %e,
                     "bedrock credential resolution failed",
                 );
-                Error::Auth(format!(
-                    "bedrock: AWS default credentials chain failed: {e}"
-                ))
+                Error::Auth("aws credentials unavailable".into())
             })?;
             Ok(ResolvedCreds::Sigv4 {
                 provider: SharedCredentialsProvider::new(chain),
@@ -178,17 +176,22 @@ mod tests {
         // a working provider even when the profile is missing if env
         // vars happen to be present. So we can't deterministically
         // assert Err. What we DO assert: if we get an error, it's a
-        // clean `Error::Auth` with our prefix (not a panic, not a
-        // leaked SDK type), and the path doesn't loop.
+        // clean `Error::Auth` whose outward payload is a fixed literal --
+        // no leaked SDK type, no profile name (both ride in structured
+        // tracing only) -- and the path doesn't loop.
         let creds = BedrockCreds::Profile {
             name: "definitely-not-a-real-profile-xyzzy-routectl-test".into(),
         };
         match resolve(&creds, "us-west-2").await {
             Ok(_) => {} // tolerated -- env-driven happy path
             Err(Error::Auth(msg)) => {
+                assert_eq!(
+                    msg, "aws credentials unavailable",
+                    "error should be the fixed auth literal: {msg}"
+                );
                 assert!(
-                    msg.contains("bedrock:") && msg.contains("profile"),
-                    "error should be tagged and mention profile: {msg}"
+                    !msg.contains("definitely-not-a-real-profile-xyzzy-routectl-test"),
+                    "the profile name must not leak into the outward Error: {msg}"
                 );
             }
             Err(other) => panic!("expected Auth or Ok, got {other:?}"),

@@ -164,7 +164,11 @@ pub fn build(user_agent: Option<&str>) -> Client {
 ///
 /// Returns `Result` rather than panicking (unlike [`build`]) so a probe
 /// on a machine with a broken TLS store degrades to a typed `Unreachable`
-/// outcome instead of aborting `doctor`.
+/// outcome instead of aborting `doctor`. The mantle provider-construction
+/// caller, by contrast, intentionally `.expect()`s this result: a client
+/// that cannot be built at startup is fatal there, matching [`build`]'s
+/// contract -- the `Result` exists for the degradable probe path, not to
+/// make provider construction fallible.
 #[cfg(any(
     feature = "openai-compat",
     feature = "anthropic-api",

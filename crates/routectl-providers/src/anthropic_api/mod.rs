@@ -20,8 +20,8 @@ use serde_json::Value;
 use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, TokenCount,
-    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
-    trace_outgoing_body, trace_upstream_success_body,
+    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, trace_outgoing_body,
+    trace_upstream_success_body,
 };
 
 mod client;
@@ -776,18 +776,6 @@ fn strip_aws_namespace(raw: &str) -> String {
         .to_string()
 }
 
-/// Extract the human-readable message from an AWS/Bedrock error envelope
-/// (top-level `message` or `Message`), used when the Anthropic
-/// `error.message` shape is absent. Best-effort -- `None` when neither
-/// key is a string.
-fn parse_aws_error_message(parsed: Option<&Value>) -> Option<String> {
-    let v = parsed?;
-    v.get("message")
-        .or_else(|| v.get("Message"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
 /// Read a 4xx/5xx upstream response body and build a routectl
 /// `Error::Upstream` from it. Encapsulates the
 /// "text-first-then-opportunistic-JSON" pattern shared by
@@ -841,21 +829,38 @@ async fn read_anthropic_error(
         crate::http_client::warn_body_cap(provider_id, status, content_length, "error_body");
     }
     let body_text = String::from_utf8_lossy(&bytes).into_owned();
-    // Emit the FULL (capped) upstream error body at debug level so triage
-    // doesn't have to reproduce. The caller's WARN excerpt stays
-    // unchanged for `routectl-warn.log` scannability.
-    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &body_text);
-    // Parse once; both the cap-trip and intact paths lift the classifier
-    // from the same parsed value. Anthropic shape
+    // Parse once; the classifier, the DEBUG body, and the client message
+    // all read from the same parsed value. Anthropic shape
     // `{type:"error",error:{type,message}}`; errors carry no separate `code`,
     // so only `upstream_type` is populated.
     let parsed = serde_json::from_str::<Value>(&body_text).ok();
+    let anthropic_type = parse_anthropic_error_type(parsed.as_ref());
+    // A native Anthropic error body (`/error/type` present) carries no AWS
+    // principal identifiers. A mantle (Bedrock) upstream returns a flat AWS
+    // envelope whose 403 AccessDenied message names the caller principal
+    // ARN, account id, and resource ARN. The AWS-lift path routes its
+    // free-text through the shared Bedrock 403 scrub before any of it
+    // reaches the DEBUG body, the WARN excerpt, or the client-facing Error.
+    let is_aws_lift = anthropic_type.is_none();
+    // Emit the (capped) upstream error body at debug level so triage doesn't
+    // have to reproduce. On the AWS-lift path a 403 body collapses to the
+    // IAM action only; a native Anthropic body logs in full. The caller's
+    // WARN excerpt is derived from the returned `msg`, which is scrubbed on
+    // the same path, so `routectl-warn.log` stays leak-free too.
+    let debug_body = if is_aws_lift {
+        crate::aws_error::sanitized_debug_body(status, &body_text)
+    } else {
+        body_text.clone()
+    };
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &debug_body);
     // Anthropic nests the classifier under `/error/type`; a mantle
     // (Bedrock) upstream uses a flat AWS envelope instead. Prefer the
     // Anthropic shape, then fall back to lifting AWS `__type` / `code` so
     // SignatureDoesNotMatch / RequestTimeTooSkewed / ThrottlingException
-    // classify and log truthfully.
-    let (upstream_type, upstream_code) = match parse_anthropic_error_type(parsed.as_ref()) {
+    // classify and log truthfully. These lifted TYPE/CODE tokens are
+    // bounded classifier inputs -- safe to keep verbatim; only the
+    // free-text message needs the scrub.
+    let (upstream_type, upstream_code) = match anthropic_type {
         Some(ty) => (Some(ty), None),
         None => parse_aws_error_tokens(parsed.as_ref()),
     };
@@ -876,23 +881,32 @@ async fn read_anthropic_error(
         );
         return (msg, err);
     }
-    let msg = parsed
+    // The client-facing message prefers the Anthropic `/error/message`. On
+    // the AWS-lift path (no Anthropic shape) it runs through the shared
+    // Bedrock scrub instead of echoing the AWS top-level `message` verbatim:
+    // a 403 AccessDenied message names the principal ARN, account id, and
+    // resource ARN, while a non-403 body is sanitized and capped. The lifted
+    // TYPE/CODE classifier tokens above are unaffected -- only this free-text
+    // message is scrubbed.
+    let msg = match parsed
         .as_ref()
         .and_then(|v| v.pointer("/error/message"))
         .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .or_else(|| parse_aws_error_message(parsed.as_ref()))
-        .unwrap_or_else(|| sanitize_upstream_body(&body_text));
-    // When the upstream returned a structured `{error:...}` JSON envelope,
-    // carry the RAW body so the ingress sanitizer can re-extract the
-    // upstream's own top-level `error.message` and surface it to the
-    // client. A client (e.g. Claude Code) can then recognize and
-    // self-heal an actionable upstream 400 instead of hitting a
-    // status-only wall. When the body was NOT a `{error:...}` envelope
-    // (HTML page, plain-text gateway error), carry the sanitized excerpt
-    // so the sanitizer falls back to a status-only message -- never a raw
-    // body dump.
-    let err_body = if is_json_error_envelope(&body_text) {
+    {
+        Some(m) => m.to_string(),
+        None => crate::aws_error::classify_client_error_message(status, &body_text),
+    };
+    // When the upstream returned a structured `{error:...}` JSON envelope on
+    // the NATIVE Anthropic path, carry the RAW body so the ingress sanitizer
+    // can re-extract the upstream's own top-level `error.message` and surface
+    // it to the client. A client (e.g. Claude Code) can then recognize and
+    // self-heal an actionable upstream 400 instead of hitting a status-only
+    // wall. The AWS-lift path NEVER carries the raw body -- its 403 envelope
+    // names principal identifiers -- so it carries the already-scrubbed
+    // message. A non-envelope body (HTML page, plain-text gateway error) also
+    // carries the sanitized message so the sanitizer falls back to a
+    // status-only message, never a raw body dump.
+    let err_body = if !is_aws_lift && is_json_error_envelope(&body_text) {
         body_text
     } else {
         msg.clone()
