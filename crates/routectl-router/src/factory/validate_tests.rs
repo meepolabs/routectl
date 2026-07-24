@@ -1506,7 +1506,10 @@ mod collect_config_validation_tests {
             "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
         ));
         assert!(
-            has_base_url_error(&validation),
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("base_url") && e.contains("required")),
             "empty openai-compat base_url must be rejected: {:?}",
             validation.errors
         );
@@ -1757,6 +1760,304 @@ bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
     }
 }
 
+#[cfg(all(test, feature = "bedrock"))]
+mod validate_provider_openai_mantle_tests {
+    //! Config-BOUNDARY tests (parse via `toml::from_str`) for the Bedrock
+    //! mantle lane on the two OpenAI-shape providers. Mirrors the
+    //! `anthropic-api` suite: the PRESENCE of a `bedrock_mantle` sub-table
+    //! selects the lane, so every other credential/endpoint knob must be
+    //! neutral, and the legacy `auth_kind = "bedrock-mantle"`-alone surface
+    //! (Responses only) is closed with a hard error.
+    //!
+    //! The `openai-compat` cases run under `bedrock` alone (the compat
+    //! branch is independent of the `openai-responses` feature); the
+    //! `openai-responses` cases are additionally gated on that feature.
+
+    use super::{collect_config_validation, validate_provider_openai_mantle};
+    use crate::config::Config;
+
+    // --- openai-compat lane ---
+
+    #[test]
+    fn compat_default_chain_mantle_parses_and_validates() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-compat"
+api_key_ref = ""
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("compat default-chain mantle parses");
+        validate_provider_openai_mantle(&cfg).expect("clean compat mantle validates");
+        assert!(
+            collect_config_validation(&cfg).errors.is_empty(),
+            "clean compat mantle must pass the whole suite: {:?}",
+            collect_config_validation(&cfg).errors
+        );
+    }
+
+    #[test]
+    fn compat_bearer_key_mantle_parses_and_validates() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-compat"
+api_key_ref = ""
+bedrock_mantle = { region = "eu-west-1", creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("compat bearer-key mantle parses");
+        validate_provider_openai_mantle(&cfg).expect("clean compat bearer-key mantle validates");
+        assert!(
+            collect_config_validation(&cfg).errors.is_empty(),
+            "clean compat bearer-key mantle must pass the whole suite: {:?}",
+            collect_config_validation(&cfg).errors
+        );
+    }
+
+    #[test]
+    fn compat_rejects_mantle_with_nonempty_api_key_ref() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-compat"
+api_key_ref = "literal:should-not-be-here"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("api_key_ref"), "msg: {msg}");
+    }
+
+    #[test]
+    fn compat_rejects_mantle_with_nonempty_base_url() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-compat"
+api_key_ref = ""
+base_url = "https://example.invalid/v1"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("base_url"), "msg: {msg}");
+    }
+
+    #[test]
+    fn compat_rejects_mantle_with_empty_region() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-compat"
+api_key_ref = ""
+bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("region"), "msg: {msg}");
+    }
+
+    #[test]
+    fn non_mantle_compat_requires_base_url() {
+        // With `#[serde(default)]` on base_url a non-mantle compat entry may
+        // now omit it; the suite must still reject the empty value.
+        let toml_text = r#"
+[providers.plain]
+kind = "openai-compat"
+api_key_ref = "env://KEY"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse (base_url defaults empty)");
+        let errors = collect_config_validation(&cfg).errors;
+        assert!(
+            errors.iter().any(|e| e.contains("base_url")),
+            "non-mantle compat with no base_url must be rejected: {errors:?}"
+        );
+    }
+
+    // --- openai-responses lane ---
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_mantle_default_auth_kind_parses_and_validates() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = ""
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("responses mantle parses");
+        validate_provider_openai_mantle(&cfg).expect("clean responses mantle validates");
+        assert!(
+            collect_config_validation(&cfg).errors.is_empty(),
+            "clean responses mantle must pass the whole suite: {:?}",
+            collect_config_validation(&cfg).errors
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_mantle_bearer_key_parses_and_validates() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = ""
+bedrock_mantle = { region = "eu-west-1", creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("responses bearer-key mantle parses");
+        validate_provider_openai_mantle(&cfg).expect("clean responses bearer-key mantle validates");
+        assert!(
+            collect_config_validation(&cfg).errors.is_empty(),
+            "clean responses bearer-key mantle must pass the whole suite: {:?}",
+            collect_config_validation(&cfg).errors
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_mantle_redundant_auth_kind_parses_and_validates() {
+        // Stating auth_kind = "bedrock-mantle" alongside the block is
+        // redundant but accepted (the factory sets the runtime marker).
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = ""
+auth_kind = "bedrock-mantle"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("responses mantle parses");
+        validate_provider_openai_mantle(&cfg).expect("redundant auth_kind validates");
+        assert!(
+            collect_config_validation(&cfg).errors.is_empty(),
+            "redundant auth_kind must pass the whole suite: {:?}",
+            collect_config_validation(&cfg).errors
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_legacy_auth_kind_without_block_is_rejected() {
+        // The must-fix: bedrock-mantle auth_kind ALONE (no block) is the
+        // silent us-east-1 misroute. Hard error naming the block form.
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth_kind = "bedrock-mantle"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse (enum stays parseable)");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bedrock_mantle"),
+            "must name the block form: {msg}"
+        );
+        assert!(
+            msg.contains("region and creds"),
+            "must name the migration path: {msg}"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_legacy_auth_kind_with_explicit_base_url_is_rejected() {
+        // The bearer-only lane form (explicit base_url) is closed too --
+        // it cannot meet the SigV4 posture. Still errors, regardless of
+        // base_url.
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth_kind = "bedrock-mantle"
+base_url = "https://bedrock-mantle.us-east-1.api.aws/openai/v1"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bedrock_mantle"),
+            "must name the block form: {msg}"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_rejects_mantle_with_account_id_ref() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = ""
+account_id_ref = "acct-123"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("account_id_ref"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_rejects_mantle_with_nonempty_api_key_ref() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = "literal:should-not-be-here"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("api_key_ref"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_rejects_mantle_with_nonempty_base_url() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = ""
+base_url = "https://example.invalid/v1"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("base_url"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_rejects_mantle_with_empty_region() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = ""
+bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("region"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn responses_rejects_mantle_with_store_payload_extra() {
+        // The Responses `store` flag is forced off on the mantle lane; a
+        // `store` key in payload_extras must be rejected at config load.
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = ""
+payload_extras = { store = true }
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("store"), "msg: {msg}");
+    }
+}
+
 #[cfg(all(test, not(feature = "bedrock")))]
 mod bedrock_mantle_feature_off_tests {
     //! With the `bedrock` feature off, the `bedrock_mantle` field does not
@@ -1772,6 +2073,40 @@ mod bedrock_mantle_feature_off_tests {
 [providers.mantle]
 kind = "anthropic-api"
 api_key_ref = "literal:sk-ant-test"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("bedrock_mantle must be rejected as an unknown field with bedrock off");
+        assert!(
+            err.to_string().contains("bedrock_mantle"),
+            "the unknown-field error should name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn bedrock_mantle_key_on_openai_compat_rejected_when_feature_off() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-compat"
+base_url = "https://example.invalid/v1"
+api_key_ref = "env://KEY"
+bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
+"#;
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("bedrock_mantle must be rejected as an unknown field with bedrock off");
+        assert!(
+            err.to_string().contains("bedrock_mantle"),
+            "the unknown-field error should name the key: {err}"
+        );
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn bedrock_mantle_key_on_openai_responses_rejected_when_feature_off() {
+        let toml_text = r#"
+[providers.mantle]
+kind = "openai-responses"
+api_key_ref = "env://KEY"
 bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
 "#;
         let err = toml::from_str::<Config>(toml_text)

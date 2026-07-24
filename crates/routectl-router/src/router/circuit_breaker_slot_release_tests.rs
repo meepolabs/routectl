@@ -114,6 +114,8 @@ fn build_router_with_breaker(
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy {
                 circuit_failures: Some(circuit_failures),
                 circuit_cooldown_ms: Some(circuit_cooldown_ms),

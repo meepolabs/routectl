@@ -133,6 +133,8 @@ fn build_router_with_chain(
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy {
                 unsupported_features: unsupported_first,
                 ..Default::default()
@@ -150,6 +152,8 @@ fn build_router_with_chain(
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy {
                 unsupported_features: unsupported_second,
                 ..Default::default()
@@ -385,6 +389,8 @@ fn build_router_two_models_one_provider(
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy {
                 unsupported_features: vec![],
                 ..Default::default()
@@ -544,6 +550,8 @@ fn helper_distinguishes_provider_and_model_source() {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy {
                 unsupported_features: vec!["web_search".into()],
                 ..Default::default()
@@ -1068,6 +1076,8 @@ fn beta_pinned_reads_provider_and_model_floors_and_ignores_non_beta_strips() {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: crate::config::ProviderRuntimePolicy::default(),
         },
     );

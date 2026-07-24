@@ -97,6 +97,8 @@ fn build_router_with_provider(provider: Arc<dyn Provider>) -> Router {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy::default(),
         },
     );

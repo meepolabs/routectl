@@ -185,6 +185,8 @@ async fn build_provider_inner(
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
+            #[cfg(feature = "bedrock")]
+                bedrock_mantle: _,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -379,6 +381,8 @@ async fn build_provider_inner(
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
+            #[cfg(feature = "bedrock")]
+                bedrock_mantle: _,
             runtime: _,
         } => {
             let bearer_is_oauth =

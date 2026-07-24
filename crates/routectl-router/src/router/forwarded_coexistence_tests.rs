@@ -92,6 +92,8 @@ fn openai_compat_entry() -> ProviderEntry {
         cache_capability: None,
         auto_emit_top_level_breakpoint: None,
         reduction_enabled: None,
+        #[cfg(feature = "bedrock")]
+        bedrock_mantle: None,
         runtime: ProviderRuntimePolicy::default(),
     }
 }
