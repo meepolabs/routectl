@@ -1,4 +1,166 @@
 pub mod routectl_testkit
+pub mod routectl_testkit::bench_alloc
+pub struct routectl_testkit::bench_alloc::BenchCase<'a>
+impl<'a> routectl_testkit::bench_alloc::BenchCase<'a>
+pub const fn routectl_testkit::bench_alloc::BenchCase<'a>::is_batched(&self) -> bool
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::name(&self) -> &str
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::new(impl core::convert::Into<alloc::string::String>, impl core::ops::function::Fn() + 'a) -> Self
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::new_batched<T: 'static>(impl core::convert::Into<alloc::string::String>, impl core::ops::function::Fn() -> T + 'a, impl core::ops::function::Fn(T) + 'a) -> Self
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::run(&self)
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::run_measured(&self, alloc::boxed::Box<dyn core::any::Any>)
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::setup(&self) -> alloc::boxed::Box<dyn core::any::Any>
+impl core::fmt::Debug for routectl_testkit::bench_alloc::BenchCase<'_>
+pub fn routectl_testkit::bench_alloc::BenchCase<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Freeze for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<'a> !core::marker::Send for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<'a> !core::marker::Sync for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<'a> core::marker::Unpin for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<'a> core::marker::UnsafeUnpin for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<'a> !core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<'a> !core::panic::unwind_safe::UnwindSafe for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<T, U> core::convert::Into<U> for routectl_testkit::bench_alloc::BenchCase<'a> where U: core::convert::From<T>
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_testkit::bench_alloc::BenchCase<'a> where U: core::convert::Into<T>
+pub type routectl_testkit::bench_alloc::BenchCase<'a>::Error = core::convert::Infallible
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_testkit::bench_alloc::BenchCase<'a> where U: core::convert::TryFrom<T>
+pub type routectl_testkit::bench_alloc::BenchCase<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_testkit::bench_alloc::BenchCase<'a> where T: 'static + ?core::marker::Sized
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_testkit::bench_alloc::BenchCase<'a> where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_testkit::bench_alloc::BenchCase<'a> where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_testkit::bench_alloc::BenchCase<'a>
+pub fn routectl_testkit::bench_alloc::BenchCase<'a>::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_testkit::bench_alloc::BenchCase<'a>
+impl<T> tracing::instrument::WithSubscriber for routectl_testkit::bench_alloc::BenchCase<'a>
+pub struct routectl_testkit::bench_alloc::CountingAllocator
+impl core::alloc::global::GlobalAlloc for routectl_testkit::bench_alloc::CountingAllocator
+pub unsafe fn routectl_testkit::bench_alloc::CountingAllocator::alloc(&self, core::alloc::layout::Layout) -> *mut u8
+pub unsafe fn routectl_testkit::bench_alloc::CountingAllocator::dealloc(&self, *mut u8, core::alloc::layout::Layout)
+pub unsafe fn routectl_testkit::bench_alloc::CountingAllocator::realloc(&self, *mut u8, core::alloc::layout::Layout, usize) -> *mut u8
+impl core::marker::Freeze for routectl_testkit::bench_alloc::CountingAllocator
+impl core::marker::Send for routectl_testkit::bench_alloc::CountingAllocator
+impl core::marker::Sync for routectl_testkit::bench_alloc::CountingAllocator
+impl core::marker::Unpin for routectl_testkit::bench_alloc::CountingAllocator
+impl core::marker::UnsafeUnpin for routectl_testkit::bench_alloc::CountingAllocator
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::bench_alloc::CountingAllocator
+impl core::panic::unwind_safe::UnwindSafe for routectl_testkit::bench_alloc::CountingAllocator
+impl<T, U> core::convert::Into<U> for routectl_testkit::bench_alloc::CountingAllocator where U: core::convert::From<T>
+pub fn routectl_testkit::bench_alloc::CountingAllocator::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_testkit::bench_alloc::CountingAllocator where U: core::convert::Into<T>
+pub type routectl_testkit::bench_alloc::CountingAllocator::Error = core::convert::Infallible
+pub fn routectl_testkit::bench_alloc::CountingAllocator::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_testkit::bench_alloc::CountingAllocator where U: core::convert::TryFrom<T>
+pub type routectl_testkit::bench_alloc::CountingAllocator::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_testkit::bench_alloc::CountingAllocator::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_testkit::bench_alloc::CountingAllocator where T: 'static + ?core::marker::Sized
+pub fn routectl_testkit::bench_alloc::CountingAllocator::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_testkit::bench_alloc::CountingAllocator where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_alloc::CountingAllocator::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_testkit::bench_alloc::CountingAllocator where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_alloc::CountingAllocator::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_testkit::bench_alloc::CountingAllocator
+pub fn routectl_testkit::bench_alloc::CountingAllocator::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_testkit::bench_alloc::CountingAllocator
+impl<T> tracing::instrument::WithSubscriber for routectl_testkit::bench_alloc::CountingAllocator
+pub fn routectl_testkit::bench_alloc::alloc_count_mode() -> bool
+pub fn routectl_testkit::bench_alloc::reset()
+pub fn routectl_testkit::bench_alloc::run_alloc_count(&[routectl_testkit::bench_alloc::BenchCase<'_>])
+pub fn routectl_testkit::bench_alloc::snapshot() -> (u64, u64)
+pub mod routectl_testkit::bench_fixtures
+pub enum routectl_testkit::bench_fixtures::SpectrumProfile
+pub routectl_testkit::bench_fixtures::SpectrumProfile::CacheLess
+pub routectl_testkit::bench_fixtures::SpectrumProfile::LargeImage
+pub routectl_testkit::bench_fixtures::SpectrumProfile::LongSession
+pub routectl_testkit::bench_fixtures::SpectrumProfile::NoMarker
+pub routectl_testkit::bench_fixtures::SpectrumProfile::PlainRoundTrip
+pub routectl_testkit::bench_fixtures::SpectrumProfile::ToolHeavy
+impl routectl_testkit::bench_fixtures::SpectrumProfile
+pub const routectl_testkit::bench_fixtures::SpectrumProfile::ALL: [Self; 6]
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::generate(self) -> routectl_testkit::bench_fixtures::BenchFixture
+pub const fn routectl_testkit::bench_fixtures::SpectrumProfile::snake_name(self) -> &'static str
+impl core::clone::Clone for routectl_testkit::bench_fixtures::SpectrumProfile
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::clone(&self) -> routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::cmp::Eq for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::cmp::PartialEq for routectl_testkit::bench_fixtures::SpectrumProfile
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::eq(&self, &routectl_testkit::bench_fixtures::SpectrumProfile) -> bool
+impl core::fmt::Debug for routectl_testkit::bench_fixtures::SpectrumProfile
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::marker::StructuralPartialEq for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::marker::Freeze for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::marker::Send for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::marker::Sync for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::marker::Unpin for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::marker::UnsafeUnpin for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::bench_fixtures::SpectrumProfile
+impl core::panic::unwind_safe::UnwindSafe for routectl_testkit::bench_fixtures::SpectrumProfile
+impl<T, U> core::convert::Into<U> for routectl_testkit::bench_fixtures::SpectrumProfile where U: core::convert::From<T>
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_testkit::bench_fixtures::SpectrumProfile where U: core::convert::Into<T>
+pub type routectl_testkit::bench_fixtures::SpectrumProfile::Error = core::convert::Infallible
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_testkit::bench_fixtures::SpectrumProfile where U: core::convert::TryFrom<T>
+pub type routectl_testkit::bench_fixtures::SpectrumProfile::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_testkit::bench_fixtures::SpectrumProfile where T: core::clone::Clone
+pub type routectl_testkit::bench_fixtures::SpectrumProfile::Owned = T
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::clone_into(&self, &mut T)
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_testkit::bench_fixtures::SpectrumProfile where T: 'static + ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_testkit::bench_fixtures::SpectrumProfile where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_testkit::bench_fixtures::SpectrumProfile where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_testkit::bench_fixtures::SpectrumProfile where T: core::clone::Clone
+pub unsafe fn routectl_testkit::bench_fixtures::SpectrumProfile::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_testkit::bench_fixtures::SpectrumProfile
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_testkit::bench_fixtures::SpectrumProfile
+impl<T> tracing::instrument::WithSubscriber for routectl_testkit::bench_fixtures::SpectrumProfile
+pub struct routectl_testkit::bench_fixtures::BenchFixture
+pub routectl_testkit::bench_fixtures::BenchFixture::anthropic_wire: alloc::vec::Vec<u8>
+pub routectl_testkit::bench_fixtures::BenchFixture::canonical: routectl_core::schema::ChatRequest
+pub routectl_testkit::bench_fixtures::BenchFixture::openai_wire: alloc::vec::Vec<u8>
+impl core::clone::Clone for routectl_testkit::bench_fixtures::BenchFixture
+pub fn routectl_testkit::bench_fixtures::BenchFixture::clone(&self) -> routectl_testkit::bench_fixtures::BenchFixture
+impl core::fmt::Debug for routectl_testkit::bench_fixtures::BenchFixture
+pub fn routectl_testkit::bench_fixtures::BenchFixture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_testkit::bench_fixtures::BenchFixture
+impl core::marker::Send for routectl_testkit::bench_fixtures::BenchFixture
+impl core::marker::Sync for routectl_testkit::bench_fixtures::BenchFixture
+impl core::marker::Unpin for routectl_testkit::bench_fixtures::BenchFixture
+impl core::marker::UnsafeUnpin for routectl_testkit::bench_fixtures::BenchFixture
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::bench_fixtures::BenchFixture
+impl core::panic::unwind_safe::UnwindSafe for routectl_testkit::bench_fixtures::BenchFixture
+impl<T, U> core::convert::Into<U> for routectl_testkit::bench_fixtures::BenchFixture where U: core::convert::From<T>
+pub fn routectl_testkit::bench_fixtures::BenchFixture::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_testkit::bench_fixtures::BenchFixture where U: core::convert::Into<T>
+pub type routectl_testkit::bench_fixtures::BenchFixture::Error = core::convert::Infallible
+pub fn routectl_testkit::bench_fixtures::BenchFixture::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_testkit::bench_fixtures::BenchFixture where U: core::convert::TryFrom<T>
+pub type routectl_testkit::bench_fixtures::BenchFixture::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_testkit::bench_fixtures::BenchFixture::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_testkit::bench_fixtures::BenchFixture where T: core::clone::Clone
+pub type routectl_testkit::bench_fixtures::BenchFixture::Owned = T
+pub fn routectl_testkit::bench_fixtures::BenchFixture::clone_into(&self, &mut T)
+pub fn routectl_testkit::bench_fixtures::BenchFixture::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_testkit::bench_fixtures::BenchFixture where T: 'static + ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::BenchFixture::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_testkit::bench_fixtures::BenchFixture where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::BenchFixture::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_testkit::bench_fixtures::BenchFixture where T: ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::BenchFixture::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_testkit::bench_fixtures::BenchFixture where T: core::clone::Clone
+pub unsafe fn routectl_testkit::bench_fixtures::BenchFixture::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_testkit::bench_fixtures::BenchFixture
+pub fn routectl_testkit::bench_fixtures::BenchFixture::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_testkit::bench_fixtures::BenchFixture
+impl<T> tracing::instrument::WithSubscriber for routectl_testkit::bench_fixtures::BenchFixture
 pub struct routectl_testkit::CapturedEvent
 pub routectl_testkit::CapturedEvent::fields: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_testkit::CapturedEvent::level: tracing_core::metadata::Level

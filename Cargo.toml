@@ -144,6 +144,12 @@ http-body = { version = "1" }
 wiremock = "0.6"
 insta = { version = "1", features = ["yaml", "json"] }
 tokio-test = "0.4"
+# Micro-benchmark harness (perf benches only, dev-dependency). Default
+# features off drops the plotters/HTML/rayon report stack. The benches run
+# under plain `cargo bench` (each provides its own `main` via
+# `harness = false`), and `--save-baseline` / `--baseline` work without any
+# extra feature.
+criterion = { version = "0.7", default-features = false }
 
 [profile.release]
 strip = true
