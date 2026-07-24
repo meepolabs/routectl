@@ -35,6 +35,9 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
     if key.trim().is_empty() {
         return None;
     }
+    // Test-vehicle default only, mirroring the sibling bedrock live
+    // tests; the production factory derives the endpoint solely from
+    // the configured region and has no fallback.
     let region = std::env::var("AWS_REGION")
         .ok()
         .filter(|s| !s.trim().is_empty())
