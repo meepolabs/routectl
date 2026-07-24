@@ -258,6 +258,8 @@ mod bedrock_converse;
 mod bedrock_invoke;
 #[path = "live_matrix/gemini.rs"]
 mod gemini;
+#[path = "live_matrix/mantle_anthropic.rs"]
+mod mantle_anthropic;
 #[path = "live_matrix/oauth_antigravity.rs"]
 mod oauth_antigravity;
 #[path = "live_matrix/oauth_codex.rs"]
