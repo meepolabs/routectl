@@ -2243,7 +2243,7 @@ mod remap_tests;
 #[path = "provider_remap_tests.rs"]
 mod provider_remap_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bedrock"))]
 #[path = "bedrock_class_remap_tests.rs"]
 mod bedrock_class_remap_tests;
 
