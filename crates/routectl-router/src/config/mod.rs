@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 mod schema;
 mod validate;
 
+#[cfg(feature = "bedrock")]
+pub(crate) use schema::default_anthropic_base;
 #[cfg(feature = "gemini")]
 pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::routectl_config_dir;
@@ -21,7 +23,7 @@ pub use schema::{
     TrimConfig, UsageConfig,
 };
 #[cfg(feature = "bedrock")]
-pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig};
+pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 use validate::default_config_version;
 pub use validate::{
     CURRENT_CONFIG_VERSION, ConfigVersionError, LegacyMitmCredentialSourceError,

@@ -227,6 +227,8 @@ async fn build_provider_inner(
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
             cloak,
+            #[cfg(feature = "bedrock")]
+                bedrock_mantle: _,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;

@@ -179,6 +179,8 @@ fn build_router_with_provider_and_retry(provider: Arc<dyn Provider>, retry: Retr
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
             cloak: routectl_providers::anthropic_api::CloakConfig::default(),
+            #[cfg(feature = "bedrock")]
+            bedrock_mantle: None,
             runtime: ProviderRuntimePolicy {
                 circuit_failures: Some(1),
                 circuit_cooldown_ms: Some(0),

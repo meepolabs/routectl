@@ -107,8 +107,10 @@ pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'s
 /// Diff the previous config against the new one and return the names of
 /// egress-defining fields whose change is high-consequence: the operator is
 /// prompted before such an edit lands (`config set` reuses the confirmation
-/// pattern; `--yes` bypasses). Covers every provider entry's `base_url` and
-/// `credential_source` and the `[mitm]` block's upstream origin + SNI/Host.
+/// pattern; `--yes` bypasses). Covers every provider entry's `base_url`,
+/// `credential_source`, and `bedrock_mantle` (the Bedrock mantle lane
+/// selector: its region derives the endpoint host and its creds carry the
+/// credential), plus the `[mitm]` block's upstream origin + SNI/Host.
 /// Local knobs (`[mitm] listen_port`, `cert_dir`) are not egress and stay
 /// out.
 pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
@@ -120,17 +122,22 @@ pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'s
 
     let mut base_url_changed = false;
     let mut credential_source_changed = false;
+    let mut bedrock_mantle_changed = false;
     for key in keys {
-        let (prev_url, prev_src) = provider_egress(prev.providers.get(key));
-        let (next_url, next_src) = provider_egress(next.providers.get(key));
-        base_url_changed |= prev_url != next_url;
-        credential_source_changed |= prev_src != next_src;
+        let prev_egress = provider_egress(prev.providers.get(key));
+        let next_egress = provider_egress(next.providers.get(key));
+        base_url_changed |= prev_egress.base_url != next_egress.base_url;
+        credential_source_changed |= prev_egress.credential_source != next_egress.credential_source;
+        bedrock_mantle_changed |= prev_egress.bedrock_mantle != next_egress.bedrock_mantle;
     }
     if base_url_changed {
         out.push("providers.base_url");
     }
     if credential_source_changed {
         out.push("providers.credential_source");
+    }
+    if bedrock_mantle_changed {
+        out.push("providers.bedrock_mantle");
     }
 
     let prev_origin = prev.mitm.as_ref().map(|m| m.upstream_origin.as_str());
@@ -147,24 +154,42 @@ pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'s
     out
 }
 
-/// Project a provider entry down to its two egress-defining knobs.
-/// `ProviderEntry` carries neither `PartialEq` nor a public reader for
-/// `base_url` / `credential_source`, so read them off the serialized value
-/// -- the only crate-boundary-respecting way to diff just these fields
-/// across the tagged variants. Variants without a field (e.g. Bedrock has
-/// no `base_url`) yield `None`.
-fn provider_egress(entry: Option<&ProviderEntry>) -> (Option<String>, Option<String>) {
+/// The egress-defining projection of a provider entry: where requests go
+/// (`base_url`), which credential authenticates them (`credential_source`),
+/// and whether the Bedrock mantle lane is selected (`bedrock_mantle`, whose
+/// region derives the endpoint and whose creds carry the credential).
+/// `ProviderEntry` carries neither `PartialEq` nor public readers for these
+/// fields, so they are read off the serialized value -- the only
+/// crate-boundary-respecting way to diff just these fields across the
+/// tagged variants. Variants without a field (e.g. Bedrock has no
+/// `base_url`) yield `None`; when the `bedrock` feature is off,
+/// `bedrock_mantle` never serializes and so always reads `None`.
+struct ProviderEgress {
+    base_url: Option<String>,
+    credential_source: Option<String>,
+    bedrock_mantle: Option<serde_json::Value>,
+}
+
+fn provider_egress(entry: Option<&ProviderEntry>) -> ProviderEgress {
     let Some(entry) = entry else {
-        return (None, None);
+        return ProviderEgress {
+            base_url: None,
+            credential_source: None,
+            bedrock_mantle: None,
+        };
     };
     let value = serde_json::to_value(entry).unwrap_or(serde_json::Value::Null);
-    let read = |field: &str| {
+    let read_str = |field: &str| {
         value
             .get(field)
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };
-    (read("base_url"), read("credential_source"))
+    ProviderEgress {
+        base_url: read_str("base_url"),
+        credential_source: read_str("credential_source"),
+        bedrock_mantle: value.get("bedrock_mantle").cloned(),
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +334,40 @@ mod tests {
         let changes = collect_high_consequence_changes(&prev, &next);
         assert!(
             changes.contains(&"providers.credential_source"),
+            "got {changes:?}"
+        );
+    }
+
+    /// The Bedrock mantle lane selector is egress-defining (its region
+    /// derives the endpoint host + SigV4 scope, its creds carry the
+    /// credential), so a change to it is high-consequence -- prompted like
+    /// `base_url`. The `bedrock` feature is on here via routectl-router's
+    /// default features, so the mantle config parses.
+    #[test]
+    fn high_consequence_flags_provider_bedrock_mantle() {
+        let prev: Config = toml::from_str(
+            "[providers.mantle]\n\
+             kind = \"anthropic-api\"\n\
+             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n",
+        )
+        .expect("mantle config parses");
+
+        // No-op: identical configs -> no mantle flag.
+        assert!(
+            !collect_high_consequence_changes(&prev, &prev.clone())
+                .contains(&"providers.bedrock_mantle")
+        );
+
+        // Region change -> providers.bedrock_mantle.
+        let next: Config = toml::from_str(
+            "[providers.mantle]\n\
+             kind = \"anthropic-api\"\n\
+             bedrock_mantle = { region = \"eu-west-1\", creds = { kind = \"default-chain\" } }\n",
+        )
+        .expect("mantle config parses");
+        let changes = collect_high_consequence_changes(&prev, &next);
+        assert!(
+            changes.contains(&"providers.bedrock_mantle"),
             "got {changes:?}"
         );
     }
