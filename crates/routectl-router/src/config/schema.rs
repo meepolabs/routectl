@@ -2131,6 +2131,17 @@ impl ProviderEntry {
     /// resolution. A `forwarded` entry's empty `api_key_ref` is omitted.
     pub fn secret_uris(&self) -> Vec<&str> {
         match self {
+            // The Bedrock mantle lane authenticates with
+            // `bedrock_mantle.creds`, not `api_key_ref` (validation REQUIRES
+            // the latter empty), so the empty ref is not a secret URI to
+            // resolve -- surfacing it would fail `SecretRef::parse` with a
+            // spurious "unrecognized scheme" error on an otherwise-clean
+            // mantle provider. Mirrors the AnthropicApi empty-ref skip below.
+            #[cfg(feature = "bedrock")]
+            Self::OpenaiCompat {
+                bedrock_mantle: Some(_),
+                ..
+            } => Vec::new(),
             Self::OpenaiCompat { api_key_ref, .. } => vec![api_key_ref.as_str()],
             // A `forwarded` entry's `api_key_ref` is intentionally empty
             // (validated by `validate_provider_credential_sources`, not
@@ -2142,6 +2153,11 @@ impl ProviderEntry {
             Self::AnthropicApi { api_key_ref, .. } => vec![api_key_ref.as_str()],
             #[cfg(feature = "bedrock")]
             Self::Bedrock { creds, .. } => creds.secret_uris(),
+            #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+            Self::OpenaiResponses {
+                bedrock_mantle: Some(_),
+                ..
+            } => Vec::new(),
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses {
                 api_key_ref,
