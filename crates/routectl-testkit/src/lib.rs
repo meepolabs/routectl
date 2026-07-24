@@ -29,6 +29,8 @@ use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
 
+pub mod bench_fixtures;
+
 mod scoped_env;
 pub use scoped_env::ScopedEnv;
 

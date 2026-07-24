@@ -2768,6 +2768,8 @@ dependencies = [
 name = "routectl-testkit"
 version = "0.9.0"
 dependencies = [
+ "routectl-core",
+ "serde_json",
  "tracing",
 ]
 
