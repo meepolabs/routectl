@@ -186,9 +186,51 @@ async fn build_provider_inner(
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
             #[cfg(feature = "bedrock")]
-                bedrock_mantle: _,
+            bedrock_mantle,
             runtime: _,
         } => {
+            // Bedrock mantle lane. Its presence flips this provider onto
+            // region-derived, SigV4/bearer-signed egress under the
+            // `bedrock-mantle` scope. Config validation guarantees an empty
+            // api_key_ref and an empty base_url, so the region is the single
+            // source of truth for the endpoint (never the operator base_url)
+            // and no first-party bearer is presented. Credentials resolve
+            // here, fail-fast probing Profile/DefaultChain exactly as the
+            // Bedrock provider does.
+            #[cfg(feature = "bedrock")]
+            if let Some(m) = bedrock_mantle {
+                debug_assert!(
+                    base_url.trim().is_empty(),
+                    "mantle lane requires an empty base_url; validation must reject a manual base_url"
+                );
+                let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
+                let resolved =
+                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
+                let cfg = OpenAiCompatConfig {
+                    id: format!("openai-compat:{name}"),
+                    base_url: routectl_providers::mantle::mantle_openai_base(&m.region),
+                    // Empty on the lane: the mantle credential rides the
+                    // signed request and the first-party `Authorization:
+                    // Bearer <api_key>` insert is skipped. Validation already
+                    // rejects a non-empty api_key_ref on the lane.
+                    api_key: String::new(),
+                    header_extras: header_extras
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    payload_extras: None,
+                    reasoning_dialect: Default::default(),
+                    history_reasoning: Default::default(),
+                    user_agent: user_agent.clone(),
+                    strict_translation: opts.strict_translation,
+                    disable_stream_include_usage: false,
+                    mantle: Some(MantleAuth {
+                        region: m.region.clone(),
+                        creds: resolved,
+                    }),
+                };
+                return Ok(Arc::new(OpenAiCompatProvider::new(cfg)));
+            }
             validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(&*secrets, api_key_ref).await?;
             // v0.6.0: reasoning_dialect + history_reasoning moved off
@@ -384,9 +426,62 @@ async fn build_provider_inner(
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
             #[cfg(feature = "bedrock")]
-                bedrock_mantle: _,
+            bedrock_mantle,
             runtime: _,
         } => {
+            // Bedrock mantle lane. Its presence flips this provider onto
+            // region-derived, SigV4/bearer-signed egress under the
+            // `bedrock-mantle` scope. Config validation guarantees an empty
+            // api_key_ref, no account_id_ref, and an unset base_url, so the
+            // region is the single source of truth for the endpoint and no
+            // first-party bearer is presented. Credentials resolve here,
+            // fail-fast probing Profile/DefaultChain exactly as the Bedrock
+            // provider does. The runtime marker is set here so the extras
+            // guard and the auth dispatch see `BedrockMantle` even when the
+            // operator omitted the redundant `auth_kind`.
+            #[cfg(feature = "bedrock")]
+            if let Some(m) = bedrock_mantle {
+                debug_assert!(
+                    base_url.as_deref().is_none_or(|s| s.trim().is_empty()),
+                    "mantle lane requires an unset base_url; validation must reject a manual base_url"
+                );
+                let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
+                let resolved =
+                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
+                let mut cfg = OpenAiResponsesConfig::new_with_auth(
+                    format!("openai-responses:{name}"),
+                    Arc::new(routectl_core::StaticToken::new(String::new())),
+                );
+                cfg.base_url = routectl_providers::mantle::mantle_openai_base(&m.region);
+                cfg.auth_kind = OpenaiResponsesAuthKind::BedrockMantle;
+                cfg.header_extras = header_extras
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                cfg.user_agent = user_agent.clone();
+                cfg.mantle = Some(MantleAuth {
+                    region: m.region.clone(),
+                    creds: resolved,
+                });
+                return Ok(Arc::new(OpenAiResponsesProvider::new(cfg)));
+            }
+            // Close the legacy `auth_kind = "bedrock-mantle"`-alone surface
+            // for every caller. The mantle branch above returns whenever a
+            // `bedrock_mantle` block selected the lane, so reaching here with
+            // the marker means no block was set: the bearer-only surface it
+            // would otherwise build is refused. This guard is deliberately
+            // NOT `bedrock`-gated -- `validate_provider_openai_mantle` is, and
+            // callers that skip validation entirely (e.g. `provider probe`
+            // over an unvalidated config) must still fail cleanly rather than
+            // hit the `default_responses_base` fallback below.
+            if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle {
+                return Err(routectl_core::Error::Config(format!(
+                    "provider `{name}`: auth_kind = \"bedrock-mantle\" but no bedrock_mantle \
+                     block is set -- the legacy bearer-only surface is closed; set \
+                     [providers.{name}.bedrock_mantle] with region and creds to select the \
+                     mantle lane"
+                )));
+            }
             let bearer_is_oauth =
                 matches!(SecretRef::parse(api_key_ref), Ok(SecretRef::OAuth { .. }));
             validate_openai_responses_account_id(
@@ -419,26 +514,9 @@ async fn build_provider_inner(
             } else {
                 None
             };
-            let resolved_base_url = base_url.clone().unwrap_or_else(|| {
-                let default = default_responses_base(*auth_kind);
-                if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle {
-                    // The OpenaiResponses config has no region field, so the
-                    // factory cannot substitute the configured AWS region into
-                    // the bedrock-mantle hostname. Operators on regions other
-                    // than us-east-1 MUST set base_url explicitly in their
-                    // provider entry, e.g.:
-                    //   base_url = "https://bedrock-mantle.<region>.api.aws/openai/v1"
-                    tracing::warn!(
-                        provider = name,
-                        default_base_url = %default,
-                        "bedrock-mantle provider has no base_url configured; \
-                         defaulting to the us-east-1 endpoint -- operators on \
-                         other AWS regions must set base_url explicitly, e.g. \
-                         https://bedrock-mantle.<region>.api.aws/openai/v1",
-                    );
-                }
-                default
-            });
+            let resolved_base_url = base_url
+                .clone()
+                .unwrap_or_else(|| default_responses_base(*auth_kind));
             validate_base_url_scheme(name, &resolved_base_url)?;
             let mut cfg =
                 OpenAiResponsesConfig::new_with_auth(format!("openai-responses:{name}"), auth);
@@ -1350,14 +1428,13 @@ fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
     match auth_kind {
         OpenaiResponsesAuthKind::ChatgptOauth => "https://chatgpt.com/backend-api/codex".into(),
         OpenaiResponsesAuthKind::ApiKey => "https://api.openai.com/v1".into(),
-        // BedrockMantle URL is region-specific. ProviderEntry::OpenaiResponses
-        // carries no region field, so the factory cannot substitute the
-        // configured AWS region here. This returns the us-east-1 endpoint as
-        // a fallback. The call site emits a WARN when this default fires so
-        // the operator is not silently misdirected to the wrong region.
-        // Operators on other regions must set base_url explicitly.
+        // The mantle lane derives its region-specific base_url in the
+        // factory's `bedrock_mantle` branch and returns before this
+        // fallback; the non-mantle path then rejects a bare `bedrock-mantle`
+        // marker with a Config error (in every build and for unvalidated
+        // callers) before any base_url is resolved. No path reaches here.
         OpenaiResponsesAuthKind::BedrockMantle => {
-            "https://bedrock-mantle.us-east-1.api.aws/openai/v1".into()
+            unreachable!("bedrock-mantle base_url is derived in the factory mantle branch")
         }
     }
 }
