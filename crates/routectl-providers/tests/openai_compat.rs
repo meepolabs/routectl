@@ -33,6 +33,8 @@ fn make_provider(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatProvi
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     })
 }
 
@@ -98,6 +100,8 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     });
 
     // If the guard is missing, the wiremock matcher above won't find
@@ -630,6 +634,8 @@ fn strict_translation_off_warns_and_allows_request() {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     });
     let req = ChatRequest {
         model: "gpt-4o".into(),
@@ -676,6 +682,8 @@ fn strict_translation_on_rejects_canonical_only_fields() {
         user_agent: None,
         strict_translation: true,
         disable_stream_include_usage: false,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
     });
     let req = ChatRequest {
         model: "gpt-4o".into(),
@@ -988,5 +996,264 @@ async fn stream_error_body_over_cap_preserves_status() {
             assert_eq!(body, "response body exceeded 16777216-byte cap");
         }
         other => panic!("expected Upstream, got: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bedrock mantle lane wire behavior: SigV4/bearer-signed egress, no
+// first-party Bearer, a no-redirect client, and the deterministic 501
+// count_tokens capability signal. These pin the runtime lane against a mock
+// upstream; the credential-scope and URL-builder units live in
+// `routectl-providers/src/mantle.rs`.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "bedrock")]
+mod mantle {
+    use super::*;
+    use routectl_core::Error;
+    use routectl_providers::anthropic_api::MantleAuth;
+    use routectl_providers::bedrock::BedrockCreds;
+    use routectl_providers::bedrock::auth::resolve;
+    use routectl_providers::openai_compat::HistoryReasoning;
+    use serde_json::Value;
+
+    /// A mantle-lane compat provider posting to `base_url` with a resolved
+    /// credential. `base_url` points at wiremock (the factory derives the
+    /// real host from the region; here we still sign under the region
+    /// scope). The `api_key` is empty, mirroring the config-validation
+    /// invariant on the lane.
+    async fn mantle_provider(base_url: &str, creds: BedrockCreds) -> OpenAiCompatProvider {
+        let resolved = resolve(&creds, "us-west-2").await.unwrap();
+        OpenAiCompatProvider::new(OpenAiCompatConfig {
+            id: "mantle-compat".into(),
+            base_url: base_url.to_string(),
+            api_key: String::new(),
+            header_extras: vec![],
+            payload_extras: None,
+            reasoning_dialect: ReasoningDialect::OpenAi,
+            history_reasoning: HistoryReasoning::Auto,
+            user_agent: None,
+            strict_translation: false,
+            disable_stream_include_usage: false,
+            mantle: Some(MantleAuth {
+                region: "us-west-2".into(),
+                creds: resolved,
+            }),
+        })
+    }
+
+    fn bearer_creds() -> BedrockCreds {
+        BedrockCreds::BearerKey {
+            key: "mantle-bearer-key".into(),
+        }
+    }
+
+    fn sigv4_creds() -> BedrockCreds {
+        BedrockCreds::Static {
+            access_key: "AKIAmantlewire000000".into(),
+            secret_key: "mantle-wire-secret-key".into(),
+            session_token: None,
+        }
+    }
+
+    fn ok_completion() -> serde_json::Value {
+        json!({
+            "id": "chatcmpl-mantle",
+            "model": "anthropic.claude-haiku-4-5",
+            "created": 1700000000_i64,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "hi" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        })
+    }
+
+    /// complete() on the mantle lane with bearer creds signs the request as
+    /// `Authorization: Bearer <mantle-key>` and never attaches a stray
+    /// first-party Bearer (the empty `api_key` is not stamped).
+    #[tokio::test]
+    async fn complete_bearer_lane_is_signed_with_no_first_party_bearer() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_completion()))
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        provider
+            .complete(user_request("anthropic.claude-haiku-4-5"))
+            .await
+            .unwrap();
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        let auth = received[0]
+            .headers
+            .get("authorization")
+            .expect("mantle lane must attach Authorization")
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            auth, "Bearer mantle-bearer-key",
+            "bearer creds must sign as the mantle key, never an empty first-party Bearer"
+        );
+        // The signed body is real JSON bytes (SigV4 requires a hashable body).
+        let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert!(body.get("model").is_some(), "signed body reached the wire");
+    }
+
+    /// stream() on the mantle lane with bearer creds is signed and carries
+    /// no first-party Bearer. The request is sent (and thus signed) by the
+    /// time `stream()` returns, so the wire assertion holds without draining.
+    #[tokio::test]
+    async fn stream_bearer_lane_is_signed_with_no_first_party_bearer() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let _stream = provider
+            .stream(user_request("anthropic.claude-haiku-4-5"))
+            .await
+            .unwrap();
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0]
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer mantle-bearer-key"),
+            "mantle stream() must be signed with the mantle key"
+        );
+    }
+
+    /// complete() on the SigV4 lane signs with an `AWS4-HMAC-SHA256`
+    /// Authorization scoped to `.../us-west-2/bedrock-mantle/aws4_request`,
+    /// stamps `x-amz-date`, and carries the bare model id on the wire.
+    #[tokio::test]
+    async fn sigv4_lane_signs_wire_with_mantle_service_scope() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_completion()))
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), sigv4_creds()).await;
+        provider
+            .complete(user_request("anthropic.claude-haiku-4-5"))
+            .await
+            .unwrap();
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        let auth = received[0]
+            .headers
+            .get("authorization")
+            .expect("SigV4 lane must attach Authorization")
+            .to_str()
+            .unwrap();
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256 "),
+            "SigV4 lane must sign with AWS4-HMAC-SHA256; got {auth}"
+        );
+        assert!(
+            auth.contains("/us-west-2/bedrock-mantle/aws4_request"),
+            "credential scope must name the mantle service under the lane region; got {auth}"
+        );
+        assert!(
+            received[0].headers.get("x-amz-date").is_some(),
+            "SigV4 lane must stamp x-amz-date"
+        );
+        let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(
+            body.get("model").and_then(Value::as_str),
+            Some("anthropic.claude-haiku-4-5"),
+            "the bare model id must reach the wire body verbatim"
+        );
+    }
+
+    /// The mantle lane uses a no-redirect client: a 3xx is surfaced as an
+    /// upstream failure and NEVER followed to its `Location` target.
+    #[tokio::test]
+    async fn mantle_lane_does_not_follow_redirects() {
+        let server = MockServer::start().await;
+        let redirect_target = format!("{}/redirected", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", redirect_target.as_str()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/redirected"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_completion()))
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let err = provider
+            .complete(user_request("anthropic.claude-haiku-4-5"))
+            .await
+            .unwrap_err();
+        // A 302 is surfaced as an upstream error, not chased cross-host.
+        match err {
+            Error::Upstream { status, .. } => assert_eq!(status, 302),
+            other => panic!("expected Upstream, got: {other:?}"),
+        }
+
+        let received = server.received_requests().await.unwrap();
+        let followed = received
+            .iter()
+            .filter(|r| r.url.path() == "/redirected")
+            .count();
+        assert_eq!(
+            followed, 0,
+            "no-redirect client must not follow the 302 to its Location target"
+        );
+    }
+
+    /// count_tokens on a mantle-configured compat provider stays the
+    /// deterministic trait-default 501 (`Error::NotImplemented`): the router
+    /// never walks compat for token counting, so the lane must not dial the
+    /// signed endpoint for it.
+    #[tokio::test]
+    async fn count_tokens_is_not_implemented_on_mantle_lane() {
+        let provider = mantle_provider("https://unused.invalid", bearer_creds()).await;
+        let err = provider
+            .count_tokens(user_request("anthropic.claude-haiku-4-5"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::NotImplemented(_, _)),
+            "count_tokens on the mantle compat lane must stay a deterministic 501; got {err:?}"
+        );
+    }
+
+    /// A bearer mantle credential is a static secret, so the credential
+    /// probe reports `Reachable` without dialing the inference host.
+    #[tokio::test]
+    async fn probe_resolves_credential_without_dialing() {
+        let provider = mantle_provider("https://unused.invalid", bearer_creds()).await;
+        assert!(
+            matches!(
+                provider.probe().await,
+                routectl_core::ProbeOutcome::Reachable
+            ),
+            "a bearer mantle credential must probe Reachable without a network dial"
+        );
     }
 }
