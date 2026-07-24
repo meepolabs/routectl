@@ -93,7 +93,7 @@ listed at the bottom of each crate.
 
 ### openai_compat
 
-- `src/openai_compat/mod.rs` -- `OpenAiCompatProvider` impl; owns `ThinkTagAccumulator` for cross-chunk `<think>` state; `map_openai_compat_upstream_error` lifts the native OpenAI `error.type`/`code` classifier and, for a non-envelope (flat AWS mantle) body, lifts `aws_error::lift_aws_error_tokens` and routes a 403 through the `aws_error` scrub
+- `src/openai_compat/mod.rs` -- `OpenAiCompatProvider` impl; owns `ThinkTagAccumulator` for cross-chunk `<think>` state; `map_openai_compat_upstream_error` lifts the native OpenAI `error.type`/`code` classifier and, for a non-envelope (flat AWS mantle) body, lifts `aws_error::lift_aws_error_tokens` and routes a 403 through the `aws_error` scrub; the optional `OpenAiCompatConfig::mantle` selects the Bedrock mantle lane (SigV4/bearer-signed body bytes via `mantle::sign`, no first-party Bearer, no-redirect client, `mantle::probe` credential check)
 - `src/openai_compat/dialect.rs` -- public `ReasoningDialect` enum + format-tag accessors
 - `src/openai_compat/request.rs` -- `ChatRequest` -> OpenAI-compat wire body (dialect dispatch + extras merge)
 - `src/openai_compat/response.rs` -- response normalization; lifts `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys

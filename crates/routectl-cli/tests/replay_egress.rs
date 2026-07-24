@@ -76,6 +76,7 @@ fn openai_compat_provider() -> OpenAiCompatProvider {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        mantle: None,
     })
 }
 

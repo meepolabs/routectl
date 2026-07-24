@@ -211,6 +211,8 @@ async fn build_provider_inner(
                 user_agent: user_agent.clone(),
                 strict_translation: opts.strict_translation,
                 disable_stream_include_usage: false,
+                #[cfg(feature = "bedrock")]
+                mantle: None,
             };
             Ok(Arc::new(OpenAiCompatProvider::new(cfg)))
         }

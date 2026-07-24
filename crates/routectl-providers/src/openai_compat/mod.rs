@@ -45,6 +45,9 @@ use routectl_core::{
 
 use sse::ThinkTagAccumulator;
 
+#[cfg(feature = "bedrock")]
+use crate::anthropic_api::MantleAuth;
+
 /// Provider-kind discriminator string used in tracing fields. Single
 /// source of truth so call sites grep clean (`provider_kind=openai-compat`)
 /// and a typo-on-rename can't silently break operator log filters.
@@ -99,6 +102,17 @@ pub struct OpenAiCompatConfig {
     /// `payload_extras` / `provider_extras` always wins -- including an
     /// explicit `include_usage = false`.
     pub disable_stream_include_usage: bool,
+    /// Bedrock mantle authentication. `Some` selects the mantle lane: the
+    /// request body is SigV4/bearer-signed under the `bedrock-mantle`
+    /// scope, the first-party `Authorization: Bearer <api_key>` insert is
+    /// skipped (the signer owns auth for both credential shapes; the
+    /// `api_key` is empty by config validation), a no-redirect client is
+    /// used, and the probe resolves the credential rather than dialing
+    /// `/models`. `None` (default) keeps the first-party openai-compat
+    /// behavior byte-for-byte. Resolved at the factory from a
+    /// `bedrock_mantle` sub-config.
+    #[cfg(feature = "bedrock")]
+    pub mantle: Option<MantleAuth>,
 }
 
 /// Outgoing-history reasoning policy. Sibling of the router-side
@@ -145,6 +159,19 @@ pub struct OpenAiCompatProvider {
 impl OpenAiCompatProvider {
     /// Build a provider from its configuration.
     pub fn new(cfg: OpenAiCompatConfig) -> Self {
+        // The mantle lane uses a no-redirect client: a signed POST must
+        // never be auto-followed across a 3xx, since replaying the SigV4
+        // signature against a different host always fails and a redirect
+        // on this lane is an upstream fault to surface, not to chase. The
+        // first-party lane keeps the stock (redirect-following) client.
+        #[cfg(feature = "bedrock")]
+        let client = if cfg.mantle.is_some() {
+            crate::http_client::build_no_redirect(cfg.user_agent.as_deref())
+                .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup")
+        } else {
+            crate::http_client::build(cfg.user_agent.as_deref())
+        };
+        #[cfg(not(feature = "bedrock"))]
         let client = crate::http_client::build(cfg.user_agent.as_deref());
         Self { cfg, client }
     }
@@ -154,6 +181,50 @@ impl OpenAiCompatProvider {
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
         )
+    }
+
+    /// True when this provider egresses on the Bedrock mantle lane. On
+    /// this lane the signer owns auth (no `Authorization: Bearer
+    /// <api_key>`), the body is serialized to signable bytes, and a
+    /// no-redirect client is used. Always `false` in a build without the
+    /// `bedrock` feature.
+    const fn is_mantle(&self) -> bool {
+        #[cfg(feature = "bedrock")]
+        {
+            self.cfg.mantle.is_some()
+        }
+        #[cfg(not(feature = "bedrock"))]
+        {
+            false
+        }
+    }
+
+    /// SigV4/bearer-sign a built request in place on the mantle lane; a
+    /// no-op on the first-party lane. Signing runs AFTER the request is
+    /// fully built (method, URL, headers, body bytes) and BEFORE any
+    /// header trace or execute, so the trace shows the real auth header
+    /// and the signed input matches the transmitted bytes.
+    #[cfg(feature = "bedrock")]
+    async fn sign_mantle(&self, request: &mut reqwest::Request) -> Result<()> {
+        if let Some(mantle) = self.cfg.mantle.as_ref() {
+            crate::mantle::sign(request, &mantle.creds, &mantle.region).await?;
+        }
+        Ok(())
+    }
+
+    /// Record the mantle lane context (`lane`, `auth_mode`, `region`) on
+    /// the current tracing span so every event within it -- including the
+    /// shared upstream-failure WARN -- carries the lane fields. A no-op on
+    /// the first-party lane, where the span's `Empty` fields stay unset
+    /// and never render.
+    #[cfg(feature = "bedrock")]
+    fn record_mantle_span_fields(&self) {
+        if let Some(mantle) = self.cfg.mantle.as_ref() {
+            let span = tracing::Span::current();
+            span.record("lane", crate::mantle::MANTLE_SERVICE);
+            span.record("auth_mode", mantle_auth_mode(&mantle.creds));
+            span.record("region", mantle.region.as_str());
+        }
     }
 
     /// Resolve the per-request reasoning dialect. v0.6.0 moved the
@@ -178,11 +249,18 @@ impl OpenAiCompatProvider {
 
     fn build_headers(&self, req: &ChatRequest) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.cfg.api_key))
-                .map_err(|e| Error::Config(format!("invalid api_key for header: {e}")))?,
-        );
+        // Mantle lane: the SigV4/bearer signer attaches Authorization
+        // post-build and the `api_key` is empty by config validation, so
+        // skip the first-party Bearer insert entirely. The first-party
+        // lane stamps the bearer here. CONTENT_TYPE is stamped on both
+        // lanes below.
+        if !self.is_mantle() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", self.cfg.api_key))
+                    .map_err(|e| Error::Config(format!("invalid api_key for header: {e}")))?,
+            );
+        }
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         // Prefer the router-composed map (provider + model merged at
         // dispatch) if present; fall back to `self.cfg.header_extras`
@@ -193,6 +271,30 @@ impl OpenAiCompatProvider {
         );
         crate::http_client::apply_header_extras(&mut headers, &source, &self.cfg.id, &[]);
         Ok(headers)
+    }
+
+    /// Build the outgoing chat/completions request. On the mantle lane the
+    /// body is serialized to bytes (the content-type is already stamped by
+    /// `build_headers`) so the signer can hash the exact transmitted body;
+    /// the first-party lane keeps the stock `.json(&body)` builder
+    /// byte-for-byte. The returned request is UNSIGNED -- the caller signs
+    /// it on the mantle lane via `sign_mantle`.
+    fn build_request(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+        body: &Value,
+    ) -> Result<reqwest::Request> {
+        let rb = self.client.post(url).headers(headers);
+        let rb = if self.is_mantle() {
+            let body_bytes = serde_json::to_vec(body)
+                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            rb.body(body_bytes)
+        } else {
+            rb.json(body)
+        };
+        rb.build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))
     }
 }
 
@@ -223,8 +325,10 @@ impl Provider for OpenAiCompatProvider {
         response::normalize(&self.cfg.id, raw, self.cfg.reasoning_dialect)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        #[cfg(feature = "bedrock")]
+        self.record_mantle_span_fields();
         let mut body = self.normalize_request(&req)?;
         // Force non-streaming.
         body["stream"] = Value::Bool(false);
@@ -239,16 +343,22 @@ impl Provider for OpenAiCompatProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let request = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Mantle lane: serialize to signable bytes (content-type already
+        // stamped by build_headers) so the signer can hash the exact
+        // transmitted body; the first-party lane keeps the stock `.json()`
+        // builder byte-for-byte.
+        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        let mut request = self.build_request(&url, headers, &body)?;
+        // Mantle lane: sign the built request before any header trace or
+        // execute so the trace shows the real auth header and the signed
+        // input matches the transmitted bytes. A no-op on the first-party
+        // lane.
+        #[cfg(feature = "bedrock")]
+        self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth). build_headers
-        // assembled the auth into `headers`; capture the full set from
-        // the built request. Opt-in via ROUTECTL_TRACE_HEADERS.
+        // assembled the auth into `headers` (or, on the mantle lane, the
+        // signer attached it above); capture the full set from the built
+        // request. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
         let resp = self
             .client
@@ -319,8 +429,10 @@ impl Provider for OpenAiCompatProvider {
         Ok(chat_resp)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        #[cfg(feature = "bedrock")]
+        self.record_mantle_span_fields();
         let mut body = self.normalize_request(&req)?;
         body["stream"] = Value::Bool(true);
 
@@ -341,13 +453,14 @@ impl Provider for OpenAiCompatProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let request = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Mantle lane: serialize to signable bytes (see complete()); the
+        // first-party lane keeps the stock `.json()` builder byte-for-byte.
+        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        let mut request = self.build_request(&url, headers, &body)?;
+        // Mantle lane: sign the built stream request before trace/execute
+        // (see complete()). No-op on the first-party lane.
+        #[cfg(feature = "bedrock")]
+        self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth) for the stream
         // path. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
@@ -505,6 +618,13 @@ impl Provider for OpenAiCompatProvider {
     }
 
     async fn probe(&self) -> routectl_core::ProbeOutcome {
+        // Mantle lane: the endpoint signs with SigV4/bearer and exposes no
+        // free `/models` surface, so probe the credential rather than
+        // dialing the inference host with a Bearer GET.
+        #[cfg(feature = "bedrock")]
+        if let Some(mantle) = &self.cfg.mantle {
+            return crate::mantle::probe(&mantle.creds).await;
+        }
         let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
         let mut headers = HeaderMap::new();
         match HeaderValue::from_str(&format!("Bearer {}", self.cfg.api_key)) {
@@ -524,6 +644,19 @@ impl Provider for OpenAiCompatProvider {
             crate::probe::PROBE_TIMEOUT,
         )
         .await
+    }
+}
+
+/// Observability discriminator for a resolved mantle credential shape:
+/// `"bearer"` for a Bedrock console API key, `"sigv4"` for a signed AWS
+/// credential. Never carries any secret material. Local to this lane so
+/// the compat runtime does not reach into the anthropic-api module's
+/// credential internals.
+#[cfg(feature = "bedrock")]
+const fn mantle_auth_mode(creds: &crate::bedrock::auth::ResolvedCreds) -> &'static str {
+    match creds {
+        crate::bedrock::auth::ResolvedCreds::Bearer { .. } => "bearer",
+        crate::bedrock::auth::ResolvedCreds::Sigv4 { .. } => "sigv4",
     }
 }
 
@@ -1358,6 +1491,62 @@ mod helper_tests {
             buffers.len(),
             MAX_STREAM_CHOICES,
             "index == cap must be rejected, buffer must not grow"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "bedrock"))]
+mod mantle_header_tests {
+    use super::{HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
+    use crate::anthropic_api::MantleAuth;
+    use crate::bedrock::auth::ResolvedCreds;
+    use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+    use routectl_core::ChatRequest;
+
+    fn mantle_provider() -> OpenAiCompatProvider {
+        OpenAiCompatProvider::new(OpenAiCompatConfig {
+            id: "mantle-compat".into(),
+            base_url: "https://bedrock-mantle.us-west-2.api.aws/openai/v1".into(),
+            // Empty by config validation on the mantle lane; the signer
+            // owns Authorization.
+            api_key: String::new(),
+            header_extras: vec![],
+            payload_extras: None,
+            reasoning_dialect: ReasoningDialect::OpenAi,
+            history_reasoning: HistoryReasoning::Auto,
+            user_agent: None,
+            strict_translation: false,
+            disable_stream_include_usage: false,
+            mantle: Some(MantleAuth {
+                region: "us-west-2".into(),
+                creds: ResolvedCreds::Bearer {
+                    key: "mantle-bearer-key".into(),
+                },
+            }),
+        })
+    }
+
+    /// build_headers on the mantle lane must NOT insert the first-party
+    /// `Authorization: Bearer <api_key>` header -- the SigV4/bearer signer
+    /// owns auth and attaches it post-build. CONTENT_TYPE still stamps.
+    #[test]
+    fn build_headers_skips_bearer_on_mantle_lane() {
+        let provider = mantle_provider();
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            ..Default::default()
+        };
+
+        let headers = provider.build_headers(&req).unwrap();
+
+        assert!(
+            headers.get(AUTHORIZATION).is_none(),
+            "mantle lane must not stamp a first-party Bearer; the signer owns auth"
+        );
+        assert_eq!(
+            headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "content-type must stamp on both lanes"
         );
     }
 }
