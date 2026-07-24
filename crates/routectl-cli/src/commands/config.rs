@@ -17,27 +17,16 @@ use crate::server::CompositeStore;
 /// presentation nicety and never turns into a load error.
 pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     let secrets = CompositeStore::open_default().await?;
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = secret_ref_parse_errors(config, raw_text);
     let mut warnings: Vec<String> = Vec::new();
 
     for (name, entry) in &config.providers {
         for uri in entry.secret_uris() {
-            let parsed = match SecretRef::parse(uri) {
-                Ok(r) => r,
-                Err(e) => {
-                    // Render the parsed scheme rather than echoing
-                    // the raw URI. A `literal:hunter2` in the TOML
-                    // would otherwise land in shell history and CI
-                    // logs verbatim via this stdout path.
-                    errors.push(locate(
-                        raw_text,
-                        format!(
-                            "provider `{name}`: secret-ref parse failed (scheme `{}`): {e}",
-                            scheme_of(uri),
-                        ),
-                    ));
-                    continue;
-                }
+            // Parse errors are collected separately above; here we only
+            // resolve the refs that parse, so an unparseable ref is skipped
+            // rather than double-reported.
+            let Ok(parsed) = SecretRef::parse(uri) else {
+                continue;
             };
             if let Err(e) = secrets.get(&parsed).await {
                 warnings.push(format!(
@@ -133,6 +122,35 @@ pub fn validation_report(config: &Config, raw_text: Option<&str>) -> CheckReport
     }
 }
 
+/// Collect the secret-ref PARSE errors across every provider entry: the
+/// store-independent half of [`check`]'s secret-ref pass. Each entry's
+/// [`secret_uris`](ProviderEntry::secret_uris) are run through
+/// `SecretRef::parse`; an unrecognized scheme is an error. Secret
+/// RESOLUTION (which needs the async store and yields warnings, not errors)
+/// stays in [`check`]. Kept sync and store-free so the full config-check
+/// error path is exercisable in tests without a `SecretStore`.
+///
+/// The rendered scheme -- never the raw URI -- names the failure so a
+/// `literal:hunter2` in the TOML cannot leak into shell history or CI logs
+/// via this stdout path.
+fn secret_ref_parse_errors(config: &Config, raw_text: Option<&str>) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (name, entry) in &config.providers {
+        for uri in entry.secret_uris() {
+            if let Err(e) = SecretRef::parse(uri) {
+                errors.push(locate(
+                    raw_text,
+                    format!(
+                        "provider `{name}`: secret-ref parse failed (scheme `{}`): {e}",
+                        scheme_of(uri),
+                    ),
+                ));
+            }
+        }
+    }
+    errors
+}
+
 /// Print the resolved config with secrets redacted.
 pub fn show(config: &Config) -> Result<()> {
     let mut redacted = config.clone();
@@ -222,5 +240,59 @@ fn scheme_of(uri: &str) -> &'static str {
         "literal:"
     } else {
         "unknown"
+    }
+}
+
+#[cfg(test)]
+mod mantle_config_check_tests {
+    use super::*;
+
+    /// A Bedrock mantle entry authenticates with `bedrock_mantle.creds` and
+    /// REQUIRES an empty `api_key_ref`. The full config-check path -- the
+    /// secret-ref parse walk plus the shared validator suite -- must accept
+    /// it end-to-end for both OpenAI-shape lanes. The parse walk previously
+    /// surfaced the empty `api_key_ref` through `SecretRef::parse` and failed
+    /// with a spurious "unrecognized scheme" error before the mantle
+    /// validator (which requires it empty) was ever consulted.
+    #[test]
+    fn openai_mantle_entries_pass_the_full_config_check() {
+        let toml_text = r#"
+[providers.compat-mantle]
+kind = "openai-compat"
+api_key_ref = ""
+
+[providers.compat-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.compat-mantle.bedrock_mantle.creds]
+kind = "bearer-key"
+key_ref = "file:///tmp/whatever"
+
+[providers.responses-mantle]
+kind = "openai-responses"
+api_key_ref = ""
+auth_kind = "bedrock-mantle"
+
+[providers.responses-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.responses-mantle.bedrock_mantle.creds]
+kind = "bearer-key"
+key_ref = "file:///tmp/whatever"
+"#;
+        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
+
+        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
+        assert!(
+            parse_errors.is_empty(),
+            "mantle api_key_ref must not surface to the secret-ref parse walk: {parse_errors:?}"
+        );
+
+        let report = validation_report(&config, Some(toml_text));
+        assert!(
+            report.errors.is_empty(),
+            "mantle entries must pass the shared validator suite: {:?}",
+            report.errors
+        );
     }
 }
