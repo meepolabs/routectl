@@ -295,4 +295,144 @@ key_ref = "file:///tmp/whatever"
             report.errors
         );
     }
+
+    /// All three mantle-bearing lanes surface `bedrock_mantle.creds` refs to
+    /// the config-check parse walk: a valid creds ref scheme passes both the
+    /// parse walk and the shared validator suite end-to-end.
+    #[test]
+    fn mantle_creds_refs_pass_config_check_on_all_lanes() {
+        let toml_text = r#"
+[providers.anthropic-mantle]
+kind = "anthropic-api"
+bedrock_mantle = { region = "us-west-2", creds = { kind = "bearer-key", key_ref = "file:///tmp/whatever" } }
+
+[providers.compat-mantle]
+kind = "openai-compat"
+api_key_ref = ""
+
+[providers.compat-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.compat-mantle.bedrock_mantle.creds]
+kind = "static"
+access_key_ref = "env://AWS_ACCESS_KEY_ID"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+
+[providers.responses-mantle]
+kind = "openai-responses"
+api_key_ref = ""
+auth_kind = "bedrock-mantle"
+
+[providers.responses-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.responses-mantle.bedrock_mantle.creds]
+kind = "bearer-key"
+key_ref = "file:///tmp/whatever"
+"#;
+        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
+
+        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
+        assert!(
+            parse_errors.is_empty(),
+            "valid mantle creds refs must pass the parse walk: {parse_errors:?}"
+        );
+
+        let report = validation_report(&config, Some(toml_text));
+        assert!(
+            report.errors.is_empty(),
+            "mantle entries must pass the shared validator suite: {:?}",
+            report.errors
+        );
+    }
+
+    /// A malformed `bedrock_mantle.creds` ref scheme FAILS config check on
+    /// every mantle lane -- proof the creds descriptor is actually walked. If
+    /// the refs were not surfaced the bogus scheme would slip through to
+    /// build/probe instead of the parse walk.
+    #[test]
+    fn malformed_mantle_creds_ref_scheme_fails_config_check() {
+        let toml_text = r#"
+[providers.anthropic-mantle]
+kind = "anthropic-api"
+bedrock_mantle = { region = "us-west-2", creds = { kind = "bearer-key", key_ref = "bogus://key" } }
+
+[providers.compat-mantle]
+kind = "openai-compat"
+api_key_ref = ""
+
+[providers.compat-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.compat-mantle.bedrock_mantle.creds]
+kind = "static"
+access_key_ref = "bogus://access"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+
+[providers.responses-mantle]
+kind = "openai-responses"
+api_key_ref = ""
+auth_kind = "bedrock-mantle"
+
+[providers.responses-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.responses-mantle.bedrock_mantle.creds]
+kind = "bearer-key"
+key_ref = "bogus://key"
+"#;
+        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
+
+        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
+        for provider in ["anthropic-mantle", "compat-mantle", "responses-mantle"] {
+            assert!(
+                parse_errors.iter().any(|e| e.contains(provider)),
+                "malformed creds ref on `{provider}` must fail the parse walk: {parse_errors:?}"
+            );
+        }
+    }
+
+    /// Ref-less and empty creds fields do not break the walk: a profile name
+    /// is not a secret ref, `default-chain` carries none, and an empty
+    /// optional `session_token_ref` is skipped (mirroring the empty-api-key
+    /// regression). None of these surface a spurious parse error.
+    #[test]
+    fn refless_and_empty_mantle_creds_fields_do_not_break_the_walk() {
+        let toml_text = r#"
+[providers.anthropic-mantle]
+kind = "anthropic-api"
+bedrock_mantle = { region = "us-west-2", creds = { kind = "profile", name = "bedrock-prod" } }
+
+[providers.compat-mantle]
+kind = "openai-compat"
+api_key_ref = ""
+
+[providers.compat-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.compat-mantle.bedrock_mantle.creds]
+kind = "default-chain"
+
+[providers.responses-mantle]
+kind = "openai-responses"
+api_key_ref = ""
+auth_kind = "bedrock-mantle"
+
+[providers.responses-mantle.bedrock_mantle]
+region = "us-west-2"
+
+[providers.responses-mantle.bedrock_mantle.creds]
+kind = "static"
+access_key_ref = "env://AWS_ACCESS_KEY_ID"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+session_token_ref = ""
+"#;
+        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
+
+        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
+        assert!(
+            parse_errors.is_empty(),
+            "ref-less / empty creds fields must not surface a parse error: {parse_errors:?}"
+        );
+    }
 }

@@ -113,6 +113,8 @@ pub use doctor::{
     DoctorPanels, DoctorReport, Finding, ProbeOutcome, Status, WouldTrimPanel, overall_exit,
 };
 #[cfg(feature = "bedrock")]
+pub use factory::validate_bedrock_creds_refs;
+#[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_provider_bedrock_mantle;
