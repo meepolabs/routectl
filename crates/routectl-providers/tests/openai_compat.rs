@@ -1256,4 +1256,91 @@ mod mantle {
             "a bearer mantle credential must probe Reachable without a network dial"
         );
     }
+
+    /// End-to-end AWS 403 on the wire: the ARN-laden AccessDenied body lifts
+    /// the AWS exception token, scrubs the client body to the IAM action only
+    /// (no principal ARN / account id), and classifies as `FailureClass::Auth`.
+    /// The reader units live in `openai_compat/mod.rs`; this pins the full
+    /// runtime lane against a mock upstream.
+    #[tokio::test]
+    async fn aws_403_lifts_token_scrubs_body_and_classifies_auth() {
+        let server = MockServer::start().await;
+        let body = r#"{"__type":"com.amazonaws.bedrock#AccessDeniedException","message":"User: arn:aws:iam::123456789012:role/App is not authorized to perform: bedrock-runtime:InvokeModel on resource: arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5"}"#;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(403).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let err = provider
+            .complete(user_request("anthropic.claude-haiku-4-5"))
+            .await
+            .unwrap_err();
+
+        match &err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                body,
+                ..
+            } => {
+                assert_eq!(*status, 403);
+                assert_eq!(upstream_type.as_deref(), Some("AccessDeniedException"));
+                assert!(!body.contains("arn:aws:"), "client body leaked ARN: {body}");
+                assert!(
+                    !body.contains("123456789012"),
+                    "client body leaked account id: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+        assert_eq!(
+            routectl_core::failure_class::classify(&err, Some("openai-compat")).class,
+            routectl_core::failure_class::FailureClass::Auth,
+            "a mantle 403 must classify as Auth"
+        );
+    }
+
+    /// End-to-end AWS 429 on the wire: the `Retry-After` reset hint is
+    /// preserved on the canonical error and the bare AWS throttling `code`
+    /// token is lifted.
+    #[tokio::test]
+    async fn aws_429_preserves_retry_after_and_lifts_code() {
+        let server = MockServer::start().await;
+        let body = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "30")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = mantle_provider(&server.uri(), bearer_creds()).await;
+        let err = provider
+            .complete(user_request("anthropic.claude-haiku-4-5"))
+            .await
+            .unwrap_err();
+
+        match err {
+            Error::Upstream {
+                status,
+                retry_after,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(status, 429);
+                assert_eq!(
+                    retry_after,
+                    Some(std::time::Duration::from_secs(30)),
+                    "the Retry-After reset hint must be preserved"
+                );
+                assert_eq!(upstream_code.as_deref(), Some("ThrottlingException"));
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
 }

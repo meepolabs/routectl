@@ -260,6 +260,10 @@ mod bedrock_invoke;
 mod gemini;
 #[path = "live_matrix/mantle_anthropic.rs"]
 mod mantle_anthropic;
+#[path = "live_matrix/mantle_chat_completions.rs"]
+mod mantle_chat_completions;
+#[path = "live_matrix/mantle_responses.rs"]
+mod mantle_responses;
 #[path = "live_matrix/oauth_antigravity.rs"]
 mod oauth_antigravity;
 #[path = "live_matrix/oauth_codex.rs"]
