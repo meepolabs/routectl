@@ -54,6 +54,16 @@ pub fn apply(
     cfg: &OpenAiResponsesConfig,
     bearer: &str,
 ) -> Result<RequestBuilder> {
+    // Mantle lane: the SigV4/bearer signer owns `Authorization` and
+    // attaches it to the built request post-`build_headers` (both creds
+    // shapes), so nothing auth-related is stamped here. The legacy
+    // `BedrockMantle -> apply_api_key` arm below stays compiled for enum
+    // completeness; the factory never builds a mantle provider without
+    // this `mantle` block set, so that arm is unreachable at runtime.
+    #[cfg(feature = "bedrock")]
+    if cfg.mantle.is_some() {
+        return Ok(rb);
+    }
     match cfg.auth_kind {
         AuthKind::ChatgptOauth => Ok(apply_chatgpt_oauth(rb, cfg, bearer)),
         AuthKind::ApiKey | AuthKind::BedrockMantle => Ok(apply_api_key(rb, bearer)),
@@ -113,6 +123,8 @@ mod tests {
             header_extras: Vec::new(),
             user_agent: None,
             session_id: None,
+            #[cfg(feature = "bedrock")]
+            mantle: None,
         }
     }
 
@@ -278,6 +290,52 @@ mod tests {
         assert!(
             header(&req, "user-agent").is_none(),
             "UA should not be set as a per-request header"
+        );
+    }
+
+    /// When the `mantle` block is set, `apply` attaches NOTHING auth-related:
+    /// the SigV4/bearer signer owns `Authorization` and stamps it post-build.
+    /// The passed-in bearer is ignored on this lane. Pins that the legacy
+    /// `BedrockMantle -> apply_api_key` bearer stamp is bypassed whenever the
+    /// runtime mantle block is present.
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn mantle_lane_attaches_no_authorization() {
+        use crate::bedrock::BedrockCreds;
+        use crate::bedrock::auth::resolve;
+        use crate::mantle::MantleAuth;
+
+        // Arrange: a mantle Responses config (bearer creds shape).
+        let creds = resolve(
+            &BedrockCreds::BearerKey {
+                key: "mantle-bearer-xyz".into(),
+            },
+            "us-east-2",
+        )
+        .await
+        .expect("resolve bearer creds");
+        let mut cfg = base_cfg(AuthKind::BedrockMantle);
+        cfg.account_id = None;
+        cfg.mantle = Some(MantleAuth {
+            region: "us-east-2".into(),
+            creds,
+        });
+        let client = Client::new();
+        let rb = client.post("https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses");
+
+        // Act: the bearer here must be ignored on the mantle lane.
+        let rb = apply(rb, &cfg, "unused-bearer").expect("apply");
+        let req = rb.build().expect("build");
+
+        // Assert: no pre-sign Authorization (the signer owns it) and no
+        // ChatGPT-OAuth account header.
+        assert!(
+            header(&req, "authorization").is_none(),
+            "mantle lane must attach no Authorization before signing",
+        );
+        assert!(
+            header(&req, "chatgpt-account-id").is_none(),
+            "mantle lane must not stamp a ChatGPT account header",
         );
     }
 }

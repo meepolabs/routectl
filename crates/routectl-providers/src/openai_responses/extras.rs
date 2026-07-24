@@ -168,14 +168,23 @@ fn operator_set_include(req: &ChatRequest) -> bool {
         .is_some_and(serde_json::Value::is_array)
 }
 
-/// Apply an operator-supplied `store` override. For `ChatgptOauth`
-/// the value is IGNORED (codex parity); for other auth_kinds the
-/// boolean is honored verbatim.
+/// Apply an operator-supplied `store` override. For `ChatgptOauth` (codex
+/// parity) and `BedrockMantle` (the mantle Responses lane, which must never
+/// persist) the value is IGNORED and `store` stays `false`; for other
+/// auth_kinds the boolean is honored verbatim.
+///
+/// `req.provider_extras` is the FINAL merged value at dispatch (the router
+/// deep-merges provider-level and model-level `payload_extras` into it), so
+/// forcing `store` here catches a model-level `store = true` the
+/// config-time provider-level reject cannot see. Combined with the `false`
+/// default in `request.rs`, no origin of `store = true` survives on the
+/// mantle lane.
 fn apply_store_override(request: &mut ResponsesRequest, v: &Value, auth_kind: AuthKind) {
-    if matches!(auth_kind, AuthKind::ChatgptOauth) {
+    if matches!(auth_kind, AuthKind::ChatgptOauth | AuthKind::BedrockMantle) {
         tracing::debug!(
             requested = ?v,
-            "openai-responses: ignoring provider_extras.store on chatgpt-oauth (always false)"
+            ?auth_kind,
+            "openai-responses: ignoring provider_extras.store (lane forces store=false)"
         );
         return;
     }

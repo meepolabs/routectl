@@ -6,6 +6,8 @@ use reqwest::Client;
 use routectl_core::{ChatRequest, Result, StaticToken, TokenSource};
 
 use super::{AuthKind, auth, cookies};
+#[cfg(feature = "bedrock")]
+use crate::mantle::MantleAuth;
 
 /// Resolved configuration for one Responses provider entry. The
 /// factory builds this from the TOML `ProviderEntry::OpenaiResponses`
@@ -52,6 +54,14 @@ pub struct OpenAiResponsesConfig {
     /// providers or a credential that has none -- in every such case
     /// `build_headers` stamps no `session-id` header.
     pub session_id: Option<String>,
+    /// Bedrock mantle authentication. `Some` selects the mantle lane
+    /// (SigV4/bearer signing under the `bedrock-mantle` scope, no bearer
+    /// `Authorization` from the provider, a no-redirect client, and no
+    /// Cloudflare cookie jar). `None` (default) keeps the chatgpt-oauth /
+    /// api-key behavior byte-for-byte. Resolved at the factory from a
+    /// `bedrock_mantle` sub-config.
+    #[cfg(feature = "bedrock")]
+    pub mantle: Option<MantleAuth>,
 }
 
 impl std::fmt::Debug for OpenAiResponsesConfig {
@@ -61,8 +71,8 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
         // print the bearer/JWT. `StaticToken`'s own Debug already
         // redacts; this is the second line of defense mirroring
         // `AnthropicApiConfig`.
-        f.debug_struct("OpenAiResponsesConfig")
-            .field("id", &self.id)
+        let mut d = f.debug_struct("OpenAiResponsesConfig");
+        d.field("id", &self.id)
             .field("auth", &"[REDACTED]")
             .field("account_id", &self.account_id)
             .field("base_url", &self.base_url)
@@ -71,8 +81,12 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("user_agent", &self.user_agent)
             // Presence only: the session_id ties requests to one logical
             // session; treat it as sensitive so its value never enters logs.
-            .field("session_id", &self.session_id.is_some())
-            .finish()
+            .field("session_id", &self.session_id.is_some());
+        // Mantle lane presence + its own redacting Debug (region + auth
+        // shape only, never credential material).
+        #[cfg(feature = "bedrock")]
+        d.field("mantle", &self.mantle);
+        d.finish()
     }
 }
 
@@ -97,6 +111,8 @@ impl OpenAiResponsesConfig {
             header_extras: Vec::new(),
             user_agent: None,
             session_id: None,
+            #[cfg(feature = "bedrock")]
+            mantle: None,
         }
     }
 }
@@ -138,6 +154,26 @@ impl OpenAiResponsesProvider {
             .clone()
             .unwrap_or_else(auth::default_user_agent);
 
+        // Mantle lane: a signed POST must never be auto-followed across a
+        // 3xx -- replaying the SigV4 signature against a redirected host
+        // always fails, and a redirect on this lane is an upstream fault to
+        // surface, not to chase. The Cloudflare cookie jar is a chatgpt.com
+        // concern with no meaning here, so this lane carries neither the jar
+        // nor a persistence path. The first-party lanes keep the
+        // cookie-backed (redirect-following) client below.
+        #[cfg(feature = "bedrock")]
+        if cfg.mantle.is_some() {
+            let client = crate::http_client::build_no_redirect(Some(&ua))
+                .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
+            return Self {
+                cfg,
+                client,
+                window_id: uuid::Uuid::new_v4().to_string(),
+                cookie_jar: None,
+                cookie_path: None,
+            };
+        }
+
         // Cloudflare cookie jar (chatgpt-oauth path). Hydrate from
         // disk on construction; reqwest reads / writes through the
         // shared Arc on every request; Drop persists on shutdown.
@@ -168,6 +204,34 @@ impl OpenAiResponsesProvider {
     /// just append `/responses`.
     pub(super) fn responses_url(&self) -> String {
         format!("{}/responses", self.cfg.base_url.trim_end_matches('/'))
+    }
+
+    /// SigV4/bearer-sign a built request in place on the mantle lane; a
+    /// no-op on the first-party lane. Signing runs AFTER the request is
+    /// fully built (method, URL, headers, body bytes) and BEFORE any
+    /// header trace or execute, so the trace shows the real auth header
+    /// and the signed input matches the transmitted bytes.
+    #[cfg(feature = "bedrock")]
+    pub(super) async fn sign_mantle(&self, request: &mut reqwest::Request) -> Result<()> {
+        if let Some(mantle) = self.cfg.mantle.as_ref() {
+            crate::mantle::sign(request, &mantle.creds, &mantle.region).await?;
+        }
+        Ok(())
+    }
+
+    /// Record the mantle lane context (`lane`, `auth_mode`, `region`) on
+    /// the current tracing span so every event within it -- including the
+    /// shared upstream-failure WARN -- carries the lane fields. A no-op on
+    /// the first-party lane, where the span's `Empty` fields stay unset
+    /// and never render.
+    #[cfg(feature = "bedrock")]
+    pub(super) fn record_mantle_span_fields(&self) {
+        if let Some(mantle) = self.cfg.mantle.as_ref() {
+            let span = tracing::Span::current();
+            span.record("lane", crate::mantle::MANTLE_SERVICE);
+            span.record("auth_mode", mantle.auth_mode());
+            span.record("region", mantle.region.as_str());
+        }
     }
 
     pub(super) fn build_headers(

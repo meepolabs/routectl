@@ -32,6 +32,51 @@ pub fn mantle_openai_base(region: &str) -> String {
     format!("{}/openai/v1", mantle_host(region))
 }
 
+/// Bedrock mantle authentication shared by the mantle egress lanes.
+///
+/// Present (a provider config's `mantle` field is `Some`) selects the
+/// mantle lane: the request body is serialized to bytes and
+/// SigV4/bearer-signed under the `bedrock-mantle` scope before egress,
+/// and the lane's first-party header plumbing (`x-api-key`, Claude-Code,
+/// or codex identity) is bypassed. `region` is the single source of truth
+/// for both the derived endpoint host and the SigV4 signing scope;
+/// `creds` carries the resolved AWS credential shape (bearer key or SigV4
+/// provider). Shared home for the Anthropic and OpenAI mantle lanes.
+#[cfg(feature = "bedrock")]
+#[derive(Clone)]
+pub struct MantleAuth {
+    /// AWS region driving the derived host and the SigV4 signing scope.
+    pub region: String,
+    /// Resolved credential shape (bearer key or SigV4 provider).
+    pub creds: crate::bedrock::auth::ResolvedCreds,
+}
+
+#[cfg(feature = "bedrock")]
+impl MantleAuth {
+    /// Observability discriminator for the credential shape:
+    /// `"bearer"` for a Bedrock console API key, `"sigv4"` for a signed
+    /// AWS credential. Never carries any secret material.
+    pub(crate) const fn auth_mode(&self) -> &'static str {
+        match self.creds {
+            crate::bedrock::auth::ResolvedCreds::Bearer { .. } => "bearer",
+            crate::bedrock::auth::ResolvedCreds::Sigv4 { .. } => "sigv4",
+        }
+    }
+}
+
+#[cfg(feature = "bedrock")]
+impl std::fmt::Debug for MantleAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The region is non-secret. `creds` carries credential material,
+        // so surface only its shape discriminator (never the key or the
+        // provider), mirroring the redacting Debug on `BedrockCreds`.
+        f.debug_struct("MantleAuth")
+            .field("region", &self.region)
+            .field("auth_mode", &self.auth_mode())
+            .finish()
+    }
+}
+
 /// Sign `req` in place for a mantle lane under the `bedrock-mantle` SigV4
 /// scope.
 ///
@@ -123,7 +168,6 @@ mod tests {
         use super::super::sign;
         use crate::bedrock::BedrockCreds;
         use crate::bedrock::auth::resolve;
-
         #[tokio::test]
         async fn sigv4_credential_scope_uses_mantle_service() {
             let resolved = resolve(
@@ -187,5 +231,42 @@ mod tests {
                 Some("Bearer mantle-api-key-xyz")
             );
         }
+    }
+
+    /// `MantleAuth` Debug surfaces only the non-secret region and the auth
+    /// shape discriminator -- never the bearer key or the SigV4 provider.
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn mantle_auth_debug_redacts_credential_material() {
+        use super::MantleAuth;
+        use crate::bedrock::BedrockCreds;
+        use crate::bedrock::auth::resolve;
+
+        let creds = resolve(
+            &BedrockCreds::BearerKey {
+                key: "super-secret-bearer-value".into(),
+            },
+            "eu-west-1",
+        )
+        .await
+        .unwrap();
+        let auth = MantleAuth {
+            region: "eu-west-1".into(),
+            creds,
+        };
+
+        let rendered = format!("{auth:?}");
+        assert!(
+            rendered.contains("eu-west-1"),
+            "region is non-secret and must render: {rendered}"
+        );
+        assert!(
+            rendered.contains("bearer"),
+            "auth-mode discriminator must render: {rendered}"
+        );
+        assert!(
+            !rendered.contains("super-secret-bearer-value"),
+            "credential material must never render in Debug: {rendered}"
+        );
     }
 }

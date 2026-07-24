@@ -120,8 +120,10 @@ impl Provider for OpenAiResponsesProvider {
         response::translate(&self.cfg.id, typed)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        #[cfg(feature = "bedrock")]
+        self.record_mantle_span_fields();
         // The chatgpt-oauth Responses endpoint is stream-only: it returns
         // HTTP 400 {"detail":"Stream must be set to true"} when stream=false.
         // We implement complete() by forcing stream=true, consuming the SSE
@@ -143,12 +145,27 @@ impl Provider for OpenAiResponsesProvider {
         let token = self.cfg.auth.token().await?;
 
         let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
-        let request = rb
+        // Serialize to bytes so the mantle signer can sign over the exact
+        // transmitted body; the content-type is stamped explicitly (rather
+        // than via `.json()`) so both lanes emit one deterministic header.
+        // The first-party lane is byte-unchanged: `serde_json::to_vec`
+        // produces the same bytes `.json()` did and the content-type is
+        // identical.
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        let mut request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Mantle lane: SigV4/bearer-sign the built request before any header
+        // trace or execute so the trace shows the real auth header and the
+        // signed input matches the transmitted bytes. No-op on the
+        // first-party lane.
+        #[cfg(feature = "bedrock")]
+        self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth) from the built
         // request. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
@@ -324,8 +341,10 @@ impl Provider for OpenAiResponsesProvider {
         Ok(chat_resp)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        #[cfg(feature = "bedrock")]
+        self.record_mantle_span_fields();
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
@@ -337,12 +356,22 @@ impl Provider for OpenAiResponsesProvider {
         let token = self.cfg.auth.token().await?;
 
         let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
-        let request = rb
+        // See complete(): serialize to bytes + explicit content-type so the
+        // mantle signer signs the exact transmitted body; first-party lane
+        // byte-unchanged.
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+        let mut request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Mantle lane: sign the built stream request before trace/execute
+        // (see complete()). No-op on the first-party lane.
+        #[cfg(feature = "bedrock")]
+        self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth) for the stream
         // path. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
@@ -441,6 +470,14 @@ impl Provider for OpenAiResponsesProvider {
     /// orchestration layer owns their reachability. On the `ApiKey` lane
     /// the resolved key is a `StaticToken`, so reading it does no refresh.
     async fn probe(&self) -> routectl_core::ProbeOutcome {
+        // Mantle lane: authenticates with SigV4/bearer and exposes no free
+        // models-list surface, so route to the credential-resolve probe
+        // instead of dialing the inference host (mirrors the Bedrock and
+        // anthropic-api mantle posture).
+        #[cfg(feature = "bedrock")]
+        if let Some(mantle) = self.cfg.mantle.as_ref() {
+            return crate::mantle::probe(&mantle.creds).await;
+        }
         if self.cfg.auth_kind != AuthKind::ApiKey {
             return routectl_core::ProbeOutcome::UnsupportedFreeProbe;
         }
