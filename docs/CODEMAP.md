@@ -64,6 +64,7 @@ listed at the bottom of each crate.
 - `src/tool_id.rs` -- shared tool-call id charset sanitizer (chars outside `[a-zA-Z0-9_-]` -> `_`, deterministic) so sanitized `tool_use` ids and their `tool_result` correlators stay equal
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures (401/403-vs-other auth-warn split) across egresses
 - `src/anthropic_error.rs` -- shared Anthropic `error.type` -> synthetic-status mapping (`anthropic_error_type_to_status`; unknown tokens -> 502) consumed by `anthropic_api/sse.rs` and `bedrock/eventstream.rs` so an in-stream error event classifies identically to the sync error path
+- `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: pure region-to-URL builders (`mantle_host` -> `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` -> `.../anthropic`, `mantle_openai_base` -> `.../openai/v1`, all trailing-slash-free) plus the `MANTLE_SERVICE` = `bedrock-mantle` SigV4 scope; builders and const are unconditional (region-derived base URLs need no AWS SDK), the `sign` wrapper (delegates to `bedrock::signing::apply_with_service`) is gated on `bedrock`
 
 ### anthropic_api
 
@@ -153,7 +154,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`, v1beta
 
 - `src/bedrock/mod.rs` -- `BedrockProvider`; topology comment for Invoke vs Converse dispatch
 - `src/bedrock/auth.rs` -- AWS credential resolution (`Bearer` short-circuit, `SigV4` via `SharedCredentialsProvider`)
-- `src/bedrock/signing.rs` -- SigV4 signing entry point; merges Authorization/x-amz-date/x-amz-security-token onto request
+- `src/bedrock/signing.rs` -- SigV4 signing entry points; merges Authorization/x-amz-date/x-amz-security-token onto request. `apply` signs in the `bedrock` scope; `apply_with_service` takes the service scope as a parameter so non-bedrock AWS-signed lanes (mantle) can reuse the same signer
 - `src/bedrock/endpoint.rs` -- region-to-bedrock-runtime URL builders; ARN/bracket-suffix path encoding
 - `src/bedrock/frame.rs` -- shared AWS-eventstream framing driver for both Bedrock egresses; owns the byte loop, the 12-byte prelude/length/CRC invariants, the `MAX_FRAME_BYTES` 8 MB DoS cap, decode-error recovery, and the WARN/TRACE log-hygiene split (prelude-only at WARN, full payload hex at TRACE); both the InvokeModel-stream and ConverseStream decoders delegate to `decode_frames`
 - `src/bedrock/eventstream.rs` -- InvokeModel-stream frame handler / payload interpreter (base64-unwrap of Anthropic SSE per frame); delegates the framing byte loop and DoS cap to `frame.rs`
