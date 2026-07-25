@@ -208,7 +208,9 @@ async fn openai_ingress_through_bedrock() {
         )
         .expect("parse openai body");
     let resp = router.complete(req).await.expect("complete via bedrock");
-    let wire = ingress.render_response(resp).expect("render openai");
+    let wire: serde_json::Value =
+        serde_json::from_slice(&ingress.render_response(resp).expect("render openai"))
+            .expect("rendered body is valid JSON");
 
     // OpenAI shape: choices[0].message.content. Note: canonical
     // ChatResponse has no `object` field today, so the wire body
@@ -277,7 +279,9 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
         )
         .expect("parse anthropic body 1");
     let resp1 = router.complete(req1).await.expect("complete 1");
-    let wire1 = ingress.render_response(resp1).expect("render anthropic 1");
+    let wire1: serde_json::Value =
+        serde_json::from_slice(&ingress.render_response(resp1).expect("render anthropic 1"))
+            .expect("rendered body is valid JSON");
 
     assert_eq!(wire1["type"], "message");
     let content1 = wire1["content"].as_array().expect("content array");
@@ -305,7 +309,9 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
         )
         .expect("parse anthropic body 2");
     let resp2 = router.complete(req2).await.expect("complete 2");
-    let wire2 = ingress.render_response(resp2).expect("render anthropic 2");
+    let wire2: serde_json::Value =
+        serde_json::from_slice(&ingress.render_response(resp2).expect("render anthropic 2"))
+            .expect("rendered body is valid JSON");
 
     let cache_read_2 = wire2["usage"]
         .get("cache_read_input_tokens")

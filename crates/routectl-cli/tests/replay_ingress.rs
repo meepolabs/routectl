@@ -208,9 +208,11 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
         .complete(canonical)
         .await
         .map_err(|e| format!("provider.complete failed: {e}"))?;
-    let rendered = AnthropicIngress
+    let rendered_bytes = AnthropicIngress
         .render_response(response)
         .map_err(|e| format!("AnthropicIngress.render_response failed: {e}"))?;
+    let rendered: Value = serde_json::from_slice(&rendered_bytes)
+        .map_err(|e| format!("rendered ingress response parse failed: {e}"))?;
 
     let expected: Value = serde_json::from_slice(&fixture.egress_response_bytes)
         .map_err(|e| format!("egress_response.json parse failed: {e}"))?;

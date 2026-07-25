@@ -158,32 +158,8 @@ impl IngressAdapter for OpenAiIngress {
         Ok(req)
     }
 
-    fn render_response(&self, resp: ChatResponse) -> Result<Value> {
-        // OpenAI-side mirror of the Anthropic ingress's tool_use dedup
-        // (see `strip_tool_use_parts_when_tool_calls_present`). Strip
-        // duplicate `tool_use` content blocks before the bare serde so
-        // OpenAI Chat-Completions clients see the tool call only on the
-        // `tool_calls` channel they understand.
-        let resp = strip_tool_use_parts_when_tool_calls_present(resp);
-        // Strip `matched_stop_sequence` from every choice: it is an
-        // Anthropic-internal field set by the egress to round-trip the
-        // matched stop sequence back through the canonical layer to the
-        // Anthropic ingress. OpenAI Chat-Completions clients do not
-        // expect it and some SDKs error or forward it unexpectedly.
-        let resp = strip_matched_stop_sequence_from_response(resp);
-        let mut value = serde_json::to_value(&resp)
-            .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
-        // Surface Anthropic/Bedrock cache-read counts under the standard
-        // OpenAI `usage.prompt_tokens_details.cached_tokens` field so an
-        // OpenAI-shape cost tracker sees them. Canonical emits them only
-        // under the Anthropic-vocabulary `cache_read_input_tokens`, which
-        // OpenAI clients ignore. Additive: `cache_read_input_tokens`
-        // stays present, and a response with no cache tokens gains no
-        // `prompt_tokens_details` key. Lives in the OpenAI dialect, not
-        // the canonical type, so the Anthropic ingress keeps its own
-        // vocabulary.
-        surface_cached_tokens_in_usage(&mut value);
-        Ok(value)
+    fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
+        crate::ingress::render_value_to_bytes(self.id(), render_openai_response_value(resp)?)
     }
 
     fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
@@ -249,6 +225,38 @@ impl IngressAdapter for OpenAiIngress {
             SseEvent::unnamed(DONE_SENTINEL),
         ]
     }
+}
+
+/// Build the OpenAI Chat-Completions wire `Value` for a canonical
+/// `ChatResponse`. Kept separate from the trait `render_response` so the
+/// dialect-specific render logic stays directly testable while the trait
+/// method finishes with the single shared serialize.
+fn render_openai_response_value(resp: ChatResponse) -> Result<Value> {
+    // OpenAI-side mirror of the Anthropic ingress's tool_use dedup
+    // (see `strip_tool_use_parts_when_tool_calls_present`). Strip
+    // duplicate `tool_use` content blocks before the bare serde so
+    // OpenAI Chat-Completions clients see the tool call only on the
+    // `tool_calls` channel they understand.
+    let resp = strip_tool_use_parts_when_tool_calls_present(resp);
+    // Strip `matched_stop_sequence` from every choice: it is an
+    // Anthropic-internal field set by the egress to round-trip the
+    // matched stop sequence back through the canonical layer to the
+    // Anthropic ingress. OpenAI Chat-Completions clients do not
+    // expect it and some SDKs error or forward it unexpectedly.
+    let resp = strip_matched_stop_sequence_from_response(resp);
+    let mut value = serde_json::to_value(&resp)
+        .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
+    // Surface Anthropic/Bedrock cache-read counts under the standard
+    // OpenAI `usage.prompt_tokens_details.cached_tokens` field so an
+    // OpenAI-shape cost tracker sees them. Canonical emits them only
+    // under the Anthropic-vocabulary `cache_read_input_tokens`, which
+    // OpenAI clients ignore. Additive: `cache_read_input_tokens`
+    // stays present, and a response with no cache tokens gains no
+    // `prompt_tokens_details` key. Lives in the OpenAI dialect, not
+    // the canonical type, so the Anthropic ingress keeps its own
+    // vocabulary.
+    surface_cached_tokens_in_usage(&mut value);
+    Ok(value)
 }
 
 /// Pull every top-level body key NOT recognized as a canonical
@@ -975,7 +983,7 @@ mod tests {
             extras: Default::default(),
             upstream_meta: None,
         };
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
         assert_eq!(v["id"], "chatcmpl-1");
         assert_eq!(v["routectl_provider"], "test");
         // Suppress unused-import warnings.
@@ -1054,7 +1062,7 @@ mod tests {
         )]);
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
         let msg = &v["choices"][0]["message"];
 
         // Assert: tool_calls survives untouched -- the OpenAI channel.
@@ -1096,7 +1104,7 @@ mod tests {
         resp.model = "public-label".into();
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
 
         // Assert
         assert_eq!(v["model"], "public-label");
@@ -1113,7 +1121,7 @@ mod tests {
         let resp = response_with_choices(vec![anthropic_shape_choice(None, tool_id)]);
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
         let msg = &v["choices"][0]["message"];
 
         // Assert
@@ -1169,7 +1177,7 @@ mod tests {
         let resp = response_with_choices(vec![choice]);
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
         let msg = &v["choices"][0]["message"];
 
         // Assert
@@ -1204,7 +1212,7 @@ mod tests {
         }]);
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
 
         // Assert
         assert_eq!(v["choices"][0]["message"]["content"], "hello world");
@@ -1559,7 +1567,7 @@ mod tests {
             extras: Default::default(),
             upstream_meta: None,
         };
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
         let choice = &v["choices"][0];
         assert!(
             choice.get("matched_stop_sequence").is_none()
@@ -1629,7 +1637,7 @@ mod tests {
         };
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
 
         // Assert
         let choice = &v["choices"][0];
@@ -1664,7 +1672,7 @@ mod tests {
         };
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
 
         // Assert: standard OpenAI field present and equal.
         assert_eq!(
@@ -1698,7 +1706,7 @@ mod tests {
         };
 
         // Act
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
 
         // Assert
         assert!(

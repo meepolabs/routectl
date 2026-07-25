@@ -38,7 +38,7 @@ fn render_response_emits_messages_shape() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     assert_eq!(v["id"], "msg_01");
     assert_eq!(v["type"], "message");
     assert_eq!(v["role"], "assistant");
@@ -88,7 +88,7 @@ fn render_response_surfaces_router_model_label_verbatim() {
     };
 
     // Act
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
 
     // Assert
     assert_eq!(v["model"], "public-label");
@@ -156,7 +156,7 @@ fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() 
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
     // Count tool_use blocks for the dup id.
     let tool_uses_for_id: Vec<&Value> = content
@@ -224,7 +224,7 @@ fn render_response_emits_tool_use_from_tool_calls_when_parts_has_no_tool_use() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
     let tool_uses: Vec<&Value> = content.iter().filter(|b| b["type"] == "tool_use").collect();
     assert_eq!(tool_uses.len(), 1);
@@ -287,7 +287,7 @@ fn render_response_dedupes_tool_use_when_parts_carries_other_typed_tool_use() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
     let tool_uses_for_id: Vec<&Value> = content
         .iter()
@@ -349,7 +349,7 @@ fn render_response_does_not_dedupe_other_tool_use_when_id_missing() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
     // tool_calls entry still emits even though parts has an Other tool_use
     // (the parts block is also rendered as-is in the parts iteration).
@@ -407,7 +407,7 @@ fn render_response_omits_signature_key_when_payload_has_none() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
     let thinking = content
         .iter()
@@ -467,7 +467,7 @@ fn render_response_emits_signature_verbatim_when_payload_has_one() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
     let thinking = content
         .iter()
@@ -520,7 +520,7 @@ fn render_response_summary_kind_omits_signature_key_when_absent() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
     let thinking = content
         .iter()
@@ -580,7 +580,7 @@ fn render_response_omits_absent_cache_fields_from_usage() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let usage = v["usage"].as_object().expect("usage is present");
 
     // Typed fields that ARE present must be emitted.
@@ -647,7 +647,7 @@ fn render_response_emits_cache_fields_when_present() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     // Raw input = 180 - 50 - 30 = 100.
     assert_eq!(v["usage"]["input_tokens"], 100);
     assert_eq!(v["usage"]["output_tokens"], 10);
@@ -697,7 +697,7 @@ fn content_filter_finish_renders_refusal_stop_reason() {
         extras: Default::default(),
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     assert_eq!(v["stop_reason"], "refusal");
 }
 
@@ -747,7 +747,7 @@ fn render_single_tool_call(arguments: &str) -> Value {
         extras: Default::default(),
         upstream_meta: None,
     };
-    AnthropicIngress.render_response(resp).unwrap()
+    AnthropicIngress.render_response_value(resp).unwrap()
 }
 
 #[test]
@@ -834,7 +834,7 @@ fn render_response_drops_reserved_upstream_meta_key_from_extras() {
         extras,
         upstream_meta: None,
     };
-    let v = AnthropicIngress.render_response(resp).unwrap();
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
     let obj = v.as_object().expect("rendered body is a JSON object");
     assert!(
         !obj.contains_key("upstream_meta"),

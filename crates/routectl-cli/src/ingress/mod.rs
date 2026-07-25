@@ -538,6 +538,20 @@ pub struct StreamRequestContext {
     pub model: String,
 }
 
+/// Finish a non-streaming render: emit the direction-4 egress-body trace
+/// for the rendered wire `Value`, then serialize it to the response body
+/// bytes exactly once. Adapters build their dialect `Value` internally and
+/// funnel it through here so the trace fires before the single
+/// `serde_json::to_vec` and the handler receives ready-to-send `Bytes`.
+/// The trace call moved here from the handler (which no longer holds the
+/// `Value`); it stays a no-op unless `TRACE` is enabled.
+pub(crate) fn render_value_to_bytes(id: &str, value: Value) -> Result<bytes::Bytes> {
+    routectl_core::trace_egress_body(id, &value);
+    let wire = serde_json::to_vec(&value)
+        .map_err(|e| Error::Internal(format!("{id} ingress: serialize response body: {e}")))?;
+    Ok(bytes::Bytes::from(wire))
+}
+
 /// Translation surface for one ingress dialect. See module docs.
 pub trait IngressAdapter: Send + Sync {
     fn id(&self) -> &str;
@@ -570,8 +584,28 @@ pub trait IngressAdapter: Send + Sync {
         self.parse_request(headers, &bytes)
     }
 
-    /// Render a canonical `ChatResponse` into wire JSON for the client.
-    fn render_response(&self, resp: ChatResponse) -> Result<Value>;
+    /// Render a canonical `ChatResponse` into the wire JSON response body
+    /// bytes for the client. The adapter builds its dialect `Value`
+    /// internally (the load-bearing sort/merge buffer) and finishes with a
+    /// single `serde_json::to_vec`, so the non-streaming path serializes to
+    /// the wire exactly once (the handler returns these bytes directly
+    /// rather than re-serializing a `Value` through `axum::Json`). Use
+    /// [`render_value_to_bytes`] to emit the egress-body trace and perform
+    /// that final serialization uniformly across adapters.
+    fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes>;
+
+    /// Test-only convenience: render a `ChatResponse` and decode the wire
+    /// bytes back into a `serde_json::Value` so the large existing suite of
+    /// `Value`-asserting render tests keeps expressing itself against the
+    /// canonical wire shape. With `preserve_order` off the encode/decode
+    /// round-trip is lossless (both directions sort keys), so the decoded
+    /// `Value` equals the adapter's internal render. Mirrors
+    /// [`Self::parse_request_value`].
+    #[cfg(test)]
+    fn render_response_value(&self, resp: ChatResponse) -> Result<Value> {
+        let bytes = self.render_response(resp)?;
+        Ok(serde_json::from_slice(&bytes).expect("rendered response body is valid JSON"))
+    }
 
     /// Initial state for a new streaming response. `ctx` carries
     /// request-scoped values (local input-token estimate, resolved
