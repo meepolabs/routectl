@@ -80,7 +80,7 @@ pub struct MitmCtx {
 
 /// Terminates TLS on `tcp` with `acceptor`, then serves HTTP/1.1 over
 /// the decrypted stream, classifying and splitting every request via
-/// [`split::handle_request`]. Intended call pattern for the later
+/// `split::handle_request`. Intended call pattern for the later
 /// listener task: `tokio::spawn(handle_mitm_connection(tcp, acceptor,
 /// Arc::clone(&ctx), permit))` per accepted connection.
 ///

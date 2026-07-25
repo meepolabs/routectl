@@ -46,7 +46,7 @@ pub(crate) fn redact_parse_error(err: &str) -> String {
 /// error>`, and a catalog-overlay failure as `catalog overlay load error:
 /// <path-bearing detail>`. The parse shape is cut at the `TOML parse error`
 /// header (dropping the wrapping path) and run through the shared fail-safe
-/// [`redact_parse_error`]; the two path-bearing IO shapes collapse to a
+/// `redact_parse_error`; the two path-bearing IO shapes collapse to a
 /// path-free class message. Any other loader error (version/legacy-key
 /// rejection) carries no path or value and is kept verbatim so it stays
 /// actionable.

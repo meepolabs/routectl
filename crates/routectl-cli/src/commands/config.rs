@@ -89,7 +89,7 @@ pub struct CheckReport {
 
 /// Build the [`CheckReport`] for `config`: the model->provider reference
 /// check plus the shared startup validator suite, each error prefixed with
-/// its source line via [`locate`] when `raw_text` names one. The validator
+/// its source line via `locate` when `raw_text` names one. The validator
 /// suite returns bare messages; the `config: ` prefix is re-added so each
 /// listed error reads the same as when these validators surfaced through
 /// `Error::Config` directly.

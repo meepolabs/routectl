@@ -99,7 +99,7 @@ pub enum ImportError {
 }
 
 /// `routectl catalog import` -- resolves the default overlay + baseline
-/// paths and the real vendor URLs; see [`run_at`] for the testable core.
+/// paths and the real vendor URLs; see `run_at` for the testable core.
 pub async fn run(args: &ImportArgs) -> Result<(), ImportError> {
     run_at(
         args,

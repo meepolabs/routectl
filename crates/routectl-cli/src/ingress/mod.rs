@@ -48,7 +48,7 @@ pub(crate) const MITM_PROXIED_HEADER: &str = "x-routectl-mitm-proxied";
 /// cryptographic adversary.
 const MITM_SEAM_NONCE_BYTES: usize = 16;
 
-/// Per-process random value that makes [`MITM_PROXIED_HEADER`] unspoofable
+/// Per-process random value that makes `MITM_PROXIED_HEADER` unspoofable
 /// in practice. The MITM front-proxy's re-inject leg (`proxy::split`) is the
 /// ONLY legitimate stamper: it stamps this exact value, generated once at
 /// server bootstrap (`server::serve_on_listener_with_overlay`) and shared
@@ -57,7 +57,7 @@ const MITM_SEAM_NONCE_BYTES: usize = 16;
 ///
 /// Bare `headers.contains_key(...)` used to be the whole check -- any direct
 /// caller could set the header and be treated as having arrived through the
-/// MITM inference path. [`MitmSeamNonce::is_present_in`] instead compares the
+/// MITM inference path. `MitmSeamNonce::is_present_in` instead compares the
 /// header's VALUE against this nonce: a wrong value and a missing header are
 /// BOTH `false` (indistinguishable seam-absent), so a spoofer gains nothing
 /// over sending no header at all.
@@ -590,7 +590,7 @@ pub trait IngressAdapter: Send + Sync {
     /// single `serde_json::to_vec`, so the non-streaming path serializes to
     /// the wire exactly once (the handler returns these bytes directly
     /// rather than re-serializing a `Value` through `axum::Json`). Use
-    /// [`render_value_to_bytes`] to emit the egress-body trace and perform
+    /// `render_value_to_bytes` to emit the egress-body trace and perform
     /// that final serialization uniformly across adapters.
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes>;
 

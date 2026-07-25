@@ -18,10 +18,10 @@
 //! across a prompt, an oauth login, env probing, or the `put`.
 //!
 //!   1. RAW version + legacy preflights on the snapshot bytes
-//!      ([`super::edit_pipeline::preflight`], shared with `config set`).
+//!      (`super::edit_pipeline::preflight`, shared with `config set`).
 //!   2. Resolve the kind (validated against this command's supported set),
 //!      the name, the base URL, and the secret source into a
-//!      [`ProviderEntry`] plus a credential CLASS label (scheme only, never
+//!      [`routectl_router::ProviderEntry`] plus a credential CLASS label (scheme only, never
 //!      the value) and a `PendingSecret` (the deferred `put`/login, if
 //!      any). A captured file ref's STRING is computed deterministically
 //!      here via `ManagedSecretStore::ref_path` -- no bytes written yet.
@@ -30,13 +30,13 @@
 //!      is an idempotent NO-OP; a different block is refused unless
 //!      `--overwrite` is given.
 //!   4. Gate the candidate through the SAME shared gate the reload path runs
-//!      ([`super::edit_pipeline::gate`]); any failure renders and writes
+//!      (`super::edit_pipeline::gate`); any failure renders and writes
 //!      nothing.
 //!   5. A new/overwritten provider block is always egress-defining, so it
 //!      prompts for confirmation before the lock is acquired (`--yes`
 //!      bypasses). A declined confirm captures NO secret and logs in NOT.
 //!   6. NOW execute the pending secret side effect (file `put` / oauth
-//!      login), then [`edit_config_toml`] re-reads under the advisory lock,
+//!      login), then [`routectl_router::edit_config_toml`] re-reads under the advisory lock,
 //!      re-applies the same deterministic insert, re-gates, and commits
 //!      atomically (or writes nothing on a no-op). A post-capture write
 //!      conflict emits an explicit recovery message -- the secret/login

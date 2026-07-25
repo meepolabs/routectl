@@ -4,7 +4,7 @@
 //! `/status` aggregate, a map of them). The surface is deliberately
 //! read-only: [`StatusState`] carries only read handles, so a status handler
 //! is structurally incapable of mutating the router, the usage ledger, or the
-//! request-forwarding seam. Each panel is built through [`guard_panel`], which
+//! request-forwarding seam. Each panel is built through `guard_panel`, which
 //! degrades a failing data source to a single unavailable panel rather than a
 //! 500 or a process crash.
 //!
@@ -44,7 +44,7 @@ use crate::server::AppState;
 use router_view::StatusRouterHandle;
 
 /// Shared state for the `/status` family. Carries ONLY read handles: the
-/// live `Router` (behind a read-only facade, [`StatusRouterHandle`]) and the
+/// live `Router` (behind a read-only facade, `StatusRouterHandle`) and the
 /// activation inventory (behind its `ArcSwap`), plus the resolved paths a
 /// panel builder needs to open the usage ledger or re-read the config file.
 /// It never carries a usage writer handle or the MITM seam nonce, and the raw
@@ -54,7 +54,7 @@ use router_view::StatusRouterHandle;
 pub struct StatusState {
     /// Live routing surface behind a read-only facade; `router.view()` once
     /// per panel build. The raw `Arc<ArcSwap<Router>>` is private to
-    /// [`StatusRouterHandle`], so a panel can reach only its read methods.
+    /// `StatusRouterHandle`, so a panel can reach only its read methods.
     pub router: StatusRouterHandle,
     /// Live auto-activation inventory.
     pub activation: Arc<ArcSwap<ActivationState>>,

@@ -43,7 +43,7 @@ use crate::server::AppState;
 /// provider is configured AND this request arrived via the MITM
 /// reinject leg carrying a captured client bearer, the handler proxies
 /// through to Anthropic's real `/v1/models` list instead (see
-/// [`forwarded_proxy_target`]) and returns THAT response verbatim.
+/// `forwarded_proxy_target`) and returns THAT response verbatim.
 /// Every other case -- no forwarded provider, or a forwarded provider
 /// configured but this particular request carries no captured bearer
 /// (a direct call to the main listener, never routed through the MITM
