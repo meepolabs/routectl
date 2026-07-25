@@ -73,10 +73,32 @@ fn message_tool_call_chars(msg: &Message) -> usize {
         .map_or(0, |calls| calls.iter().map(json_chars).sum())
 }
 
+/// `io::Write` sink that counts Unicode scalar values instead of buffering
+/// bytes. Every UTF-8 continuation byte has its top two bits set to `10`
+/// (`(b & 0xC0) == 0x80`); the remaining bytes each begin exactly one
+/// scalar. Counting the non-continuation bytes of serde's UTF-8 output
+/// therefore equals `chars().count()` of that output by construction,
+/// without ever allocating the string.
+struct CharCount(usize);
+
+impl std::io::Write for CharCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Serialized-JSON character length of `value`, or zero if serialization
-/// fails. Keeps the estimate total, never panicking on any input.
+/// fails. Streams serde's output through a counting sink so no intermediate
+/// `String` is allocated. Keeps the estimate total, never panicking on any
+/// input.
 fn json_chars<T: Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value).map_or(0, |s| s.chars().count())
+    let mut sink = CharCount(0);
+    serde_json::to_writer(&mut sink, value).map_or(0, |()| sink.0)
 }
 
 fn system_text_chars(system: &SystemContent) -> usize {
@@ -480,5 +502,148 @@ mod tests {
 
         // Assert
         assert_eq!(estimate, 0);
+    }
+
+    /// The pre-streaming-sink formula the counting sink must reproduce
+    /// exactly: serialize to a `String`, count its Unicode scalars.
+    fn old_formula_chars<T: Serialize + ?Sized>(value: &T) -> usize {
+        serde_json::to_string(value).unwrap().chars().count()
+    }
+
+    #[test]
+    fn json_chars_parity_tool_definition() {
+        // Arrange
+        let tool = ToolDef::Custom(CustomTool {
+            name: "get_weather".into(),
+            description: Some("Look up the current weather for a location".into()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            }),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        });
+
+        // Act + Assert
+        assert_eq!(json_chars(&tool), old_formula_chars(&tool));
+    }
+
+    #[test]
+    fn json_chars_parity_tool_call_payload() {
+        // Arrange: the shape stored in each `tool_calls` element.
+        let payload = json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"location\": \"San Francisco, CA\"}",
+            },
+        });
+
+        // Act + Assert
+        assert_eq!(json_chars(&payload), old_formula_chars(&payload));
+    }
+
+    #[test]
+    fn content_part_parity_image() {
+        // Arrange
+        let source = json!({"type": "base64", "media_type": "image/png", "data": "AAAA"});
+        let part = CP::Known(KCP::Image {
+            source: source.clone(),
+            cache_control: None,
+        });
+
+        // Act + Assert: the arm counts the serialized `source`.
+        assert_eq!(content_part_chars(&part), old_formula_chars(&source));
+    }
+
+    #[test]
+    fn content_part_parity_document_with_citations() {
+        // Arrange
+        let source = json!({"type": "text", "media_type": "text/plain", "data": "report body"});
+        let citations = json!([{"type": "page", "start": 1, "end": 3}]);
+        let part = CP::Known(KCP::Document {
+            source: source.clone(),
+            title: Some("Q3 report".into()),
+            citations: Some(citations.clone()),
+            cache_control: None,
+        });
+
+        // Act + Assert: the arm sums serialized `source` and `citations`.
+        assert_eq!(
+            content_part_chars(&part),
+            old_formula_chars(&source) + old_formula_chars(&citations)
+        );
+    }
+
+    #[test]
+    fn content_part_parity_tool_use() {
+        // Arrange
+        let input = json!({"operation": "add", "a": 1, "b": 2});
+        let part = CP::Known(KCP::ToolUse {
+            id: "toolu_01".into(),
+            name: "calculator".into(),
+            input: input.clone(),
+            cache_control: None,
+        });
+
+        // Act + Assert
+        assert_eq!(content_part_chars(&part), old_formula_chars(&input));
+    }
+
+    #[test]
+    fn content_part_parity_tool_result() {
+        // Arrange
+        let content = json!({"result": 3, "unit": "count"});
+        let part = CP::Known(KCP::ToolResult {
+            tool_use_id: "toolu_01".into(),
+            content: content.clone(),
+            is_error: None,
+            cache_control: None,
+        });
+
+        // Act + Assert
+        assert_eq!(content_part_chars(&part), old_formula_chars(&content));
+    }
+
+    #[test]
+    fn content_part_parity_other_extras() {
+        // Arrange: forward-compat catchall carrying unmodeled fields.
+        let extras = json!({"custom_field": "future value", "count": 7});
+        let extras_map = extras.as_object().unwrap().clone();
+        let part = CP::Other {
+            type_tag: "future_block_v2".into(),
+            cache_control: None,
+            extras: extras_map.clone(),
+        };
+
+        // Act + Assert: the arm counts the serialized `extras` map.
+        assert_eq!(content_part_chars(&part), old_formula_chars(&extras_map));
+    }
+
+    #[test]
+    fn json_chars_parity_multibyte_counts_scalars_not_bytes() {
+        // Arrange: structured content with genuinely multibyte scalars so
+        // byte-count and char-count diverge.
+        let value = json!({
+            "note": "caf\u{e9} na\u{ef}ve \u{6f22}\u{5b57} \u{1f600}\u{1f680}",
+        });
+        let serialized = serde_json::to_string(&value).unwrap();
+        let char_count = serialized.chars().count();
+        let byte_count = serialized.len();
+
+        // Act
+        let counted = json_chars(&value);
+
+        // Assert: the sink counts Unicode scalars, matching the old formula,
+        // and the fixture really is multibyte (bytes exceed chars).
+        assert!(
+            byte_count > char_count,
+            "fixture must be multibyte for a meaningful parity check: {byte_count} bytes vs {char_count} chars"
+        );
+        assert_eq!(counted, char_count);
     }
 }
