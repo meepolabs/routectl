@@ -19,7 +19,8 @@ fn simple_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     }
 }
@@ -84,7 +85,8 @@ fn req_with_tool_use_history_and_cm() -> ChatRequest {
                 tool_call_id: Some("toolu_t1".into()),
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         provider_extras: Some(json!({
             "context_management": {
                 "edits": [{"type": CLEAR_THINKING_EDIT_TYPE, "keep": "all"}]
@@ -233,7 +235,8 @@ fn normalize_strips_billing_from_legacy_system_message() {
             tool_call_id: None,
             tool_calls: None,
         },
-    ];
+    ]
+    .into();
     let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
     let sys = body
         .get("system")
@@ -278,7 +281,8 @@ fn normalize_drops_pure_billing_legacy_system_message() {
             tool_call_id: None,
             tool_calls: None,
         },
-    ];
+    ]
+    .into();
     let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
     assert!(
         body.get("system").is_none() || body["system"].is_null(),

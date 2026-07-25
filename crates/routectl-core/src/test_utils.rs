@@ -98,7 +98,7 @@ pub mod scenarios {
     pub fn scenario_1_system_handling() -> ChatRequest {
         ChatRequest {
             model: "claude-3-opus".into(),
-            messages: vec![user_msg("Hello!")],
+            messages: vec![user_msg("Hello!")].into(),
             system: Some(SystemContent::Text("You are a helpful assistant.".into())),
             max_tokens: Some(1024),
             ..Default::default()
@@ -116,7 +116,7 @@ pub mod scenarios {
     pub fn scenario_2_tool_choice_auto() -> ChatRequest {
         ChatRequest {
             model: "claude-3-opus".into(),
-            messages: vec![user_msg("What is the weather?")],
+            messages: vec![user_msg("What is the weather?")].into(),
             tools: Some(vec![get_weather_tool()]),
             tool_choice: Some(json!("auto")),
             max_tokens: Some(1024),
@@ -133,7 +133,7 @@ pub mod scenarios {
     pub fn scenario_2_tool_choice_auto_anthropic_shape() -> ChatRequest {
         ChatRequest {
             model: "claude-3-opus".into(),
-            messages: vec![user_msg("What is the weather?")],
+            messages: vec![user_msg("What is the weather?")].into(),
             tools: Some(vec![get_weather_tool()]),
             tool_choice: Some(json!({"type": "auto"})),
             max_tokens: Some(1024),
@@ -151,7 +151,7 @@ pub mod scenarios {
     pub fn scenario_2_tool_choice_named_function() -> ChatRequest {
         ChatRequest {
             model: "claude-3-opus".into(),
-            messages: vec![user_msg("What is the weather?")],
+            messages: vec![user_msg("What is the weather?")].into(),
             tools: Some(vec![get_weather_tool()]),
             tool_choice: Some(json!({
                 "type": "function",
@@ -224,7 +224,8 @@ pub mod scenarios {
                 tool_result,
                 assistant_text_msg("It is currently 72F and sunny in San Francisco."),
                 user_msg("And tomorrow?"),
-            ],
+            ]
+            .into(),
             tools: Some(vec![get_weather_tool()]),
             max_tokens: Some(1024),
             ..Default::default()
@@ -328,7 +329,7 @@ pub mod scenarios {
 
         ChatRequest {
             model: "claude-opus-4-7".into(),
-            messages: vec![user_with_cc_block],
+            messages: vec![user_with_cc_block].into(),
             system: Some(system_with_cc),
             tools: Some(vec![cached_tool]),
             cache_control: Some(CacheControl::ephemeral_5m()),
@@ -377,7 +378,8 @@ pub mod scenarios {
                 user_msg("What is 6 times 7?"),
                 assistant_with_thinking,
                 user_msg("And 6 times 8?"),
-            ],
+            ]
+            .into(),
             max_tokens: Some(1024),
             ..Default::default()
         }

@@ -184,7 +184,8 @@ fn base_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     }
 }
@@ -410,7 +411,7 @@ fn long_tool_request() -> ChatRequest {
     }
     ChatRequest {
         model: "m".into(),
-        messages,
+        messages: messages.into(),
         ..Default::default()
     }
 }
@@ -600,7 +601,7 @@ fn near_lossless_attribution_request() -> ChatRequest {
     }
     ChatRequest {
         model: "m".into(),
-        messages,
+        messages: messages.into(),
         ..Default::default()
     }
 }
@@ -877,7 +878,8 @@ async fn fallback_targets_decide_independently_without_accumulation() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     router.complete(req).await.expect("falls back and serves");
@@ -915,7 +917,8 @@ async fn fallback_targets_decide_independently_without_accumulation() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     expected.cache_control = Some(CacheControl::ephemeral_5m());
@@ -1003,7 +1006,8 @@ fn helper_rolls_back_when_validation_fails() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
-    }];
+    }]
+    .into();
     // Sanity: the request already sits at MAX_BREAKPOINTS (1 tool + 1
     // system + 2 message parts).
     assert_eq!(

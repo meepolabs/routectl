@@ -39,7 +39,7 @@ impl Provider for StubProvider {
 fn req_with_betas(betas: Vec<&str>) -> ChatRequest {
     ChatRequest {
         model: "any".into(),
-        messages: vec![],
+        messages: vec![].into(),
         anthropic_beta: betas.into_iter().map(String::from).collect(),
         ..Default::default()
     }

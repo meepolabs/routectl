@@ -117,7 +117,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             provider_extras: extras,
             ..Default::default()
         }

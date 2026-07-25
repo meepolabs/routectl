@@ -106,7 +106,7 @@ fn triggering_req() -> ChatRequest {
     }
     let mut req = ChatRequest {
         model: UPSTREAM.into(),
-        messages,
+        messages: messages.into(),
         ..Default::default()
     };
     req.routectl_internal.inbound_session_key = Some(SESSION.into());

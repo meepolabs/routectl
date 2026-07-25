@@ -21,7 +21,7 @@ fn class_of(err: &Error) -> FailureClass {
 fn req_with_max_tokens(max_tokens: Option<u32>) -> ChatRequest {
     ChatRequest {
         model: "m".into(),
-        messages: vec![],
+        messages: vec![].into(),
         max_tokens,
         ..Default::default()
     }

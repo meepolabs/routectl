@@ -94,7 +94,7 @@ async fn build_headers_strips_context_management_beta_when_flag_true() {
     let provider = make_provider(&mock_server.uri(), true);
     let req = routectl_core::ChatRequest {
         model: "claude-sonnet-4".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         anthropic_beta: vec![
             CONTEXT_MANAGEMENT_BETA.to_string(),
             "prompt-caching-2024-07-31".to_string(),
@@ -146,7 +146,7 @@ async fn build_headers_keeps_context_management_beta_when_flag_false() {
     let provider = make_provider(&mock_server.uri(), false);
     let req = routectl_core::ChatRequest {
         model: "claude-sonnet-4".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         anthropic_beta: vec![CONTEXT_MANAGEMENT_BETA.to_string()],
         ..Default::default()
     };
@@ -245,7 +245,8 @@ async fn e2e_context_management_strips_key_strips_beta_and_injects_thinking() {
                 tool_call_id: Some("toolu_t1".into()),
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         anthropic_beta: vec![
             CONTEXT_MANAGEMENT_BETA.to_string(),
             "prompt-caching-2024-07-31".to_string(),

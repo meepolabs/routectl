@@ -41,7 +41,8 @@ fn base_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         max_tokens: Some(64),
         ..Default::default()
     }
@@ -817,7 +818,8 @@ mod mantle_wire {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             max_tokens: Some(64),
             ..Default::default()
         }

@@ -597,7 +597,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             max_tokens: Some(64),
             stream: Some(true),
             ..Default::default()
@@ -674,7 +675,7 @@ mod tests {
             cache_control: Some(CacheControl::ephemeral_1h()),
             citations: None,
         }]));
-        req.messages[0].content =
+        std::sync::Arc::make_mut(&mut req.messages)[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
                 citations: None,
@@ -712,7 +713,7 @@ mod tests {
         let cfg = fake_cfg();
         let mut req = user_req();
         req.cache_control = Some(CacheControl::ephemeral_5m());
-        req.messages[0].content =
+        std::sync::Arc::make_mut(&mut req.messages)[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
                 citations: None,
@@ -778,7 +779,7 @@ mod tests {
         let cfg = fake_cfg();
         let mut req = user_req();
         req.cache_control = Some(CacheControl::ephemeral_5m());
-        req.messages[0].content =
+        std::sync::Arc::make_mut(&mut req.messages)[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
                 citations: None,
@@ -851,7 +852,7 @@ mod tests {
             cache_control: Some(CacheControl::ephemeral_1h()),
             citations: None,
         }]));
-        req.messages[0].content =
+        std::sync::Arc::make_mut(&mut req.messages)[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
                 citations: None,

@@ -130,7 +130,7 @@ async fn complete_path_unions_three_sources() {
     );
     let req = ChatRequest {
         model: "haiku".into(),
-        messages: vec![],
+        messages: vec![].into(),
         anthropic_beta: vec!["foo".into()],
         ..Default::default()
     };
@@ -154,7 +154,7 @@ async fn stream_path_unions_three_sources() {
         router_with_capture(Some("oauth-2025-04-20"), Some("context-1m-2025-08-07"));
     let req = ChatRequest {
         model: "haiku".into(),
-        messages: vec![],
+        messages: vec![].into(),
         anthropic_beta: vec![],
         ..Default::default()
     };

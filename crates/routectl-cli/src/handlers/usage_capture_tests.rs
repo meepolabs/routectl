@@ -45,7 +45,8 @@ fn capture() -> (UsageCapture, UsageWriter, tempfile::TempDir) {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     let draft = build_usage_draft("anthropic", &req, "req-1".to_string());
@@ -231,7 +232,8 @@ fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, tempfile::T
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     let draft = build_usage_draft("anthropic", &req, "req-take".to_string());
@@ -358,7 +360,7 @@ async fn any_dispatch_meta() -> routectl_router::DispatchMeta {
         .expect("build router");
     let req = routectl_core::ChatRequest {
         model: "a".to_string(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     router
@@ -648,7 +650,8 @@ fn minimal_request() -> routectl_core::ChatRequest {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     }
 }

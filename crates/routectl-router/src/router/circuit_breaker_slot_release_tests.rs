@@ -211,7 +211,7 @@ fn build_router(calls: Arc<AtomicUsize>) -> Router {
 fn probe_req() -> ChatRequest {
     ChatRequest {
         model: "m".into(),
-        messages: vec![],
+        messages: vec![].into(),
         // max_tokens <= probe_max_tokens (default 1) => probe-shaped.
         max_tokens: Some(1),
         ..Default::default()
@@ -526,7 +526,7 @@ fn build_recovering_router_inner(refresh_fails: bool) -> (Router, Arc<Recovering
 fn plain_req() -> ChatRequest {
     ChatRequest {
         model: "m".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     }
 }
@@ -713,7 +713,7 @@ async fn complete_half_open_non_fallbackable_429_does_not_lock_breaker() {
     // is_probe=false and the probe-fast-fail path is not taken.
     let req = ChatRequest {
         model: "m".into(),
-        messages: vec![],
+        messages: vec![].into(),
         max_tokens: Some(1024),
         ..Default::default()
     };

@@ -294,7 +294,8 @@ mod scenario_other_passthrough_round_trip {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
         let body = provider

@@ -84,7 +84,8 @@ fn stream_request(model: &str) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         max_tokens: Some(64),
         stream: Some(true),
         ..Default::default()

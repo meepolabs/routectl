@@ -151,7 +151,7 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
 fn sample_request(model: &str, stream: bool) -> routectl_core::ChatRequest {
     routectl_core::ChatRequest {
         model: model.to_string(),
-        messages: vec![message()],
+        messages: vec![message()].into(),
         stream: Some(stream),
         ..Default::default()
     }

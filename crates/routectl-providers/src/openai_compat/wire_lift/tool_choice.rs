@@ -166,7 +166,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             tool_choice,
             ..Default::default()
         }

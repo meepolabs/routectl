@@ -1315,7 +1315,8 @@ mod gemini_cloud_code_factory_tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             max_tokens: Some(64),
             ..Default::default()
         }

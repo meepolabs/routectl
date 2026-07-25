@@ -27,7 +27,7 @@ fn cfg() -> OpenAiResponsesConfig {
 fn req_with(messages: Vec<Message>) -> ChatRequest {
     ChatRequest {
         model: "gpt-5".into(),
-        messages,
+        messages: messages.into(),
         ..Default::default()
     }
 }

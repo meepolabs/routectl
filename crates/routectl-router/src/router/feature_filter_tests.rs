@@ -85,7 +85,7 @@ fn web_search_tool() -> ToolDef {
 fn web_search_request(model: &str) -> ChatRequest {
     ChatRequest {
         model: model.into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: Some(vec![web_search_tool()]),
         ..Default::default()
     }
@@ -97,7 +97,7 @@ fn web_search_request(model: &str) -> ChatRequest {
 fn structured_output_request(model: &str) -> ChatRequest {
     ChatRequest {
         model: model.into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: None,
         provider_extras: Some(json!({
             "output_config": {
@@ -253,7 +253,7 @@ async fn no_features_in_request_is_no_op_filter() {
         build_router_with_chain(vec!["web_search".into()], vec![]);
     let req = ChatRequest {
         model: "alias".into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: None,
         ..Default::default()
     };
@@ -276,7 +276,7 @@ async fn dated_suffix_versions_normalize_to_same_key() {
         build_router_with_chain(vec!["web_search".into()], vec![]);
     let req = ChatRequest {
         model: "alias".into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: Some(vec![ToolDef::Other(json!({
             "type": "web_search_20251102",
             "name": "search"
@@ -298,7 +298,7 @@ async fn custom_tools_dont_contribute_feature_keys() {
         build_router_with_chain(vec!["web_search".into()], vec![]);
     let req = ChatRequest {
         model: "alias".into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: Some(vec![ToolDef::Custom(CustomTool {
             name: "calculator".into(),
             description: None,
@@ -1204,7 +1204,7 @@ fn advisor_tool() -> ToolDef {
 fn advisor_request() -> ChatRequest {
     ChatRequest {
         model: "nick".into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: Some(vec![advisor_tool()]),
         ..Default::default()
     }

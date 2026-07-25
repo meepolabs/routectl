@@ -126,7 +126,7 @@ async fn complete_surfaces_real_error_not_gate_error() {
     let router = router_with_two_entry_chain();
     let req = ChatRequest {
         model: "flow".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let err = router
@@ -149,7 +149,7 @@ async fn stream_surfaces_real_error_not_gate_error() {
     let router = router_with_two_entry_chain();
     let req = ChatRequest {
         model: "flow".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let err = router

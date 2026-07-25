@@ -192,7 +192,8 @@ impl StreamErrorClass {
 ///   ingress boundary and reach the Anthropic / Bedrock egress intact.
 pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
     let mut lifted_blocks: Vec<SystemBlock> = Vec::new();
-    req.messages.retain(|m| {
+    let mut kept = req.messages.to_vec();
+    kept.retain(|m| {
         if !matches!(m.role, Role::System) {
             return true;
         }
@@ -229,6 +230,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
         }
         false
     });
+    req.messages = kept.into();
 
     if lifted_blocks.is_empty() {
         return;

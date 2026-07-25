@@ -124,7 +124,7 @@ fn pooled_router_with_labels(
 fn req() -> ChatRequest {
     ChatRequest {
         model: "opus".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     }
 }

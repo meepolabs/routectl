@@ -50,7 +50,8 @@ fn base_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         max_tokens: Some(32),
         ..Default::default()
     }

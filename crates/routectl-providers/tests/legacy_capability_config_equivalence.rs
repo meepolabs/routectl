@@ -69,7 +69,7 @@ fn non_empty_body_fields() -> Vec<String> {
 fn legacy_request() -> ChatRequest {
     ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![common::user_msg("hello")],
+        messages: vec![common::user_msg("hello")].into(),
         max_tokens: Some(64),
         anthropic_beta: vec![ALLOWED_BETA.into(), UNLISTED_BETA.into()],
         provider_extras: Some(json!({

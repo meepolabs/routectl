@@ -77,7 +77,7 @@ fn system_msg(text: &str) -> Message {
 fn base_req(model: &str, msgs: Vec<Message>) -> ChatRequest {
     ChatRequest {
         model: model.into(),
-        messages: msgs,
+        messages: msgs.into(),
         // 2048 sits above the Anthropic legacy-thinking floor
         // (`max_tokens > 1024`) so tests exercising the
         // `ThinkingConfig::Enabled` arm reach the wire body

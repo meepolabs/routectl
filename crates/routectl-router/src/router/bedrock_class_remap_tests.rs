@@ -44,7 +44,7 @@ fn two_leg_router_from_toml(
 fn req_alias() -> ChatRequest {
     ChatRequest {
         model: "alias".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     }
 }

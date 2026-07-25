@@ -178,7 +178,8 @@ mod thought_signature_replay {
                 common::user_msg("What is 6 times 7?"),
                 assistant,
                 common::user_msg("And 6 times 8?"),
-            ],
+            ]
+            .into(),
             max_tokens: Some(256),
             ..Default::default()
         };
@@ -319,7 +320,7 @@ mod stream_sequence {
         let provider = gemini_provider_at(&server.uri());
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![common::user_msg("hi")],
+            messages: vec![common::user_msg("hi")].into(),
             max_tokens: Some(64),
             stream: Some(true),
             ..Default::default()

@@ -48,7 +48,7 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
     let mut texts: Vec<String> = Vec::new();
 
     // Collect system-role messages.
-    for msg in &req.messages {
+    for msg in &*req.messages {
         if !matches!(msg.role, Role::System) {
             continue;
         }
@@ -95,7 +95,7 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
 fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> {
     let mut contents: Vec<Content> = Vec::new();
 
-    for msg in &req.messages {
+    for msg in &*req.messages {
         match msg.role {
             Role::System => {
                 // Lifted into systemInstruction above; skip here.
@@ -742,7 +742,7 @@ mod tests {
     fn base_req() -> ChatRequest {
         ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("hello")],
+            messages: vec![make_user("hello")].into(),
             ..Default::default()
         }
     }
@@ -766,7 +766,8 @@ mod tests {
                 make_user("hi"),
                 make_assistant("hello back"),
                 make_user("thanks"),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -781,7 +782,7 @@ mod tests {
     fn system_message_lifted_into_system_instruction() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_system("you are helpful"), make_user("hi")],
+            messages: vec![make_system("you are helpful"), make_user("hi")].into(),
             ..Default::default()
         };
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -809,7 +810,8 @@ mod tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
                 })]),
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -837,7 +839,8 @@ mod tests {
                 name: Some("get_weather".into()),
                 tool_call_id: Some("call_1".into()),
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
         let body = translate("gemini:test", &req).expect("translate ok");
@@ -856,7 +859,7 @@ mod tests {
         use routectl_core::{CustomTool, ToolDef};
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("call something")],
+            messages: vec![make_user("call something")].into(),
             tools: Some(vec![ToolDef::Custom(CustomTool {
                 name: "my_fn".into(),
                 description: Some("does stuff".into()),
@@ -883,7 +886,7 @@ mod tests {
         use routectl_core::{CustomTool, ToolDef};
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("hi")],
+            messages: vec![make_user("hi")].into(),
             tools: Some(vec![ToolDef::Custom(CustomTool {
                 name: "f".into(),
                 description: None,
@@ -906,7 +909,7 @@ mod tests {
     fn generation_config_fields_populate_correctly() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("hi")],
+            messages: vec![make_user("hi")].into(),
             temperature: Some(0.7),
             top_p: Some(0.9),
             max_tokens: Some(512),
@@ -928,7 +931,7 @@ mod tests {
     fn req_with_reasoning(r: routectl_core::ReasoningConfig) -> ChatRequest {
         ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("hi")],
+            messages: vec![make_user("hi")].into(),
             reasoning: Some(r),
             ..Default::default()
         }
@@ -1001,7 +1004,7 @@ mod tests {
     fn response_format_json_schema_maps_to_response_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("hi")],
+            messages: vec![make_user("hi")].into(),
             response_format: Some(json!({
                 "type": "json_schema",
                 "json_schema": {"schema": {"type": "object", "properties": {}}}
@@ -1020,7 +1023,7 @@ mod tests {
     fn response_format_json_object_sets_mime_without_schema() {
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("hi")],
+            messages: vec![make_user("hi")].into(),
             response_format: Some(json!({"type": "json_object"})),
             ..Default::default()
         };
@@ -1062,7 +1065,7 @@ mod tests {
         };
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
-            messages: vec![make_user("q"), assistant],
+            messages: vec![make_user("q"), assistant].into(),
             ..Default::default()
         };
         let body = translate("gemini:test", &req).expect("translate");

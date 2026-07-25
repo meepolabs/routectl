@@ -50,7 +50,8 @@ fn user_request(model: &str) -> routectl_core::ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         temperature: Some(0.5),
         max_tokens: Some(128),
         ..Default::default()
@@ -565,7 +566,8 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
     // Build a request whose history contains an assistant message with
     // reasoning_details and reasoning fields populated.
     let mut req = user_request("deepseek-reasoner");
-    req.messages.push(Message {
+    let mut msgs = req.messages.to_vec();
+    msgs.push(Message {
         refusal: None,
         role: Role::Assistant,
         content: MessageContent::Text("Prior answer".into()),
@@ -575,7 +577,7 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
         tool_call_id: None,
         tool_calls: None,
     });
-    req.messages.push(Message {
+    msgs.push(Message {
         refusal: None,
         role: Role::User,
         content: MessageContent::Text("Follow-up question".into()),
@@ -585,6 +587,7 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
         tool_call_id: None,
         tool_calls: None,
     });
+    req.messages = msgs.into();
 
     let provider = make_provider(&server.uri(), ReasoningDialect::DeepSeek);
 
@@ -652,7 +655,8 @@ fn strict_translation_off_warns_and_allows_request() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
         ..Default::default()
     };
@@ -696,7 +700,8 @@ fn strict_translation_on_rejects_canonical_only_fields() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
         anthropic_beta: vec!["context-1m-2025-08-07".into()],
         ..Default::default()

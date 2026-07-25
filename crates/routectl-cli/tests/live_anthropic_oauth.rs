@@ -41,7 +41,8 @@ fn make_request(stream: bool) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         max_tokens: Some(40),
         stream: Some(stream),
         ..Default::default()

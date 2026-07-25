@@ -549,7 +549,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             max_tokens: Some(2048),
             reasoning: Some(ReasoningConfig {
                 effort: Some("medium".into()),

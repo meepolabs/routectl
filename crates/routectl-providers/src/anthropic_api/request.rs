@@ -133,7 +133,7 @@ impl cache_control::CacheBreakpointSource for AnthropicRequest {
         }
 
         // Then messages.
-        for m in &self.messages {
+        for m in &*self.messages {
             if let AnthropicContent::Blocks(blocks) = &m.content {
                 for b in blocks {
                     if let Some(cc) = content_block_cache_control(b) {
