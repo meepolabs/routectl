@@ -172,6 +172,20 @@ codegen-units = 1
 # or the deploy target stops caring about binary size.
 opt-level = "z"
 panic = "abort"
+
+[profile.bench]
+# Bench builds inherit the shipped release codegen (lto=thin,
+# codegen-units=1, opt-level="z") so measurements reflect the real binary.
+# `debug = 1` adds line-table debug info so the dhat heap-profile call
+# sites symbolize to file:line; `strip = false` is required alongside it
+# because [profile.release] sets `strip = true`, which would otherwise
+# discard those line tables and leave dhat with bare addresses. Neither
+# setting changes codegen -- the before/after bench guardrail confirms
+# medians and alloc counts are unchanged.
+inherits = "release"
+debug = 1
+strip = false
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # All 6 workspace crates are internal (publish = false). The CI gate runs

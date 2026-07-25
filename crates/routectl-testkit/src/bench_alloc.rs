@@ -93,6 +93,16 @@ pub fn alloc_count_mode() -> bool {
     matches!(std::env::var("BENCH_ALLOC_COUNT").as_deref(), Ok("1"))
 }
 
+/// Whether the dhat heap-profile pass was requested via `BENCH_DHAT=1`.
+///
+/// The dhat allocator and profiler live behind each bench crate's `dhat`
+/// feature (this testkit carries no dhat dependency); this is only the
+/// shared env-flag check, so all three bench binaries parse the request
+/// identically -- mirroring [`alloc_count_mode`].
+pub fn dhat_profile_mode() -> bool {
+    matches!(std::env::var("BENCH_DHAT").as_deref(), Ok("1"))
+}
+
 /// One benchmark case: a stable name plus the closures performing a
 /// single unit of the measured work. The same case feeds both the
 /// criterion timing path and the allocation-count pass, so it is defined

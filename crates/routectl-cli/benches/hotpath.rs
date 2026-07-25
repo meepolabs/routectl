@@ -22,7 +22,9 @@ use std::time::Duration;
 use axum::http::HeaderMap;
 use criterion::{BatchSize, Criterion};
 use routectl_core::{ChatResponse, Choice, Message, MessageContent, Role, Usage};
-use routectl_testkit::bench_alloc::{self, BenchCase, CountingAllocator};
+#[cfg(not(feature = "dhat"))]
+use routectl_testkit::bench_alloc::CountingAllocator;
+use routectl_testkit::bench_alloc::{self, BenchCase};
 use routectl_testkit::bench_fixtures::{BenchFixture, SpectrumProfile};
 use serde_json::{Value, json};
 
@@ -31,8 +33,20 @@ use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::openai::OpenAiIngress;
 use routectl_cli::ingress::token_estimate::estimate_input_tokens;
 
+// The perf benches run under one of two mutually exclusive global
+// allocators, selected at compile time: by default the CountingAllocator
+// (exact allocs/bytes tallies -- the totals-of-record), and under the
+// `dhat` feature dhat::Alloc (heap-profile attribution -- WHERE the
+// allocations happen). SINGLE REMOVAL POINT: when a successor profiler
+// replaces dhat, delete the `dhat`-gated arm here and the dhat wiring in
+// Cargo.toml.
+#[cfg(not(feature = "dhat"))]
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
+
+#[cfg(feature = "dhat")]
+#[global_allocator]
+static GLOBAL: dhat::Alloc = dhat::Alloc;
 
 /// Profiles fed to the `ingress_parse` stage (both dialects).
 const PARSE_PROFILES: [SpectrumProfile; 4] = [
@@ -189,6 +203,23 @@ fn main() {
                 black_box(wire);
             },
         ));
+    }
+
+    #[cfg(feature = "dhat")]
+    if bench_alloc::dhat_profile_mode() {
+        // Run every case once under a single heap profiler; the JSON is
+        // written on profiler drop to DHAT_OUTPUT (or dhat's default file
+        // name). Never inside criterion's sampling loop -- the dhat
+        // allocator + backtrace capture distort wall time.
+        let mut builder = dhat::Profiler::builder();
+        if let Ok(path) = std::env::var("DHAT_OUTPUT") {
+            builder = builder.file_name(path);
+        }
+        let _profiler = builder.build();
+        for case in &cases {
+            case.run();
+        }
+        return;
     }
 
     if bench_alloc::alloc_count_mode() {
