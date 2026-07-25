@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
-use axum::body::Bytes;
-use axum::http::{HeaderMap, StatusCode};
+use axum::body::{Body, Bytes};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
@@ -411,6 +411,24 @@ pub(crate) fn render_body_rejection(
     )
 }
 
+/// Build the 200 response for a rendered non-streaming body: the finished
+/// wire `Bytes` carried straight through with an explicit
+/// `application/json` content-type. The adapter already serialized the
+/// canonical response to these exact bytes (single serialize), so the
+/// handler adds no second pass. Named as a seam so the egress bytes +
+/// header are unit-testable without driving a full dispatch.
+fn ok_json_response(body: Bytes) -> Response {
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        Body::from(body),
+    )
+        .into_response()
+}
+
 async fn complete_response<A: IngressAdapter>(
     router: Arc<routectl_router::Router>,
     req: routectl_core::ChatRequest,
@@ -444,12 +462,11 @@ async fn complete_response<A: IngressAdapter>(
                     // only path where the client receives 200 + body, so
                     // finalize `ok` here rather than before the render.
                     capture.finalize(Outcome::Ok);
-                    // Trace-level egress body for triage. Single
-                    // call site covers both ingresses (openai/anthropic)
-                    // because every non-streaming response funnels through
-                    // here after canonical -> wire serialization.
-                    routectl_core::trace_egress_body(adapter.id(), &body);
-                    let resp = (StatusCode::OK, Json(body)).into_response();
+                    // The trace-level egress body (dir 4) fires inside the
+                    // adapter render now, before the single `to_vec`: the
+                    // handler holds only the finished wire bytes and no
+                    // longer has the `Value` the trace redactor needs.
+                    let resp = ok_json_response(body);
                     // Dir 4: egress response headers, captured from the
                     // built response so the trace reflects what the client
                     // receives. Read before returning (no borrow conflict;

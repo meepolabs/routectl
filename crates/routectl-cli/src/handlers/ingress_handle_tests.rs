@@ -205,6 +205,63 @@ async fn body_to_value(resp: Response) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// Exact-byte pin: the Anthropic non-streaming handler response body is the
+/// dialect wire JSON serialized exactly once, carried through unchanged,
+/// with an explicit `application/json` content-type. The literal is the
+/// byte string the pre-P5 `render_response -> Value` + `axum::Json(Value)`
+/// path produced (both directions serialize the same `Value` with
+/// `preserve_order` off, so keys sort alphabetically). If this literal
+/// drifts, the single-serialize path changed the client-visible bytes.
+#[tokio::test]
+async fn anthropic_non_stream_ok_body_bytes_are_stable_single_serialize() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    let body = AnthropicIngress
+        .render_response(ok_response_with_usage(11, 7))
+        .expect("anthropic render");
+    let resp = ok_json_response(body);
+
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("content-type set"),
+        "application/json",
+    );
+    let bytes = to_bytes(resp.into_body(), 8 * 1024).await.unwrap();
+    let expected = br#"{"content":[{"text":"hi","type":"text"}],"id":"resp-1","model":"m","role":"assistant","stop_reason":"end_turn","stop_sequence":null,"type":"message","usage":{"input_tokens":11,"output_tokens":7}}"#;
+    assert_eq!(
+        bytes.as_ref(),
+        expected.as_slice(),
+        "Anthropic egress body bytes must match the pre-P5 Json(Value) serialization",
+    );
+}
+
+/// Exact-byte pin: OpenAI dialect. See the Anthropic sibling above for the
+/// invariant this literal guards.
+#[tokio::test]
+async fn openai_non_stream_ok_body_bytes_are_stable_single_serialize() {
+    use crate::ingress::openai::OpenAiIngress;
+
+    let body = OpenAiIngress
+        .render_response(ok_response_with_usage(11, 7))
+        .expect("openai render");
+    let resp = ok_json_response(body);
+
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("content-type set"),
+        "application/json",
+    );
+    let bytes = to_bytes(resp.into_body(), 8 * 1024).await.unwrap();
+    let expected = br#"{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"user"}}],"created":0,"id":"resp-1","model":"m","usage":{"completion_tokens":7,"prompt_tokens":11,"total_tokens":18}}"#;
+    assert_eq!(
+        bytes.as_ref(),
+        expected.as_slice(),
+        "OpenAI egress body bytes must match the pre-P5 Json(Value) serialization",
+    );
+}
+
 #[tokio::test]
 async fn anthropic_envelope_unknown_alias_emits_not_found_error() {
     // Arrange
@@ -1233,7 +1290,10 @@ impl<A: IngressAdapter> IngressAdapter for RenderChunkFailsOnceAdapter<A> {
     ) -> routectl_core::Result<routectl_core::ChatRequest> {
         self.inner.parse_request(headers, body)
     }
-    fn render_response(&self, resp: routectl_core::ChatResponse) -> routectl_core::Result<Value> {
+    fn render_response(
+        &self,
+        resp: routectl_core::ChatResponse,
+    ) -> routectl_core::Result<bytes::Bytes> {
         self.inner.render_response(resp)
     }
     fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {

@@ -1065,7 +1065,7 @@ fn render_response_emits_response_envelope() {
     let resp = ChatResponse::default();
 
     // Act
-    let v = ResponsesIngress.render_response(resp).unwrap();
+    let v = ResponsesIngress.render_response_value(resp).unwrap();
 
     // Assert
     assert_eq!(v["object"], "response");

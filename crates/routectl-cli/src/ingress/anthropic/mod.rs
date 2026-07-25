@@ -278,8 +278,8 @@ impl IngressAdapter for AnthropicIngress {
         translate_request(headers, body)
     }
 
-    fn render_response(&self, resp: ChatResponse) -> Result<Value> {
-        Ok(render_messages_response(resp))
+    fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
+        crate::ingress::render_value_to_bytes(self.id(), render_messages_response(resp))
     }
 
     fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {

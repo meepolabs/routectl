@@ -89,9 +89,12 @@ fn openai_compat_to_anthropic_render_strips_vendor_keys_and_omits_null_signature
     );
 
     // Anthropic ingress render -> wire body served back to caller.
-    let body = AnthropicIngress
-        .render_response(canonical)
-        .expect("render_response must succeed");
+    let body: Value = serde_json::from_slice(
+        &AnthropicIngress
+            .render_response(canonical)
+            .expect("render_response must succeed"),
+    )
+    .expect("rendered body is valid JSON");
 
     // Assert (1): top-level envelope keys do not leak. Iterate the
     // shared allow-list so a future addition to
@@ -206,9 +209,12 @@ fn openai_render_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
         upstream_meta: None,
     };
 
-    let v = OpenAiIngress
-        .render_response(resp)
-        .expect("render_response must succeed");
+    let v: Value = serde_json::from_slice(
+        &OpenAiIngress
+            .render_response(resp)
+            .expect("render_response must succeed"),
+    )
+    .expect("rendered body is valid JSON");
 
     // Assert (1): tool_calls populated with exactly one entry.
     let tool_calls = v["choices"][0]["message"]["tool_calls"]

@@ -20,8 +20,20 @@ mod common;
 
 use routectl_cli::ingress::IngressAdapter;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
+use serde_json::Value;
 
 use common::scenarios;
+
+/// Render a canonical response through the Anthropic ingress and decode
+/// the wire body bytes back into a `Value` for shape assertions. The
+/// trait returns finished body `Bytes`; with `preserve_order` off the
+/// decode is lossless.
+fn render_wire(resp: routectl_core::ChatResponse) -> Value {
+    let bytes = AnthropicIngress
+        .render_response(resp)
+        .expect("anthropic ingress render");
+    serde_json::from_slice(&bytes).expect("rendered body is valid JSON")
+}
 
 // =====================================================================
 // Scenario 4: stop_reason_round_trip
@@ -39,9 +51,7 @@ use common::scenarios;
 fn ingress_anthropic_render_stop_reason_end_turn() {
     let resp = scenarios::scenario_4_response_stop_reason_end_turn();
 
-    let wire = AnthropicIngress
-        .render_response(resp)
-        .expect("anthropic ingress render");
+    let wire = render_wire(resp);
 
     // Explicit pin on the bug class (B/K) BEFORE the snapshot so a
     // regression surfaces with a clear failure message rather than
@@ -58,9 +68,7 @@ fn ingress_anthropic_render_stop_reason_end_turn() {
 fn ingress_anthropic_render_stop_reason_pause_turn() {
     let resp = scenarios::scenario_4_response_stop_reason_pause_turn();
 
-    let wire = AnthropicIngress
-        .render_response(resp)
-        .expect("anthropic ingress render");
+    let wire = render_wire(resp);
 
     // Anthropic-only stop reasons must passthrough verbatim --
     // they must NOT be clobbered to `end_turn`. Pre-fix the
@@ -94,9 +102,7 @@ fn ingress_anthropic_render_stop_reason_pause_turn() {
 fn ingress_anthropic_render_matched_stop_sequence() {
     let resp = scenarios::scenario_11_response_matched_stop_sequence();
 
-    let wire = AnthropicIngress
-        .render_response(resp)
-        .expect("anthropic ingress render");
+    let wire = render_wire(resp);
 
     // The two assertions pin the wire-shape contract that closes
     // the bug class: stop_reason MUST be "stop_sequence" (not the
