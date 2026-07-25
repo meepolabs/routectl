@@ -24,6 +24,11 @@ bedrock = ["routectl-providers/bedrock"]
 # drift-guard test). Off by default so the runtime binary does not carry
 # the multi-megabyte snapshot text.
 gen-catalog = []
+# Bench-only: swaps the perf bench global allocator to dhat's heap
+# profiler (see benches/dispatch_clone.rs). Never a default feature;
+# enabled via `--features routectl-router/dhat` by
+# scripts/bench.sh --profile heap.
+dhat = ["dep:dhat"]
 
 [[bin]]
 name = "gen_catalog"
@@ -50,6 +55,13 @@ lru.workspace = true
 url.workspace = true
 tempfile = "3"
 fd-lock = "4"
+
+# Heap-allocation profiler for the perf bench ONLY, and ONLY when the
+# `dhat` feature is enabled -- never a default feature, so the shipped
+# binary never links it. Cargo forbids an optional dev-dependency, so it
+# is an optional regular dependency; nothing in the library references it.
+# The cfg gate in benches/dispatch_clone.rs is the single removal point.
+dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

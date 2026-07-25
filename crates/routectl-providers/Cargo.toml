@@ -45,6 +45,10 @@ default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses", "gem
     "dep:http",
     "dep:base64",
 ]
+# Bench-only: swaps the perf bench global allocator to dhat's heap
+# profiler (see benches/egress.rs). Never a default feature; enabled via
+# `--features routectl-providers/dhat` by scripts/bench.sh --profile heap.
+dhat = ["dep:dhat"]
 
 [dependencies]
 routectl-core.workspace = true
@@ -104,6 +108,13 @@ aws-types = { version = "1.3", optional = true }
 http = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 xxhash-rust = { version = "0.8", optional = true, features = ["xxh64"] }
+
+# Heap-allocation profiler for the perf bench ONLY, and ONLY when the
+# `dhat` feature is enabled -- never a default feature, so the shipped
+# library never links it. Cargo forbids an optional dev-dependency, so it
+# is an optional regular dependency; nothing in the library references it.
+# The cfg gate in benches/egress.rs is the single removal point.
+dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # Enable the shared contract-test fixture builders (test_utils) from core.

@@ -86,7 +86,7 @@ FIXTURE_PROFILES="tool_heavy large_image plain_round_trip no_marker cache_less l
 TOLERANCE_PCT=5
 
 usage() {
-    echo "usage: $0 [OUTPUT_DIR]" >&2
+    echo "usage: $0 [--profile heap] [OUTPUT_DIR]" >&2
     exit 2
 }
 
@@ -120,7 +120,29 @@ median_for() {
 }
 
 main() {
+    # Arg parse: an optional `--profile heap` selects the dhat heap-profile
+    # suite; with no --profile the behaviour is byte-identical to before.
+    local profile=""
+    local -a positional=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profile)
+                [[ $# -ge 2 ]] || usage
+                profile="$2"; shift 2 ;;
+            --profile=*)
+                profile="${1#--profile=}"; shift ;;
+            --)
+                shift; while [[ $# -gt 0 ]]; do positional+=("$1"); shift; done ;;
+            -*)
+                usage ;;
+            *)
+                positional+=("$1"); shift ;;
+        esac
+    done
+    set -- ${positional[@]+"${positional[@]}"}
     [[ $# -le 1 ]] || usage
+    [[ -z "$profile" || "$profile" == "heap" ]] \
+        || { echo "bench.sh: unknown --profile '$profile' (only 'heap' is supported)" >&2; usage; }
     local output_dir="${1:-$REPO_ROOT/bench-results}"
 
     command -v cargo >/dev/null || fail "cargo not found on PATH"
@@ -172,6 +194,17 @@ main() {
 
     echo "bench.sh: run dir $run_dir" >&2
     echo "bench.sh: target dir $CARGO_TARGET_DIR" >&2
+
+    # Heap-profile suite: attribution only, single run per target, no
+    # baseline record. Everything above (hermetic HOME/XDG + target dir +
+    # sha/dirty + load tag) is shared with the default path.
+    if [[ "$profile" == "heap" ]]; then
+        run_dhat_suite "$output_dir" "$shortsha" "$dirty"
+        local loadavg_after_heap
+        loadavg_after_heap="$(cut -d' ' -f1 </proc/loadavg 2>/dev/null || echo unknown)"
+        echo "bench.sh: heap profile complete (loadavg before=$loadavg_before after=$loadavg_after_heap [$load_tag])" >&2
+        return
+    fi
 
     run_wall_suite run1
     run_wall_suite run2
@@ -281,6 +314,37 @@ run_alloc_suite() {
             out_bytes["$bench"]="$b"
         done < <(grep -E '^[a-z_]+__[a-z_]+__[a-z]+ allocs=[0-9]+ bytes=[0-9]+$' "$log" || true)
     done
+}
+
+# Run each bench target ONCE under the dhat heap profiler and write one
+# JSON per target into the output dir, named
+# dhat-<target>-<shortsha>[-dirty].json. Each target is compiled with its
+# `dhat` feature (swapping the bench global allocator to dhat::Alloc) and
+# invoked with BENCH_DHAT=1, so the bench main() runs every case once under
+# a single profiler instead of criterion's sampling loop. A single run is
+# correct: dhat attribution is deterministic on the byte-stable fixtures,
+# so the wall-time noise contract does not apply -- and wall time is never
+# read under dhat (the allocator + backtrace capture distort it).
+run_dhat_suite() {
+    local out="$1" shortsha="$2" dirty="$3"
+    mkdir -p "$out"
+    out="$(cd "$out" && pwd)"
+    local suffix=""
+    [[ "$dirty" == "dirty" ]] && suffix="-dirty"
+    local i crate target json log
+    for i in "${!BENCH_CRATES[@]}"; do
+        crate="${BENCH_CRATES[$i]}"
+        target="${BENCH_TARGETS[$i]}"
+        json="$out/dhat-$target-$shortsha$suffix.json"
+        log="$run_dir/dhat-$crate-$target.log"
+        echo "bench.sh: heap-profile $crate/$target -> $json" >&2
+        (
+            cd "$REPO_ROOT"
+            BENCH_DHAT=1 DHAT_OUTPUT="$json" \
+                cargo bench -p "$crate" --bench "$target" --features "$crate/dhat"
+        ) >"$log" 2>&1 </dev/null || fail "heap-profile run failed ($crate/$target); see $log"
+    done
+    echo "bench.sh: heap profiles written to $out" >&2
 }
 
 # Assemble the metadata header + summary table into the record file.
