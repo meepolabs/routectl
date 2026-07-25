@@ -5,7 +5,9 @@
 //! read the captured per-attempt request (the bytes the egress would see)
 //! and the returned meta; the original request is never mutated.
 use super::*;
-use crate::config::{CacheConfig, ProviderEntry, ProviderRuntimePolicy, ReductionConfig};
+use crate::config::{
+    AliasValue, CacheConfig, ProviderEntry, ProviderRuntimePolicy, ReductionConfig,
+};
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use parking_lot::Mutex as ParkingMutex;
@@ -359,5 +361,184 @@ fn strategy_token_maps_every_case_to_stable_string() {
     assert_eq!(
         reduction_strategy_token(true, Some(&ReductionOutcome::NothingToStrip)),
         "skipped:nothing-to-strip",
+    );
+}
+
+/// Shared handle to the requests a capturing provider recorded, in
+/// dispatch order.
+type Captured = Arc<ParkingMutex<Vec<ChatRequest>>>;
+
+/// Captures each request it is handed (like `CapturingProvider`) and then
+/// fails with a fallbackable upstream 503 on BOTH the complete and stream
+/// paths. Used as the FIRST chain entry so its per-attempt context
+/// reduction fires (mutating its own clone) before it hands the chain off
+/// to the second entry.
+struct CapturingFailProvider {
+    id: String,
+    captured: Captured,
+}
+
+#[async_trait]
+impl Provider for CapturingFailProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response(&self.id, "unused"))
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        self.captured.lock().push(req);
+        Err(Error::upstream(&self.id, 503, "entry1 down; fall back"))
+    }
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.captured.lock().push(req);
+        Err(Error::upstream(&self.id, 503, "entry1 down; fall back"))
+    }
+}
+
+/// Build a two-entry fallback chain `flow = [entry1, entry2]`.
+///
+/// entry1 (`CapturingFailProvider`) has reduction ENABLED (inherits the
+/// global switch): its per-attempt clone is compacted, then it fails 503
+/// and the chain falls over to entry2. entry2 (`CapturingProvider`) has
+/// reduction explicitly OFF (`reduction_enabled = Some(false)`) so its own
+/// dispatch performs NO mutation -- whatever it captures is exactly the
+/// bytes cloned off the shared request. That makes entry2's capture a
+/// clean discriminator: if entry1's mutation had leaked into the shared
+/// request, entry2 would see the compacted JSON; isolation means it sees
+/// the pristine pretty JSON.
+///
+/// `max_attempts = 1` so entry1 fails fast without burning backoff.
+fn two_entry_chain_rig() -> (Router, Captured, Captured) {
+    let mut config = Config {
+        cache: CacheConfig {
+            auto_emit_top_level_breakpoint: false,
+        },
+        reduction: ReductionConfig { enabled: true },
+        retry: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    config.aliases.insert(
+        "flow".into(),
+        AliasValue::Chain(vec!["entry1".into(), "entry2".into()]),
+    );
+    config.providers.insert("p1".into(), anthropic_entry());
+    config
+        .providers
+        .insert("p2".into(), anthropic_entry_reduction_off());
+
+    let mut router = Router::new(Arc::new(config));
+    let cap1: Captured = Arc::new(ParkingMutex::new(Vec::new()));
+    let cap2: Captured = Arc::new(ParkingMutex::new(Vec::new()));
+    let p1: Arc<dyn Provider> = Arc::new(CapturingFailProvider {
+        id: "cap1".into(),
+        captured: cap1.clone(),
+    });
+    let p2: Arc<dyn Provider> = Arc::new(CapturingProvider {
+        id: "cap2".into(),
+        captured: cap2.clone(),
+    });
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "entry1".into(),
+        Arc::new(ResolvedModel::new("entry1", "p1", p1, "u1")),
+    );
+    models.insert(
+        "entry2".into(),
+        Arc::new(ResolvedModel::new("entry2", "p2", p2, "u2")),
+    );
+    router.install_resolved_models(models);
+    (router, cap1, cap2)
+}
+
+/// A `flow` request whose model is the two-entry chain alias.
+fn flow_req_with_pretty_tool_result() -> ChatRequest {
+    ChatRequest {
+        model: "flow".into(),
+        ..req_with_pretty_tool_result()
+    }
+}
+
+#[tokio::test]
+async fn fallback_chain_isolates_per_attempt_reduction_from_shared_request() {
+    // INVARIANT the P2 Arc<[Message]> copy-on-write must preserve: a
+    // per-attempt mutation on the FIRST chain entry (message-tail context
+    // reduction) must not leak into the shared request the SECOND entry
+    // clones from. entry1 reduces its own clone then 503s; entry2 (reduction
+    // off) must see the PRISTINE pretty JSON, proving the mutation stayed
+    // local to entry1's attempt.
+    let (router, cap1, cap2) = two_entry_chain_rig();
+    let dispatched = router
+        .complete_with_options(flow_req_with_pretty_tool_result(), RouterOptions::default())
+        .await;
+    dispatched
+        .result
+        .expect("entry2 serves after entry1 falls back");
+    assert_eq!(
+        dispatched.meta.fallback_count, 1,
+        "the request must have fallen over to the second chain entry",
+    );
+
+    let up1 = cap1.lock();
+    let up1 = up1.first().expect("entry1 dispatched once");
+    assert_eq!(
+        first_tool_result_content(up1),
+        &serde_json::json!("{\"rows\":[1,2,3]}"),
+        "entry1's per-attempt clone must be COMPACTED (its reduction fired)",
+    );
+
+    let up2 = cap2.lock();
+    let up2 = up2.first().expect("entry2 dispatched once after fallback");
+    assert_eq!(
+        first_tool_result_content(up2),
+        &serde_json::json!("{\n  \"rows\": [1, 2, 3]\n}"),
+        "entry2 must receive PRISTINE messages; entry1's mutation must not \
+         leak into the shared request",
+    );
+}
+
+#[tokio::test]
+async fn stream_fallback_chain_isolates_per_attempt_reduction_from_shared_request() {
+    // Streaming analogue: the same isolation invariant on the stream
+    // dispatch clone site. entry1 reduces its own clone then fails
+    // stream-open with a fallbackable 503; entry2 (reduction off) opens the
+    // stream and must see the PRISTINE pretty JSON.
+    let (router, cap1, cap2) = two_entry_chain_rig();
+    let dispatched = router
+        .stream_with_options(flow_req_with_pretty_tool_result(), RouterOptions::default())
+        .await;
+    let stream = dispatched
+        .result
+        .expect("entry2 serves after entry1 falls back");
+    let _ = stream.collect::<Vec<_>>().await;
+    assert_eq!(
+        dispatched.meta.fallback_count, 1,
+        "the stream request must have fallen over to the second chain entry",
+    );
+
+    let up1 = cap1.lock();
+    let up1 = up1.first().expect("entry1 stream-dispatched once");
+    assert_eq!(
+        first_tool_result_content(up1),
+        &serde_json::json!("{\"rows\":[1,2,3]}"),
+        "entry1's per-attempt clone must be COMPACTED (its reduction fired)",
+    );
+
+    let up2 = cap2.lock();
+    let up2 = up2
+        .first()
+        .expect("entry2 stream-dispatched once after fallback");
+    assert_eq!(
+        first_tool_result_content(up2),
+        &serde_json::json!("{\n  \"rows\": [1, 2, 3]\n}"),
+        "entry2 must receive PRISTINE messages on the stream path; entry1's \
+         mutation must not leak into the shared request",
     );
 }

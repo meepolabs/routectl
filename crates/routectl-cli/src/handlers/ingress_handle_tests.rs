@@ -3788,3 +3788,306 @@ fn map_error_json_logs_detail_server_side() {
         .expect("json error must emit a server-side ERROR log");
     assert_eq!(logged.field("detail"), Some(expected.as_str()));
 }
+
+/// Pre-change ingress rejection contract + forward-compat extras sweep.
+///
+/// Locks today's per-endpoint wire behavior on today's code so a later
+/// switch to `Bytes` extraction with hand-rolled 4xx rendering stays
+/// honest. The rejection tests drive the REAL per-endpoint handler
+/// functions mounted behind the same `DefaultBodyLimit` layer
+/// `server::serve::build_axum_router` installs, via `oneshot`, so the
+/// axum `Json` extractor AND the body-size layer are exercised exactly as
+/// in production. The extras tests go through the `IngressAdapter::
+/// parse_request` trait boundary -- the surface a later change
+/// re-signatures.
+mod pre_change_ingress_contract {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::extract::DefaultBodyLimit;
+    use axum::http::{HeaderMap, Request, StatusCode};
+    use axum::routing::post;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use crate::ingress::IngressAdapter;
+    use crate::ingress::anthropic::AnthropicIngress;
+    use crate::ingress::openai::OpenAiIngress;
+    use crate::ingress::openai_responses::ResponsesIngress;
+    use crate::server::AppState;
+
+    /// Small cap so an oversized body is a few KB, not tens of MB.
+    const REJECT_BODY_LIMIT: usize = 1024;
+
+    fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let swap = Arc::new(arc_swap::ArcSwap::from(super::k_test_router()));
+        AppState::for_test(swap)
+    }
+
+    fn post_req(uri: &str, content_type: Option<&str>, body: impl Into<Body>) -> Request<Body> {
+        let mut builder = Request::builder().method("POST").uri(uri);
+        if let Some(ct) = content_type {
+            builder = builder.header("content-type", ct);
+        }
+        builder.body(body.into()).expect("request builds")
+    }
+
+    /// A syntactically valid JSON body whose byte length exceeds
+    /// `REJECT_BODY_LIMIT`, so the body-size layer -- not the JSON parser
+    /// -- is what rejects it.
+    fn oversized_body() -> String {
+        format!(
+            "{{\"model\":\"m\",\"pad\":\"{}\"}}",
+            "a".repeat(REJECT_BODY_LIMIT * 2)
+        )
+    }
+
+    async fn drive(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {
+        let resp = app.oneshot(req).await.expect("router is infallible");
+        let status = resp.status();
+        let body = super::body_to_value(resp).await;
+        (status, body)
+    }
+
+    fn app_for_messages(state: Arc<AppState>) -> axum::Router {
+        axum::Router::new()
+            .route("/v1/messages", post(crate::handlers::messages::messages))
+            .layer(DefaultBodyLimit::max(REJECT_BODY_LIMIT))
+            .with_state(state)
+    }
+
+    fn app_for_chat_completions(state: Arc<AppState>) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(crate::handlers::chat_completions::chat_completions),
+            )
+            .layer(DefaultBodyLimit::max(REJECT_BODY_LIMIT))
+            .with_state(state)
+    }
+
+    fn app_for_responses(state: Arc<AppState>) -> axum::Router {
+        axum::Router::new()
+            .route("/v1/responses", post(crate::handlers::responses::responses))
+            .layer(DefaultBodyLimit::max(REJECT_BODY_LIMIT))
+            .with_state(state)
+    }
+
+    /// Pin the full Anthropic-dialect rejection envelope. The routectl-owned
+    /// shape and classifier are asserted byte-for-byte; the human message
+    /// string is axum-owned today and spliced back in, so the pin does not
+    /// force a later hand-rolled renderer to reproduce axum's exact wording.
+    fn assert_anthropic_reject(status: StatusCode, body: &Value, expected: StatusCode) {
+        assert_eq!(status, expected, "anthropic rejection status");
+        let msg = body["error"]["message"]
+            .as_str()
+            .expect("anthropic envelope carries error.message string");
+        assert!(!msg.is_empty(), "rejection message must be non-empty");
+        assert_eq!(
+            *body,
+            json!({
+                "type": "error",
+                "error": { "type": "invalid_request_error", "message": msg }
+            }),
+            "exact Anthropic rejection envelope"
+        );
+    }
+
+    /// Pin the full OpenAI-dialect rejection envelope (same message caveat
+    /// as `assert_anthropic_reject`). `expected_type` is the per-mode
+    /// classifier surfaced on `error.type`.
+    fn assert_openai_reject(
+        status: StatusCode,
+        body: &Value,
+        expected: StatusCode,
+        expected_type: &str,
+    ) {
+        assert_eq!(status, expected, "openai rejection status");
+        let msg = body["error"]["message"]
+            .as_str()
+            .expect("openai envelope carries error.message string");
+        assert!(!msg.is_empty(), "rejection message must be non-empty");
+        assert_eq!(
+            *body,
+            json!({
+                "error": {
+                    "message": msg,
+                    "type": expected_type,
+                    "code": "invalid_request_error",
+                }
+            }),
+            "exact OpenAI rejection envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_rejection_contract_pins_status_and_envelope() {
+        // JSON syntax error -> 400 + Anthropic envelope.
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_messages(state),
+            post_req("/v1/messages", Some("application/json"), "{ not valid json"),
+        )
+        .await;
+        assert_anthropic_reject(status, &body, StatusCode::BAD_REQUEST);
+
+        // Wrong content-type -> 415.
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_messages(state),
+            post_req("/v1/messages", Some("text/plain"), "{}"),
+        )
+        .await;
+        assert_anthropic_reject(status, &body, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        // Oversized body -> 413 (DefaultBodyLimit layer).
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_messages(state),
+            post_req("/v1/messages", Some("application/json"), oversized_body()),
+        )
+        .await;
+        assert_anthropic_reject(status, &body, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_rejection_contract_pins_status_and_envelope() {
+        // JSON syntax error -> 400 + OpenAI envelope.
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_chat_completions(state),
+            post_req(
+                "/v1/chat/completions",
+                Some("application/json"),
+                "{ not valid json",
+            ),
+        )
+        .await;
+        assert_openai_reject(status, &body, StatusCode::BAD_REQUEST, "bad_request");
+
+        // Wrong content-type -> 415.
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_chat_completions(state),
+            post_req("/v1/chat/completions", Some("text/plain"), "{}"),
+        )
+        .await;
+        assert_openai_reject(
+            status,
+            &body,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        );
+
+        // Oversized body -> 413 (DefaultBodyLimit layer).
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_chat_completions(state),
+            post_req(
+                "/v1/chat/completions",
+                Some("application/json"),
+                oversized_body(),
+            ),
+        )
+        .await;
+        assert_openai_reject(
+            status,
+            &body,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_rejection_contract_pins_status_and_envelope() {
+        // JSON syntax error -> 400 + OpenAI envelope.
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_responses(state),
+            post_req(
+                "/v1/responses",
+                Some("application/json"),
+                "{ not valid json",
+            ),
+        )
+        .await;
+        assert_openai_reject(status, &body, StatusCode::BAD_REQUEST, "bad_request");
+
+        // Wrong content-type -> 415.
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_responses(state),
+            post_req("/v1/responses", Some("text/plain"), "{}"),
+        )
+        .await;
+        assert_openai_reject(
+            status,
+            &body,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        );
+
+        // Oversized body -> 413 (DefaultBodyLimit layer).
+        let (state, _dir) = test_state();
+        let (status, body) = drive(
+            app_for_responses(state),
+            post_req("/v1/responses", Some("application/json"), oversized_body()),
+        )
+        .await;
+        assert_openai_reject(
+            status,
+            &body,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+        );
+    }
+
+    #[test]
+    fn anthropic_parse_request_sweeps_unknown_top_level_field_into_provider_extras() {
+        let body = json!({
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1024,
+            "future_unknown_knob": {"nested": [1, 2, 3]}
+        });
+        let req = AnthropicIngress
+            .parse_request(&HeaderMap::new(), body)
+            .expect("valid Anthropic body parses");
+        let extras = req
+            .provider_extras
+            .expect("unknown top-level field must round-trip into provider_extras");
+        assert_eq!(extras["future_unknown_knob"], json!({"nested": [1, 2, 3]}));
+    }
+
+    #[test]
+    fn openai_parse_request_sweeps_unknown_top_level_field_into_provider_extras() {
+        let body = json!({
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "future_unknown_knob": "keep-me"
+        });
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .expect("valid OpenAI body parses");
+        let extras = req
+            .provider_extras
+            .expect("unknown top-level field must round-trip into provider_extras");
+        assert_eq!(extras["future_unknown_knob"], "keep-me");
+    }
+
+    #[test]
+    fn responses_parse_request_sweeps_unknown_top_level_field_into_provider_extras() {
+        let body = json!({
+            "model": "m",
+            "input": "hi",
+            "future_unknown_knob": "keep-me"
+        });
+        let req = ResponsesIngress
+            .parse_request(&HeaderMap::new(), body)
+            .expect("valid Responses body parses");
+        let extras = req
+            .provider_extras
+            .expect("unknown top-level field must round-trip into provider_extras");
+        assert_eq!(extras["future_unknown_knob"], "keep-me");
+    }
+}

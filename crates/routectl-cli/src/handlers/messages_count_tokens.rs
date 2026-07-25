@@ -74,3 +74,7 @@ pub async fn count_tokens(
         Err(e) => map_error(envelope, e),
     }
 }
+
+#[cfg(test)]
+#[path = "messages_count_tokens_tests.rs"]
+mod tests;
