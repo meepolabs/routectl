@@ -67,6 +67,7 @@ pub fn routectl_testkit::bench_alloc::CountingAllocator::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_testkit::bench_alloc::CountingAllocator
 impl<T> tracing::instrument::WithSubscriber for routectl_testkit::bench_alloc::CountingAllocator
 pub fn routectl_testkit::bench_alloc::alloc_count_mode() -> bool
+pub fn routectl_testkit::bench_alloc::dhat_profile_mode() -> bool
 pub fn routectl_testkit::bench_alloc::reset()
 pub fn routectl_testkit::bench_alloc::run_alloc_count(&[routectl_testkit::bench_alloc::BenchCase<'_>])
 pub fn routectl_testkit::bench_alloc::snapshot() -> (u64, u64)

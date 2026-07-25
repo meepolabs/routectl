@@ -996,6 +996,7 @@ pub routectl_router::config::ProviderEntry::AnthropicApi::api_key_ref: alloc::st
 pub routectl_router::config::ProviderEntry::AnthropicApi::auth_kind: routectl_providers::anthropic_api::client::AuthKind
 pub routectl_router::config::ProviderEntry::AnthropicApi::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::AnthropicApi::base_url: alloc::string::String
+pub routectl_router::config::ProviderEntry::AnthropicApi::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::config::ProviderEntry::AnthropicApi::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::config::ProviderEntry::AnthropicApi::cloak: routectl_providers::anthropic_api::cloak::CloakConfig
 pub routectl_router::config::ProviderEntry::AnthropicApi::context_management: bool
@@ -1034,6 +1035,7 @@ pub routectl_router::config::ProviderEntry::Gemini::user_agent: core::option::Op
 pub routectl_router::config::ProviderEntry::OpenaiCompat::api_key_ref: alloc::string::String
 pub routectl_router::config::ProviderEntry::OpenaiCompat::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::OpenaiCompat::base_url: alloc::string::String
+pub routectl_router::config::ProviderEntry::OpenaiCompat::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::config::ProviderEntry::OpenaiCompat::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::config::ProviderEntry::OpenaiCompat::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::config::ProviderEntry::OpenaiCompat::payload_extras: core::option::Option<serde_json::value::Value>
@@ -1046,6 +1048,7 @@ pub routectl_router::config::ProviderEntry::OpenaiResponses::api_key_ref: alloc:
 pub routectl_router::config::ProviderEntry::OpenaiResponses::auth_kind: routectl_providers::openai_responses::AuthKind
 pub routectl_router::config::ProviderEntry::OpenaiResponses::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::base_url: core::option::Option<alloc::string::String>
+pub routectl_router::config::ProviderEntry::OpenaiResponses::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::payload_extras: core::option::Option<serde_json::value::Value>
@@ -1350,6 +1353,66 @@ impl<T> typenum::type_operators::Same for routectl_router::BedrockGlobalConfig
 pub type routectl_router::BedrockGlobalConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BedrockGlobalConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::BedrockGlobalConfig::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::config::BedrockMantleConfig
+pub routectl_router::config::BedrockMantleConfig::creds: routectl_router::BedrockCredsConfig
+pub routectl_router::config::BedrockMantleConfig::region: alloc::string::String
+impl core::clone::Clone for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::clone(&self) -> routectl_router::BedrockMantleConfig
+impl core::fmt::Debug for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl schemars::JsonSchema for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::inline_schema() -> bool
+pub fn routectl_router::BedrockMantleConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::BedrockMantleConfig::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::BedrockMantleConfig::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::BedrockMantleConfig
+impl core::marker::Send for routectl_router::BedrockMantleConfig
+impl core::marker::Sync for routectl_router::BedrockMantleConfig
+impl core::marker::Unpin for routectl_router::BedrockMantleConfig
+impl core::marker::UnsafeUnpin for routectl_router::BedrockMantleConfig
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::BedrockMantleConfig
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::BedrockMantleConfig
+impl<T, U> core::convert::Into<U> for routectl_router::BedrockMantleConfig where U: core::convert::From<T>
+pub fn routectl_router::BedrockMantleConfig::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::BedrockMantleConfig where U: core::convert::Into<T>
+pub type routectl_router::BedrockMantleConfig::Error = core::convert::Infallible
+pub fn routectl_router::BedrockMantleConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::BedrockMantleConfig where U: core::convert::TryFrom<T>
+pub type routectl_router::BedrockMantleConfig::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::BedrockMantleConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub type routectl_router::BedrockMantleConfig::Owned = T
+pub fn routectl_router::BedrockMantleConfig::clone_into(&self, &mut T)
+pub fn routectl_router::BedrockMantleConfig::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub fn routectl_router::BedrockMantleConfig::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::BedrockMantleConfig where T: 'static + ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::BedrockMantleConfig where T: ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::BedrockMantleConfig where T: ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub unsafe fn routectl_router::BedrockMantleConfig::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub fn routectl_router::BedrockMantleConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::BedrockMantleConfig
+impl<T> serde_core::de::DeserializeOwned for routectl_router::BedrockMantleConfig where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::BedrockMantleConfig where T: ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::BedrockMantleConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::BedrockMantleConfig
+impl<T> tracing::instrument::WithSubscriber for routectl_router::BedrockMantleConfig
+impl<T> typenum::type_operators::Same for routectl_router::BedrockMantleConfig
+pub type routectl_router::BedrockMantleConfig::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BedrockMantleConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::BedrockMantleConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::config::CacheCapability
 pub routectl_router::config::CacheCapability::cache_hit_observable: bool
 pub routectl_router::config::CacheCapability::supports_top_level_cache_control: bool
@@ -5053,6 +5116,7 @@ pub routectl_router::ProviderEntry::AnthropicApi::api_key_ref: alloc::string::St
 pub routectl_router::ProviderEntry::AnthropicApi::auth_kind: routectl_providers::anthropic_api::client::AuthKind
 pub routectl_router::ProviderEntry::AnthropicApi::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::AnthropicApi::base_url: alloc::string::String
+pub routectl_router::ProviderEntry::AnthropicApi::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::ProviderEntry::AnthropicApi::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::ProviderEntry::AnthropicApi::cloak: routectl_providers::anthropic_api::cloak::CloakConfig
 pub routectl_router::ProviderEntry::AnthropicApi::context_management: bool
@@ -5091,6 +5155,7 @@ pub routectl_router::ProviderEntry::Gemini::user_agent: core::option::Option<all
 pub routectl_router::ProviderEntry::OpenaiCompat::api_key_ref: alloc::string::String
 pub routectl_router::ProviderEntry::OpenaiCompat::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::OpenaiCompat::base_url: alloc::string::String
+pub routectl_router::ProviderEntry::OpenaiCompat::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::ProviderEntry::OpenaiCompat::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::ProviderEntry::OpenaiCompat::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::ProviderEntry::OpenaiCompat::payload_extras: core::option::Option<serde_json::value::Value>
@@ -5103,6 +5168,7 @@ pub routectl_router::ProviderEntry::OpenaiResponses::api_key_ref: alloc::string:
 pub routectl_router::ProviderEntry::OpenaiResponses::auth_kind: routectl_providers::openai_responses::AuthKind
 pub routectl_router::ProviderEntry::OpenaiResponses::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::OpenaiResponses::base_url: core::option::Option<alloc::string::String>
+pub routectl_router::ProviderEntry::OpenaiResponses::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::ProviderEntry::OpenaiResponses::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::ProviderEntry::OpenaiResponses::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::ProviderEntry::OpenaiResponses::payload_extras: core::option::Option<serde_json::value::Value>
@@ -6102,6 +6168,66 @@ impl<T> typenum::type_operators::Same for routectl_router::BedrockGlobalConfig
 pub type routectl_router::BedrockGlobalConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BedrockGlobalConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::BedrockGlobalConfig::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::BedrockMantleConfig
+pub routectl_router::BedrockMantleConfig::creds: routectl_router::BedrockCredsConfig
+pub routectl_router::BedrockMantleConfig::region: alloc::string::String
+impl core::clone::Clone for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::clone(&self) -> routectl_router::BedrockMantleConfig
+impl core::fmt::Debug for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl schemars::JsonSchema for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::inline_schema() -> bool
+pub fn routectl_router::BedrockMantleConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::BedrockMantleConfig::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::BedrockMantleConfig::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::BedrockMantleConfig
+impl core::marker::Send for routectl_router::BedrockMantleConfig
+impl core::marker::Sync for routectl_router::BedrockMantleConfig
+impl core::marker::Unpin for routectl_router::BedrockMantleConfig
+impl core::marker::UnsafeUnpin for routectl_router::BedrockMantleConfig
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::BedrockMantleConfig
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::BedrockMantleConfig
+impl<T, U> core::convert::Into<U> for routectl_router::BedrockMantleConfig where U: core::convert::From<T>
+pub fn routectl_router::BedrockMantleConfig::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::BedrockMantleConfig where U: core::convert::Into<T>
+pub type routectl_router::BedrockMantleConfig::Error = core::convert::Infallible
+pub fn routectl_router::BedrockMantleConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::BedrockMantleConfig where U: core::convert::TryFrom<T>
+pub type routectl_router::BedrockMantleConfig::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::BedrockMantleConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub type routectl_router::BedrockMantleConfig::Owned = T
+pub fn routectl_router::BedrockMantleConfig::clone_into(&self, &mut T)
+pub fn routectl_router::BedrockMantleConfig::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub fn routectl_router::BedrockMantleConfig::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::BedrockMantleConfig where T: 'static + ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::BedrockMantleConfig where T: ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::BedrockMantleConfig where T: ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub unsafe fn routectl_router::BedrockMantleConfig::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::BedrockMantleConfig
+pub fn routectl_router::BedrockMantleConfig::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::BedrockMantleConfig where T: core::clone::Clone
+pub fn routectl_router::BedrockMantleConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::BedrockMantleConfig
+impl<T> serde_core::de::DeserializeOwned for routectl_router::BedrockMantleConfig where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::BedrockMantleConfig where T: ?core::marker::Sized
+pub fn routectl_router::BedrockMantleConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::BedrockMantleConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::BedrockMantleConfig
+impl<T> tracing::instrument::WithSubscriber for routectl_router::BedrockMantleConfig
+impl<T> typenum::type_operators::Same for routectl_router::BedrockMantleConfig
+pub type routectl_router::BedrockMantleConfig::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::BedrockMantleConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::BedrockMantleConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::BuildOptions
 pub routectl_router::BuildOptions::bedrock_allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::BuildOptions::bedrock_allowed_body_fields: alloc::vec::Vec<alloc::string::String>
@@ -10476,6 +10602,7 @@ pub const fn routectl_router::stale_after_days() -> i64
 pub fn routectl_router::trimmed_prefix_fingerprint(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimPlan) -> u64
 pub fn routectl_router::validate_alias_chain_targets(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_alias_patterns(&routectl_router::config::Config) -> routectl_core::error::Result<()>
+pub fn routectl_router::validate_bedrock_creds_refs(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_global_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::validate_capability_overrides(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
@@ -10483,7 +10610,9 @@ pub fn routectl_router::validate_class_policy(&routectl_router::config::Config) 
 pub fn routectl_router::validate_config_path(&str) -> core::result::Result<routectl_router::PathShape, routectl_router::PathError>
 pub fn routectl_router::validate_mitm_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_overrides(&alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> core::result::Result<(), alloc::string::String>
+pub fn routectl_router::validate_provider_bedrock_mantle(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_provider_credential_sources(&routectl_router::config::Config) -> routectl_core::error::Result<()>
+pub fn routectl_router::validate_provider_openai_mantle(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_reasoning_defaults(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_registry_patterns(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::with_overlay_write_lock<E, F>(&std::path::Path, F) -> core::result::Result<routectl_router::CatalogOverlay, E> where E: core::convert::From<routectl_router::OverlayError>, F: core::ops::function::FnOnce(routectl_router::CatalogOverlay) -> core::result::Result<routectl_router::CatalogOverlay, E>

@@ -322,6 +322,7 @@ pub routectl_providers::anthropic_api::AnthropicApiConfig::context_management: b
 pub routectl_providers::anthropic_api::AnthropicApiConfig::forward_client_headers: alloc::vec::Vec<alloc::string::String>
 pub routectl_providers::anthropic_api::AnthropicApiConfig::header_extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_providers::anthropic_api::AnthropicApiConfig::id: alloc::string::String
+pub routectl_providers::anthropic_api::AnthropicApiConfig::mantle: core::option::Option<routectl_providers::mantle::MantleAuth>
 pub routectl_providers::anthropic_api::AnthropicApiConfig::max_thinking_entry_bytes: usize
 pub routectl_providers::anthropic_api::AnthropicApiConfig::session_id: core::option::Option<alloc::string::String>
 pub routectl_providers::anthropic_api::AnthropicApiConfig::use_forwarded_bearer: bool
@@ -482,6 +483,54 @@ impl<T> typenum::type_operators::Same for routectl_providers::anthropic_api::Clo
 pub type routectl_providers::anthropic_api::CloakConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::anthropic_api::CloakConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::anthropic_api::CloakConfig::into_shared(self) -> Shared
+pub struct routectl_providers::anthropic_api::MantleAuth
+pub routectl_providers::anthropic_api::MantleAuth::creds: routectl_providers::bedrock::auth::ResolvedCreds
+pub routectl_providers::anthropic_api::MantleAuth::region: alloc::string::String
+impl core::clone::Clone for routectl_providers::mantle::MantleAuth
+pub fn routectl_providers::mantle::MantleAuth::clone(&self) -> routectl_providers::mantle::MantleAuth
+impl core::fmt::Debug for routectl_providers::mantle::MantleAuth
+pub fn routectl_providers::mantle::MantleAuth::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_providers::mantle::MantleAuth
+impl core::marker::Send for routectl_providers::mantle::MantleAuth
+impl core::marker::Sync for routectl_providers::mantle::MantleAuth
+impl core::marker::Unpin for routectl_providers::mantle::MantleAuth
+impl core::marker::UnsafeUnpin for routectl_providers::mantle::MantleAuth
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_providers::mantle::MantleAuth
+impl !core::panic::unwind_safe::UnwindSafe for routectl_providers::mantle::MantleAuth
+impl<T, U> core::convert::Into<U> for routectl_providers::mantle::MantleAuth where U: core::convert::From<T>
+pub fn routectl_providers::mantle::MantleAuth::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_providers::mantle::MantleAuth where U: core::convert::Into<T>
+pub type routectl_providers::mantle::MantleAuth::Error = core::convert::Infallible
+pub fn routectl_providers::mantle::MantleAuth::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_providers::mantle::MantleAuth where U: core::convert::TryFrom<T>
+pub type routectl_providers::mantle::MantleAuth::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_providers::mantle::MantleAuth::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_providers::mantle::MantleAuth where T: core::clone::Clone
+pub type routectl_providers::mantle::MantleAuth::Owned = T
+pub fn routectl_providers::mantle::MantleAuth::clone_into(&self, &mut T)
+pub fn routectl_providers::mantle::MantleAuth::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_providers::mantle::MantleAuth where T: 'static + ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_providers::mantle::MantleAuth where T: ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_providers::mantle::MantleAuth where T: ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_providers::mantle::MantleAuth where T: core::clone::Clone
+pub unsafe fn routectl_providers::mantle::MantleAuth::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_providers::mantle::MantleAuth
+pub fn routectl_providers::mantle::MantleAuth::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_providers::mantle::MantleAuth where T: core::clone::Clone
+pub fn routectl_providers::mantle::MantleAuth::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_providers::mantle::MantleAuth
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::mantle::MantleAuth where T: ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_providers::mantle::MantleAuth::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_providers::mantle::MantleAuth
+impl<T> tracing::instrument::WithSubscriber for routectl_providers::mantle::MantleAuth
+impl<T> typenum::type_operators::Same for routectl_providers::mantle::MantleAuth
+pub type routectl_providers::mantle::MantleAuth::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::mantle::MantleAuth where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_providers::mantle::MantleAuth::into_shared(self) -> Shared
 pub struct routectl_providers::anthropic_api::ToolRename
 pub routectl_providers::anthropic_api::ToolRename::from: alloc::string::String
 pub routectl_providers::anthropic_api::ToolRename::to: alloc::string::String
@@ -610,6 +659,7 @@ pub fn routectl_providers::bedrock::invoke::normalize_request(&routectl_provider
 pub fn routectl_providers::bedrock::invoke::normalize_response(&str, serde_json::value::Value) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub mod routectl_providers::bedrock::signing
 pub async fn routectl_providers::bedrock::signing::apply(&mut reqwest::async_impl::request::Request, &routectl_providers::bedrock::auth::ResolvedCreds, &str) -> routectl_core::error::Result<()>
+pub async fn routectl_providers::bedrock::signing::apply_with_service(&mut reqwest::async_impl::request::Request, &routectl_providers::bedrock::auth::ResolvedCreds, &str, &str) -> routectl_core::error::Result<()>
 #[non_exhaustive] pub enum routectl_providers::bedrock::BedrockApiShape
 pub routectl_providers::bedrock::BedrockApiShape::Converse
 pub routectl_providers::bedrock::BedrockApiShape::Invoke
@@ -1006,6 +1056,61 @@ impl<T> typenum::type_operators::Same for routectl_providers::gemini::GeminiProv
 pub type routectl_providers::gemini::GeminiProvider::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::gemini::GeminiProvider where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::gemini::GeminiProvider::into_shared(self) -> Shared
+pub mod routectl_providers::mantle
+pub struct routectl_providers::mantle::MantleAuth
+pub routectl_providers::mantle::MantleAuth::creds: routectl_providers::bedrock::auth::ResolvedCreds
+pub routectl_providers::mantle::MantleAuth::region: alloc::string::String
+impl core::clone::Clone for routectl_providers::mantle::MantleAuth
+pub fn routectl_providers::mantle::MantleAuth::clone(&self) -> routectl_providers::mantle::MantleAuth
+impl core::fmt::Debug for routectl_providers::mantle::MantleAuth
+pub fn routectl_providers::mantle::MantleAuth::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_providers::mantle::MantleAuth
+impl core::marker::Send for routectl_providers::mantle::MantleAuth
+impl core::marker::Sync for routectl_providers::mantle::MantleAuth
+impl core::marker::Unpin for routectl_providers::mantle::MantleAuth
+impl core::marker::UnsafeUnpin for routectl_providers::mantle::MantleAuth
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_providers::mantle::MantleAuth
+impl !core::panic::unwind_safe::UnwindSafe for routectl_providers::mantle::MantleAuth
+impl<T, U> core::convert::Into<U> for routectl_providers::mantle::MantleAuth where U: core::convert::From<T>
+pub fn routectl_providers::mantle::MantleAuth::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_providers::mantle::MantleAuth where U: core::convert::Into<T>
+pub type routectl_providers::mantle::MantleAuth::Error = core::convert::Infallible
+pub fn routectl_providers::mantle::MantleAuth::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_providers::mantle::MantleAuth where U: core::convert::TryFrom<T>
+pub type routectl_providers::mantle::MantleAuth::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_providers::mantle::MantleAuth::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_providers::mantle::MantleAuth where T: core::clone::Clone
+pub type routectl_providers::mantle::MantleAuth::Owned = T
+pub fn routectl_providers::mantle::MantleAuth::clone_into(&self, &mut T)
+pub fn routectl_providers::mantle::MantleAuth::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_providers::mantle::MantleAuth where T: 'static + ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_providers::mantle::MantleAuth where T: ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_providers::mantle::MantleAuth where T: ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_providers::mantle::MantleAuth where T: core::clone::Clone
+pub unsafe fn routectl_providers::mantle::MantleAuth::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_providers::mantle::MantleAuth
+pub fn routectl_providers::mantle::MantleAuth::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_providers::mantle::MantleAuth where T: core::clone::Clone
+pub fn routectl_providers::mantle::MantleAuth::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_providers::mantle::MantleAuth
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_providers::mantle::MantleAuth where T: ?core::marker::Sized
+pub fn routectl_providers::mantle::MantleAuth::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_providers::mantle::MantleAuth::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_providers::mantle::MantleAuth
+impl<T> tracing::instrument::WithSubscriber for routectl_providers::mantle::MantleAuth
+impl<T> typenum::type_operators::Same for routectl_providers::mantle::MantleAuth
+pub type routectl_providers::mantle::MantleAuth::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::mantle::MantleAuth where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_providers::mantle::MantleAuth::into_shared(self) -> Shared
+pub const routectl_providers::mantle::MANTLE_SERVICE: &str
+pub fn routectl_providers::mantle::mantle_anthropic_base(&str) -> alloc::string::String
+pub fn routectl_providers::mantle::mantle_host(&str) -> alloc::string::String
+pub fn routectl_providers::mantle::mantle_openai_base(&str) -> alloc::string::String
+pub async fn routectl_providers::mantle::probe(&routectl_providers::bedrock::auth::ResolvedCreds) -> routectl_core::provider::ProbeOutcome
+pub async fn routectl_providers::mantle::sign(&mut reqwest::async_impl::request::Request, &routectl_providers::bedrock::auth::ResolvedCreds, &str) -> routectl_core::error::Result<()>
 pub mod routectl_providers::openai_compat
 pub mod routectl_providers::openai_compat::dialect
 pub enum routectl_providers::openai_compat::dialect::ReasoningDialect
@@ -1588,6 +1693,7 @@ pub routectl_providers::openai_compat::OpenAiCompatConfig::disable_stream_includ
 pub routectl_providers::openai_compat::OpenAiCompatConfig::header_extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_providers::openai_compat::OpenAiCompatConfig::history_reasoning: routectl_providers::openai_compat::HistoryReasoning
 pub routectl_providers::openai_compat::OpenAiCompatConfig::id: alloc::string::String
+pub routectl_providers::openai_compat::OpenAiCompatConfig::mantle: core::option::Option<routectl_providers::mantle::MantleAuth>
 pub routectl_providers::openai_compat::OpenAiCompatConfig::payload_extras: core::option::Option<serde_json::value::Value>
 pub routectl_providers::openai_compat::OpenAiCompatConfig::reasoning_dialect: routectl_providers::openai_compat::dialect::ReasoningDialect
 pub routectl_providers::openai_compat::OpenAiCompatConfig::strict_translation: bool
@@ -1601,8 +1707,8 @@ impl core::marker::Send for routectl_providers::openai_compat::OpenAiCompatConfi
 impl core::marker::Sync for routectl_providers::openai_compat::OpenAiCompatConfig
 impl core::marker::Unpin for routectl_providers::openai_compat::OpenAiCompatConfig
 impl core::marker::UnsafeUnpin for routectl_providers::openai_compat::OpenAiCompatConfig
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_providers::openai_compat::OpenAiCompatConfig
-impl core::panic::unwind_safe::UnwindSafe for routectl_providers::openai_compat::OpenAiCompatConfig
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_providers::openai_compat::OpenAiCompatConfig
+impl !core::panic::unwind_safe::UnwindSafe for routectl_providers::openai_compat::OpenAiCompatConfig
 impl<T, U> core::convert::Into<U> for routectl_providers::openai_compat::OpenAiCompatConfig where U: core::convert::From<T>
 pub fn routectl_providers::openai_compat::OpenAiCompatConfig::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for routectl_providers::openai_compat::OpenAiCompatConfig where U: core::convert::Into<T>
@@ -1758,6 +1864,7 @@ pub routectl_providers::openai_responses::OpenAiResponsesConfig::auth_kind: rout
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::base_url: alloc::string::String
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::header_extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::id: alloc::string::String
+pub routectl_providers::openai_responses::OpenAiResponsesConfig::mantle: core::option::Option<routectl_providers::mantle::MantleAuth>
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::session_id: core::option::Option<alloc::string::String>
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::user_agent: core::option::Option<alloc::string::String>
 impl routectl_providers::openai_responses::OpenAiResponsesConfig
