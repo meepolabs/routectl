@@ -19,13 +19,13 @@ use serde_json::json;
 
 fn parse(body: serde_json::Value) -> ChatRequest {
     ResponsesIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .expect("request should parse")
 }
 
 fn parse_with_headers(headers: &HeaderMap, body: serde_json::Value) -> ChatRequest {
     ResponsesIngress
-        .parse_request(headers, body)
+        .parse_request_value(headers, body)
         .expect("request should parse")
 }
 
@@ -903,7 +903,7 @@ fn non_object_body_returns_validation_error() {
 
     // Act
     let err = ResponsesIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
 
     // Assert
@@ -925,7 +925,7 @@ fn previous_response_id_present_returns_400_validation_error() {
 
     // Act
     let err = ResponsesIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
 
     // Assert: a stateless proxy must reject server-side state rather than
@@ -1012,7 +1012,7 @@ fn store_true_with_previous_response_id_returns_400_not_warn() {
 
     // Act
     let err = ResponsesIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
 
     // Assert

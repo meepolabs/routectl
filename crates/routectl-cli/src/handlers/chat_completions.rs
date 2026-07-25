@@ -8,10 +8,10 @@
 use std::sync::Arc;
 
 use axum::Extension;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
-use serde_json::Value;
 
 use crate::handlers::ingress_handle::ingress_handle;
 use crate::ingress::openai::OpenAiIngress;
@@ -23,7 +23,7 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     request_id: Option<Extension<RequestId>>,
-    body: Result<axum::Json<Value>, axum::extract::rejection::JsonRejection>,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     let ingress = OpenAiIngress;
     ingress_handle(state, headers, request_id.map(|e| e.0), body, ingress).await

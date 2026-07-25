@@ -1229,7 +1229,7 @@ impl<A: IngressAdapter> IngressAdapter for RenderChunkFailsOnceAdapter<A> {
     fn parse_request(
         &self,
         headers: &HeaderMap,
-        body: Value,
+        body: &[u8],
     ) -> routectl_core::Result<routectl_core::ChatRequest> {
         self.inner.parse_request(headers, body)
     }
@@ -3486,8 +3486,8 @@ async fn ingress_handle_rejects_forwarded_token_missing_end_to_end() {
     let headers = admission_headers(Some(&state.mitm_seam_nonce), None, Some("sess-e2e"));
     // Admission runs before body parse, so the body is never inspected on the
     // rejection path.
-    let body: std::result::Result<Json<Value>, axum::extract::rejection::JsonRejection> =
-        Ok(Json(json!({})));
+    let body: std::result::Result<axum::body::Bytes, axum::extract::rejection::BytesRejection> =
+        Ok(axum::body::Bytes::from_static(b"{}"));
 
     // Act
     let resp = ingress_handle(state, headers, None, body, AnthropicIngress).await;
@@ -3524,8 +3524,16 @@ async fn ingress_handle_admits_a_spoofed_seam_header_end_to_end() {
         axum::http::HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
         axum::http::HeaderValue::from_static("1"),
     );
-    let body: std::result::Result<Json<Value>, axum::extract::rejection::JsonRejection> =
-        Ok(Json(json!({"model": "m", "messages": []})));
+    // Content-type so the request flows past the ingress content-type gate
+    // into the parse + capture path this test exercises (the `Bytes`
+    // extractor no longer enforces it; the handler does).
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let body: std::result::Result<axum::body::Bytes, axum::extract::rejection::BytesRejection> = Ok(
+        axum::body::Bytes::from_static(b"{\"model\": \"m\", \"messages\": []}"),
+    );
 
     let resp = ingress_handle(state, headers, None, body, AnthropicIngress).await;
     let status = resp.status();
@@ -3789,17 +3797,57 @@ fn map_error_json_logs_detail_server_side() {
     assert_eq!(logged.field("detail"), Some(expected.as_str()));
 }
 
+/// The `Bytes` extractor does not gate on content-type, so the handler
+/// does it via `is_json_content_type`. Pin the essence cases the axum
+/// `Json` extractor used to own: `application/json`, a `+json` suffix,
+/// charset parameters, case-insensitivity -- and the reject cases (a
+/// non-JSON type and an absent header both fall through to 415).
+#[test]
+fn is_json_content_type_matches_json_essences_and_rejects_others() {
+    fn with_ct(value: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    for accepted in [
+        "application/json",
+        "application/json; charset=utf-8",
+        "APPLICATION/JSON",
+        "application/vnd.foo+json",
+        "application/vnd.foo+json; charset=utf-8",
+    ] {
+        assert!(
+            is_json_content_type(&with_ct(accepted)),
+            "should accept {accepted}"
+        );
+    }
+
+    for rejected in ["text/plain", "application/xml", "application/octet-stream"] {
+        assert!(
+            !is_json_content_type(&with_ct(rejected)),
+            "should reject {rejected}"
+        );
+    }
+
+    assert!(
+        !is_json_content_type(&axum::http::HeaderMap::new()),
+        "absent content-type must reject (-> 415)"
+    );
+}
+
 /// Pre-change ingress rejection contract + forward-compat extras sweep.
 ///
-/// Locks today's per-endpoint wire behavior on today's code so a later
-/// switch to `Bytes` extraction with hand-rolled 4xx rendering stays
-/// honest. The rejection tests drive the REAL per-endpoint handler
-/// functions mounted behind the same `DefaultBodyLimit` layer
-/// `server::serve::build_axum_router` installs, via `oneshot`, so the
-/// axum `Json` extractor AND the body-size layer are exercised exactly as
-/// in production. The extras tests go through the `IngressAdapter::
-/// parse_request` trait boundary -- the surface a later change
-/// re-signatures.
+/// Locks per-endpoint wire behavior across the switch to `Bytes`
+/// extraction with hand-rolled 4xx rendering. The rejection tests drive
+/// the REAL per-endpoint handler functions mounted behind the same
+/// `DefaultBodyLimit` layer `server::serve::build_axum_router` installs,
+/// via `oneshot`, so the `Bytes` extractor AND the body-size layer are
+/// exercised exactly as in production. The extras tests go through the
+/// `IngressAdapter::parse_request` trait boundary.
 mod pre_change_ingress_contract {
     use std::sync::Arc;
 
@@ -3875,8 +3923,8 @@ mod pre_change_ingress_contract {
 
     /// Pin the full Anthropic-dialect rejection envelope. The routectl-owned
     /// shape and classifier are asserted byte-for-byte; the human message
-    /// string is axum-owned today and spliced back in, so the pin does not
-    /// force a later hand-rolled renderer to reproduce axum's exact wording.
+    /// string is asserted only non-empty (the hand-rolled renderer owns its
+    /// wording), so the pin never couples to a specific message string.
     fn assert_anthropic_reject(status: StatusCode, body: &Value, expected: StatusCode) {
         assert_eq!(status, expected, "anthropic rejection status");
         let msg = body["error"]["message"]
@@ -4051,7 +4099,7 @@ mod pre_change_ingress_contract {
             "future_unknown_knob": {"nested": [1, 2, 3]}
         });
         let req = AnthropicIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .expect("valid Anthropic body parses");
         let extras = req
             .provider_extras
@@ -4067,7 +4115,7 @@ mod pre_change_ingress_contract {
             "future_unknown_knob": "keep-me"
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .expect("valid OpenAI body parses");
         let extras = req
             .provider_extras
@@ -4083,7 +4131,7 @@ mod pre_change_ingress_contract {
             "future_unknown_knob": "keep-me"
         });
         let req = ResponsesIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .expect("valid Responses body parses");
         let extras = req
             .provider_extras

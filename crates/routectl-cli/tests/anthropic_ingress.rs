@@ -1948,7 +1948,12 @@ async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
         "anthropic_beta": ["context-1m-2025-08-07"]
     });
 
-    let req = ingress.parse_request(&headers, inbound_body).unwrap();
+    let req = ingress
+        .parse_request(
+            &headers,
+            &serde_json::to_vec(&inbound_body).expect("wire serializes"),
+        )
+        .unwrap();
 
     // The ingress merge already deduped header-vs-body, so canonical
     // has the union deduped: 3 unique flags.
@@ -2445,7 +2450,12 @@ async fn converse_request_body_has_camel_case_inference_config() {
         "system": [{"type": "text", "text": "you are helpful"}],
         "messages": [{"role": "user", "content": "hi"}]
     });
-    let req = ingress.parse_request(&HeaderMap::new(), inbound).unwrap();
+    let req = ingress
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&inbound).expect("wire serializes"),
+        )
+        .unwrap();
 
     let cfg = BedrockConfig {
         id: "bedrock:converse-test".into(),
@@ -2557,7 +2567,12 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
         }],
         "messages": [{"role": "user", "content": "weather in Tokyo?"}]
     });
-    let req = ingress.parse_request(&HeaderMap::new(), inbound).unwrap();
+    let req = ingress
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&inbound).expect("wire serializes"),
+        )
+        .unwrap();
 
     let cfg = BedrockConfig {
         id: "bedrock:converse-tools-test".into(),
@@ -2740,7 +2755,12 @@ async fn converse_request_system_with_cache_control_emits_cache_point_block() {
         }],
         "messages": [{"role": "user", "content": "hi"}]
     });
-    let req = ingress.parse_request(&HeaderMap::new(), inbound).unwrap();
+    let req = ingress
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&inbound).expect("wire serializes"),
+        )
+        .unwrap();
 
     let cfg = BedrockConfig {
         id: "bedrock:converse-cache-test".into(),

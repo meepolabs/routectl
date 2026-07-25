@@ -193,7 +193,13 @@ impl IngressAdapter for ResponsesIngress {
         ErrorEnvelopeShape::OpenAi
     }
 
-    fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+    fn parse_request(&self, headers: &HeaderMap, body: &[u8]) -> Result<ChatRequest> {
+        // Materialize the wire body once from the raw request bytes.
+        // The Responses dialect keeps its Value-based walk (its
+        // pre-deserialization mutations are load-bearing forward-compat
+        // surface) -- neutral vs the prior extractor-owned parse. A
+        // top-level syntax error surfaces as `Error::Json`.
+        let body: Value = serde_json::from_slice(body)?;
         // Trace-level ingress body for triage; inherits the parent
         // span's request_id and honors ROUTECTL_LOG_REDACT_PROMPTS=1.
         // Mirrors the openai / anthropic ingress.

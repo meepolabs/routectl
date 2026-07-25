@@ -25,12 +25,15 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use serde_json::Value;
 
-use crate::handlers::ingress_handle::{map_error, render_json_rejection};
+use crate::handlers::ingress_handle::{
+    is_json_content_type, map_error, render_body_rejection, render_malformed_body,
+    render_unsupported_media_type,
+};
 use crate::ingress::IngressAdapter;
 use crate::ingress::anthropic::AnthropicIngress;
 use crate::server::AppState;
@@ -39,23 +42,26 @@ use crate::server::AppState;
 pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     let adapter = AnthropicIngress;
     let envelope = adapter.error_envelope_shape();
-    let Json(raw_body) = match body {
+    // `Bytes` + `DefaultBodyLimit` surfaces an oversized body as a 413
+    // rejection (untouched); content-type is enforced explicitly since
+    // `Bytes` does not gate on it, and a top-level JSON syntax failure
+    // maps to `Error::Json` below. Mirrors `ingress_handle`; count_tokens
+    // is the one inference endpoint that does not funnel through it.
+    let raw_body = match body {
         Ok(b) => b,
-        Err(e) => {
-            // JsonRejection surfaces 413 / 415 / 400 as appropriate;
-            // shared helper preserves the status code and renders the
-            // dialect-correct envelope. See `ingress_handle` for the
-            // matching call site on /v1/messages.
-            return render_json_rejection(envelope, e);
-        }
+        Err(rej) => return render_body_rejection(envelope, rej),
     };
+    if !is_json_content_type(&headers) {
+        return render_unsupported_media_type(envelope);
+    }
 
-    let req = match adapter.parse_request(&headers, raw_body) {
+    let req = match adapter.parse_request(&headers, raw_body.as_ref()) {
         Ok(r) => r,
+        Err(routectl_core::Error::Json(_)) => return render_malformed_body(envelope),
         Err(e) => return map_error(envelope, e),
     };
 

@@ -202,7 +202,10 @@ async fn openai_ingress_through_bedrock() {
 
     let ingress = OpenAiIngress;
     let req = ingress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).expect("wire serializes"),
+        )
         .expect("parse openai body");
     let resp = router.complete(req).await.expect("complete via bedrock");
     let wire = ingress.render_response(resp).expect("render openai");
@@ -268,7 +271,10 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
 
     // First call: should create the cache entry.
     let req1 = ingress
-        .parse_request(&HeaderMap::new(), body.clone())
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).expect("wire serializes"),
+        )
         .expect("parse anthropic body 1");
     let resp1 = router.complete(req1).await.expect("complete 1");
     let wire1 = ingress.render_response(resp1).expect("render anthropic 1");
@@ -293,7 +299,10 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
 
     // Second call (same body): should hit the cache.
     let req2 = ingress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).expect("wire serializes"),
+        )
         .expect("parse anthropic body 2");
     let resp2 = router.complete(req2).await.expect("complete 2");
     let wire2 = ingress.render_response(resp2).expect("render anthropic 2");
@@ -349,7 +358,10 @@ async fn anthropic_ingress_streaming_through_bedrock() {
 
     let ingress = AnthropicIngress;
     let req = ingress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).expect("wire serializes"),
+        )
         .expect("parse anthropic body");
 
     let mut state = ingress.new_stream_state(&StreamRequestContext::default());

@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use axum::Json;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, header::AUTHORIZATION};
 use routectl_cli::handlers::ingress_handle::ingress_handle;
 use routectl_cli::ingress::MitmSeamNonce;
@@ -27,7 +26,6 @@ use routectl_cli::server::AppState;
 use routectl_router::{ActivationState, Config, MitmConfig, Router};
 use routectl_testkit::{CapturedEvent, with_capture};
 use routectl_usage::UsageWriter;
-use serde_json::{Value, json};
 
 /// The forwarded token. Distinctive so any leak into a log field, the log
 /// message, or the client response is unmistakable.
@@ -87,8 +85,8 @@ async fn rejection_logs_safe_dimensions_and_never_the_token() {
     let headers = identity_missing_headers(&state.mitm_seam_nonce);
     // Admission runs before body parse, so the body is never inspected on
     // the rejection path.
-    let body: std::result::Result<Json<Value>, axum::extract::rejection::JsonRejection> =
-        Ok(Json(json!({})));
+    let body: std::result::Result<axum::body::Bytes, axum::extract::rejection::BytesRejection> =
+        Ok(axum::body::Bytes::from_static(b"{}"));
 
     let (resp, events) = with_capture(Box::pin(ingress_handle(
         state,

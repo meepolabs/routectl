@@ -4,11 +4,12 @@
 //! from `messages_count_tokens.rs`.
 //!
 //! count_tokens is the one inference endpoint that does NOT funnel through
-//! `ingress_handle`; it renders its own JSON-rejection / parse-error
-//! responses via the shared `render_json_rejection` / `map_error` helpers.
-//! The rejection test drives the REAL handler mounted behind the same
-//! `DefaultBodyLimit` layer `server::serve::build_axum_router` installs,
-//! so the axum `Json` extractor and the body-size layer are exercised
+//! `ingress_handle`; it renders its own body-rejection / content-type /
+//! parse-error responses via the shared `render_body_rejection` /
+//! `render_unsupported_media_type` / `render_malformed_body` / `map_error`
+//! helpers. The rejection test drives the REAL handler mounted behind the
+//! same `DefaultBodyLimit` layer `server::serve::build_axum_router`
+//! installs, so the `Bytes` extractor and the body-size layer are exercised
 //! exactly as in production. The extras test pins that an unknown
 //! top-level field round-trips into `provider_extras` (Anthropic dialect).
 
@@ -72,9 +73,9 @@ async fn drive(state: Arc<AppState>, req: Request<Body>) -> (StatusCode, Value) 
 }
 
 /// count_tokens is Anthropic-dialect: the routectl-owned envelope shape and
-/// classifier are pinned byte-for-byte; the human message string is
-/// axum-owned today and spliced back in so the pin does not force a later
-/// hand-rolled renderer to reproduce axum's exact wording.
+/// classifier are pinned byte-for-byte; the human message string is asserted
+/// only non-empty (the hand-rolled renderer owns its wording), so the pin
+/// never couples to a specific message string.
 fn assert_anthropic_reject(status: StatusCode, body: &Value, expected: StatusCode) {
     assert_eq!(status, expected, "count_tokens rejection status");
     let msg = body["error"]["message"]
@@ -122,7 +123,7 @@ fn count_tokens_preserves_unknown_top_level_field_into_provider_extras() {
         "future_unknown_knob": {"nested": [1, 2, 3]}
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .expect("valid Anthropic body parses");
     let extras = req
         .provider_extras

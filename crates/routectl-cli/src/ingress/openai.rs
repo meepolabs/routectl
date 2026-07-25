@@ -51,7 +51,16 @@ impl IngressAdapter for OpenAiIngress {
         ErrorEnvelopeShape::OpenAi
     }
 
-    fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+    fn parse_request(&self, headers: &HeaderMap, body: &[u8]) -> Result<ChatRequest> {
+        // Materialize the wire body once, here, from the raw request
+        // bytes. The pre-deserialization Value mutations below
+        // (`reasoning_content` coalescing, `max_completion_tokens`
+        // rename, `developer` role rewrite, `reasoning_effort` promotion,
+        // unknown-field sweep) are load-bearing forward-compat surface,
+        // so this dialect stays Value-based -- neutral vs the prior
+        // extractor-owned parse. A top-level syntax error surfaces as
+        // `Error::Json` (the handler renders it as a 400 malformed body).
+        let mut body: Value = serde_json::from_slice(body)?;
         // Trace-level ingress body for triage. Inherits the
         // parent span's `request_id` so a `grep request_id=<id>`
         // shows ingress -> outgoing -> upstream -> egress in one
@@ -63,7 +72,6 @@ impl IngressAdapter for OpenAiIngress {
         // smart-heartbeat validator can grep without fighting the
         // 16 KB body cap. See StructuralSummary on field stability.
         routectl_core::trace_structural_summary("ingress", "ingress", "openai", &body);
-        let mut body = body;
         // Coalesce DeepSeek/vLLM-shape `reasoning_content` into
         // canonical `reasoning` on each message BEFORE serde
         // deserialization. Without this, opencode-style clients
@@ -561,7 +569,7 @@ mod tests {
             "stream": true
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.model, "gpt-4o");
         assert_eq!(req.stream, Some(true));
@@ -574,7 +582,7 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(
             req.routectl_internal.provenance,
@@ -590,7 +598,7 @@ mod tests {
             "reasoning": {"effort": "high"}
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.reasoning.unwrap().effort.as_deref(), Some("high"));
         // The unused-import lint catches accidental dead deps.
@@ -602,7 +610,7 @@ mod tests {
     fn parse_request_rejects_malformed_body() {
         let body = json!({"this": "is not a chat request"});
         let err = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
     }
@@ -806,7 +814,7 @@ mod tests {
             ]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         match req.system {
             Some(SystemContent::Text(s)) => assert_eq!(s, "you are helpful"),
@@ -828,7 +836,7 @@ mod tests {
             ]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         match req.system {
             Some(SystemContent::Text(s)) => assert_eq!(s, "be brief\nbe polite"),
@@ -850,7 +858,7 @@ mod tests {
             ]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         match req.system {
             Some(SystemContent::Text(s)) => assert_eq!(s, "primary\nsecondary"),
@@ -887,7 +895,7 @@ mod tests {
             }]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body.clone())
+            .parse_request_value(&HeaderMap::new(), body.clone())
             .unwrap();
         let tools = req.tools.expect("tools present");
         assert_eq!(tools.len(), 1);
@@ -916,7 +924,7 @@ mod tests {
             }]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         let tools = req.tools.expect("tools present");
         assert!(matches!(&tools[0], routectl_core::ToolDef::Other(_)));
@@ -945,7 +953,7 @@ mod tests {
                 "tool_choice": tc.clone(),
             });
             let req = OpenAiIngress
-                .parse_request(&HeaderMap::new(), body)
+                .parse_request_value(&HeaderMap::new(), body)
                 .unwrap();
             assert_eq!(
                 req.tool_choice,
@@ -1263,7 +1271,7 @@ mod tests {
             ]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         let assistant = &req.messages[1];
         assert_eq!(assistant.reasoning.as_deref(), Some("my hidden chain"));
@@ -1281,7 +1289,7 @@ mod tests {
             ]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.messages[0].reasoning.as_deref(), Some("the real one"));
     }
@@ -1297,7 +1305,7 @@ mod tests {
             ]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.messages[0].reasoning.as_deref(), Some("primary"));
     }
@@ -1311,7 +1319,7 @@ mod tests {
             "messages": [{"role":"user","content":"hi"}]
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert!(req.messages[0].reasoning.is_none());
     }
@@ -1327,7 +1335,7 @@ mod tests {
             "max_completion_tokens": 8000
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.max_tokens, Some(8000));
     }
@@ -1343,7 +1351,7 @@ mod tests {
             "max_completion_tokens": 8000
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.max_tokens, Some(100));
     }
@@ -1358,7 +1366,7 @@ mod tests {
             "max_tokens": 512
         });
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.max_tokens, Some(512));
     }
@@ -1378,7 +1386,7 @@ mod tests {
 
         // Act
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
 
         // Assert: canonical effort set.
@@ -1409,7 +1417,7 @@ mod tests {
 
         // Act
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
 
         // Assert
@@ -1430,7 +1438,7 @@ mod tests {
 
         // Act
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
 
         // Assert
@@ -1456,7 +1464,7 @@ mod tests {
 
         // Act
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
 
         // Assert: developer message lifted into req.system.
@@ -1496,7 +1504,7 @@ mod tests {
 
         // Act
         let req = OpenAiIngress
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request_value(&HeaderMap::new(), body)
             .unwrap();
 
         // Assert: system is Blocks and cache_control survived.

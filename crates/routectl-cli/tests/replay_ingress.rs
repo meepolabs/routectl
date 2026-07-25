@@ -162,7 +162,10 @@ async fn mount_upstream(mount: &EgressMount, body: Vec<u8>, content_type: &str) 
 fn parse_canonical(fixture: &Fixture) -> Result<ChatRequest, String> {
     let headers = headers_from_pairs(&fixture.ingress_request_headers);
     AnthropicIngress
-        .parse_request(&headers, fixture.ingress_request.clone())
+        .parse_request(
+            &headers,
+            &serde_json::to_vec(&fixture.ingress_request).expect("wire serializes"),
+        )
         .map_err(|e| format!("anthropic ingress parse_request failed: {e}"))
 }
 

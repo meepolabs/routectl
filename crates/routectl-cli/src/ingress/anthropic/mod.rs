@@ -261,7 +261,11 @@ impl IngressAdapter for AnthropicIngress {
         ErrorEnvelopeShape::Anthropic
     }
 
-    fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+    fn parse_request(&self, headers: &HeaderMap, body: &[u8]) -> Result<ChatRequest> {
+        // Materialize the wire body once from the raw request bytes. A
+        // top-level syntax error surfaces as `Error::Json` (the handler
+        // renders it as a 400 malformed body).
+        let body: Value = serde_json::from_slice(body)?;
         // Trace-level ingress body for triage. Same gating +
         // sensitivity story as the openai ingress. Honors
         // ROUTECTL_LOG_REDACT_PROMPTS=1.

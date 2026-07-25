@@ -18,7 +18,7 @@ fn parse_request_with_system_blocks_and_cache_control() {
         "max_tokens": 1024
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     assert_eq!(req.model, "claude-opus-4-7");
     assert!(matches!(
@@ -35,7 +35,7 @@ fn parse_request_stamps_anthropic_provenance() {
         "max_tokens": 1024
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     assert_eq!(
         req.routectl_internal.provenance,
@@ -52,7 +52,7 @@ fn parse_request_translates_thinking_to_reasoning() {
         "thinking": {"type": "enabled", "budget_tokens": 5000}
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     let r = req.reasoning.unwrap();
     assert_eq!(r.enabled, Some(true));
@@ -68,7 +68,7 @@ fn parse_request_translates_metadata_user_id_to_user() {
         "metadata": {"user_id": "abc-123"}
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     assert_eq!(req.user.as_deref(), Some("abc-123"));
 }
@@ -90,7 +90,7 @@ fn parse_request_captures_inbound_session_key_from_header() {
         "max_tokens": 1024
     });
     let req = AnthropicIngress
-        .parse_request(&headers_with_session("sid-from-header"), body)
+        .parse_request_value(&headers_with_session("sid-from-header"), body)
         .unwrap();
     assert_eq!(
         req.routectl_internal.inbound_session_key.as_deref(),
@@ -107,7 +107,7 @@ fn parse_request_falls_back_to_metadata_session_id() {
         "metadata": {"session_id": "sid-from-metadata"}
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     assert_eq!(
         req.routectl_internal.inbound_session_key.as_deref(),
@@ -124,7 +124,7 @@ fn parse_request_header_session_key_wins_over_metadata() {
         "metadata": {"session_id": "sid-from-metadata"}
     });
     let req = AnthropicIngress
-        .parse_request(&headers_with_session("sid-from-header"), body)
+        .parse_request_value(&headers_with_session("sid-from-header"), body)
         .unwrap();
     assert_eq!(
         req.routectl_internal.inbound_session_key.as_deref(),
@@ -140,7 +140,7 @@ fn parse_request_keyless_yields_none_session_key() {
         "max_tokens": 1024
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     assert_eq!(req.routectl_internal.inbound_session_key, None);
 }
@@ -154,7 +154,7 @@ fn parse_request_empty_header_session_key_falls_through_to_metadata() {
         "metadata": {"session_id": "sid-from-metadata"}
     });
     let req = AnthropicIngress
-        .parse_request(&headers_with_session("   "), body)
+        .parse_request_value(&headers_with_session("   "), body)
         .unwrap();
     assert_eq!(
         req.routectl_internal.inbound_session_key.as_deref(),
@@ -173,7 +173,7 @@ fn parse_request_header_metadata_conflict_emits_mismatch_warning_without_raw_ids
 
     let events = routectl_testkit::capture_events(|| {
         let req = AnthropicIngress
-            .parse_request(&headers_with_session("sid-from-header"), body.clone())
+            .parse_request_value(&headers_with_session("sid-from-header"), body.clone())
             .unwrap();
         // Header still wins for the resolved key; the guardrail only logs
         // the conflict, it never changes the resolution outcome.
@@ -218,7 +218,7 @@ fn parse_request_header_metadata_agreement_emits_no_mismatch_warning() {
 
     let events = routectl_testkit::capture_events(|| {
         let _ = AnthropicIngress
-            .parse_request(&headers_with_session("sid-same"), body)
+            .parse_request_value(&headers_with_session("sid-same"), body)
             .unwrap();
     });
 
@@ -239,7 +239,7 @@ fn parse_request_preserves_metadata_session_id_in_provider_extras() {
         "metadata": {"session_id": "sid-from-metadata", "user_id": "abc-123"}
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     // Capturing the session key must be a non-destructive read: the full
     // `metadata` object (including `session_id`) still round-trips into
@@ -260,7 +260,7 @@ fn parse_request_anthropic_only_fields_land_in_provider_extras() {
         "container": "ctr_01"
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     let extras = req.provider_extras.unwrap();
     assert_eq!(extras["top_k"], 40);
@@ -277,7 +277,7 @@ fn parse_request_anthropic_beta_round_trips() {
         "anthropic_beta": ["context-1m-2025-08-07"]
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     assert_eq!(
         req.anthropic_beta,
@@ -302,7 +302,7 @@ fn parse_request_rejects_too_many_breakpoints() {
         "max_tokens": 1024
     });
     let err = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
     assert!(matches!(err, Error::Validation(_)));
     assert!(err.to_string().contains("exceeds maximum"));
@@ -322,7 +322,7 @@ fn parse_request_rejects_5m_then_1h_ordering() {
         "max_tokens": 1024
     });
     let err = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap_err();
     assert!(matches!(err, Error::Validation(_)));
     assert!(err.to_string().contains("after a 5m"));
@@ -344,7 +344,7 @@ fn parse_request_unknown_block_type_passes_through() {
         "max_tokens": 1024
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     if let MessageContent::Parts(parts) = &req.messages[0].content {
         assert!(matches!(&parts[0], ContentPart::Other { .. }));
@@ -503,7 +503,7 @@ fn parse_request_adaptive_thinking_lifts_effort() {
         "output_config": {"effort": "low"}
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     let r = req.reasoning.as_ref().unwrap();
     assert_eq!(
@@ -534,7 +534,7 @@ fn parse_request_output_config_effort_no_thinking() {
         "output_config": {"effort": "high"}
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     let r = req.reasoning.as_ref().unwrap();
     assert_eq!(
@@ -565,7 +565,7 @@ fn parse_request_output_config_without_effort() {
         }
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     assert!(
         req.reasoning.is_none(),
@@ -591,7 +591,7 @@ fn parse_request_null_output_format_is_dropped() {
         "output_format": null
     });
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body)
+        .parse_request_value(&HeaderMap::new(), body)
         .unwrap();
     if let Some(extras) = req.provider_extras.as_ref() {
         assert!(
@@ -611,7 +611,7 @@ fn parse_request_null_output_format_is_dropped() {
         "output_config": {"effort": "high"}
     });
     let req2 = AnthropicIngress
-        .parse_request(&HeaderMap::new(), body2)
+        .parse_request_value(&HeaderMap::new(), body2)
         .unwrap();
     let extras2 = req2.provider_extras.as_ref().unwrap();
     // output_config is preserved; no format key was injected from the null.
