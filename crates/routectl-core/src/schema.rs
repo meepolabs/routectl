@@ -871,6 +871,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// serde_json emits object keys in alphabetical order because the
+    /// workspace does NOT enable serde_json's `preserve_order` feature (its
+    /// `Map` is a `BTreeMap`). This byte-ordering premise is load-bearing for
+    /// egress prompt-cache affinity: anthropic request bodies are serialized
+    /// through a `to_value` sort/merge buffer and the resulting bytes are
+    /// cached for prompt-cache prefix reuse. If `preserve_order` were ever
+    /// enabled (directly or pulled in transitively by any dependency), keys
+    /// would follow insertion order instead, request bytes would drift, and
+    /// upstream cache affinity would break silently -- no semantic test would
+    /// catch it, since the egress contract tests are order-blind. This test
+    /// fails the instant that feature is turned on anywhere in the tree.
+    #[test]
+    fn serde_json_object_keys_serialize_alphabetically() {
+        assert_eq!(
+            serde_json::to_string(&json!({ "b": 1, "a": 2 })).unwrap(),
+            r#"{"a":2,"b":1}"#,
+            "serde_json must emit alphabetical object keys; a failure here \
+             means the preserve_order feature has been enabled and the egress \
+             cache-affinity byte premise is broken"
+        );
+    }
+
     /// A partial `usage` object that omits `total_tokens` must not sink
     /// the whole `ChatResponse` deserialization -- some openai-compat
     /// upstreams ship only the component counts. The missing aggregate
