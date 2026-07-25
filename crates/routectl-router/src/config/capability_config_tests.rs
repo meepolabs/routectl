@@ -49,7 +49,9 @@ fn unknown_key_is_rejected() {
 
 /// `config example` prints `examples/config.toml` verbatim; that shipped
 /// text must render a `[capability]` block, and it must parse with the
-/// documented defaults.
+/// documented defaults. The parse assertions require the feature-gated
+/// provider kinds the example documents (`bedrock`, `openai-responses`);
+/// the render assertion is provider-agnostic and holds on every build.
 #[test]
 fn shipped_example_renders_capability_block() {
     let example = include_str!("../../../../examples/config.toml");
@@ -58,7 +60,28 @@ fn shipped_example_renders_capability_block() {
         "shipped example must render a [capability] block"
     );
 
-    let config: Config = toml::from_str(example).expect("example parses as Config");
+    #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
+    {
+        let config: Config = toml::from_str(example).expect("example parses as Config");
+        assert!(config.capability.enabled);
+        assert_eq!(config.capability.decay_hours, 48);
+        assert_eq!(config.capability.inferred_window_hours, 1);
+    }
+}
+
+/// Lean-build counterpart to `shipped_example_renders_capability_block`:
+/// a full config using only the always-available provider kinds renders
+/// and parses a `[capability]` block at the documented defaults, so this
+/// coverage survives on builds where the feature-gated example cannot parse.
+#[test]
+fn lean_example_renders_capability_block() {
+    let example = crate::config::LEAN_EXAMPLE_CONFIG;
+    assert!(
+        example.contains("[capability]"),
+        "lean example must render a [capability] block"
+    );
+
+    let config: Config = toml::from_str(example).expect("lean example parses as Config");
     assert!(config.capability.enabled);
     assert_eq!(config.capability.decay_hours, 48);
     assert_eq!(config.capability.inferred_window_hours, 1);

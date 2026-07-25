@@ -470,19 +470,36 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn concurrent_writer_blocks_on_the_lock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The holder signals it is inside the lock, then stays in its
+        // critical section for this window before flipping `holder_released`
+        // just before returning. If the advisory lock were NOT honored the
+        // waiter would enter its own critical section during this window and
+        // observe `holder_released` still false; a working lock forces the
+        // waiter to block until the holder's `edit_fn` has returned, so it
+        // always observes `true`. The invariant is asserted on this observed
+        // ordering, never on wall-clock elapsed time -- an earlier version
+        // compared the waiter's elapsed time against this window and flaked
+        // because the two clocks (holder-internal vs waiter-observed) are
+        // offset by channel-delivery and scheduling latency.
         const HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), "version = 2\nport = 1\n");
         let snapshot = std::fs::read(&path).unwrap();
+        let holder_released = Arc::new(AtomicBool::new(false));
         let (holder_ready_tx, holder_ready_rx) = std::sync::mpsc::channel::<()>();
 
         let path_holder = path.clone();
         let snapshot_holder = snapshot.clone();
+        let holder_released_writer = Arc::clone(&holder_released);
         let holder = std::thread::spawn(move || {
             edit_config_toml::<TestEditError, _>(&path_holder, &snapshot_holder, move |_doc| {
                 holder_ready_tx.send(()).expect("signal inside the lock");
                 std::thread::sleep(HOLD);
+                holder_released_writer.store(true, Ordering::SeqCst);
                 Ok(EditOutcome::Unchanged)
             })
         });
@@ -491,20 +508,22 @@ mod tests {
             .recv()
             .expect("holder must signal before the waiter starts");
 
-        let waiter_start = std::time::Instant::now();
-        let waiter = edit_config_toml::<TestEditError, _>(&path, &snapshot, |_doc| {
+        // The holder now provably holds the lock. This second writer must
+        // block until the holder's critical section completes; by the time
+        // its own closure runs, the holder must already have released.
+        let holder_released_reader = Arc::clone(&holder_released);
+        let waiter = edit_config_toml::<TestEditError, _>(&path, &snapshot, move |_doc| {
+            assert!(
+                holder_released_reader.load(Ordering::SeqCst),
+                "waiter entered the lock before the holder released it"
+            );
             Ok(EditOutcome::Unchanged)
         });
-        let elapsed = waiter_start.elapsed();
 
         waiter.expect("waiter must succeed after the holder releases");
         holder
             .join()
             .expect("holder thread")
             .expect("holder must succeed");
-        assert!(
-            elapsed >= HOLD,
-            "waiter must block until the holder releases the lock, elapsed={elapsed:?}"
-        );
     }
 }

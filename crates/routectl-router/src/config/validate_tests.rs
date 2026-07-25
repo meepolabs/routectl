@@ -13,6 +13,9 @@ mod config_version_tests {
         // the CURRENT schema version and parse as a typed Config, or the
         // documented copy-to-config-dir flow is dead on arrival -- pin it so
         // this class of break (a stale/absent `version` stamp) can't recur.
+        // Preflight reads only the `version` key, so it holds on every
+        // build; the typed deserialize needs the feature-gated provider
+        // kinds the example documents (`bedrock`, `openai-responses`).
         let example = include_str!("../../../../examples/config.toml");
 
         assert_eq!(
@@ -20,9 +23,36 @@ mod config_version_tests {
             Ok(CURRENT_CONFIG_VERSION),
             "example config must preflight at the current schema version"
         );
-        let config: Config = toml::from_str(example).expect("example config must parse as Config");
+
+        #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
+        {
+            let config: Config =
+                toml::from_str(example).expect("example config must parse as Config");
+            assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+            validate_cache_pricing_retired(&config).expect("example must not carry retired tables");
+        }
+    }
+
+    /// Lean-build counterpart to
+    /// `shipped_example_config_parses_and_passes_preflight`: a full config
+    /// using only the always-available provider kinds preflights at the
+    /// current version, deserializes, and carries no retired tables -- the
+    /// same guarantees on a build where the feature-gated example cannot
+    /// parse.
+    #[test]
+    fn lean_example_config_parses_and_passes_preflight() {
+        let example = crate::config::LEAN_EXAMPLE_CONFIG;
+
+        assert_eq!(
+            preflight_config_version(example),
+            Ok(CURRENT_CONFIG_VERSION),
+            "lean example config must preflight at the current schema version"
+        );
+        let config: Config =
+            toml::from_str(example).expect("lean example config must parse as Config");
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
-        validate_cache_pricing_retired(&config).expect("example must not carry retired tables");
+        validate_cache_pricing_retired(&config)
+            .expect("lean example must not carry retired tables");
     }
 
     #[test]

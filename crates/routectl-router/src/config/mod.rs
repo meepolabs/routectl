@@ -222,3 +222,51 @@ impl Config {
             .map(|(_, _, _, pricing)| pricing)
     }
 }
+
+/// A full config mirroring `examples/config.toml`'s non-feature-gated
+/// structure, using ONLY the always-available provider kinds
+/// (`openai-compat`, `anthropic-api`). The shipped example documents
+/// feature-gated kinds (`bedrock`, `openai-responses`), so it deserializes
+/// as a `Config` only when those features are compiled in. This fixture
+/// lets the shipped-example parse assertions run unchanged on a lean build.
+#[cfg(test)]
+pub(crate) const LEAN_EXAMPLE_CONFIG: &str = r#"
+version = 3
+
+[server]
+host = "127.0.0.1"
+port = 8787
+
+[providers.openrouter]
+kind        = "openai-compat"
+base_url    = "https://openrouter.ai/api/v1"
+api_key_ref = "env://OPENROUTER_API_KEY"
+
+[providers.anthropic]
+kind        = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+
+[models.opus-or]
+provider      = "openrouter"
+upstream      = "anthropic/claude-opus-4-7-20260301"
+effort_levels = []
+
+[models.opus-direct]
+provider                   = "anthropic"
+upstream                   = "claude-opus-4-7-20260301"
+supports_adaptive_thinking = true
+effort_levels              = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+[aliases]
+"claude-opus-*" = "opus-direct"
+default         = "opus-or"
+
+[retry]
+max_attempts       = 2
+initial_backoff_ms = 250
+
+[capability]
+enabled               = true
+decay_hours           = 48
+inferred_window_hours = 1
+"#;

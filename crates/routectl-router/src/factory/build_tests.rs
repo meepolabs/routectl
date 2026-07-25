@@ -995,155 +995,199 @@ mod openai_responses_account_id_tests {
 
 #[cfg(test)]
 mod anthropic_api_config_propagation_tests {
-    //! Pin that `context_management` flows from `ProviderEntry::AnthropicApi`
-    //! through the factory destructure into `AnthropicApiConfig`.
+    //! Pin that the `[providers.X]` anthropic-api knobs `context_management`
+    //! and `credential_source` reach the built provider through the REAL
+    //! `build_provider` path -- observed via provider behavior, not a
+    //! re-implemented factory destructure.
     //!
-    //! The factory arm destructures the entry fields then assigns them
-    //! one-for-one to `AnthropicApiConfig { .. }`. These tests mirror that
-    //! destructure pattern so any mismatch in the wiring is caught at
-    //! compile time (missing field) or at runtime (wrong value).
+    //! `context_management` is observed through `Provider::normalize_request`:
+    //! the flag decides whether the top-level `context_management` body key
+    //! is stripped (the provider emulates the edits itself and must not
+    //! forward the key to a non-Anthropic upstream) or forwarded verbatim.
+    //!
+    //! `credential_source` is observed through the build-time secret
+    //! resolution seam: an own-mode entry resolves its configured
+    //! `api_key_ref` through the store, whereas a forwarded entry takes the
+    //! sentinel-token path and never touches the store. That seam is exactly
+    //! what `config check` cannot see (it validates a forwarded entry's shape
+    //! but never builds it).
 
+    use super::build_provider;
     use crate::config::{CredentialSource, ProviderEntry};
-    use routectl_providers::anthropic_api::AnthropicApiConfig;
+    use async_trait::async_trait;
+    use routectl_auth::{SecretRef, SecretStore};
+    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Helper that simulates the factory destructure and returns the
-    /// `context_management` value that would land in `AnthropicApiConfig`.
-    /// Written to mirror the exact field list in `build_provider_inner` so
-    /// a future factory refactor that drops the field from the destructure
-    /// will break this test at compile time.
-    fn extract_context_management(entry: &ProviderEntry) -> bool {
-        match entry {
-            ProviderEntry::AnthropicApi {
-                context_management, ..
-            } => *context_management,
-            other => panic!("expected AnthropicApi entry; got {other:?}"),
+    /// `SecretStore` that resolves any `env://` ref to a canned key and
+    /// counts every resolution. Lets a test observe whether `build_provider`
+    /// resolved a configured secret (own mode) or skipped resolution
+    /// (forwarded mode, sentinel token). Non-`env://` refs error so an
+    /// unexpected resolution surfaces loudly rather than being masked.
+    struct RecordingStore {
+        gets: AtomicUsize,
+    }
+    impl RecordingStore {
+        fn new() -> Self {
+            Self {
+                gets: AtomicUsize::new(0),
+            }
+        }
+        fn gets(&self) -> usize {
+            self.gets.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait]
+    impl SecretStore for RecordingStore {
+        async fn get(&self, sr: &SecretRef) -> routectl_core::Result<String> {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            match sr {
+                SecretRef::Env(_) => Ok("sk-canned-test-key".into()),
+                other => Err(routectl_core::Error::Auth(format!(
+                    "recording store handles env:// only; got {other}"
+                ))),
+            }
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            Ok(())
         }
     }
 
-    /// Helper that simulates the factory destructure and returns the
-    /// `use_forwarded_bearer` value that would land in `AnthropicApiConfig`
-    /// (`credential_source == Forwarded`). Mirrors the exact
-    /// `build_provider_inner` wiring so a future factory refactor that
-    /// drops the derivation breaks this test at compile time.
-    fn extract_use_forwarded_bearer(entry: &ProviderEntry) -> bool {
-        match entry {
-            ProviderEntry::AnthropicApi {
-                credential_source, ..
-            } => *credential_source == CredentialSource::Forwarded,
-            other => panic!("expected AnthropicApi entry; got {other:?}"),
-        }
-    }
-
-    /// `ProviderEntry::AnthropicApi { context_management: true, .. }` wires
-    /// the value `true` into `AnthropicApiConfig.context_management`.
-    #[test]
-    fn factory_propagates_context_management_true() {
-        // Arrange
-        let mut entry = ProviderEntry::anthropic_api("literal:sk-test");
+    /// An own-mode anthropic-api entry (default `credential_source = Own`,
+    /// ApiKey auth) with `context_management` set as requested. The
+    /// `env://` api_key_ref lets the real build path resolve a token via
+    /// `RecordingStore`.
+    fn own_entry_with_context_management(cm: bool) -> ProviderEntry {
+        let mut entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_ANTHROPIC_KEY");
         if let ProviderEntry::AnthropicApi {
             ref mut context_management,
             ..
         } = entry
         {
-            *context_management = true;
+            *context_management = cm;
         }
-
-        // Act: extract the way the factory does, then build the config field.
-        let extracted = extract_context_management(&entry);
-        let cfg = AnthropicApiConfig::new("test", "sk-test");
-        // Simulate the factory struct-literal assignment.
-        let cfg_with_flag = AnthropicApiConfig {
-            context_management: extracted,
-            ..cfg
-        };
-
-        // Assert
-        assert!(
-            cfg_with_flag.context_management,
-            "context_management: true must propagate into AnthropicApiConfig"
-        );
+        entry
     }
 
-    /// A default `ProviderEntry::AnthropicApi` (context_management omitted)
-    /// wires the value `false` into `AnthropicApiConfig.context_management`.
-    #[test]
-    fn factory_propagates_context_management_false_default() {
-        // Arrange: use the constructor helper -- context_management defaults to false.
-        let entry = ProviderEntry::anthropic_api("literal:sk-test");
-
-        // Act
-        let extracted = extract_context_management(&entry);
-        let cfg = AnthropicApiConfig::new("test", "sk-test");
-        let cfg_with_flag = AnthropicApiConfig {
-            context_management: extracted,
-            ..cfg
-        };
-
-        // Assert
-        assert!(
-            !cfg_with_flag.context_management,
-            "context_management must default to false in AnthropicApiConfig"
-        );
-    }
-
-    /// `ProviderEntry::AnthropicApi { credential_source: Forwarded, .. }`
-    /// wires `use_forwarded_bearer: true` into `AnthropicApiConfig` --
-    /// acceptance criterion for the per-provider WIRE gate.
-    #[test]
-    fn factory_propagates_forwarded_credential_source_to_use_forwarded_bearer_true() {
-        // Arrange
-        let mut entry = ProviderEntry::anthropic_api("literal:sk-test");
-        if let ProviderEntry::AnthropicApi {
-            ref mut credential_source,
-            ref mut api_key_ref,
-            ..
-        } = entry
-        {
-            *credential_source = CredentialSource::Forwarded;
-            api_key_ref.clear();
+    /// A minimal request carrying a `context_management` block in
+    /// `provider_extras`. The anthropic-api normalize path strips this
+    /// top-level body key IFF the provider was built with
+    /// `context_management = true`; with the flag false the key is
+    /// forwarded verbatim.
+    fn req_with_context_management_extras() -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                refusal: None,
+            }]
+            .into(),
+            provider_extras: Some(json!({
+                "context_management": { "edits": [] }
+            })),
+            ..Default::default()
         }
+    }
 
-        // Act
-        let extracted = extract_use_forwarded_bearer(&entry);
-        let cfg = AnthropicApiConfig::new("test", "sk-test");
-        let cfg_with_flag = AnthropicApiConfig {
-            use_forwarded_bearer: extracted,
+    /// `[providers.X] context_management = true` must reach the built
+    /// provider: its `normalize_request` strips the `context_management`
+    /// body key (the provider owns the emulation and never forwards it).
+    #[tokio::test]
+    async fn context_management_true_propagates_and_strips_body_key() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(RecordingStore::new());
+        let provider = build_provider(
+            "anthropic-cm-on",
+            &own_entry_with_context_management(true),
+            secrets,
+        )
+        .await
+        .expect("own-mode anthropic-api provider must build");
 
-            #[cfg(feature = "bedrock")]
-            mantle: None,
-            ..cfg
-        };
+        let body = provider
+            .normalize_request(&req_with_context_management_extras())
+            .expect("normalize_request must succeed");
 
-        // Assert
         assert!(
-            cfg_with_flag.use_forwarded_bearer,
-            "credential_source: Forwarded must propagate to use_forwarded_bearer: true"
+            body.get("context_management").is_none(),
+            "context_management = true must reach the provider and strip the body key; got: {body}"
         );
     }
 
-    /// A default `ProviderEntry::AnthropicApi` (credential_source omitted,
-    /// so `Own`) wires `use_forwarded_bearer: false` -- the own-mode
-    /// default that never consumes a floating forwarded bearer.
-    #[test]
-    fn factory_propagates_own_credential_source_to_use_forwarded_bearer_false_default() {
-        // Arrange: use the constructor helper -- credential_source defaults to Own.
-        let entry = ProviderEntry::anthropic_api("literal:sk-test");
+    /// A default entry (`context_management` omitted, so false) must reach
+    /// the built provider as false: its `normalize_request` forwards the
+    /// `context_management` body key verbatim to the upstream.
+    #[tokio::test]
+    async fn context_management_false_default_propagates_and_keeps_body_key() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(RecordingStore::new());
+        let provider = build_provider(
+            "anthropic-cm-off",
+            &own_entry_with_context_management(false),
+            secrets,
+        )
+        .await
+        .expect("own-mode anthropic-api provider must build");
 
-        // Act
-        let extracted = extract_use_forwarded_bearer(&entry);
-        let cfg = AnthropicApiConfig::new("test", "sk-test");
-        let cfg_with_flag = AnthropicApiConfig {
-            use_forwarded_bearer: extracted,
+        let body = provider
+            .normalize_request(&req_with_context_management_extras())
+            .expect("normalize_request must succeed");
 
-            #[cfg(feature = "bedrock")]
-            mantle: None,
-            ..cfg
-        };
-
-        // Assert
         assert!(
-            !cfg_with_flag.use_forwarded_bearer,
-            "credential_source: Own must propagate to use_forwarded_bearer: false"
+            body.get("context_management").is_some(),
+            "context_management = false must reach the provider and keep the body key; got: {body}"
+        );
+    }
+
+    /// `credential_source = "own"` (the default) drives the factory to
+    /// resolve the entry's configured `api_key_ref` through the store --
+    /// the own-credential build path (`use_forwarded_bearer = false`).
+    #[tokio::test]
+    async fn own_credential_source_resolves_configured_secret() {
+        let store = Arc::new(RecordingStore::new());
+        let secrets: Arc<dyn SecretStore> = store.clone();
+        let entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_ANTHROPIC_KEY");
+
+        build_provider("anthropic-own", &entry, secrets)
+            .await
+            .expect("own-mode anthropic-api provider must build");
+
+        assert_eq!(
+            store.gets(),
+            1,
+            "own credential_source must resolve its configured api_key_ref exactly once at build"
+        );
+    }
+
+    /// `credential_source = "forwarded"` drives the factory onto the
+    /// sentinel-token path (`use_forwarded_bearer = true`): the empty
+    /// `api_key_ref` is NEVER resolved, so the store stays untouched. This
+    /// is the seam `config check` cannot see -- it validates the forwarded
+    /// entry's shape but never builds it.
+    #[tokio::test]
+    async fn forwarded_credential_source_skips_secret_resolution() {
+        let store = Arc::new(RecordingStore::new());
+        let secrets: Arc<dyn SecretStore> = store.clone();
+        let entry =
+            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded);
+
+        build_provider("anthropic-forwarded", &entry, secrets)
+            .await
+            .expect("forwarded anthropic-api provider must build without resolving a secret");
+
+        assert_eq!(
+            store.gets(),
+            0,
+            "forwarded credential_source must build the sentinel token without resolving api_key_ref"
         );
     }
 }
