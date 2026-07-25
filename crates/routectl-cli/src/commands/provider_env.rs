@@ -7,7 +7,7 @@
 //!
 //! Two classifications cover every cataloged provider kind:
 //!
-//! - IN-TABLE ([`ENV_VAR_TABLE`]): kinds with a single well-known env var.
+//! - IN-TABLE (`ENV_VAR_TABLE`): kinds with a single well-known env var.
 //! - EXCLUDED ([`EXCLUDED_KINDS`]): kinds that intentionally have NO single
 //!   conventional var (e.g. multi-var cloud credentials).
 //!
@@ -27,7 +27,7 @@ static ENV_VAR_TABLE: &[(&str, &str)] = &[
     ("openai-responses", "OPENAI_API_KEY"),
 ];
 
-/// Cataloged provider kinds deliberately omitted from [`ENV_VAR_TABLE`]:
+/// Cataloged provider kinds deliberately omitted from `ENV_VAR_TABLE`:
 /// kinds with no single conventional credential var to offer.
 pub static EXCLUDED_KINDS: &[&str] = &[
     // Bedrock authenticates with multi-var AWS credentials

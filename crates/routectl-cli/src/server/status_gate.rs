@@ -37,7 +37,7 @@ const GATE_SCHEMA_VERSION: u32 = 1;
 
 /// Resolved `Host` allowlist for the status subtree: the loopback literals
 /// plus the exact address routectl actually bound. Under a wildcard bind
-/// (`0.0.0.0` / `::`) it degrades to a bound-port check (see [`Self::allows`]).
+/// (`0.0.0.0` / `::`) it degrades to a bound-port check (see `Self::allows`).
 /// Cheap to clone (an `Arc`), as the axum middleware state machinery clones it
 /// per request.
 #[derive(Clone)]

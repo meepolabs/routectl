@@ -15,7 +15,7 @@
 //! stays leak-safe by construction: the counter dimension can only ever be
 //! one of the two fixed reason strings -- NEVER a token, header, or body
 //! value -- because the only input `incr` accepts is a
-//! [`PureProxyRejectionReason`], and the only input the rejection log
+//! `PureProxyRejectionReason`, and the only input the rejection log
 //! accepts is that reason plus a boolean.
 
 use std::sync::LazyLock;

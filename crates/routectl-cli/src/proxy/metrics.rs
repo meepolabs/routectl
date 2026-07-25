@@ -17,7 +17,7 @@
 //! No token, credential, or request/response body ever flows into a
 //! counter dimension or a log line here -- by construction, the only
 //! inputs this module accepts are small closed enums plus the HTTP
-//! method and path (for [`warn_once`]), never headers or payloads.
+//! method and path (for [`WarnOnce::warn_once`]), never headers or payloads.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -261,7 +261,7 @@ impl ProxyMetrics {
 /// unlike `ProxyMetrics`'s per-request counters, this is not called
 /// once per request in steady state, only once per newly-seen pair.
 ///
-/// The set is capped at [`WARN_ONCE_CAP`] distinct pairs: it is keyed on
+/// The set is capped at `WARN_ONCE_CAP` distinct pairs: it is keyed on
 /// request-derived data (the exact path a client sends), so without a
 /// bound a client that sends many distinct unrecognized paths -- an
 /// attacker or a runaway client bug -- would grow this set without

@@ -5,7 +5,7 @@
 //! real Anthropic origin).
 //!
 //! This module does not terminate TLS or serve HTTP/1.1 connections --
-//! see `proxy::mitm` for that. [`handle_request`] is generic over the
+//! see `proxy::mitm` for that. `handle_request` is generic over the
 //! request body type (`B: http_body::Body`, not `hyper::body::Incoming`
 //! specifically) so it can be exercised directly in tests with a
 //! synthetic body (e.g. `http_body_util::Full`) without spinning up a
@@ -40,7 +40,7 @@ use super::mitm::MitmCtx;
 pub(crate) const ANTHROPIC_INFERENCE_PATHS: &[&str] =
     &["/v1/messages", "/v1/messages/count_tokens", "/v1/models"];
 
-/// Read-only accessor for [`ANTHROPIC_INFERENCE_PATHS`], for the
+/// Read-only accessor for `ANTHROPIC_INFERENCE_PATHS`, for the
 /// cross-crate anti-drift integration test in `tests/server.rs` (a
 /// separate compilation unit that cannot see a `pub(crate)` item
 /// directly). The const itself stays `pub(crate)` -- this accessor

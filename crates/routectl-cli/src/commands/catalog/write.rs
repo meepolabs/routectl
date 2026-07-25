@@ -13,7 +13,7 @@ use super::today_verified_at;
 
 /// `routectl catalog export` -- serialize the on-disk overlay to pretty
 /// JSON, printed to stdout or written to `--out <path>`. Resolves the
-/// default overlay path; see [`export_at`] for the testable core.
+/// default overlay path; see `export_at` for the testable core.
 ///
 /// The exported JSON is exactly `catalog_overlay.json` -- catalog cells
 /// only. It does NOT back up credentials: provider keys, OAuth tokens, and
@@ -51,7 +51,7 @@ pub(crate) fn export_at(path: &Path) -> Result<String, Box<dyn std::error::Error
 }
 
 /// `routectl catalog verify <selector>` -- stamp an existing overlay cell
-/// verified today. Resolves the default overlay path; see [`verify_at`] for
+/// verified today. Resolves the default overlay path; see `verify_at` for
 /// the testable core.
 pub fn verify(selector_raw: &str) -> Result<(), Box<dyn std::error::Error>> {
     verify_at(selector_raw, &overlay_default_path())
@@ -320,7 +320,7 @@ pub(crate) fn print_pickup_note() {
 }
 
 /// `routectl catalog set <selector> <field>=<value>...` -- resolves the
-/// default overlay path; see [`set_at`] for the testable core.
+/// default overlay path; see `set_at` for the testable core.
 pub fn set(
     selector_raw: &str,
     fields: &[String],
@@ -410,7 +410,7 @@ pub(crate) fn set_at(
 }
 
 /// `routectl catalog disable <selector>` -- resolves the default overlay
-/// path; see [`disable_at`] for the testable core.
+/// path; see `disable_at` for the testable core.
 pub fn disable(selector_raw: &str) -> Result<(), CatalogWriteError> {
     disable_at(selector_raw, &overlay_default_path())
 }

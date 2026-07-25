@@ -2,14 +2,14 @@
 //!
 //! A probe run mutates NOTHING: config, credentials, catalog overlay, and
 //! usage DB are all byte-identical afterward. The shared orchestration
-//! ([`probe_all`]) is the one place the per-credential branch logic lives,
+//! (`probe_all`) is the one place the per-credential branch logic lives,
 //! reused by the doctor aggregator so both surfaces classify a provider the
 //! same way.
 //!
 //! The credential branch (BINDING, read-only):
 //!   - `credential_source = forwarded` -> [`ProbeOutcome::Skipped`]: no
 //!     build, no upstream call.
-//!   - an `oauth://` ref -> the in-memory-only [`OAuthStore::probe_local`]
+//!   - an `oauth://` ref -> the in-memory-only [`routectl_auth::OAuthStore::probe_local`]
 //!     (no network, no refresh). `CompositeStore::get` is NEVER called for
 //!     these -- it refreshes near-expiry tokens, which a probe must not do.
 //!   - `env://` / `file://` / `literal:` / bedrock -> build the provider and

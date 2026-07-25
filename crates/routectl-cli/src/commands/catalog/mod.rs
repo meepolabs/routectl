@@ -9,7 +9,7 @@
 //!              baked table with the on-disk `catalog_overlay.json`,
 //!              `routectl_router::merge`) as an aligned ASCII table, headed
 //!              by an overlay summary line (revision + counts by source +
-//!              disabled count -- see [`render::overlay_summary_line`]). Every
+//!              disabled count -- see `render::overlay_summary_line`). Every
 //!              row renders PRESENT (with derived provenance + a staleness
 //!              marker) or DISABLED (overlay `null`); MISSING never
 //!              appears in this catalog-only listing (see
@@ -27,12 +27,12 @@
 //!              see `commands::catalog_import`.
 //!   set     -- write a `source: user` cell for a KNOWN selector (an
 //!              existing baked row, or an existing overlay cell of either
-//!              provenance), field by field. See [`write::set_at`] for the
+//!              provenance), field by field. See `write::set_at` for the
 //!              admission rule, the field syntax, and the value-validation
 //!              contract it reuses.
 //!   disable -- write a JSON-null overlay cell for a KNOWN selector,
 //!              disabling it regardless of what it previously carried. See
-//!              [`write::disable_at`].
+//!              `write::disable_at`.
 //!
 //! LEGACY SIDECAR (`pricing_verifications.json`): this command still carries
 //! the READ side of the old sidecar format ([`verifications::PricingVerifications`],
