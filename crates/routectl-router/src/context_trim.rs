@@ -275,7 +275,8 @@ fn is_placeholder(value: &Value) -> bool {
 pub fn apply_trim_plan(req: &ChatRequest, plan: &SteadyStateTrimPlan) -> ChatRequest {
     let mut out = req.clone();
     for mark in &plan.marks {
-        let Some(message) = out.messages.get_mut(mark.message_index) else {
+        let Some(message) = std::sync::Arc::make_mut(&mut out.messages).get_mut(mark.message_index)
+        else {
             continue;
         };
         let MessageContent::Parts(parts) = &mut message.content else {
@@ -852,7 +853,7 @@ mod tests {
         }
         ChatRequest {
             model: "claude-opus-4-8".into(),
-            messages,
+            messages: messages.into(),
             ..Default::default()
         }
     }
@@ -864,7 +865,7 @@ mod tests {
         // Arrange: a tiny conversation well below the trigger.
         let req = ChatRequest {
             model: "claude-opus-4-8".into(),
-            messages: vec![user_msg("hi"), assistant_msg("hello")],
+            messages: vec![user_msg("hi"), assistant_msg("hello")].into(),
             ..Default::default()
         };
         let params = SteadyStateTrimParams::default();
@@ -884,7 +885,8 @@ mod tests {
                 user_msg("one"),
                 assistant_msg("two"),
                 tool_result_msg(&payload),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let params = SteadyStateTrimParams::default();
@@ -908,7 +910,7 @@ mod tests {
         }
         let req = ChatRequest {
             model: "claude-opus-4-8".into(),
-            messages,
+            messages: messages.into(),
             ..Default::default()
         };
         let params = SteadyStateTrimParams::default();
@@ -994,12 +996,10 @@ mod tests {
         // Arrange: turn N, and turn N+1 = turn N + one appended user/assistant.
         let turn_n = long_conversation(6, 12_000);
         let mut turn_n_plus_1 = turn_n.clone();
-        turn_n_plus_1
-            .messages
-            .push(user_msg("a brand new follow-up turn"));
-        turn_n_plus_1
-            .messages
-            .push(assistant_msg("a brand new reply"));
+        let mut msgs = turn_n_plus_1.messages.to_vec();
+        msgs.push(user_msg("a brand new follow-up turn"));
+        msgs.push(assistant_msg("a brand new reply"));
+        turn_n_plus_1.messages = msgs.into();
         let params = SteadyStateTrimParams::default();
 
         // Act
@@ -1045,9 +1045,10 @@ mod tests {
             }
             // Grow by one full turn (front indices stay immutable; only the
             // tail lengthens).
-            req.messages
-                .push(user_msg(&format!("follow-up turn {step}")));
-            req.messages.push(assistant_msg(&format!("reply {step}")));
+            let mut msgs = req.messages.to_vec();
+            msgs.push(user_msg(&format!("follow-up turn {step}")));
+            msgs.push(assistant_msg(&format!("reply {step}")));
+            req.messages = msgs.into();
         }
 
         // Sanity: the trimmer DID activate at some point (otherwise the
@@ -1063,12 +1064,10 @@ mod tests {
         // Arrange: turn N and turn N+1 (one appended turn).
         let turn_n = long_conversation(6, 12_000);
         let mut turn_n_plus_1 = turn_n.clone();
-        turn_n_plus_1
-            .messages
-            .push(user_msg("a brand new follow-up turn"));
-        turn_n_plus_1
-            .messages
-            .push(assistant_msg("a brand new reply"));
+        let mut msgs = turn_n_plus_1.messages.to_vec();
+        msgs.push(user_msg("a brand new follow-up turn"));
+        msgs.push(assistant_msg("a brand new reply"));
+        turn_n_plus_1.messages = msgs.into();
         let params = SteadyStateTrimParams::default();
 
         // Act
@@ -1108,10 +1107,12 @@ mod tests {
 
         for growth in 1..=3usize {
             let mut grown = base.clone();
+            let mut grown_msgs = grown.messages.to_vec();
             for i in 0..growth {
-                grown.messages.push(user_msg(&format!("growth {i}")));
-                grown.messages.push(assistant_msg(&format!("reply {i}")));
+                grown_msgs.push(user_msg(&format!("growth {i}")));
+                grown_msgs.push(assistant_msg(&format!("reply {i}")));
             }
+            grown.messages = grown_msgs.into();
             let plan_g = propose_steady_state_trim(&grown, &params).expect("plan grown");
             let fp_g = trimmed_prefix_fingerprint(&grown, &plan_g);
             assert_eq!(fp_base, fp_g, "fingerprint drifted at growth step {growth}");
@@ -1129,7 +1130,8 @@ mod tests {
 
         // Replace the first message (front head) content.
         let mut perturbed = base;
-        perturbed.messages[0] = user_msg("completely different first message XXXX");
+        std::sync::Arc::make_mut(&mut perturbed.messages)[0] =
+            user_msg("completely different first message XXXX");
         let plan_p = propose_steady_state_trim(&perturbed, &params).expect("plan perturbed");
         let fp_perturbed = trimmed_prefix_fingerprint(&perturbed, &plan_p);
 
@@ -1168,7 +1170,8 @@ mod tests {
 
         // Different fingerprint (perturbed front): Misfire.
         let mut perturbed = base;
-        perturbed.messages[0] = user_msg("different first message for misfire test");
+        std::sync::Arc::make_mut(&mut perturbed.messages)[0] =
+            user_msg("different first message for misfire test");
         let plan_p = propose_steady_state_trim(&perturbed, &params).expect("plan p");
         let fp_p = trimmed_prefix_fingerprint(&perturbed, &plan_p);
         assert_ne!(fp, fp_p, "perturbed fingerprint must differ from base");
@@ -1306,7 +1309,7 @@ mod tests {
         }
         ChatRequest {
             model: "claude-opus-4-8".into(),
-            messages,
+            messages: messages.into(),
             ..Default::default()
         }
     }
@@ -1366,7 +1369,7 @@ mod tests {
     fn req_of(messages: Vec<Message>) -> ChatRequest {
         ChatRequest {
             model: "claude-opus-4-8".into(),
-            messages,
+            messages: messages.into(),
             ..Default::default()
         }
     }

@@ -249,7 +249,8 @@ fn req_with_features(alias: &str, features: &[&str]) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         tools: Some(
             features
                 .iter()
@@ -277,7 +278,8 @@ fn req_with_structured_output(alias: &str) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         provider_extras: Some(json!({
             "output_config": { "format": {"type": "json_object"} }
         })),

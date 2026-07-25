@@ -91,7 +91,7 @@ async fn caller_reasoning_passes_through_dispatch_unchanged() {
     };
     let req = ChatRequest {
         model: "m".into(),
-        messages: vec![],
+        messages: vec![].into(),
         reasoning: Some(caller_reasoning.clone()),
         ..Default::default()
     };

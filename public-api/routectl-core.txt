@@ -1163,7 +1163,7 @@ pub routectl_core::schema::ChatRequest::frequency_penalty: core::option::Option<
 pub routectl_core::schema::ChatRequest::logit_bias: core::option::Option<serde_json::value::Value>
 pub routectl_core::schema::ChatRequest::logprobs: core::option::Option<bool>
 pub routectl_core::schema::ChatRequest::max_tokens: core::option::Option<u32>
-pub routectl_core::schema::ChatRequest::messages: alloc::vec::Vec<routectl_core::schema::Message>
+pub routectl_core::schema::ChatRequest::messages: alloc::sync::Arc<[routectl_core::schema::Message]>
 pub routectl_core::schema::ChatRequest::model: alloc::string::String
 pub routectl_core::schema::ChatRequest::n: core::option::Option<u32>
 pub routectl_core::schema::ChatRequest::presence_penalty: core::option::Option<f64>
@@ -3236,7 +3236,7 @@ pub routectl_core::ChatRequest::frequency_penalty: core::option::Option<f64>
 pub routectl_core::ChatRequest::logit_bias: core::option::Option<serde_json::value::Value>
 pub routectl_core::ChatRequest::logprobs: core::option::Option<bool>
 pub routectl_core::ChatRequest::max_tokens: core::option::Option<u32>
-pub routectl_core::ChatRequest::messages: alloc::vec::Vec<routectl_core::schema::Message>
+pub routectl_core::ChatRequest::messages: alloc::sync::Arc<[routectl_core::schema::Message]>
 pub routectl_core::ChatRequest::model: alloc::string::String
 pub routectl_core::ChatRequest::n: core::option::Option<u32>
 pub routectl_core::ChatRequest::presence_penalty: core::option::Option<f64>

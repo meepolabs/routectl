@@ -68,7 +68,8 @@ fn assistant_message_with_tool_calls_emits_tool_use_blocks() {
                     }
                 })]),
             ),
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -133,7 +134,8 @@ fn strips_unsigned_thinking_block_keeps_other_blocks() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -208,7 +210,8 @@ fn passes_through_when_all_thinking_signed() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -263,7 +266,8 @@ fn drops_assistant_message_when_only_block_was_unsigned_thinking() {
                 tool_calls: None,
             },
             user_msg("any update?"),
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -316,7 +320,8 @@ fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
                     "function": {"name": "calc", "arguments": "{\"x\":1}"}
                 })]),
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
     let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
@@ -380,7 +385,8 @@ fn emits_warn_when_stripping_occurs() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -445,7 +451,8 @@ fn tool_message_without_tool_call_id_is_rejected() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     let err = normalize("test-anthropic", &req, false, &[], false, None).unwrap_err();
@@ -489,7 +496,8 @@ fn unsigned_thinking_block_is_stripped_not_rejected() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
     // Must NOT error: the new behavior is to strip the unsigned
@@ -527,7 +535,8 @@ fn assistant_tool_call_with_unparseable_arguments_wraps_under_underscore() {
                 "type": "function",
                 "function": {"name": "calc", "arguments": "this is not json"}
             })]),
-        )],
+        )]
+        .into(),
         ..Default::default()
     };
     let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
@@ -557,7 +566,7 @@ fn normalize_recomputes_sampling_after_tool_choice_forces_use_strip() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("search the web")],
+        messages: vec![user_msg("search the web")].into(),
         max_tokens: Some(2048),
         temperature: None,
         top_p: Some(0.9),
@@ -595,7 +604,7 @@ fn adaptive_emits_adaptive_shape_with_output_config() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("xhigh".into()),
@@ -634,7 +643,7 @@ fn reasoning_effort_composes_thinking_and_does_not_leak() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -664,7 +673,7 @@ fn reasoning_effort_none_disables_thinking_and_does_not_leak() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         reasoning: Some(ReasoningConfig {
             effort: Some("none".into()),
@@ -695,7 +704,7 @@ fn legacy_thinking_unchanged_when_flag_false() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-6".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -733,7 +742,7 @@ fn effort_max_maps_to_window_ceiling_legacy_path() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2000),
         reasoning: Some(ReasoningConfig {
             effort: Some("max".into()),
@@ -758,7 +767,7 @@ fn disabled_thinking_unchanged_under_adaptive_flag() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(512),
         reasoning: Some(ReasoningConfig {
             effort: Some("none".into()),
@@ -785,7 +794,7 @@ fn adaptive_defaults_effort_to_medium_when_unset() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: None,
@@ -813,7 +822,7 @@ fn adaptive_drops_max_tokens_silently() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("low".into()),
@@ -846,7 +855,7 @@ fn small_max_tokens_drops_legacy_thinking() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -874,7 +883,7 @@ fn small_max_tokens_drops_legacy_thinking_effort_medium() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: Some("medium".into()),
@@ -901,7 +910,7 @@ fn small_max_tokens_drops_legacy_thinking_effort_xhigh() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: Some("xhigh".into()),
@@ -928,7 +937,7 @@ fn small_max_tokens_drops_thinking_with_explicit_budget() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: None,
@@ -951,7 +960,7 @@ fn small_max_tokens_keeps_adaptive() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -977,7 +986,7 @@ fn effort_budget_ceiling_clamped_in_carryable_band() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1100),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -1000,7 +1009,7 @@ fn exactly_1025_max_tokens_keeps_thinking() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1025),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -1026,7 +1035,7 @@ fn explicit_budget_above_max_tokens_capped_to_max_minus_one() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1100),
         reasoning: Some(ReasoningConfig {
             effort: None,
@@ -1054,7 +1063,7 @@ fn explicit_budget_below_floor_clamped_up_to_min() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         reasoning: Some(ReasoningConfig {
             effort: None,
@@ -1078,7 +1087,7 @@ fn explicit_disable_wins_over_small_max_tokens() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -1100,7 +1109,7 @@ fn explicit_disable_wins_over_small_max_tokens() {
 fn tool_choice_string_auto_translates_to_anthropic_object() {
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tool_choice: Some(json!("auto")),
         ..Default::default()
     };
@@ -1112,7 +1121,7 @@ fn tool_choice_string_auto_translates_to_anthropic_object() {
 fn tool_choice_string_required_translates_to_any() {
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tool_choice: Some(json!("required")),
         ..Default::default()
     };
@@ -1124,7 +1133,7 @@ fn tool_choice_string_required_translates_to_any() {
 fn tool_choice_string_none_drops_field() {
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tool_choice: Some(json!("none")),
         ..Default::default()
     };
@@ -1147,7 +1156,7 @@ fn tool_choice_string_none_drops_field() {
 fn tool_choice_none_with_tools_strips_tools_too() {
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tool_choice: Some(json!("none")),
         tools: Some(vec![routectl_core::ToolDef::Custom(
             routectl_core::CustomTool {
@@ -1177,7 +1186,7 @@ fn tool_choice_none_with_tools_strips_tools_too() {
 fn tool_choice_function_object_translates_to_anthropic_tool() {
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tool_choice: Some(json!({"type":"function","function":{"name":"get_weather"}})),
         ..Default::default()
     };
@@ -1202,7 +1211,7 @@ fn tool_choice_already_anthropic_shape_passes_through_verbatim() {
     ] {
         let req = ChatRequest {
             model: "claude-sonnet-4-5-20250929".into(),
-            messages: vec![user_msg("hi")],
+            messages: vec![user_msg("hi")].into(),
             tool_choice: Some(tc.clone()),
             ..Default::default()
         };
@@ -1219,7 +1228,7 @@ fn tool_choice_unknown_object_passes_through_verbatim() {
     let weird = json!({"type":"some_future_mode","extra":"bag"});
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tool_choice: Some(weird.clone()),
         ..Default::default()
     };
@@ -1237,7 +1246,7 @@ fn tool_choice_unknown_object_passes_through_verbatim() {
 fn structured_output_format_merges_from_provider_extras() {
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         provider_extras: Some(json!({
             "output_config": {
                 "format": {
@@ -1262,7 +1271,7 @@ fn structured_output_format_merges_from_provider_extras() {
 fn output_config_effort_stripped_on_non_adaptive_provider() {
     let req = ChatRequest {
         model: "claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         provider_extras: Some(json!({
             "output_config": {"effort": "high"}
@@ -1287,7 +1296,7 @@ fn output_config_effort_stripped_on_non_adaptive_provider() {
 fn output_config_effort_stripped_preserves_sibling_format_on_non_adaptive() {
     let req = ChatRequest {
         model: "claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         provider_extras: Some(json!({
             "output_config": {
@@ -1319,7 +1328,7 @@ fn output_config_effort_preserved_on_adaptive_provider() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -1361,7 +1370,7 @@ fn req_with_thinking_and_tool_choice(tool_choice: Option<Value>) -> ChatRequest 
     use routectl_core::ReasoningConfig;
     ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         reasoning: Some(ReasoningConfig {
             effort: Some("medium".into()),
@@ -1505,7 +1514,7 @@ fn tool_choice_any_without_thinking_no_op() {
     // is harmless and tool_choice survives.
     let req = ChatRequest {
         model: "claude-sonnet-4-5-20250929".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         tool_choice: Some(json!({"type": "any"})),
         ..Default::default()
@@ -1567,7 +1576,7 @@ fn assistant_with_thinking(signature: Option<&str>) -> Message {
 fn req_with_hr(hr: Option<CoreHistoryReasoning>, assistant: Message) -> ChatRequest {
     let mut req = ChatRequest {
         model: "deepseek-chat".into(),
-        messages: vec![user_msg("compute 2+2"), assistant],
+        messages: vec![user_msg("compute 2+2"), assistant].into(),
         ..Default::default()
     };
     req.routectl_internal.history_reasoning = hr;
@@ -1732,7 +1741,8 @@ fn tool_call_id_reject_stays_unconditional_under_preserve() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
     req.routectl_internal.history_reasoning = Some(CoreHistoryReasoning::Preserve);
@@ -1754,7 +1764,7 @@ fn normalize_reads_supports_adaptive_thinking_from_routectl_internal() {
 
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hello")],
+        messages: vec![user_msg("hello")].into(),
         max_tokens: Some(8192),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -1829,7 +1839,7 @@ fn per_model_adaptive_thinking_wire_shape_contract() {
     for row in &rows {
         let mut req = ChatRequest {
             model: row.model.into(),
-            messages: vec![user_msg("hi")],
+            messages: vec![user_msg("hi")].into(),
             max_tokens: Some(8192),
             reasoning: Some(ReasoningConfig {
                 effort: Some("high".into()),
@@ -1890,7 +1900,7 @@ fn max_thinking_budget_nonzero_clamps_budget_down() {
 
     let mut req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hello")],
+        messages: vec![user_msg("hello")].into(),
         max_tokens: Some(10000),
         reasoning: Some(ReasoningConfig {
             effort: None,
@@ -1920,7 +1930,7 @@ fn max_thinking_budget_zero_no_op() {
 
     let mut req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hello")],
+        messages: vec![user_msg("hello")].into(),
         max_tokens: Some(10000),
         reasoning: Some(ReasoningConfig {
             effort: None,
@@ -1986,7 +1996,8 @@ fn emit_reasoning_blocks_warns_on_non_anthropic_format() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -2052,7 +2063,7 @@ fn drops_top_p_when_temperature_also_set() {
     // Arrange
     let req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(256),
         temperature: Some(0.7),
         top_p: Some(0.9),
@@ -2076,7 +2087,7 @@ fn keeps_top_p_when_temperature_unset() {
     // Arrange
     let req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(256),
         temperature: None,
         top_p: Some(0.9),
@@ -2100,7 +2111,7 @@ fn keeps_temperature_when_top_p_unset() {
     // Arrange
     let req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(256),
         temperature: Some(0.3),
         top_p: None,
@@ -2126,7 +2137,7 @@ fn drops_top_p_when_thinking_forces_temperature() {
     // Arrange
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         top_p: Some(0.9),
         reasoning: Some(ReasoningConfig {
@@ -2169,7 +2180,7 @@ fn adaptive_reinjects_effort_when_provider_extras_omits_it() {
     use serde_json::json;
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -2217,7 +2228,7 @@ fn adaptive_forced_tool_choice_drops_orphan_effort_via_late_enforcer() {
     use serde_json::json;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -2251,7 +2262,7 @@ fn adaptive_effort_over_cap_clamped_by_late_enforcer() {
     use routectl_core::ReasoningConfig;
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("max".into()),

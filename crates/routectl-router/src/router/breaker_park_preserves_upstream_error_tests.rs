@@ -111,7 +111,7 @@ fn router_with_parking_entry() -> (Router, Arc<AtomicUsize>) {
 fn solo_req() -> ChatRequest {
     ChatRequest {
         model: "solo".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     }
 }

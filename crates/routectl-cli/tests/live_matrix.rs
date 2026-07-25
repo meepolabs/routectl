@@ -75,7 +75,8 @@ fn make_request(target: &str, max_tokens: u32, stream: bool) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         max_tokens: Some(max_tokens),
         stream: Some(stream),
         ..Default::default()

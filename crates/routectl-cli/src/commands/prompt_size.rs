@@ -368,7 +368,7 @@ fn system_tier_bytes(req: &ChatRequest) -> usize {
     if let Some(system) = &req.system {
         bytes += serialized_len(system);
     }
-    for m in &req.messages {
+    for m in &*req.messages {
         if matches!(m.role, Role::System) {
             bytes += serialized_len(m);
         }
@@ -782,7 +782,7 @@ mod tests {
                 .len();
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![tool_result_msg(json!(pretty), None)],
+            messages: vec![tool_result_msg(json!(pretty), None)].into(),
             ..Default::default()
         };
 
@@ -817,7 +817,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
 
@@ -837,7 +838,7 @@ mod tests {
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
             system: Some(SystemContent::Text("You are a careful assistant.".into())),
-            messages: vec![user_text("hello there")],
+            messages: vec![user_text("hello there")].into(),
             ..Default::default()
         };
 
@@ -854,7 +855,7 @@ mod tests {
         let req = ChatRequest {
             model: "gpt-4o".into(),
             system: Some(SystemContent::Text("You are helpful.".into())),
-            messages: vec![user_text("hi")],
+            messages: vec![user_text("hi")].into(),
             ..Default::default()
         };
 
@@ -873,7 +874,7 @@ mod tests {
             system: Some(SystemContent::Text(
                 "Session 550e8400-e29b-41d4-a716-446655440000 active.".into(),
             )),
-            messages: vec![user_text("hi")],
+            messages: vec![user_text("hi")].into(),
             ..Default::default()
         };
 
@@ -890,7 +891,7 @@ mod tests {
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
             system: Some(SystemContent::Text("You are helpful.".into())),
-            messages: vec![user_text("hi")],
+            messages: vec![user_text("hi")].into(),
             ..Default::default()
         };
 
@@ -925,7 +926,8 @@ mod tests {
                     tool_calls: None,
                 },
                 user_text("What is the weather today?"),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -1025,7 +1027,7 @@ fast = "sonnet"
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
             system: Some(SystemContent::Text("You are helpful.".into())),
-            messages: vec![user_text("hi")],
+            messages: vec![user_text("hi")].into(),
             ..Default::default()
         };
 
@@ -1046,7 +1048,7 @@ fast = "sonnet"
         let pretty = "{\n  \"rows\": [1, 2, 3]\n}";
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![tool_result_msg(json!(pretty), None)],
+            messages: vec![tool_result_msg(json!(pretty), None)].into(),
             ..Default::default()
         };
 
@@ -1248,7 +1250,7 @@ fast = "sonnet"
         let req = ChatRequest {
             model: "claude-opus-4-8".into(),
             system: Some(SystemContent::Text("You are helpful.".into())),
-            messages: vec![user_text("hi")],
+            messages: vec![user_text("hi")].into(),
             ..Default::default()
         };
 
@@ -1265,7 +1267,7 @@ fast = "sonnet"
         let req = ChatRequest {
             model: "claude-opus-4-8".into(),
             system: Some(SystemContent::Text("You are helpful.".into())),
-            messages: vec![user_text("hi")],
+            messages: vec![user_text("hi")].into(),
             ..Default::default()
         };
         let projection = ProjectionArgs {
@@ -1549,7 +1551,7 @@ fast = "sonnet"
         }
         ChatRequest {
             model: "claude-opus-4-8".into(),
-            messages,
+            messages: messages.into(),
             ..Default::default()
         }
     }
@@ -1606,7 +1608,7 @@ fast = "sonnet"
         let target = resolve_target(&config, "heavy");
         let req = ChatRequest {
             model: "claude-opus-4-8".into(),
-            messages: vec![user_text("hi"), user_text("there")],
+            messages: vec![user_text("hi"), user_text("there")].into(),
             ..Default::default()
         };
         let args = ProjectionArgs {

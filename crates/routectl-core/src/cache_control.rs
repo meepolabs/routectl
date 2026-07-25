@@ -219,7 +219,7 @@ impl CacheBreakpointSource for crate::ChatRequest {
         }
 
         // Then messages: each typed `ContentPart` may carry a marker.
-        for m in &self.messages {
+        for m in &*self.messages {
             if let crate::MessageContent::Parts(parts) = &m.content {
                 for p in parts {
                     if let Some(cc) = p.cache_control() {
@@ -574,7 +574,7 @@ mod tests {
     fn frozen_floor_no_markers_is_zero() {
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![user_text_msg("hi", None)],
+            messages: vec![user_text_msg("hi", None)].into(),
             ..Default::default()
         };
         let floor = compute_frozen_floor(&req);
@@ -589,7 +589,7 @@ mod tests {
         // top-level cache_control marker must both be counted.
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![user_text_msg("hi", None)],
+            messages: vec![user_text_msg("hi", None)].into(),
             tools: Some(vec![ToolDef::Other(json!({
                 "type": "web_search_20250901",
                 "name": "web_search",
@@ -625,7 +625,7 @@ mod tests {
                 cache_control: Some(CacheControl::ephemeral_5m()),
                 citations: None,
             }])),
-            messages: vec![user_text_msg("hi", Some(CacheControl::ephemeral_5m()))],
+            messages: vec![user_text_msg("hi", Some(CacheControl::ephemeral_5m()))].into(),
             cache_control: Some(CacheControl::ephemeral_5m()),
             ..Default::default()
         };
@@ -666,7 +666,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
         let err = validate_source(&req).unwrap_err();
@@ -686,7 +687,7 @@ mod tests {
                 strict: None,
                 type_tag: None,
             })]),
-            messages: vec![user_text_msg("hi", Some(CacheControl::ephemeral_5m()))],
+            messages: vec![user_text_msg("hi", Some(CacheControl::ephemeral_5m()))].into(),
             ..Default::default()
         };
         validate_source(&req).unwrap();
@@ -705,7 +706,8 @@ mod tests {
                 user_text_msg("c", Some(cc_5m())),
                 user_text_msg("d", None),
                 user_text_msg("e", None),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         // Act
@@ -736,7 +738,7 @@ mod tests {
                 cache_control: Some(cc_5m()),
                 citations: None,
             }])),
-            messages: vec![user_text_msg("hi", None), user_text_msg("there", None)],
+            messages: vec![user_text_msg("hi", None), user_text_msg("there", None)].into(),
             ..Default::default()
         };
         let floor = compute_frozen_floor(&req);
@@ -756,7 +758,7 @@ mod tests {
         // caching) freezes the ENTIRE prefix, including all messages.
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![user_text_msg("hi", None), user_text_msg("there", None)],
+            messages: vec![user_text_msg("hi", None), user_text_msg("there", None)].into(),
             cache_control: Some(cc_5m()),
             ..Default::default()
         };
@@ -775,7 +777,7 @@ mod tests {
         // Arrange: the only message marker is on the final message.
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![user_text_msg("a", None), user_text_msg("b", Some(cc_5m()))],
+            messages: vec![user_text_msg("a", None), user_text_msg("b", Some(cc_5m()))].into(),
             ..Default::default()
         };
 
@@ -792,7 +794,7 @@ mod tests {
         // values for the `i + 1 >= len` guard (i = 0, len = 1).
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![user_text_msg("a", Some(cc_5m()))],
+            messages: vec![user_text_msg("a", Some(cc_5m()))].into(),
             ..Default::default()
         };
 
@@ -808,7 +810,7 @@ mod tests {
         // Arrange
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![],
+            messages: vec![].into(),
             ..Default::default()
         };
 
@@ -824,7 +826,7 @@ mod tests {
         // Arrange
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![user_text_msg("a", None), user_text_msg("b", None)],
+            messages: vec![user_text_msg("a", None), user_text_msg("b", None)].into(),
             ..Default::default()
         };
         let floor = compute_frozen_floor(&req);
@@ -842,7 +844,7 @@ mod tests {
         // Arrange
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![user_text_msg("a", Some(cc_5m())), user_text_msg("b", None)],
+            messages: vec![user_text_msg("a", Some(cc_5m())), user_text_msg("b", None)].into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();

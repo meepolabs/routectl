@@ -414,6 +414,18 @@ mod tests {
     };
     use serde_json::json;
 
+    fn push_msg(req: &mut ChatRequest, m: Message) {
+        let mut msgs = req.messages.to_vec();
+        msgs.push(m);
+        req.messages = msgs.into();
+    }
+
+    fn insert_msg(req: &mut ChatRequest, idx: usize, m: Message) {
+        let mut msgs = req.messages.to_vec();
+        msgs.insert(idx, m);
+        req.messages = msgs.into();
+    }
+
     fn simple_req(model: &str) -> ChatRequest {
         ChatRequest {
             model: model.into(),
@@ -426,7 +438,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             temperature: Some(0.7),
             top_p: Some(0.9),
             max_tokens: Some(512),
@@ -583,16 +596,19 @@ mod tests {
     #[test]
     fn deepseek_strips_reasoning_content_from_history() {
         let mut req = simple_req("deepseek-reasoner");
-        req.messages.push(Message {
-            refusal: None,
-            role: Role::Assistant,
-            content: MessageContent::Text("I thought about it".into()),
-            reasoning: Some("hidden chain".into()),
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        push_msg(
+            &mut req,
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("I thought about it".into()),
+                reasoning: Some("hidden chain".into()),
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
         let body = normalize(
             "test",
             &req,
@@ -618,16 +634,19 @@ mod tests {
     #[test]
     fn deepseek_preserve_renames_reasoning_to_reasoning_content() {
         let mut req = simple_req("deepseek-reasoner");
-        req.messages.push(Message {
-            refusal: None,
-            role: Role::Assistant,
-            content: MessageContent::Text("I thought about it".into()),
-            reasoning: Some("hidden chain".into()),
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        push_msg(
+            &mut req,
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("I thought about it".into()),
+                reasoning: Some("hidden chain".into()),
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
         let body = normalize(
             "test",
             &req,
@@ -659,16 +678,19 @@ mod tests {
     #[test]
     fn explicit_strip_overrides_dialect_default() {
         let mut req = simple_req("anything");
-        req.messages.push(Message {
-            refusal: None,
-            role: Role::Assistant,
-            content: MessageContent::Text("a".into()),
-            reasoning: Some("zap me".into()),
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        push_msg(
+            &mut req,
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("a".into()),
+                reasoning: Some("zap me".into()),
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
         let body = normalize(
             "test",
             &req,
@@ -693,16 +715,19 @@ mod tests {
     #[test]
     fn openrouter_preserve_lifts_reasoning_to_typed_details_array() {
         let mut req = simple_req("anthropic/claude-haiku-4-5");
-        req.messages.push(Message {
-            refusal: None,
-            role: Role::Assistant,
-            content: MessageContent::Text("ok".into()),
-            reasoning: Some("trace".into()),
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        push_msg(
+            &mut req,
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("ok".into()),
+                reasoning: Some("trace".into()),
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
         let body = normalize(
             "test",
             &req,
@@ -1034,7 +1059,8 @@ mod tests {
         use routectl_core::SystemContent;
         let mut req = simple_req("test-model");
         req.system = Some(SystemContent::Text("the real system prompt".into()));
-        req.messages.insert(
+        insert_msg(
+            &mut req,
             0,
             Message {
                 refusal: None,
@@ -1079,26 +1105,29 @@ mod tests {
     #[test]
     fn request_carries_reasoning_detects_thinking_content_part() {
         let mut req = simple_req("any-model");
-        req.messages.push(Message {
-            refusal: None,
-            role: Role::Assistant,
-            content: MessageContent::Parts(vec![
-                ContentPart::Known(KnownContentPart::Thinking {
-                    thinking: "my trace".into(),
-                    signature: None,
-                }),
-                ContentPart::Known(KnownContentPart::Text {
-                    text: "answer".into(),
-                    citations: None,
-                    cache_control: None,
-                }),
-            ]),
-            reasoning: None,
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        push_msg(
+            &mut req,
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Thinking {
+                        thinking: "my trace".into(),
+                        signature: None,
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "answer".into(),
+                        citations: None,
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
         assert!(
             request_carries_reasoning(&req),
             "Thinking content part must be detected as carrying reasoning"

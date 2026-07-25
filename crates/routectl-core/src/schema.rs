@@ -14,6 +14,8 @@
 //! passthroughs. See `crate::content_part`, `crate::system_content`,
 //! `crate::tool_def`, `crate::cache_control`.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -53,7 +55,19 @@ pub struct ChatRequest {
     /// Target model identifier (alias or provider-native id).
     pub model: String,
     /// Conversation turns in order.
-    pub messages: Vec<Message>,
+    ///
+    /// Held behind `Arc<[Message]>` so the per-chain-entry `req.clone()`
+    /// on the dispatch path is O(1) (a refcount bump), not a deep copy of
+    /// every message body. Contract:
+    /// 1. Cloning a `ChatRequest` shares this buffer; it does not copy it.
+    /// 2. `Arc::make_mut(&mut req.messages)` is THE copy-on-write seam for
+    ///    every in-place mutation. It pays one body copy only when the
+    ///    buffer is shared (refcount > 1), keeping other clones pristine.
+    ///    Mutate through `make_mut` exclusively.
+    /// 3. Never reassign a freshly rebuilt `Arc::from(vec)` where a
+    ///    `make_mut` edit is intended: doing so silently breaks the CoW
+    ///    seam and forces an allocation on every call.
+    pub messages: Arc<[Message]>,
 
     /// Top-level system prompt. Anthropic accepts a flat string or an
     /// array of typed text blocks with per-block `cache_control`. The

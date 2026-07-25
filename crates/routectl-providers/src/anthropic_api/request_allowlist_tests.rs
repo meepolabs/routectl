@@ -14,7 +14,8 @@ fn req_with_betas(betas: Vec<String>) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         max_tokens: Some(64),
         anthropic_beta: betas,
         ..Default::default()

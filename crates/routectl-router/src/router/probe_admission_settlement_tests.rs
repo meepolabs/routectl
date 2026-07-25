@@ -179,7 +179,7 @@ fn build_router(targets: &[(&str, &str, Behavior)]) -> Router {
 fn req_with_web_search() -> ChatRequest {
     ChatRequest {
         model: "chain".into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: Some(vec![ToolDef::Other(
             json!({"type": "web_search", "name": "t"}),
         )]),

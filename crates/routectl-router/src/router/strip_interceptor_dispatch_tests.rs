@@ -93,7 +93,7 @@ impl Provider for ProbeProvider {
 fn advisor_request() -> ChatRequest {
     ChatRequest {
         model: "haiku".into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: Some(vec![ToolDef::Other(
             json!({"type": "advisor", "name": "advisor"}),
         )]),

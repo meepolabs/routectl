@@ -157,7 +157,8 @@ mod order_test {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         }
     }
@@ -249,7 +250,8 @@ mod order_test {
                     tool_calls: None,
                 },
                 assistant_msg,
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
 
@@ -303,7 +305,8 @@ mod order_test {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             tools: Some(vec![tool]),
             tool_choice: Some(json!("required")),
             ..Default::default()

@@ -97,7 +97,7 @@ fn anthropic_object_none_tool_choice_suppresses_tool_config_entirely() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tools: Some(vec![ToolDef::Custom(CustomTool {
             name: "calc".into(),
             description: None,
@@ -140,7 +140,7 @@ fn provider_extras_merge_into_additional_model_request_fields() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         provider_extras: Some(json!({
             "context_management": {"strategy": "summarize"},
             "metadata": {"user_id": "u-1"},
@@ -176,7 +176,7 @@ fn body_fields_filter_drops_disallowed_keys_on_converse() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         provider_extras: Some(json!({
             "context_management": {"strategy": "summarize"},  // allowed
             "mcp_servers": [{"url": "https://example.com"}],  // disallowed
@@ -216,7 +216,7 @@ fn provider_extras_cannot_override_managed_keys_on_converse() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         provider_extras: Some(json!({
             "thinking": {"type": "evil"},
             "anthropic_beta": ["pwn"],
@@ -278,7 +278,8 @@ fn document_with_existing_text_sibling_does_not_prepend_empty_text() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -331,7 +332,8 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
                 tool_call_id: Some("toolu_X".into()),
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -388,7 +390,8 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
                 tool_call_id: Some("toolu_doc".into()),
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -429,7 +432,7 @@ fn anthropic_beta_filtered_against_bedrock_allowlist_in_additional_fields() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         anthropic_beta: vec![
             "context-1m-2025-08-07".into(),           // accepted
             "made-up-flag".into(),                    // not in allowlist
@@ -469,7 +472,7 @@ fn anthropic_beta_provider_config_floor_bypasses_filter_on_converse() {
     cfg.anthropic_beta = vec!["future-flag-2099".into()];
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         ..Default::default()
     };
 
@@ -500,7 +503,7 @@ fn anthropic_beta_global_allowed_betas_filters_against_operator_list_on_converse
     cfg.allowed_betas = vec!["my-override".into()];
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         anthropic_beta: vec![
             // NOT in operator list: drops.
             "context-1m-2025-08-07".into(),
@@ -562,7 +565,8 @@ fn thinking_block_with_signature_translates_to_converse_reasoning_text() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -615,7 +619,8 @@ fn thinking_block_without_signature_returns_err() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -658,7 +663,8 @@ fn thinking_block_with_empty_signature_returns_err() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -704,7 +710,8 @@ fn redacted_thinking_translates_to_converse_redacted_content() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -779,7 +786,8 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
                 tool_call_id: Some("tu_1".into()),
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -914,7 +922,8 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
                 tool_calls: None,
             },
             tool_result_msg,
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 

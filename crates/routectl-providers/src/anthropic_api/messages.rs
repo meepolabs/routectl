@@ -1087,7 +1087,7 @@ mod thinking_signature_tests {
         });
         let msg = assistant_with_parts(vec![foreign, e_kept, r_kept, text]);
         let req = ChatRequest {
-            messages: vec![msg],
+            messages: vec![msg].into(),
             ..Default::default()
         };
 
@@ -1125,7 +1125,7 @@ mod thinking_signature_tests {
             cache_control: None,
         });
         let req = ChatRequest {
-            messages: vec![assistant_with_parts(vec![empty, text])],
+            messages: vec![assistant_with_parts(vec![empty, text])].into(),
             ..Default::default()
         };
 
@@ -1337,7 +1337,7 @@ mod empty_content_backstop_tests {
             None,
         );
         let req = ChatRequest {
-            messages: vec![msg],
+            messages: vec![msg].into(),
             ..Default::default()
         };
 
@@ -1375,7 +1375,7 @@ mod empty_content_backstop_tests {
             None,
         );
         let req = ChatRequest {
-            messages: vec![msg],
+            messages: vec![msg].into(),
             ..Default::default()
         };
 
@@ -1402,7 +1402,7 @@ mod empty_content_backstop_tests {
             Some(vec![tool_call("call_1")]),
         );
         let req = ChatRequest {
-            messages: vec![msg],
+            messages: vec![msg].into(),
             ..Default::default()
         };
 

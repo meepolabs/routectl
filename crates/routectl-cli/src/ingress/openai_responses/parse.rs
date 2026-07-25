@@ -102,7 +102,7 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
 
     // input -> messages[].
     if let Some(input) = obj.remove("input") {
-        req.messages = build_messages(input);
+        req.messages = build_messages(input).into();
     }
 
     // Lift in-array system/developer messages into req.system so loose

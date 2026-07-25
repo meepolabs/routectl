@@ -27,6 +27,8 @@
 //! equal the original parsed `Value`, and the output must be strictly
 //! shorter (else there was nothing to strip).
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
 use crate::cache_control::mutable_suffix_start;
@@ -215,7 +217,7 @@ pub fn apply_json_minify(req: &mut ChatRequest) -> ReductionOutcome {
     let mut strings_minified = 0usize;
     let mut bytes_saved = 0usize;
 
-    for message in req.messages.iter_mut().skip(start) {
+    for message in Arc::make_mut(&mut req.messages).iter_mut().skip(start) {
         if let MessageContent::Parts(parts) = &mut message.content {
             for part in parts.iter_mut() {
                 let ContentPart::Known(known) = part else {
@@ -489,7 +491,7 @@ mod tests {
         let pretty = "{\n  \"rows\": [1, 2, 3]\n}";
         let mut req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![tool_result_msg(json!(pretty), None)],
+            messages: vec![tool_result_msg(json!(pretty), None)].into(),
             ..Default::default()
         };
 
@@ -535,7 +537,8 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
 
@@ -564,7 +567,8 @@ mod tests {
             messages: vec![
                 tool_result_msg(json!(pretty), Some(CacheControl::ephemeral_5m())),
                 text_msg("hi", None),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -599,7 +603,8 @@ mod tests {
             messages: vec![
                 tool_result_msg(json!(frozen_pretty), Some(CacheControl::ephemeral_5m())),
                 tool_result_msg(json!(tail_pretty), None),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let frozen_before = serde_json::to_value(&req.messages[0]).unwrap();
@@ -625,7 +630,7 @@ mod tests {
         // Arrange: tool_result content is plain prose, not JSON.
         let mut req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![tool_result_msg(json!("just some text output"), None)],
+            messages: vec![tool_result_msg(json!("just some text output"), None)].into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -644,7 +649,7 @@ mod tests {
         // the wire) -- only Value::String targets are minified.
         let mut req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![tool_result_msg(json!({"rows": [1, 2, 3]}), None)],
+            messages: vec![tool_result_msg(json!({"rows": [1, 2, 3]}), None)].into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -667,7 +672,8 @@ mod tests {
             messages: vec![
                 text_msg("hello", None),
                 tool_result_msg(json!(pretty), Some(CacheControl::ephemeral_5m())),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -685,7 +691,7 @@ mod tests {
         // Arrange
         let mut req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![],
+            messages: vec![].into(),
             ..Default::default()
         };
 
@@ -705,7 +711,7 @@ mod tests {
         let pretty = "{\n  \"a\": 1\n}";
         let mut req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![tool_result_msg(json!(pretty), None)],
+            messages: vec![tool_result_msg(json!(pretty), None)].into(),
             cache_control: Some(CacheControl::ephemeral_5m()),
             ..Default::default()
         };
@@ -725,7 +731,7 @@ mod tests {
         let pretty = "{\n    \"k\": \"v\"\n}";
         let mut req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![tool_result_msg(json!(pretty), None)],
+            messages: vec![tool_result_msg(json!(pretty), None)].into(),
             ..Default::default()
         };
 
@@ -774,7 +780,7 @@ mod tests {
         let pretty = "{\n  \"query\": \"rust\",\n  \"limit\": 10\n}";
         let mut req = ChatRequest {
             model: "gpt-4o".into(),
-            messages: vec![tool_calls_msg(json!(pretty), None)],
+            messages: vec![tool_calls_msg(json!(pretty), None)].into(),
             ..Default::default()
         };
 
@@ -809,7 +815,8 @@ mod tests {
             messages: vec![
                 tool_calls_msg(json!(pretty), Some(CacheControl::ephemeral_5m())),
                 text_msg("hi", None),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -837,7 +844,8 @@ mod tests {
             messages: vec![
                 tool_calls_msg(json!(frozen_pretty), Some(CacheControl::ephemeral_5m())),
                 tool_calls_msg(json!(tail_pretty), None),
-            ],
+            ]
+            .into(),
             ..Default::default()
         };
         let frozen_before = serde_json::to_value(&req.messages[0]).unwrap();
@@ -871,7 +879,7 @@ mod tests {
         let pretty = "{\n  \"a\": 1\n}";
         let mut req = ChatRequest {
             model: "gpt-4o".into(),
-            messages: vec![tool_calls_msg(json!(pretty), None)],
+            messages: vec![tool_calls_msg(json!(pretty), None)].into(),
             cache_control: Some(CacheControl::ephemeral_5m()),
             ..Default::default()
         };
@@ -890,7 +898,7 @@ mod tests {
         // Arrange: arguments is already whitespace-free JSON.
         let mut req = ChatRequest {
             model: "gpt-4o".into(),
-            messages: vec![tool_calls_msg(json!("{\"q\":\"x\"}"), None)],
+            messages: vec![tool_calls_msg(json!("{\"q\":\"x\"}"), None)].into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -909,7 +917,7 @@ mod tests {
         // semantic and must be preserved.
         let mut req = ChatRequest {
             model: "gpt-4o".into(),
-            messages: vec![tool_calls_msg(json!("just some text"), None)],
+            messages: vec![tool_calls_msg(json!("just some text"), None)].into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -941,7 +949,8 @@ mod tests {
                     json!({"id": "call_1", "type": "function"}),
                     json!({"id": "call_2", "function": {"name": "noargs"}}),
                 ]),
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -972,7 +981,8 @@ mod tests {
                     json!({"function": {"name": "f", "arguments": {"q": "x"}}}),
                     json!({"function": {"name": "g", "arguments": 42}}),
                 ]),
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
         let before = serde_json::to_value(&req).unwrap();
@@ -1013,7 +1023,8 @@ mod tests {
                     "type": "function",
                     "function": {"name": "lookup", "arguments": tool_call_pretty},
                 })]),
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
 

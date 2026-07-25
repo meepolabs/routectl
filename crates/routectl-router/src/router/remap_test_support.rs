@@ -59,7 +59,7 @@ pub(super) fn router_from_toml(toml_text: &str, provider: Arc<dyn Provider>) -> 
 pub(super) fn req_m1() -> ChatRequest {
     ChatRequest {
         model: "m1".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     }
 }

@@ -82,7 +82,8 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         max_tokens: Some(512),
         stream: Some(false),
         ..Default::default()

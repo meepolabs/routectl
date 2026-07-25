@@ -457,7 +457,7 @@ mod forward_compat_pins {
 
         let req = ChatRequest {
             model: "claude-3-opus".into(),
-            messages: vec![common::user_msg("hi")],
+            messages: vec![common::user_msg("hi")].into(),
             max_tokens: Some(1024),
             anthropic_beta: vec![
                 "claude-code-20250219".to_string(),
@@ -519,7 +519,7 @@ mod forward_compat_pins {
 
         let req = ChatRequest {
             model: "claude-3-opus".into(),
-            messages: vec![common::user_msg("hi")],
+            messages: vec![common::user_msg("hi")].into(),
             max_tokens: Some(1024),
             provider_extras: Some(json!({
                 "context_management": input
@@ -571,7 +571,8 @@ mod forward_compat_pins {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
-            }],
+            }]
+            .into(),
             max_tokens: Some(1024),
             ..Default::default()
         };

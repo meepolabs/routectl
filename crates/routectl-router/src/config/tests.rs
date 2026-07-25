@@ -804,7 +804,8 @@ async fn trim_to_params_is_identical_across_both_consumers() {
                     refusal: None,
                 },
                 text_msg(Role::User, "recent turn"),
-            ],
+            ]
+            .into(),
             ..Default::default()
         }
     }

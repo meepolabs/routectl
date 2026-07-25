@@ -185,7 +185,7 @@ kind = "anthropic-api"
 fn req_with_tool(tool_type: &str) -> ChatRequest {
     ChatRequest {
         model: "m1".into(),
-        messages: vec![],
+        messages: vec![].into(),
         tools: Some(vec![ToolDef::Other(json!({ "type": tool_type }))]),
         ..Default::default()
     }
@@ -544,7 +544,7 @@ async fn inferred_prefill_is_dormant_and_not_learned() {
     // derived feature set is empty.
     let req = ChatRequest {
         model: "m1".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
 

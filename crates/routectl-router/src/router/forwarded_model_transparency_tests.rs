@@ -122,7 +122,7 @@ fn router_with_leg(
 fn req_for(model: &str) -> ChatRequest {
     ChatRequest {
         model: model.to_string(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     }
 }

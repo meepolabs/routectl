@@ -327,7 +327,8 @@ fn req(model: &str) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     }
 }

@@ -54,7 +54,7 @@ fn user_msg(text: &str) -> Message {
 fn base_req() -> ChatRequest {
     ChatRequest {
         model: "claude-3-opus".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         ..Default::default()
     }

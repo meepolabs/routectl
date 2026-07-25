@@ -362,7 +362,8 @@ fn build_plain_round_trip(rng: &mut SplitMix64) -> BenchFixture {
             user_text(u1.clone()),
             assistant_text(a1.clone()),
             user_text(u2.clone()),
-        ],
+        ]
+        .into(),
         system: Some(SystemContent::Text(system.clone())),
         max_tokens: Some(1024),
         ..Default::default()
@@ -418,7 +419,8 @@ fn build_tool_heavy(rng: &mut SplitMix64) -> BenchFixture {
             assistant_tool_use(call_id.into(), tool_name.clone(), tool_input.clone()),
             tool_result_msg(call_id.into(), tool_output.clone()),
             assistant_text(answer.clone()),
-        ],
+        ]
+        .into(),
         system: Some(cached_system_blocks(system.clone())),
         tools: Some(tools.iter().map(tool_to_custom).collect()),
         max_tokens: Some(2048),
@@ -482,7 +484,8 @@ fn build_large_image(rng: &mut SplitMix64) -> BenchFixture {
                     cache_control: Some(CacheControl::ephemeral_5m()),
                 }),
             ]),
-        )],
+        )]
+        .into(),
         max_tokens: Some(1024),
         ..Default::default()
     };
@@ -526,7 +529,8 @@ fn build_no_marker(rng: &mut SplitMix64) -> BenchFixture {
             user_text(u1.clone()),
             assistant_text(a1.clone()),
             user_text(u2.clone()),
-        ],
+        ]
+        .into(),
         system: Some(SystemContent::Text(system.clone())),
         tools: Some(vec![tool_to_custom(&tool)]),
         max_tokens: Some(1024),
@@ -575,7 +579,7 @@ fn build_cache_less(rng: &mut SplitMix64) -> BenchFixture {
 
     let canonical = ChatRequest {
         model: "gpt-4o-mini".into(),
-        messages: vec![user_text(u1.clone()), assistant_text(a1.clone())],
+        messages: vec![user_text(u1.clone()), assistant_text(a1.clone())].into(),
         system: Some(SystemContent::Text(system.clone())),
         tools: Some(tools.iter().map(tool_to_custom).collect()),
         max_tokens: Some(1024),
@@ -654,7 +658,7 @@ fn build_long_session(rng: &mut SplitMix64) -> BenchFixture {
 
     let canonical = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: canonical_messages,
+        messages: canonical_messages.into(),
         system: Some(cached_system_blocks(system.clone())),
         max_tokens: Some(4096),
         ..Default::default()

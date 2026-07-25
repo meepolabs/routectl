@@ -97,7 +97,7 @@ fn router_with_failing(status: u16, ty: Option<&str>, code: Option<&str>) -> Rou
 fn req_m1() -> ChatRequest {
     ChatRequest {
         model: "m1".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     }
 }

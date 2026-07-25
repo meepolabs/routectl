@@ -302,7 +302,7 @@ async fn visible_routectl_provider_false_suppresses_field() {
 
     let req = ChatRequest {
         model: "haiku".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");
@@ -390,7 +390,7 @@ async fn suppressed_provider_clears_prestamped_field() {
 
     let req = ChatRequest {
         model: "haiku".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");
@@ -428,7 +428,7 @@ async fn suppressed_provider_still_records_dispatch_meta() {
 
     let req = ChatRequest {
         model: "haiku".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let dispatched = router
@@ -583,7 +583,7 @@ async fn seat_backed_complete_echoes_client_alias_by_default() {
     );
     let req = ChatRequest {
         model: "opus".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");
@@ -610,7 +610,7 @@ async fn seat_backed_complete_honors_reported_model_override() {
     );
     let req = ChatRequest {
         model: "opus".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");
@@ -635,7 +635,7 @@ async fn seat_backed_stream_relabels_chunk_model() {
     );
     let req = ChatRequest {
         model: "opus".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let mut stream = router.stream(req).await.expect("stream opens");
@@ -660,7 +660,7 @@ async fn dispatch_resolves_wire_string_to_nickname_directly() {
     let router = router_with_resolved(vec![("haiku", "anthropic", "claude-haiku-4-5", p.clone())]);
     let req = ChatRequest {
         model: "haiku".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");
@@ -932,7 +932,7 @@ async fn per_model_breaker_isolates_failures() {
     // Trip alpha's breaker: one failed dispatch puts it Open.
     let req_a = ChatRequest {
         model: "alpha".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let _ = router.complete(req_a).await; // failure, breaker trips
@@ -941,7 +941,7 @@ async fn per_model_breaker_isolates_failures() {
     // provider) this returned a circuit_breaker gate-block error.
     let req_b = ChatRequest {
         model: "beta".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req_b).await.expect(
@@ -1009,7 +1009,7 @@ async fn alias_entry_shadows_direct_model_nickname() {
 
     let req = ChatRequest {
         model: "foo".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");
@@ -1084,7 +1084,7 @@ async fn alias_pointing_to_another_alias_resolves_two_deep() {
     );
     let req = ChatRequest {
         model: "a".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");
@@ -1113,7 +1113,7 @@ async fn alias_three_deep_resolves_to_full_chain() {
     );
     let req = ChatRequest {
         model: "a".into(),
-        messages: vec![],
+        messages: vec![].into(),
         ..Default::default()
     };
     let resp = router.complete(req).await.expect("ok");

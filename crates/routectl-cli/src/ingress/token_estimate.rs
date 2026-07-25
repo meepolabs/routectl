@@ -165,7 +165,7 @@ mod tests {
     fn req_with(messages: Vec<Message>, system: Option<SystemContent>) -> ChatRequest {
         ChatRequest {
             model: "test-model".into(),
-            messages,
+            messages: messages.into(),
             system,
             ..Default::default()
         }

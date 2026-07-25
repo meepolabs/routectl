@@ -81,7 +81,7 @@ fn plain_user_message_round_trips_through_converse_request() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hello world")],
+        messages: vec![user_msg("hello world")].into(),
         max_tokens: Some(1024),
         ..Default::default()
     };
@@ -109,7 +109,7 @@ fn system_string_serializes_as_array_of_text_blocks() {
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         system: Some(SystemContent::Text("be helpful".into())),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         ..Default::default()
     };
 
@@ -131,7 +131,7 @@ fn system_blocks_with_cache_control_emit_cache_point_after_text() {
             cache_control: Some(CacheControl::ephemeral_1h()),
             citations: None,
         }])),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         ..Default::default()
     };
 
@@ -168,7 +168,8 @@ fn legacy_system_message_is_lifted_into_top_level_system() {
                 tool_calls: None,
             },
             user_msg("hi"),
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -189,7 +190,7 @@ fn custom_tool_translates_to_converse_tool_def() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("weather?")],
+        messages: vec![user_msg("weather?")].into(),
         tools: Some(vec![ToolDef::Custom(CustomTool {
             name: "get_weather".into(),
             description: Some("look up weather".into()),
@@ -220,7 +221,7 @@ fn tool_with_cache_control_emits_sibling_cache_point_in_tools_array() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tools: Some(vec![ToolDef::Custom(CustomTool {
             name: "calc".into(),
             description: None,
@@ -252,7 +253,7 @@ fn anthropic_builtin_tool_dropped_under_non_strict() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("search?")],
+        messages: vec![user_msg("search?")].into(),
         tools: Some(vec![
             ToolDef::Other(json!({
                 "type": "web_search_20250901",
@@ -284,7 +285,7 @@ fn tool_choice_string_auto_translates_to_aws_auto_object() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tools: Some(vec![ToolDef::Custom(CustomTool {
             name: "calc".into(),
             description: None,
@@ -308,7 +309,7 @@ fn tool_choice_anthropic_object_translates_to_specific_tool() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         tools: Some(vec![ToolDef::Custom(CustomTool {
             name: "calc".into(),
             description: None,
@@ -347,7 +348,7 @@ fn tool_choice_with_empty_name_drops_field() {
         let cfg = fake_cfg();
         let req = ChatRequest {
             model: "anthropic.claude-haiku-4-5".into(),
-            messages: vec![user_msg("hi")],
+            messages: vec![user_msg("hi")].into(),
             tools: Some(vec![ToolDef::Custom(CustomTool {
                 name: "calc".into(),
                 description: None,
@@ -373,7 +374,7 @@ fn thinking_config_lands_in_additional_model_request_fields() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         // Sized above Anthropic's legacy-thinking floor
         // (`max_tokens > 1024`); the gate in
         // `anthropic_api::request::build_thinking` would otherwise
@@ -415,7 +416,7 @@ fn small_max_tokens_drops_legacy_thinking_in_bedrock_converse() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(64),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -470,7 +471,8 @@ fn tool_use_block_in_assistant_content_translates_to_aws_tool_use_block() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -529,7 +531,8 @@ fn assistant_text_after_tool_use_is_stripped() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -573,7 +576,8 @@ fn tool_message_with_id_emits_user_role_with_tool_result() {
                 tool_call_id: Some("toolu_X".into()),
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -615,7 +619,8 @@ fn tool_message_without_id_returns_err() {
                 tool_call_id: None,
                 tool_calls: None,
             },
-        ],
+        ]
+        .into(),
         ..Default::default()
     };
 
@@ -657,7 +662,8 @@ fn document_content_block_translates_to_aws_document_block() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -708,7 +714,8 @@ fn dropped_image_url_with_cache_control_does_not_emit_orphan_cache_point() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -746,7 +753,8 @@ fn other_content_part_passes_through_as_single_key_union() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -782,7 +790,8 @@ fn other_content_part_empty_extras_emits_empty_object() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -817,7 +826,8 @@ fn other_content_part_with_cache_control_emits_sibling_cache_point() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -854,7 +864,8 @@ fn preserved_other_logs_passthrough_not_drop() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -905,7 +916,8 @@ fn tool_result_image_content_uses_image_variant_not_json_wrap() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -964,7 +976,8 @@ fn cache_control_breakpoint_validation_runs_in_converse_path() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        }],
+        }]
+        .into(),
         ..Default::default()
     };
 
@@ -986,7 +999,7 @@ fn additional_model_response_field_paths_opts_in_to_stop_sequence_lift() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         ..Default::default()
     };
 
@@ -1013,7 +1026,7 @@ fn additional_model_response_field_paths_emitted_for_non_anthropic_model() {
     cfg.id = "bedrock:test-mistral-converse".into();
     let req = ChatRequest {
         model: "mistral.mistral-large-2407-v1:0".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         ..Default::default()
     };
 
@@ -1036,7 +1049,7 @@ fn drops_top_p_when_temperature_also_set() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(256),
         temperature: Some(0.7),
         top_p: Some(0.9),
@@ -1061,7 +1074,7 @@ fn keeps_top_p_when_temperature_unset() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(256),
         temperature: None,
         top_p: Some(0.9),
@@ -1087,7 +1100,7 @@ fn keeps_temperature_when_top_p_unset() {
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(256),
         temperature: Some(0.3),
         top_p: None,

@@ -181,7 +181,7 @@ fn user_msg(text: &str) -> Message {
 fn advisor_req(alias: &str) -> ChatRequest {
     ChatRequest {
         model: alias.to_string(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         tools: Some(vec![ToolDef::Other(
             json!({"type": "advisor", "name": "advisor"}),
@@ -196,7 +196,7 @@ fn advisor_req(alias: &str) -> ChatRequest {
 fn context_management_req(alias: &str) -> ChatRequest {
     ChatRequest {
         model: alias.to_string(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(2048),
         tools: Some(vec![ToolDef::Other(
             json!({"type": "context_management", "name": "cm"}),

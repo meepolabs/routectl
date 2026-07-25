@@ -40,7 +40,11 @@ async-trait = "0.1"
 futures = "0.3"
 
 # Serde
-serde = { version = "1", features = ["derive"] }
+# `rc` enables Serialize/Deserialize for Arc<[T]>/Rc<T> (used by
+# ChatRequest.messages). Documented semantics: deserialize allocates a
+# fresh Arc with refcount 1 (no cross-request sharing), which is exactly
+# the copy-on-write posture the dispatch clone path relies on.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 # JSON Schema generation for the config surface (schema-first editor tooling).
 schemars = "1"

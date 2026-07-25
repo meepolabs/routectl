@@ -636,7 +636,8 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         };
 

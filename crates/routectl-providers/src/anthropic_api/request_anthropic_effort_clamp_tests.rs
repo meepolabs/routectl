@@ -23,7 +23,7 @@ fn adaptive_clamps_effort_to_operator_cap() {
     // Arrange
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("max".into()),
@@ -60,7 +60,7 @@ fn adaptive_passthrough_when_effort_levels_empty() {
     // Arrange
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("max".into()),
@@ -101,7 +101,7 @@ fn legacy_clamps_effort_to_operator_cost_cap() {
     // Arrange
     let mut req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(4096),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
@@ -156,7 +156,7 @@ fn adaptive_clamps_effort_to_operator_cap_even_when_provider_extras_carries_raw(
     // operator caps effort_levels at "high".
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("max".into()),
@@ -202,7 +202,7 @@ fn adaptive_passes_through_provider_extras_effort_when_levels_empty() {
     // Arrange
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("max".into()),
@@ -241,7 +241,7 @@ fn adaptive_reclamp_preserves_sibling_output_config_keys() {
     // Arrange
     let mut req = ChatRequest {
         model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")],
+        messages: vec![user_msg("hi")].into(),
         max_tokens: Some(1024),
         reasoning: Some(ReasoningConfig {
             effort: Some("max".into()),
