@@ -552,8 +552,23 @@ pub trait IngressAdapter: Send + Sync {
     fn error_envelope_shape(&self) -> ErrorEnvelopeShape;
 
     /// Parse an incoming JSON body + headers into the canonical
-    /// `ChatRequest`. Errors map to 4xx in the handler.
-    fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest>;
+    /// `ChatRequest`. Takes the raw request bytes so a dialect can go
+    /// straight from the wire to canonical without the extractor first
+    /// materializing a `serde_json::Value` (the removed double-parse).
+    /// A top-level JSON syntax failure surfaces as `Error::Json`, which
+    /// the handler renders as a 400 malformed-body rejection; every
+    /// other error maps to its own 4xx/5xx class.
+    fn parse_request(&self, headers: &HeaderMap, body: &[u8]) -> Result<ChatRequest>;
+
+    /// Test-only convenience: parse a `serde_json::Value` by serializing
+    /// it back to bytes and running the real byte-oriented parse path.
+    /// Keeps the large existing suite of `Value`-driven parse tests
+    /// expressive without each call site hand-rolling the round-trip.
+    #[cfg(test)]
+    fn parse_request_value(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+        let bytes = serde_json::to_vec(&body).expect("test request body serializes");
+        self.parse_request(headers, &bytes)
+    }
 
     /// Render a canonical `ChatResponse` into wire JSON for the client.
     fn render_response(&self, resp: ChatResponse) -> Result<Value>;

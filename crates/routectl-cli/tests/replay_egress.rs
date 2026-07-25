@@ -160,7 +160,10 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 
     let headers = headers_from_pairs(&fixture.ingress_request_headers);
     let canonical = AnthropicIngress
-        .parse_request(&headers, fixture.ingress_request.clone())
+        .parse_request(
+            &headers,
+            &serde_json::to_vec(&fixture.ingress_request).expect("wire serializes"),
+        )
         .map_err(|e| format!("anthropic ingress parse_request failed: {e}"))?;
 
     let Some(actual_body) = normalize_for_kind(&fixture.meta.provider_kind, &canonical)? else {

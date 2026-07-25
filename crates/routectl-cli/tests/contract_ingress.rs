@@ -54,7 +54,10 @@ fn ingress_anthropic_system_handling() {
     });
 
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("anthropic ingress parse");
 
     let expected = scenarios::scenario_1_system_handling();
@@ -88,7 +91,10 @@ fn ingress_openai_system_handling() {
     });
 
     let req = OpenAiIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("openai ingress parse");
 
     let expected = scenarios::scenario_1_system_handling();
@@ -150,7 +156,10 @@ fn ingress_anthropic_tool_choice_auto() {
     });
 
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("anthropic ingress parse");
 
     let expected = scenarios::scenario_2_tool_choice_auto();
@@ -196,7 +205,10 @@ fn ingress_openai_tool_choice_auto() {
     });
 
     let req = OpenAiIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("openai ingress parse");
 
     assert_eq!(req.model, "claude-3-opus");
@@ -245,7 +257,10 @@ fn ingress_anthropic_tool_choice_named_function() {
     });
 
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("anthropic ingress parse");
 
     assert_eq!(req.model, "claude-3-opus");
@@ -282,7 +297,10 @@ fn ingress_openai_tool_choice_named_function() {
     });
 
     let req = OpenAiIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("openai ingress parse");
 
     // OpenAI-shape tool_choice passes through verbatim. This is the
@@ -353,7 +371,10 @@ fn ingress_anthropic_multi_turn_with_tool_result() {
     });
 
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("anthropic ingress parse");
 
     assert_eq!(req.messages.len(), 5);
@@ -457,7 +478,10 @@ fn ingress_openai_multi_turn_with_tool_result() {
     });
 
     let req = OpenAiIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("openai ingress parse");
 
     assert_eq!(req.messages.len(), 5);
@@ -569,7 +593,10 @@ fn ingress_anthropic_cache_control_positions() {
     });
 
     let req = AnthropicIngress
-        .parse_request(&HeaderMap::new(), wire_body)
+        .parse_request(
+            &HeaderMap::new(),
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("anthropic ingress parse");
 
     // Position 1: top-level cache_control.
@@ -655,7 +682,10 @@ fn ingress_anthropic_anthropic_beta_header_lift() {
     });
 
     let req = AnthropicIngress
-        .parse_request(&headers, wire_body)
+        .parse_request(
+            &headers,
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("anthropic ingress parse");
 
     // Body-level value comes first; header values follow; duplicate
@@ -690,7 +720,10 @@ fn ingress_anthropic_anthropic_beta_header_lift_empty_body() {
     });
 
     let req = AnthropicIngress
-        .parse_request(&headers, wire_body)
+        .parse_request(
+            &headers,
+            &serde_json::to_vec(&wire_body).expect("wire serializes"),
+        )
         .expect("anthropic ingress parse");
 
     assert_eq!(

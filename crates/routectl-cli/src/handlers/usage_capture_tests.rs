@@ -672,7 +672,7 @@ fn anthropic_request(
 ) -> routectl_core::ChatRequest {
     use crate::ingress::IngressAdapter;
     use crate::ingress::anthropic::AnthropicIngress;
-    AnthropicIngress.parse_request(headers, body).unwrap()
+    AnthropicIngress.parse_request_value(headers, body).unwrap()
 }
 
 #[test]

@@ -141,10 +141,8 @@ fn main() {
         cases.push(BenchCase::new(
             format!("ingress_parse__{}__anthropic", profile.snake_name()),
             move || {
-                let body: Value =
-                    serde_json::from_slice(anthropic_wire).expect("anthropic wire is JSON");
                 let req = AnthropicIngress
-                    .parse_request(headers, body)
+                    .parse_request(headers, anthropic_wire)
                     .expect("anthropic fixture parses");
                 black_box(req);
             },
@@ -154,9 +152,8 @@ fn main() {
         cases.push(BenchCase::new(
             format!("ingress_parse__{}__openai", profile.snake_name()),
             move || {
-                let body: Value = serde_json::from_slice(openai_wire).expect("openai wire is JSON");
                 let req = OpenAiIngress
-                    .parse_request(headers, body)
+                    .parse_request(headers, openai_wire)
                     .expect("openai fixture parses");
                 black_box(req);
             },

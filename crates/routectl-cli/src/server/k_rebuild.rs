@@ -532,7 +532,7 @@ mod tests {
             use crate::ingress::IngressAdapter;
             use crate::ingress::anthropic::AnthropicIngress;
             AnthropicIngress
-                .parse_request(&axum::http::HeaderMap::new(), body)
+                .parse_request_value(&axum::http::HeaderMap::new(), body)
                 .expect("parse anthropic request")
         };
         let mut draft = crate::handlers::usage_capture::build_usage_draft(

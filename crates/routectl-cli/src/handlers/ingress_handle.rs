@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -67,7 +68,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     state: Arc<AppState>,
     headers: HeaderMap,
     request_id: Option<RequestId>,
-    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
     adapter: A,
 ) -> Response {
     let envelope = adapter.error_envelope_shape();
@@ -88,13 +89,28 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         return resp;
     }
 
-    let Json(raw_body) = match body {
+    // Buffer the raw body ourselves (via the `Bytes` extractor) instead
+    // of letting an axum `Json<Value>` extractor parse it: the adapter
+    // now owns the single wire->canonical parse, so a second `Value`
+    // materialization here would be the double-parse this path removes.
+    // The `Bytes` extractor still honors the `DefaultBodyLimit` layer, so
+    // an oversized body surfaces here as a 413 rejection (untouched); a
+    // missing/non-JSON content-type is enforced explicitly below since
+    // `Bytes` does not gate on it.
+    let raw_body = match body {
         Ok(b) => b,
-        Err(e) => return render_json_rejection(envelope, e),
+        Err(rej) => return render_body_rejection(envelope, rej),
     };
+    if !is_json_content_type(&headers) {
+        return render_unsupported_media_type(envelope);
+    }
 
-    let mut req = match adapter.parse_request(&headers, raw_body) {
+    let mut req = match adapter.parse_request(&headers, raw_body.as_ref()) {
         Ok(r) => r,
+        // A top-level JSON syntax failure inside the adapter maps to
+        // `Error::Json`; render it as the 400 malformed-body envelope the
+        // axum `Json` extractor produced before this path owned the parse.
+        Err(Error::Json(_)) => return render_malformed_body(envelope),
         Err(e) => return map_error(envelope, e),
     };
 
@@ -312,20 +328,75 @@ fn header_truthy(headers: &HeaderMap, name: &str) -> bool {
 /// `/v1/messages` and `/v1/messages/count_tokens` route their JSON
 /// rejections through here so the status code never gets collapsed to
 /// 400 and the dialect-correct envelope (Anthropic vs OpenAI) is used.
-pub(crate) fn render_json_rejection(
+/// True when the request `content-type` names JSON: `application/json`,
+/// a `+json` structured-syntax suffix (e.g. `application/vnd.foo+json`),
+/// or either with parameters (`; charset=utf-8`). Mirrors the essence
+/// check the axum `Json` extractor applied before ingress switched to
+/// the `Bytes` extractor, which does not gate on content-type. A missing
+/// or non-JSON content-type yields `false` -> 415.
+pub(crate) fn is_json_content_type(headers: &HeaderMap) -> bool {
+    let Some(value) = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    // Drop any parameters (`; charset=...`); content-type is
+    // case-insensitive, so compare on a lowercased essence.
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let Some(subtype) = essence.strip_prefix("application/") else {
+        return false;
+    };
+    subtype == "json" || subtype.ends_with("+json")
+}
+
+/// Render the 415 for a missing or non-JSON `content-type`. The envelope
+/// shape + classifier are the routectl-owned contract; the human message
+/// is ours (the pins assert only that it is non-empty).
+pub(crate) fn render_unsupported_media_type(shape: ErrorEnvelopeShape) -> Response {
+    error_response(
+        shape,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unsupported_media_type",
+        "unsupported content-type; expected application/json",
+        "invalid_request_error",
+        None,
+        None,
+    )
+}
+
+/// Render the 400 for a body whose top-level JSON failed to parse inside
+/// the adapter (surfaced as `Error::Json`). Matches the envelope the
+/// axum `Json` extractor's syntax-error 400 produced before ingress
+/// owned the parse.
+pub(crate) fn render_malformed_body(shape: ErrorEnvelopeShape) -> Response {
+    error_response(
+        shape,
+        StatusCode::BAD_REQUEST,
+        "bad_request",
+        "malformed JSON in request body",
+        "invalid_request_error",
+        None,
+        None,
+    )
+}
+
+/// Render a `Bytes`-extractor rejection into the dialect error envelope.
+/// The only rejection the `DefaultBodyLimit` layer surfaces on this path
+/// is 413 Payload Too Large (oversized body); mirror its status into the
+/// envelope rather than collapsing it to 400.
+pub(crate) fn render_body_rejection(
     shape: ErrorEnvelopeShape,
-    e: axum::extract::rejection::JsonRejection,
+    e: axum::extract::rejection::BytesRejection,
 ) -> Response {
-    // JsonRejection carries the right status code for each failure
-    // mode: 413 Payload Too Large for body-size cap hits, 400 Bad
-    // Request for parse errors, 415 for missing content-type, etc.
-    // Mirror that status into our error envelope rather than
-    // collapsing every rejection into 400.
     let status = e.status();
     let kind = if status == StatusCode::PAYLOAD_TOO_LARGE {
         "payload_too_large"
-    } else if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
-        "unsupported_media_type"
     } else {
         "bad_request"
     };
