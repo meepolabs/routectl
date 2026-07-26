@@ -445,8 +445,8 @@ fn emit_suspect(
 
 /// Classify a canary failure: attribute a deterministic capability-naming
 /// rejection to a `broken` event via the shared live matcher; otherwise mark
-/// the lane unhealthy on a transport / availability failure (never on a
-/// capability-level 400 is capability evidence, never lane health), or record an inconclusive cell.
+/// the lane unhealthy on a transport / availability failure (a capability-level
+/// 400 is capability evidence, never lane health), or record an inconclusive cell.
 fn classify_failure(
     plan: &CapabilityProbePlan,
     err: &routectl_core::Error,
@@ -609,6 +609,23 @@ pub async fn run(
         return 0;
     }
 
+    dispatch_and_persist(&loaded, entry, &target, &capabilities, rates, json).await
+}
+
+/// Build the bare provider, open the ledger read-write, run the scoped probe,
+/// persist its events synchronously, and render the report. Returns the
+/// process exit code: nonzero only on a ledger-open / build / write failure --
+/// never on what the probe itself found. Shared by the `probe --capabilities`
+/// verb and the post-add wizard offer so both dispatch, persist, and render
+/// through one path.
+async fn dispatch_and_persist(
+    loaded: &crate::server::LoadedConfig,
+    entry: &routectl_router::ProviderEntry,
+    target: &super::resolve::ResolvedProbeTarget,
+    capabilities: &[ProbeCapability],
+    rates: Option<Rates>,
+    json: bool,
+) -> i32 {
     let db = match routectl_usage::open_rw(&loaded.config.usage.db_path) {
         Ok(db) => db,
         Err(e) => {
@@ -638,16 +655,16 @@ pub async fn run(
     };
 
     let plan = CapabilityProbePlan {
-        state_key: target.state_key,
+        state_key: target.state_key.clone(),
         provider_kind: entry.kind_str().to_string(),
-        model: target.model_id,
+        model: target.model_id.clone(),
         catalog_version: i64::from(CATALOG_VERSION),
         overlay_revision: i64::try_from(overlay_revision(&loaded.catalog_overlay))
             .unwrap_or(i64::MAX),
         rates,
     };
 
-    let report = run_capability_probe(&dispatcher, &plan, &capabilities).await;
+    let report = run_capability_probe(&dispatcher, &plan, capabilities).await;
 
     // Persist the events synchronously on the read-write connection -- the
     // CLI is the writer here (no serving-path async writer actor). A write
@@ -674,6 +691,50 @@ pub async fn run(
         }
     }
     i32::from(write_failed)
+}
+
+/// Offer a scoped capability probe for a provider that was JUST added, driven
+/// by the caller's `confirm` seam. Loads the effective config, resolves the
+/// provider's single routable lane, prints the cost line, then consults
+/// `confirm`; on a yes it dispatches the probe and persists what it finds.
+///
+/// Silently does nothing -- never an error, never a panic -- when the config
+/// cannot be loaded or the provider has no single selectable model to scope to
+/// yet. A probe is a bonus after a successful add, not a precondition for it,
+/// so a lane that cannot be resolved simply skips the offer. The probe touches
+/// only the capability ledger and never rewrites config or credentials, so it
+/// cannot undo the add that preceded it.
+pub async fn offer_scoped_probe(
+    config_path: &Path,
+    provider: &str,
+    confirm: impl FnOnce(&ProbeEstimate) -> bool,
+) {
+    let Ok(loaded) = crate::server::load_effective_config_unvalidated(config_path) else {
+        return;
+    };
+    let Ok(target) = super::resolve::resolve_probe_target(&loaded.config, Some(provider), None)
+    else {
+        return;
+    };
+    let Some(entry) = loaded.config.providers.get(&target.provider) else {
+        return;
+    };
+
+    let capabilities = ProbeCapability::ALL.to_vec();
+    let rates = loaded
+        .config
+        .pricing_for(&target.model_id, &target.provider)
+        .map(rates_from_pricing);
+    let estimate = estimate_probe_cost(&capabilities, rates.as_ref());
+    for line in render_estimate(&estimate) {
+        println!("{line}");
+    }
+
+    if !confirm(&estimate) {
+        return;
+    }
+
+    dispatch_and_persist(&loaded, entry, &target, &capabilities, rates, false).await;
 }
 
 /// Resolve the `--only` tokens to a capability set, or all capabilities when
@@ -782,3 +843,7 @@ fn report_json(report: &CapabilityProbeReport) -> serde_json::Value {
 #[cfg(test)]
 #[path = "capabilities_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "capability_acceptance_tests.rs"]
+mod acceptance;

@@ -169,6 +169,7 @@ fn collect_answers(args: &InitArgs, offers: &[Offer], io: &dyn InitIo) -> Result
         model_ids,
         default_route,
         yes: args.yes,
+        probe: args.probe,
     })
 }
 
@@ -292,10 +293,20 @@ async fn apply_plan(
         }
     }
 
+    // The operator's probe choice rides on every provider arg (build_plan
+    // threads `answers.probe` onto each); capture it before the loop consumes
+    // them, and record which providers this run actually wrote so the
+    // post-routing offer never touches a pre-existing, unchanged block.
+    let probe = plan.provider_args.first().and_then(|arg| arg.probe);
+    let mut written: Vec<String> = Vec::new();
     for provider_arg in plan.provider_args {
-        provider_add::run_with_io(config_path, provider_arg, io as &dyn AddIo)
+        let name = provider_arg.name.clone();
+        let outcome = provider_add::run_with_io(config_path, provider_arg, io as &dyn AddIo)
             .await
             .map_err(recovery_error)?;
+        if outcome == provider_add::AddResult::Written {
+            written.push(name);
+        }
     }
 
     let snapshot = std::fs::read(config_path).map_err(|e| {
@@ -314,6 +325,23 @@ async fn apply_plan(
     )
     .map_err(recovery_error)?;
 
+    // Routing has now landed, so each provider written THIS run resolves to a
+    // lane. Offer the scoped probe here for the providers whose lane did NOT
+    // exist during the in-loop `provider add` hook (the fresh-onboarding case
+    // -- models were written only just above). A provider that ALREADY had a
+    // selectable model before this run was eligible for the in-loop offer, so
+    // it is skipped here: the pair yields at most one offer per provider.
+    for name in &written {
+        let had_lane_before = existing_config
+            .models
+            .values()
+            .any(|model| model.selectable && model.provider == *name);
+        if had_lane_before {
+            continue;
+        }
+        offer_post_routing_probe(config_path, name, probe, io as &dyn AddIo).await;
+    }
+
     println!(
         "routing configured; default route -> `{}`.",
         plan.default_alias
@@ -327,6 +355,30 @@ async fn apply_plan(
         )
     );
     Ok(())
+}
+
+/// The post-routing capability-probe offer for a provider `init` added THIS
+/// run, scoped to its now-routable lane. Same semantics as the `provider add`
+/// hook: `--no-probe` suppresses entirely, `--probe` dispatches without
+/// prompting, and the interactive default asks `confirm_probe` after the cost
+/// line. The probe writes only the capability ledger, never config. The heavy
+/// probe future is boxed so it stays off `apply_plan`'s own future.
+async fn offer_post_routing_probe(
+    config_path: &Path,
+    provider: &str,
+    probe: Option<bool>,
+    io: &dyn AddIo,
+) {
+    if probe == Some(false) {
+        return;
+    }
+    let force = probe == Some(true);
+    Box::pin(crate::commands::probe::capabilities::offer_scoped_probe(
+        config_path,
+        provider,
+        |_estimate| force || io.confirm_probe(),
+    ))
+    .await;
 }
 
 /// Confirm before the scaffold write, then drop the starter config. The
@@ -508,9 +560,11 @@ mod tests {
         offer_env: bool,
         prompt_value: String,
         login_ok: bool,
+        confirm_probe: bool,
         credential_capture: CredentialCapture,
         login_calls: std::sync::Mutex<u32>,
         prompt_hidden_calls: std::sync::Mutex<u32>,
+        confirm_probe_calls: std::sync::Mutex<u32>,
     }
 
     impl Default for FakeInitIo {
@@ -526,9 +580,11 @@ mod tests {
                 offer_env: false,
                 prompt_value: String::new(),
                 login_ok: true,
+                confirm_probe: false,
                 credential_capture: CredentialCapture::Skip,
                 login_calls: std::sync::Mutex::new(0),
                 prompt_hidden_calls: std::sync::Mutex::new(0),
+                confirm_probe_calls: std::sync::Mutex::new(0),
             }
         }
     }
@@ -547,6 +603,10 @@ mod tests {
         fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
             *self.prompt_hidden_calls.lock().unwrap() += 1;
             Ok(self.prompt_value.clone())
+        }
+        fn confirm_probe(&self) -> bool {
+            *self.confirm_probe_calls.lock().unwrap() += 1;
+            self.confirm_probe
         }
         async fn login(&self, _provider: &str) -> Result<()> {
             *self.login_calls.lock().unwrap() += 1;
@@ -637,11 +697,25 @@ mod tests {
         default_model: Option<&str>,
         forwarded: bool,
     ) -> InitArgs {
+        // Existing wizard tests suppress the post-add probe offer so they stay
+        // hermetic (no overlay/store/ledger access); the probe-specific tests
+        // opt in via `init_args_probe`.
+        init_args_probe(scaffold, yes, default_model, forwarded, Some(false))
+    }
+
+    fn init_args_probe(
+        scaffold: bool,
+        yes: bool,
+        default_model: Option<&str>,
+        forwarded: bool,
+        probe: Option<bool>,
+    ) -> InitArgs {
         InitArgs {
             scaffold,
             yes,
             default_model: default_model.map(str::to_string),
             forwarded,
+            probe,
         }
     }
 
@@ -650,6 +724,158 @@ mod tests {
             .get("default")
             .and_then(|v| v.nicknames().next())
             .map(str::to_string)
+    }
+
+    // -----------------------------------------------------------------
+    // Post-routing capability-probe offer. On a fresh init the lane does
+    // not exist until the final models/aliases write, so the in-loop
+    // `provider add` hook cannot scope; `apply_plan` re-offers after routing
+    // lands, scoped to each provider written THIS run. A provider whose lane
+    // pre-existed (re-init overwrite) is offered in-loop and skipped
+    // post-routing, so the pair fires at most once per provider per run.
+    // These tests count `confirm_probe` calls as the offer signal (the fake
+    // declines, so nothing dispatches -- no store/ledger access needed).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn fresh_init_offers_the_probe_post_routing_for_the_added_provider() {
+        let xdg = tempfile::tempdir().unwrap();
+        let _env = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let fake = FakeInitIo {
+            offer_selection: vec![0],
+            model_id: Some("claude-sonnet-4-5".to_string()),
+            default_route: Some("anthropic-forwarded".to_string()),
+            confirm_probe: false, // the offer fires but declines, so nothing dispatches
+            ..Default::default()
+        };
+
+        // probe = None (interactive): the post-routing offer asks confirm_probe.
+        orchestrate(
+            &path,
+            &init_args_probe(false, false, None, false, None),
+            &Config::default(),
+            false,
+            vec![forwarded_test_offer()],
+            &fake,
+        )
+        .await
+        .expect("fresh wizard writes a routed config");
+
+        assert_eq!(
+            *fake.confirm_probe_calls.lock().unwrap(),
+            1,
+            "the offer fires exactly once, post-routing, for the single added provider"
+        );
+        let cfg = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            cfg.providers.contains_key("anthropic-forwarded"),
+            "the offer never rolls the added provider back"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn fresh_init_with_no_probe_offers_nothing() {
+        let xdg = tempfile::tempdir().unwrap();
+        let _env = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let fake = FakeInitIo {
+            offer_selection: vec![0],
+            model_id: Some("claude-sonnet-4-5".to_string()),
+            default_route: Some("anthropic-forwarded".to_string()),
+            confirm_probe: true, // would consent IF asked -- it must not be asked
+            ..Default::default()
+        };
+
+        orchestrate(
+            &path,
+            &init_args_probe(false, false, None, false, Some(false)),
+            &Config::default(),
+            false,
+            vec![forwarded_test_offer()],
+            &fake,
+        )
+        .await
+        .expect("fresh wizard writes a routed config");
+
+        assert_eq!(
+            *fake.confirm_probe_calls.lock().unwrap(),
+            0,
+            "--no-probe suppresses the offer entirely, in-loop and post-routing"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reinit_overwrite_offers_the_probe_at_most_once_per_provider() {
+        let xdg = tempfile::tempdir().unwrap();
+        let _env = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // A config already routing model `m` -> provider `p`, both on disk and
+        // in the existing_config the wizard reasons about, so the in-loop hook
+        // can resolve the lane the moment `p` is overwritten.
+        let existing_text = "\
+version = 3
+
+[providers.p]
+kind = \"openai-compat\"
+base_url = \"http://127.0.0.1:2\"
+api_key_ref = \"literal:test-key\"
+
+[models.m]
+provider = \"p\"
+upstream = \"gpt-4o\"
+
+[aliases]
+default = \"m\"
+";
+        std::fs::write(&path, existing_text).unwrap();
+        let existing = parse_config(existing_text).unwrap();
+
+        // Overwrite `p` with a DIFFERENT block so the add is a real `Written`,
+        // arming the in-loop offer (the lane already exists on disk).
+        let plan = WizardPlan {
+            provider_args: vec![provider_add::ProviderAddArgs {
+                kind: "openai-compat".to_string(),
+                name: "p".to_string(),
+                base_url: Some("http://127.0.0.1:1".to_string()),
+                api_key_env: None,
+                secret_ref: Some("file:///abs/key".to_string()),
+                api_key_stdin: false,
+                credential_source: None,
+                overwrite: true,
+                yes: true,
+                probe: None,
+            }],
+            models: vec![ModelWiring {
+                nick: "m".to_string(),
+                provider: "p".to_string(),
+                upstream: "gpt-4o".to_string(),
+            }],
+            default_alias: "m".to_string(),
+        };
+
+        let fake = FakeInitIo {
+            confirm_probe: false,
+            ..Default::default()
+        };
+
+        apply_plan(&path, true, plan, &existing, &fake)
+            .await
+            .expect("apply_plan overwrites and routes");
+
+        assert_eq!(
+            *fake.confirm_probe_calls.lock().unwrap(),
+            1,
+            "a provider whose lane pre-existed is offered once in-loop and skipped \
+             post-routing -- never twice"
+        );
     }
 
     #[tokio::test]

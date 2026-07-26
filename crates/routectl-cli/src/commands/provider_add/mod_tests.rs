@@ -47,6 +47,7 @@ fn args(kind: &str, name: &str) -> ProviderAddArgs {
         credential_source: None,
         overwrite: false,
         yes: true,
+        probe: Some(false),
     }
 }
 
@@ -579,6 +580,7 @@ struct FakeIo {
     offer_env: bool,
     prompt_value: String,
     login_ok: bool,
+    confirm_probe: bool,
     login_calls: std::sync::Mutex<Vec<String>>,
     stdin_reads: std::sync::Mutex<u32>,
     prompt_calls: std::sync::Mutex<u32>,
@@ -593,6 +595,7 @@ impl Default for FakeIo {
             offer_env: false,
             prompt_value: String::new(),
             login_ok: true,
+            confirm_probe: false,
             login_calls: std::sync::Mutex::new(Vec::new()),
             stdin_reads: std::sync::Mutex::new(0),
             prompt_calls: std::sync::Mutex::new(0),
@@ -618,6 +621,9 @@ impl AddIo for FakeIo {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         *self.prompt_calls.lock().unwrap() += 1;
         Ok(self.prompt_value.clone())
+    }
+    fn confirm_probe(&self) -> bool {
+        self.confirm_probe
     }
     async fn login(&self, provider: &str) -> Result<()> {
         self.login_calls.lock().unwrap().push(provider.to_string());
@@ -1490,9 +1496,108 @@ fn rotation_reports_the_pinned_operator_message() {
     assert_eq!(ROTATED_MESSAGE, "credential rotated; config unchanged");
 }
 
+// -----------------------------------------------------------------
+// Post-add capability-probe offer: a forced probe against an unreachable
+// lane fails, and the just-committed provider block must survive on disk --
+// the probe writes only to the capability ledger and never rolls back the
+// add. The failing probe also mints no capability events.
+// -----------------------------------------------------------------
+
+#[tokio::test]
+#[serial_test::serial]
+async fn failing_post_add_probe_leaves_the_provider_block_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let _secrets = scoped_secret_dir(xdg.path());
+
+    // A migrated ledger so the probe's read-write open succeeds and the run
+    // reaches an actual dispatch (which then fails on the unreachable lane).
+    let db_path = dir.path().join("usage.db");
+    drop(routectl_usage::open(&db_path).expect("create migrated ledger"));
+
+    let key = "ROUTECTL_PROVIDER_ADD_PROBE_ENV_KEY";
+    set_env(key, "probe-key-not-real");
+
+    // A model already routes to `grok`, so the probe can scope. `grok` starts
+    // at one unreachable base; the add rewrites it to a different unreachable
+    // base, so the write is a real `Written` outcome.
+    let body = format!(
+        "version = 3\n\n\
+         [server]\nhost = \"127.0.0.1\"\nport = 8787\n\n\
+         [usage]\ndb_path = \"{}\"\n\n\
+         [providers.grok]\nkind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:2\"\napi_key_ref = \"literal:test-key\"\n\n\
+         [models.gpt]\nprovider = \"grok\"\nupstream = \"grok-2\"\n\n\
+         [aliases]\ndefault = \"gpt\"\n",
+        db_path.display()
+    );
+    let path = write_config(dir.path(), &body);
+
+    let mut a = args("openai-compat", "grok");
+    a.base_url = Some("http://127.0.0.1:1".to_string());
+    a.secret_ref = Some(format!("env://{key}"));
+    a.overwrite = true;
+    a.probe = Some(true); // force the probe non-interactively
+
+    let result = run(&path, a)
+        .await
+        .expect("the add succeeds even though the probe fails");
+    assert_eq!(result, AddResult::Written);
+
+    // The provider block persists with the new base URL: a failing probe never
+    // rolls the committed add back.
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[providers.grok]"), "{text}");
+    assert!(
+        text.contains("base_url = \"http://127.0.0.1:1\""),
+        "the rewritten provider block must persist: {text}"
+    );
+
+    // A failing probe writes no capability events.
+    let db = routectl_usage::open_rw(&db_path).expect("reopen ledger");
+    let events =
+        routectl_usage::read_capability_events_after(db.conn(), 0, 100).expect("read events");
+    assert!(
+        events.is_empty(),
+        "a failing probe must mint no capability events"
+    );
+
+    unset_env(key);
+    unset_env("XDG_CONFIG_HOME");
+}
+
 fn restore_env(key: &str, prev: Option<String>) {
     match prev {
         Some(v) => set_env(key, &v),
         None => unset_env(key),
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn post_add_probe_offer_skips_when_no_model_routes_to_the_provider() {
+    // probe = None means the offer is consulted, but a freshly added provider
+    // that no model routes to yet resolves to no lane, so the offer is silently
+    // skipped: the add succeeds and the confirm seam is never consulted (a
+    // consent of `true` here would still not dispatch).
+    let dir = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let _secrets = scoped_secret_dir(xdg.path());
+    let path = write_config(dir.path(), V3_BASE);
+
+    let mut a = args("openai-compat", "grok");
+    a.base_url = Some("https://api.x.example/v1".to_string());
+    a.secret_ref = Some("file:///abs/key".to_string());
+    a.probe = None;
+    let io = FakeIo {
+        confirm_probe: true,
+        ..Default::default()
+    };
+
+    let result = run_with_io(&path, a, &io).await.expect("add");
+    assert_eq!(result, AddResult::Written);
+    // V3_BASE routes `gpt` -> `fast`, so `grok` has no lane to probe.
+    let config = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(config.providers.contains_key("grok"));
+    unset_env("XDG_CONFIG_HOME");
 }

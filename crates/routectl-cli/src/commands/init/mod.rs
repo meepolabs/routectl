@@ -62,6 +62,10 @@ pub struct InitArgs {
     pub yes: bool,
     pub default_model: Option<String>,
     pub forwarded: bool,
+    /// Post-add capability-probe offer, threaded verbatim onto every provider
+    /// the plan adds: `None` asks interactively, `Some(true)` (`--probe`)
+    /// dispatches without prompting, `Some(false)` (`--no-probe`) suppresses it.
+    pub probe: Option<bool>,
 }
 
 /// One detected credential the wizard may OFFER (never auto-routes).
@@ -180,6 +184,9 @@ impl AddIo for RealInitIo {
     }
     fn prompt_hidden(&self, provider_name: &str) -> Result<String> {
         RealAddIo.prompt_hidden(provider_name)
+    }
+    fn confirm_probe(&self) -> bool {
+        RealAddIo.confirm_probe()
     }
     async fn login(&self, provider: &str) -> Result<()> {
         RealAddIo.login(provider).await
@@ -352,6 +359,7 @@ mod tests {
             yes: false,
             default_model: Some("gpt".into()),
             forwarded: false,
+            probe: None,
         };
         assert!(args.scaffold);
         assert!(!args.yes);
