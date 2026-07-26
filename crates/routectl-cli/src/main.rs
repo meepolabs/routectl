@@ -396,6 +396,25 @@ enum ProviderCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Hidden: env-gated Bedrock envelope-capture harness. Requires
+    /// `ROUTECTL_BEDROCK_ENVELOPE_CAPTURE=1` and exactly one explicit
+    /// `--provider` or `--alias` target. CLI-only; never reachable from
+    /// the serving listener.
+    #[cfg(feature = "bedrock")]
+    #[command(hide = true)]
+    CaptureEnvelope {
+        /// Target a Bedrock `[providers.X]` key (model id resolved from the
+        /// single selectable model referencing it).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Target a `[models.X]` nickname (resolves both provider and model
+        /// id).
+        #[arg(long)]
+        alias: Option<String>,
+        /// Directory the byte-exact response bodies are written to.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -730,6 +749,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             ProviderCmd::Probe { name, json } => {
                 let config_path = resolve_config_path(cli.config.as_deref());
                 std::process::exit(commands::probe::run(&config_path, name, json).await);
+            }
+            #[cfg(feature = "bedrock")]
+            ProviderCmd::CaptureEnvelope {
+                provider,
+                alias,
+                out,
+            } => {
+                let config_path = resolve_config_path(cli.config.as_deref());
+                let args = commands::probe::capture::CaptureArgs {
+                    provider,
+                    alias,
+                    out,
+                };
+                std::process::exit(commands::probe::capture::run(&config_path, args).await);
             }
         },
         Cmd::PromptSize {
