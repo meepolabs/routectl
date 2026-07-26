@@ -403,6 +403,7 @@ impl Router {
             provider_kind,
             tier,
             phase,
+            EvidenceSource::Live,
             Instant::now(),
         );
         let acting = matches!(outcome, crate::learned_capability::ObserveOutcome::Acting);

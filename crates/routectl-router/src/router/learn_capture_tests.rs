@@ -443,6 +443,7 @@ async fn masked_cell_rejection_does_not_refresh_resident_entry() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         t0,
     );
     let before = router.learned_capabilities.snapshot();

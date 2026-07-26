@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use routectl_core::capability::{FailurePhase, SignalTier};
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider, ToolDef};
 use serde_json::json;
@@ -105,15 +105,20 @@ fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePh
         KIND,
         SignalTier::SelfIdentifying,
         phase,
+        EvidenceSource::Live,
         Instant::now(),
     );
 }
 
 /// Seed a resident VerifiedWorking positive for `(nickname, feature)`.
 fn seed_verified(router: &Router, nickname: &str, feature: &str) {
-    router
-        .learned_capabilities
-        .observe_positive(nickname, feature, KIND, Instant::now());
+    router.learned_capabilities.observe_positive(
+        nickname,
+        feature,
+        KIND,
+        EvidenceSource::Live,
+        Instant::now(),
+    );
 }
 
 fn req_with_tool(tool_type: &str) -> ChatRequest {

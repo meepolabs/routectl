@@ -135,6 +135,7 @@ impl Router {
                     state_key,
                     obs.capability_key,
                     provider_kind,
+                    EvidenceSource::Live,
                     now,
                 );
                 if matches!(outcome, PositiveOutcome::Recorded) {
@@ -151,6 +152,7 @@ impl Router {
                     provider_kind,
                     obs.tier,
                     FailurePhase::F3,
+                    EvidenceSource::Live,
                     now,
                 );
                 if matches!(outcome, ObserveOutcome::Acting) {

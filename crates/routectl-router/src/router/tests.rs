@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::{ProviderEntry, RetryPolicy};
+use routectl_core::capability::EvidenceSource;
 use std::collections::BTreeMap;
 
 /// Build a Router with one openai-compat provider that has the given
@@ -574,6 +575,7 @@ fn router_new_builds_learned_registry_reflecting_config_knobs() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         t0,
     );
     assert_eq!(
@@ -657,6 +659,7 @@ fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -692,6 +695,7 @@ fn carry_over_learned_from_clears_in_flight_slot() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         t0,
     );
     let t_probe = t0 + Duration::from_hours(1) + Duration::from_secs(1);
@@ -760,6 +764,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
         "",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         t0,
     );
     before.learned_capabilities.observe(
@@ -768,6 +773,7 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
         "",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         t0,
     );
 
@@ -818,6 +824,7 @@ fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -866,6 +873,7 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     // The rebuild picked up a newer overlay revision.
