@@ -1,0 +1,103 @@
+{
+  "note": "PROVISIONAL SYNTHETIC degraded response bodies for the clean-stop gate (R4) suite. Each case is a canonical ChatResponse that must yield zero capability observations. No value here is a real captured response.",
+  "cases": {
+    "finish_length_plausible_body": {
+      "id": "synthetic",
+      "model": "synthetic",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "{\"answer\": \"forty-two\", \"unit\": \"none\"}"
+          },
+          "finish_reason": "length"
+        }
+      ]
+    },
+    "content_filter": {
+      "id": "synthetic",
+      "model": "synthetic",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "I have withheld the response."
+          },
+          "finish_reason": "content_filter"
+        }
+      ]
+    },
+    "refusal": {
+      "id": "synthetic",
+      "model": "synthetic",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "refusal": "I cannot help with that request."
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    "missing_finish_reason": {
+      "id": "synthetic",
+      "model": "synthetic",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "{\"answer\": \"forty-two\"}"
+          }
+        }
+      ]
+    },
+    "truncated_but_parseable_json": {
+      "id": "synthetic",
+      "model": "synthetic",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "{\"answer\": \"partial\"}"
+          },
+          "finish_reason": "length"
+        }
+      ]
+    },
+    "non_strict_prose": {
+      "id": "synthetic",
+      "model": "synthetic",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "The answer is forty-two, written out in plain prose."
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    "unknown_finish_reason": {
+      "id": "synthetic",
+      "model": "synthetic",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "{\"answer\": \"forty-two\"}"
+          },
+          "finish_reason": "provider_specific_halt"
+        }
+      ]
+    }
+  }
+}
