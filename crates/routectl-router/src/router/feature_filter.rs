@@ -625,3 +625,7 @@ mod strip_interceptor_dispatch_tests;
 #[cfg(test)]
 #[path = "strip_wire_egress_tests.rs"]
 mod strip_wire_egress_tests;
+
+#[cfg(test)]
+#[path = "capability_precedence_matrix_tests.rs"]
+mod capability_precedence_matrix_tests;
