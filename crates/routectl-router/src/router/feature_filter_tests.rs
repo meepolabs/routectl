@@ -4,6 +4,7 @@
 //! account) and that a chain reduced to empty surfaces as
 //! `Error::NotImplemented` rather than walking and 400ing.
 use super::*;
+#[cfg(feature = "bedrock")]
 use crate::capability_matcher::resolve_requested_capability;
 use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
