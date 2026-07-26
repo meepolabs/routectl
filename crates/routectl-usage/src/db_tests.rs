@@ -1680,6 +1680,99 @@ fn open_readonly_sets_busy_timeout() {
     assert_eq!(timeout, BUSY_TIMEOUT_MS as i64);
 }
 
+// --- open_rw: read-write, non-migrating, never-creating ----------------
+
+#[test]
+fn open_rw_on_nonexistent_path_returns_no_data_and_creates_nothing() {
+    // Arrange: a path that does not exist.
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("absent.db");
+
+    // Act
+    let result = open_rw(&path);
+
+    // Assert: NoData, and the file was NOT created (never `CREATE`).
+    assert!(matches!(result, Err(OpenError::NoData { .. })));
+    assert!(!path.exists(), "open_rw must not create the file");
+}
+
+#[test]
+fn open_rw_rejects_older_schema_without_migrating() {
+    // Arrange: seed a fully-migrated DB, then roll user_version back to
+    // simulate a DB that predates this binary. A non-migrating writer must
+    // refuse rather than mutate the schema out from under a daemon.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("seed db");
+    db.conn()
+        .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION - 1))
+        .expect("roll version back");
+    drop(db);
+
+    // Act
+    let result = open_rw(&path);
+
+    // Assert: fails closed, and the on-disk version is untouched (no migrate).
+    assert!(matches!(result, Err(OpenError::VersionTooOld { .. })));
+    let conn = Connection::open(&path).expect("reopen");
+    assert_eq!(
+        user_version(&conn),
+        SCHEMA_VERSION - 1,
+        "open_rw must never run the migration ladder"
+    );
+}
+
+#[test]
+fn open_rw_rejects_newer_schema() {
+    // Arrange: seed a normal DB, then bump user_version above support.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("seed db");
+    db.conn()
+        .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
+        .expect("bump version");
+    drop(db);
+
+    // Act + Assert
+    assert!(matches!(
+        open_rw(&path),
+        Err(OpenError::VersionTooNew { .. })
+    ));
+}
+
+#[test]
+fn open_rw_accepts_matching_schema_and_can_insert() {
+    // Arrange: a fully-migrated WAL DB at the current schema.
+    let (_dir, path) = temp_db_path();
+    drop(open(&path).expect("seed db"));
+
+    // Act: open read-write, non-migrating.
+    let db = open_rw(&path).expect("open rw on a matching-schema db");
+
+    // Assert: the connection may actually write (not a read-only handle).
+    let inserted = crate::capability_event::insert_capability_event(
+        db.conn(),
+        &crate::CapabilityEvent::tombstone(1, 1, 0),
+    )
+    .expect("insert must succeed on a read-write connection");
+    assert_eq!(inserted, 1);
+}
+
+#[test]
+fn open_rw_sets_busy_timeout() {
+    // Arrange
+    let (_dir, path) = temp_db_path();
+    drop(open(&path).expect("seed db"));
+
+    // Act
+    let db = open_rw(&path).expect("open rw");
+    let timeout: i64 = db
+        .conn()
+        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+        .expect("read busy_timeout");
+
+    // Assert
+    assert_eq!(timeout, BUSY_TIMEOUT_MS as i64);
+}
+
 #[test]
 fn open_readonly_fastfail_on_nonexistent_path_returns_no_data() {
     // Arrange: a path that does not exist.

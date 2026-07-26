@@ -280,6 +280,53 @@ pub fn open_readonly_fastfail(path: impl AsRef<Path>) -> Result<UsageDb, OpenErr
     open_readonly_with_timeout(path, FASTFAIL_BUSY_TIMEOUT_MS, true)
 }
 
+/// Open the usage DB at `path` for READ-WRITE while NEVER creating or
+/// migrating it. It sits between [`open`] (which creates, chmods, switches
+/// journal modes, and runs the migration ladder) and [`open_readonly`]
+/// (which forbids writes): the connection may `INSERT`, but a missing file
+/// is still rejected as [`OpenError::NoData`] rather than materializing a
+/// second, unmigrated database beside the daemon's.
+///
+/// The one-shot CLI writer (the capability probe's synchronous capability-
+/// event insert) uses this so it attaches to the EXISTING WAL database the
+/// daemon created and owns, never forking its own schema. A missing or
+/// older-schema DB is a clear error here, never a silent migrate -- the
+/// out-of-band-migration incident class.
+///
+/// The open sequence is a thin sibling of [`open_readonly_with_timeout`],
+/// reusing [`verify_readable_version`] and [`ensure_requests_table`]: reject
+/// a missing file as `NoData`, open `SQLITE_OPEN_READ_WRITE` (never `CREATE`),
+/// apply the standard [`BUSY_TIMEOUT_MS`] busy timeout, verify the schema
+/// version matches this binary exactly ([`OpenError::VersionTooOld`] /
+/// [`OpenError::VersionTooNew`] on any mismatch), treat a missing `requests`
+/// table as `NoData`, and confirm WAL by READING the journal-mode pragma
+/// (never writing it, so a live daemon's mode is untouched; a non-WAL mode
+/// fails closed with [`OpenError::NotWal`]).
+pub fn open_rw(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
+    let path = path.as_ref().to_path_buf();
+    if !path.exists() {
+        return Err(OpenError::NoData {
+            path: path.display().to_string(),
+        });
+    }
+
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(
+        |source| OpenError::Open {
+            path: path.display().to_string(),
+            source,
+        },
+    )?;
+
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))
+        .map_err(OpenError::Pragma)?;
+
+    verify_readable_version(&conn)?;
+    ensure_requests_table(&conn, &path)?;
+    verify_wal_readonly(&conn)?;
+
+    Ok(UsageDb { conn, path })
+}
+
 /// Shared read-only open sequence behind [`open_readonly`] and
 /// [`open_readonly_fastfail`]: reject a missing file as `NoData`, open the
 /// file `SQLITE_OPEN_READ_ONLY` (never `CREATE`, so a missing file is still

@@ -332,7 +332,7 @@ fn emit_rebuild_log(summary: &CapabilityRebuildSummary, loaded_rows: usize) {
         replayed_negative = summary.replayed_negative,
         replayed_cleared = summary.replayed_cleared,
         cleared_noop = summary.cleared_noop,
-        skipped_probe = summary.skipped_probe,
+        replayed_probe = summary.replayed_probe,
         skipped_unknown = summary.skipped_unknown,
         loaded_rows,
         row_cap = REBUILD_ROW_LIMIT,

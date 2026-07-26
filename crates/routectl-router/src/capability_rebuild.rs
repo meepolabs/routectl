@@ -197,9 +197,11 @@ pub struct CapabilityRebuildSummary {
     /// `cleared` events with no resident entry to remove (a no-op, e.g. a
     /// cleared event replayed before its negative).
     pub cleared_noop: usize,
-    /// Probe-source events skipped (inert until the probe pass lands; the
-    /// admission arms stay Live-only).
-    pub skipped_probe: usize,
+    /// Probe-source events replayed through the shared admission arms. A
+    /// by-source tally bumped ALONGSIDE the by-verdict counter each probe
+    /// row hits -- a probe `broken` row bumps both `replayed_probe` and
+    /// `replayed_negative`.
+    pub replayed_probe: usize,
     /// Events skipped because a token (source/verdict/tier/phase) was not
     /// recognized.
     pub skipped_unknown: usize,
@@ -235,33 +237,25 @@ pub fn rebuild_capabilities_into(
     summary
 }
 
-/// Replay one surviving row through the matching admission call. Probe-
-/// source and unrecognized-token rows are skipped with a counter; nothing
-/// here panics.
+/// Replay one surviving row through the matching admission call. The parsed
+/// evidence source is threaded into the admission so probe and live rows
+/// share the same arms; an unrecognized source token skips the row with a
+/// counter. Nothing here panics.
 fn replay_row(
     row: &CapabilityEventRow,
     registry: &LearnedCapabilityRegistry,
     summary: &mut CapabilityRebuildSummary,
 ) {
-    match EvidenceSource::parse(&row.source) {
-        // Probe evidence is inert until the probe pass lands; feeding it
-        // through the Live-only admission arms would mis-attribute source.
-        Some(EvidenceSource::Probe) => {
-            summary.skipped_probe += 1;
-            return;
-        }
-        Some(EvidenceSource::Live) => {}
-        None => {
-            tracing::warn!(
-                event = "rebuild_skip",
-                reason = "unknown_source",
-                source = %row.source,
-                "capability rebuild skipped a row with an unrecognized source token",
-            );
-            summary.skipped_unknown += 1;
-            return;
-        }
-    }
+    let Some(source) = EvidenceSource::parse(&row.source) else {
+        tracing::warn!(
+            event = "rebuild_skip",
+            reason = "unknown_source",
+            source = %row.source,
+            "capability rebuild skipped a row with an unrecognized source token",
+        );
+        summary.skipped_unknown += 1;
+        return;
+    };
 
     // The verdict tokens mirror `Verdict::as_str`; the catch-all arm is the
     // open-set skip.
@@ -278,14 +272,15 @@ fn replay_row(
                 &row.state_key,
                 &row.capability,
                 &row.provider_kind,
-                EvidenceSource::Live,
+                source,
                 row.observed_at,
             );
             summary.replayed_verified += 1;
+            bump_probe(source, summary);
         }
         "broken" => {
             if let Some((tier, phase)) = parse_tier_phase(row, summary) {
-                mint_negative(row, registry, tier, phase, summary);
+                mint_negative(row, registry, tier, phase, source, summary);
             }
         }
         "suspect" => {
@@ -310,7 +305,7 @@ fn replay_row(
                 summary.skipped_unknown += 1;
                 return;
             }
-            mint_negative(row, registry, tier, phase, summary);
+            mint_negative(row, registry, tier, phase, source, summary);
         }
         "cleared" => {
             if registry.remove_keyed(&row.state_key, &row.capability, &row.provider_kind) {
@@ -318,6 +313,7 @@ fn replay_row(
             } else {
                 summary.cleared_noop += 1;
             }
+            bump_probe(source, summary);
         }
         other => {
             tracing::warn!(
@@ -328,6 +324,15 @@ fn replay_row(
             );
             summary.skipped_unknown += 1;
         }
+    }
+}
+
+/// Bump the by-source probe tally when the replayed row carried probe
+/// evidence. Called alongside each by-verdict counter so a probe row is
+/// counted once per arm it reaches.
+const fn bump_probe(source: EvidenceSource, summary: &mut CapabilityRebuildSummary) {
+    if matches!(source, EvidenceSource::Probe) {
+        summary.replayed_probe += 1;
     }
 }
 
@@ -381,12 +386,14 @@ fn parse_tier_phase(
     Some((tier, phase))
 }
 
-/// Replay a parsed negative through the live admission call.
+/// Replay a parsed negative through the shared admission call, attributing
+/// the evidence source the row carried.
 fn mint_negative(
     row: &CapabilityEventRow,
     registry: &LearnedCapabilityRegistry,
     tier: SignalTier,
     phase: FailurePhase,
+    source: EvidenceSource,
     summary: &mut CapabilityRebuildSummary,
 ) {
     registry.observe(
@@ -395,10 +402,11 @@ fn mint_negative(
         &row.provider_kind,
         tier,
         phase,
-        EvidenceSource::Live,
+        source,
         row.observed_at,
     );
     summary.replayed_negative += 1;
+    bump_probe(source, summary);
 }
 
 #[cfg(test)]
