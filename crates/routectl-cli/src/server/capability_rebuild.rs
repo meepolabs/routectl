@@ -307,8 +307,9 @@ fn map_instant(now: Instant, now_ms: i64, event_ms: i64) -> Instant {
 }
 
 /// Current wall-clock time in epoch milliseconds, saturating rather than
-/// panicking on a pre-epoch or overflowing clock.
-fn epoch_ms_now() -> i64 {
+/// panicking on a pre-epoch or overflowing clock. Shared with the hot-reload
+/// tombstone seam so both replay boundaries stamp the same clock basis.
+pub(super) fn epoch_ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))

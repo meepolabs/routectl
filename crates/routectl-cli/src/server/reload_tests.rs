@@ -691,7 +691,171 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
     );
 }
 
-/// Hot-reload containment: an overlay hand-edited to a degenerate cell
+// ---- Hot-reload capability tombstone: revision-change replay boundary ----
+
+/// Count the tombstone rows persisted in the ledger at `path`.
+#[cfg(test)]
+fn tombstone_count(path: &std::path::Path) -> i64 {
+    let db = routectl_usage::open(path).expect("open ledger");
+    db.conn()
+        .query_row(
+            "SELECT COUNT(*) FROM capability_events WHERE verdict = 'tombstone'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count tombstones")
+}
+
+/// A config/overlay reload that advances the overlay revision must enqueue
+/// EXACTLY ONE tombstone stamped the NEW revision -- the replay boundary that
+/// keeps post-reload negatives replayable after a restart. Drives
+/// `handle_config_reload` directly against a real, enabled usage writer, then
+/// drains it and inspects the ledger. `#[serial]`: the loader reads the
+/// ambient `overlay_default_path()` (XDG_CONFIG_HOME-derived).
+#[tokio::test]
+#[serial_test::serial]
+async fn config_reload_revision_change_enqueues_one_new_revision_tombstone() {
+    // Arrange: isolated config dir, a config.toml with usage enabled at a temp
+    // DB, and an initial router built from an empty overlay (revision 0).
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let db_path = dir.path().join("usage.db");
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, usage_config_text(true, &db_path)).unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut start_config = Config::default();
+    start_config.usage.db_path = db_path.clone();
+    start_config.usage.enabled = true;
+    let start_config = Arc::new(start_config);
+    let (usage, writer) = build_usage_writer(&start_config);
+
+    let router = build_router_from_config_with_overlay(
+        start_config.clone(),
+        &CatalogOverlay::default(),
+        secrets.clone(),
+    )
+    .await
+    .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let boot_overlay_revision = swap.load().overlay_revision();
+
+    // Act: write an overlay file at revision 1, advancing the overlay
+    // revision, then reload.
+    let overlay_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("catalog_overlay.json"),
+        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+    )
+    .unwrap();
+    handle_config_reload(
+        Some(&cfg_path),
+        &start_config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::CatalogOverlay,
+    )
+    .await
+    .expect("overlay reload must apply");
+
+    // Precondition: the reload actually advanced the overlay revision.
+    let new_overlay_revision = swap.load().overlay_revision();
+    assert_ne!(
+        boot_overlay_revision, new_overlay_revision,
+        "the overlay write must advance the overlay revision"
+    );
+
+    // Drain the writer, then inspect the ledger.
+    drop(usage);
+    writer.shutdown();
+
+    assert_eq!(
+        tombstone_count(&db_path),
+        1,
+        "a revision-changing reload must enqueue exactly one tombstone"
+    );
+    let db = routectl_usage::open(&db_path).expect("reopen ledger");
+    let boundary = routectl_usage::latest_tombstone(db.conn())
+        .expect("read tombstone")
+        .expect("a reload tombstone exists");
+    assert_eq!(
+        boundary.overlay_revision,
+        Some(i64::try_from(new_overlay_revision).unwrap()),
+        "the tombstone must be stamped the NEW overlay revision"
+    );
+    assert_eq!(
+        boundary.catalog_version,
+        Some(i64::from(swap.load().catalog_version())),
+        "the tombstone must carry this reload's catalog version"
+    );
+}
+
+/// A reload that leaves the catalog version and overlay revision unchanged
+/// (here: no overlay file, config identical) must enqueue NO tombstone -- the
+/// replay boundary only advances on a real revision change. `#[serial]`: the
+/// loader reads the ambient `overlay_default_path()`.
+#[tokio::test]
+#[serial_test::serial]
+async fn config_reload_without_revision_change_enqueues_no_tombstone() {
+    // Arrange: isolated config dir with NO overlay file (revision stays 0),
+    // usage enabled at a temp DB, and an initial router off an empty overlay.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let db_path = dir.path().join("usage.db");
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, usage_config_text(true, &db_path)).unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut start_config = Config::default();
+    start_config.usage.db_path = db_path.clone();
+    start_config.usage.enabled = true;
+    let start_config = Arc::new(start_config);
+    let (usage, writer) = build_usage_writer(&start_config);
+
+    let router = build_router_from_config_with_overlay(
+        start_config.clone(),
+        &CatalogOverlay::default(),
+        secrets.clone(),
+    )
+    .await
+    .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let before = swap.load_full();
+
+    // Act: reload the unchanged config against the same (absent) overlay.
+    handle_config_reload(
+        Some(&cfg_path),
+        &start_config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+    )
+    .await
+    .expect("config reload must apply");
+
+    // The reload still swapped the router (proving it ran), but neither
+    // revision moved.
+    let after = swap.load_full();
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "the reload must have run and swapped the router"
+    );
+    assert_eq!(before.catalog_version(), after.catalog_version());
+    assert_eq!(before.overlay_revision(), after.overlay_revision());
+
+    // Drain the writer: no tombstone must have been enqueued.
+    drop(usage);
+    writer.shutdown();
+    assert_eq!(
+        tombstone_count(&db_path),
+        0,
+        "an unchanged-revision reload must enqueue no tombstone"
+    );
+}
 /// value (rm <= 0) fails the fail-closed load, so the reload is
 /// rejected and the prior router stays live -- same posture as any
 /// other reload-time load failure.

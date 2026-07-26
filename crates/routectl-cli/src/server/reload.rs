@@ -9,7 +9,7 @@ use routectl_router::{
     ActivationDelta, ActivationState, CatalogOverlay, Config, Router, compute_activation,
     diff_activation,
 };
-use routectl_usage::UsageHandle;
+use routectl_usage::{CapabilityEvent, UsageHandle};
 use tokio::sync::{mpsc, watch};
 
 use super::build_router_from_config_with_overlay;
@@ -608,10 +608,20 @@ pub(super) async fn handle_config_reload(
     // Carry over per-nickname runtime state (circuit-breaker counters,
     // RPM token buckets) from the outgoing Router so a hot-reload does
     // not reset gates that took time to build up.
-    new_router.carry_over_runtime_state_from(&router_swap.load_full());
-    new_router.carry_over_sticky_from(&router_swap.load_full());
-    new_router.carry_over_k_store_from(&router_swap.load_full());
-    new_router.carry_over_learned_from(&router_swap.load_full());
+    let previous_router = router_swap.load_full();
+    new_router.carry_over_runtime_state_from(&previous_router);
+    new_router.carry_over_sticky_from(&previous_router);
+    new_router.carry_over_k_store_from(&previous_router);
+    new_router.carry_over_learned_from(&previous_router);
+
+    // A reload that advanced the catalog version or overlay revision moves the
+    // replay boundary. Read both revisions before the swap (this coordinator is
+    // the sole writer, so the loaded Arc is the router being replaced) and stamp
+    // the new revision below.
+    let revision_changed = previous_router.catalog_version() != new_router.catalog_version()
+        || previous_router.overlay_revision() != new_router.overlay_revision();
+    let new_catalog_version = new_router.catalog_version();
+    let new_overlay_revision = new_router.overlay_revision();
 
     router_swap.store(Arc::new(new_router));
 
@@ -621,6 +631,14 @@ pub(super) async fn handle_config_reload(
     // next daemon start -- both surface in the restart-required warning
     // below). Only `enabled` flips at runtime.
     usage.set_enabled(new_config.usage.enabled);
+
+    // Stamp the replay boundary at the post-reload revision so negatives
+    // learned during the post-reload session sort after this tombstone and
+    // replay on the next boot. Enqueued after the gate flip so it honors the
+    // freshly-applied usage setting; best-effort, never blocks the reload.
+    if revision_changed {
+        enqueue_reload_tombstone(usage, new_catalog_version, new_overlay_revision);
+    }
 
     tracing::info!(
         path = %path.display(),
@@ -638,6 +656,26 @@ pub(super) async fn handle_config_reload(
     }
 
     Some((new_config, new_overlay))
+}
+
+/// Enqueue exactly one tombstone stamped the post-reload revision when a hot
+/// reload advanced the catalog version or overlay revision. Non-blocking and
+/// best-effort like every usage write (`try_send_capability_event` never
+/// blocks, awaits, or panics; the enabled gate applies and a disabled writer
+/// drops it), so it never fails the reload. Shares the boot seam's tombstone
+/// clock source so both replay boundaries stamp the same wall-clock basis.
+fn enqueue_reload_tombstone(usage: &UsageHandle, catalog_version: u32, overlay_revision: u64) {
+    let event = CapabilityEvent::tombstone(
+        super::capability_rebuild::epoch_ms_now(),
+        i64::from(catalog_version),
+        i64::try_from(overlay_revision).unwrap_or(i64::MAX),
+    );
+    usage.try_send_capability_event(event);
+    tracing::info!(
+        catalog_version,
+        overlay_revision,
+        "hot reload advanced the capability revision; enqueued a fresh tombstone (replay boundary)"
+    );
 }
 
 /// Activation-recompute + audit-event tests. Driven on the `#[tokio::test]`
