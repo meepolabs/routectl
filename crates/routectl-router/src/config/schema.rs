@@ -1664,6 +1664,7 @@ impl ProviderEntry {
     /// operator-floor-pin guard so a capability whose beta token the
     /// operator pins is never stripped (a stripped-then-re-added token
     /// is a false success).
+    #[allow(clippy::missing_const_for_fn)]
     pub fn anthropic_beta_floor(&self) -> &[String] {
         match self {
             #[cfg(feature = "bedrock")]
@@ -2036,6 +2037,7 @@ impl ProviderEntry {
             Self::OpenaiCompat { base_url, .. } | Self::AnthropicApi { base_url, .. } => {
                 *base_url = u;
             }
+            #[cfg(any(feature = "bedrock", feature = "openai-responses", feature = "gemini"))]
             _ => panic!("ProviderEntry::with_base_url only applies to api-backed providers"),
         }
         self
