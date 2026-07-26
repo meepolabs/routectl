@@ -31,6 +31,7 @@ use routectl_router::{Config, Finding, ProviderEntry, Status, build_provider, ov
 
 use crate::server::CompositeStore;
 
+pub mod canary;
 #[cfg(feature = "bedrock")]
 pub mod capture;
 
