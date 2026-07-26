@@ -1,9 +1,13 @@
 //! Usage read-query facade and shared row/error types.
 
 mod aggregate;
+mod capability;
 mod would_trim;
 
 pub use aggregate::{QuotaSnapshot, aggregate, errors_by_class, latest_quota, ttfbs};
+pub use capability::{
+    CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,
+};
 pub use would_trim::{
     KCalibration, M1AttributionSummary, ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary,
     k_calibration_summary, m1_attribution_summary, read_reuse_samples_since,

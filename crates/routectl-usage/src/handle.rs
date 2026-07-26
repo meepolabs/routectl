@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::mpsc::Sender;
 
+use crate::capability_event::CapabilityEvent;
 use crate::learn_event::CapabilityLearnEvent;
 use crate::record::UsageRecord;
 use crate::writer::WriterMessage;
@@ -33,6 +34,9 @@ pub struct UsageCounters {
     learn_events_enqueued: AtomicU64,
     learn_events_dropped_full: AtomicU64,
     learn_events_persisted: AtomicU64,
+    capability_events_enqueued: AtomicU64,
+    capability_events_dropped_full: AtomicU64,
+    capability_events_persisted: AtomicU64,
 }
 
 impl UsageCounters {
@@ -82,6 +86,23 @@ impl UsageCounters {
         self.learn_events_persisted.load(Ordering::Relaxed)
     }
 
+    /// Capability events accepted into the channel by
+    /// `try_send_capability_event`.
+    pub fn capability_events_enqueued(&self) -> u64 {
+        self.capability_events_enqueued.load(Ordering::Relaxed)
+    }
+
+    /// Capability events dropped because the bounded channel was full or
+    /// closed.
+    pub fn capability_events_dropped_full(&self) -> u64 {
+        self.capability_events_dropped_full.load(Ordering::Relaxed)
+    }
+
+    /// Capability-event rows successfully persisted by the consumer thread.
+    pub fn capability_events_persisted(&self) -> u64 {
+        self.capability_events_persisted.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn incr_enqueued(&self) {
         self.enqueued.fetch_add(1, Ordering::Relaxed);
     }
@@ -117,6 +138,21 @@ impl UsageCounters {
 
     pub(crate) fn incr_learn_events_persisted(&self) {
         self.learn_events_persisted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn incr_capability_events_enqueued(&self) {
+        self.capability_events_enqueued
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn incr_capability_events_dropped_full(&self) -> u64 {
+        self.capability_events_dropped_full
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn incr_capability_events_persisted(&self) {
+        self.capability_events_persisted
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -189,6 +225,23 @@ impl UsageHandle {
         }
     }
 
+    /// Hand a capability event to the writer without ever blocking,
+    /// awaiting, or panicking. Mirrors [`UsageHandle::try_send`]: the same
+    /// enabled gate applies (a capability event is a usage write), and a
+    /// full or closed channel drops the event with its own counter and
+    /// rate-limited WARN. Routing never depends on this landing -- it is
+    /// best-effort; the warm-rebuild replayer tolerates the gap.
+    pub fn try_send_capability_event(&self, event: CapabilityEvent) {
+        if !self.is_enabled() {
+            self.counters.incr_dropped_disabled();
+            return;
+        }
+        match self.sender.try_send(WriterMessage::CapabilityEvent(event)) {
+            Ok(()) => self.counters.incr_capability_events_enqueued(),
+            Err(_) => self.note_capability_event_overflow_drop(),
+        }
+    }
+
     /// Whether usage capture is currently enabled (runtime-flippable).
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
@@ -224,6 +277,17 @@ impl UsageHandle {
                 target: "routectl_usage::handle",
                 dropped_total = prior + 1,
                 "usage channel full -- dropping learn event (capture lags writer)"
+            );
+        }
+    }
+
+    fn note_capability_event_overflow_drop(&self) {
+        let prior = self.counters.incr_capability_events_dropped_full();
+        if prior == 0 || (prior + 1).is_multiple_of(DROP_WARN_INTERVAL) {
+            tracing::warn!(
+                target: "routectl_usage::handle",
+                dropped_total = prior + 1,
+                "usage channel full -- dropping capability event (capture lags writer)"
             );
         }
     }
