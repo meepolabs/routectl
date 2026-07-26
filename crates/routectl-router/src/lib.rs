@@ -61,9 +61,9 @@ pub use capability_rebuild::{
 };
 pub use catalog::{
     BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
-    baked_table_rows, is_cataloged_provider_kind, is_stale_today, lookup,
-    lookup_baked_with_overrides, lookup_overlay_cell, lookup_with_overrides, merge,
-    stale_after_days, validate_overrides,
+    baked_table_rows, is_cataloged_provider_kind, is_stale_days, is_stale_days_today,
+    is_stale_today, lookup, lookup_baked_with_overrides, lookup_overlay_cell,
+    lookup_with_overrides, merge, stale_after_days, validate_overrides,
 };
 pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
 pub use catalog_import::{

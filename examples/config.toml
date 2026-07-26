@@ -229,6 +229,7 @@ stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 enabled               = true    # master switch for the subsystem
 decay_hours           = 48      # how long a learned negative acts before a re-probe
 inferred_window_hours = 1       # window for a second observation to confirm an inferred signal
+staleness_hint_days   = 14      # age past which a verified capability reads as stale in diagnostics
 
 # ---- Bedrock global filters (operator-owned allowlists) ----
 # Empty list (or section omitted) = pass-through. See

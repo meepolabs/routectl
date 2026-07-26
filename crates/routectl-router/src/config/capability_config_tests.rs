@@ -11,6 +11,7 @@ fn absent_block_uses_defaults() {
     assert!(config.capability.enabled);
     assert_eq!(config.capability.decay_hours, 48);
     assert_eq!(config.capability.inferred_window_hours, 1);
+    assert_eq!(config.capability.staleness_hint_days, 14);
 }
 
 #[test]
@@ -18,7 +19,7 @@ fn explicit_values_are_honored() {
     // Arrange / Act
     let config: Config = toml::from_str(
         "version = 3\n[capability]\nenabled = false\ndecay_hours = 12\n\
-             inferred_window_hours = 3\n",
+             inferred_window_hours = 3\nstaleness_hint_days = 30\n",
     )
     .expect("parse");
 
@@ -26,17 +27,19 @@ fn explicit_values_are_honored() {
     assert!(!config.capability.enabled);
     assert_eq!(config.capability.decay_hours, 12);
     assert_eq!(config.capability.inferred_window_hours, 3);
+    assert_eq!(config.capability.staleness_hint_days, 30);
 }
 
 #[test]
 fn partial_block_defaults_the_omitted_keys() {
-    // Only the kill switch set; the two tempo knobs keep their defaults.
+    // Only the kill switch set; the remaining tempo knobs keep their defaults.
     let config: Config =
         toml::from_str("version = 3\n[capability]\nenabled = false\n").expect("parse");
 
     assert!(!config.capability.enabled);
     assert_eq!(config.capability.decay_hours, 48);
     assert_eq!(config.capability.inferred_window_hours, 1);
+    assert_eq!(config.capability.staleness_hint_days, 14);
 }
 
 #[test]

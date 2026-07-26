@@ -75,15 +75,17 @@ pub struct ReductionConfig {
 /// Operator-facing `[capability]` config block. Kill switch plus tempo
 /// knobs for the learned-capability subsystem. A missing `[capability]`
 /// table deserializes to `CapabilityConfig::default()` (enabled, 48h
-/// decay, 1h inferred window), and each per-field `#[serde(default)]`
-/// keeps an omitted key at its default too.
+/// decay, 1h inferred window, 14d staleness hint), and each per-field
+/// `#[serde(default)]` keeps an omitted key at its default too.
 ///
 /// `enabled` is the master switch: off leaves any learned entries
 /// resident but inert (both the learn path and the act path are skipped).
 /// `decay_hours` sets how long a learned negative acts before it lapses
 /// into a single re-probe; `inferred_window_hours` bounds how long a
 /// pending single-observation inferred signal waits for a confirming
-/// second observation before it resets.
+/// second observation before it resets. `staleness_hint_days` sets the
+/// age past which a verified capability reads as stale in diagnostics
+/// (display-only; not wired into the act path).
 ///
 /// `#[non_exhaustive]` leaves room for later knobs without breaking
 /// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
@@ -109,6 +111,11 @@ pub struct CapabilityConfig {
     /// confirming second observation before it resets. Default 1.
     #[serde(default = "default_inferred_window_hours")]
     pub inferred_window_hours: u64,
+    /// Days past which a verified capability stamp reads as stale in
+    /// diagnostics. Display-only -- surfaced in doctor / CLI hints, never
+    /// wired into router construction or the act path. Default 14.
+    #[serde(default = "default_staleness_hint_days")]
+    pub staleness_hint_days: u64,
     /// Operator capability overrides, keyed by two-tier target spec:
     /// `"provider_name"` applies to every model on that provider, and
     /// `"provider_name:nickname"` targets a single model. An omitted
@@ -125,6 +132,7 @@ impl Default for CapabilityConfig {
             enabled: true,
             decay_hours: default_decay_hours(),
             inferred_window_hours: default_inferred_window_hours(),
+            staleness_hint_days: default_staleness_hint_days(),
             overrides: BTreeMap::new(),
         }
     }
@@ -155,6 +163,10 @@ const fn default_decay_hours() -> u64 {
 
 const fn default_inferred_window_hours() -> u64 {
     1
+}
+
+const fn default_staleness_hint_days() -> u64 {
+    14
 }
 
 /// Operator-facing `[trim]` config block. Wraps the deterministic

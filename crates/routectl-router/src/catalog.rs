@@ -718,15 +718,25 @@ fn parse_epoch_day(date: &str) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
+/// True when `verified_at` is more than `threshold_days` before `today`
+/// (both epoch-days). A date that fails to parse is treated as stale so a
+/// malformed stamp surfaces rather than hides. Parameterizes the horizon so
+/// callers with their own threshold (the config staleness hint) share the
+/// exact parse-and-compare logic the baked-catalog check uses.
+#[must_use]
+pub fn is_stale_days(verified_at: &str, today: i64, threshold_days: i64) -> bool {
+    match parse_epoch_day(verified_at) {
+        Some(day) => today - day > threshold_days,
+        None => true,
+    }
+}
+
 /// True when a `verified_at` / snapshot date is more than
 /// [`STALE_AFTER_DAYS`] before `today` (both epoch-days). A date that fails
 /// to parse is treated as stale so a malformed stamp surfaces rather than
 /// hides.
 fn is_stale(verified_at: &str, today: i64) -> bool {
-    match parse_epoch_day(verified_at) {
-        Some(day) => today - day > STALE_AFTER_DAYS,
-        None => true,
-    }
+    is_stale_days(verified_at, today, STALE_AFTER_DAYS)
 }
 
 /// Emit a `tracing::warn!` when the WHOLE baked table's snapshot date
@@ -786,6 +796,15 @@ pub fn baked_table_rows() -> Vec<BakedPricingRow> {
 #[must_use]
 pub fn is_stale_today(verified_at: &str) -> bool {
     is_stale(verified_at, today_epoch_day())
+}
+
+/// True when `verified_at` is more than `threshold_days` before today (as
+/// measured by the system clock). Wraps [`is_stale_days`] with the live
+/// clock for callers that carry their own threshold and do not need a
+/// pinned test clock.
+#[must_use]
+pub fn is_stale_days_today(verified_at: &str, threshold_days: i64) -> bool {
+    is_stale_days(verified_at, today_epoch_day(), threshold_days)
 }
 
 /// The staleness horizon in days. A snapshot date more than this many days
@@ -1683,6 +1702,29 @@ mod tests {
         assert!(!is_stale_today("2099-01-01"));
         // Ancient stamp: always stale.
         assert!(is_stale_today("1971-01-01"));
+    }
+
+    #[test]
+    fn is_stale_days_boundary_is_strict_greater_than() {
+        // Parameterized horizon: exactly `threshold_days` old is still fresh
+        // (strict `>`); one day more is stale. Pinned clock, arbitrary n.
+        let stamp = parse_epoch_day("2026-01-01").expect("parse");
+        let n = 14;
+        assert!(!is_stale_days("2026-01-01", stamp + n, n));
+        assert!(is_stale_days("2026-01-01", stamp + n + 1, n));
+    }
+
+    #[test]
+    fn is_stale_days_malformed_stamp_is_stale() {
+        // A stamp that fails to parse surfaces as stale for any threshold.
+        assert!(is_stale_days("not-a-date", 20_000, 14));
+    }
+
+    #[test]
+    fn is_stale_days_today_public_real_clock_smoke() {
+        // Live-clock wrapper: far-future never stale, ancient always stale.
+        assert!(!is_stale_days_today("2099-01-01", 14));
+        assert!(is_stale_days_today("1971-01-01", 14));
     }
 
     // -- max_context_tokens tests --------------------------------------------
