@@ -20,7 +20,10 @@ use super::reload::{
     ActivationTrigger, apply_activation, await_reload_tasks, spawn_reload_pipeline,
 };
 use super::router_build::build_router_from_config_with_overlay;
-use super::{AppState, CompositeStore, check_bind_safety, k_rebuild, request_id, status_gate};
+use super::{
+    AppState, CompositeStore, capability_rebuild, check_bind_safety, k_rebuild, request_id,
+    status_gate,
+};
 
 /// Bind a TCP listener, then serve. Exposes the bound address for tests.
 ///
@@ -176,6 +179,30 @@ pub async fn serve_on_listener_with_overlay(
     // ledger history).
     k_rebuild::warm_k_store_from_ledger(&config.usage.db_path, &router.k_session_store);
 
+    // Start the usage writer BEFORE the capability warm and before building
+    // AppState. The writer opens the DB once here and owns it for the
+    // daemon's lifetime; the returned `UsageHandle` is what the boot
+    // capability warm enqueues its fail-closed tombstone through, then it
+    // goes onto AppState (outside the ArcSwap, so a Router hot-swap never
+    // disturbs it) while the owning `UsageWriter` stays in this scope as the
+    // shutdown handle. Started unconditionally -- even when
+    // `usage.enabled == false` -- so the runtime gate can flip live on reload
+    // without a restart.
+    let (usage_handle, usage_writer) = build_usage_writer(&config);
+
+    // One-shot warm of the learned-capability registry from the usage ledger,
+    // on the owned `router` BEFORE it is wrapped in the ArcSwap and
+    // bootstrap-only -- NOT on hot-reload, where `carry_over_learned_from`
+    // already carries or deliberately clears the live registry. Best-effort
+    // and fail-closed: a missing / unreadable ledger, an absent tombstone, or
+    // a revision mismatch replays nothing and enqueues one fresh tombstone
+    // (stamped this boot's revision) through the writer started just above.
+    capability_rebuild::warm_capability_registry_from_ledger(
+        &config.usage.db_path,
+        &router,
+        &usage_handle,
+    );
+
     let bound = listener
         .local_addr()
         .map_err(|e| Error::Internal(format!("local_addr: {e}")))?;
@@ -270,15 +297,6 @@ pub async fn serve_on_listener_with_overlay(
         ActivationTrigger::Startup,
     )
     .await;
-
-    // Start the usage writer BEFORE building AppState. The writer opens
-    // the DB once here and owns it for the daemon's lifetime; the
-    // returned `UsageHandle` goes onto AppState (outside the ArcSwap, so
-    // a Router hot-swap never disturbs it) while the owning `UsageWriter`
-    // stays in this scope as the shutdown handle. The writer is started
-    // unconditionally -- even when `usage.enabled == false` -- so the
-    // runtime gate can flip live on reload without a restart.
-    let (usage_handle, usage_writer) = build_usage_writer(&config);
 
     // Generated ONCE per process, regardless of whether `[mitm]` is
     // configured: shared with the ingress admission/capture gates via
