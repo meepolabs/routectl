@@ -1,5 +1,5 @@
 {
-  "note": "PARKED: provisional synthetic shapes for the F2 feature-naming anchored-template extraction engine tests. Replace with sanitized captured feature-naming rejection envelopes once real capture lands. No value here is a real captured token.",
+  "note": "PROVISIONAL: provisional synthetic shapes for the F2 feature-naming anchored-template extraction engine tests. Replace with sanitized captured feature-naming rejection envelopes once real capture lands. No value here is a real captured token.",
   "templates": [
     { "prefix": "This model does not support the ", "suffix": " capability." }
   ],

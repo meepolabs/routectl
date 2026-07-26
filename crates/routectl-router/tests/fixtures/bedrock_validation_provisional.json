@@ -1,5 +1,5 @@
 {
-  "note": "PARKED: provisional synthetic shapes for the anchored-template extraction engine tests. Replace with sanitized captured AWS ValidationException envelopes once real capture lands. No value here is a real captured token.",
+  "note": "PROVISIONAL: provisional synthetic shapes for the anchored-template extraction engine tests. Replace with sanitized captured AWS ValidationException envelopes once real capture lands. No value here is a real captured token.",
   "templates": [
     { "prefix": "The parameter ", "suffix": " is not supported for this model." }
   ],
