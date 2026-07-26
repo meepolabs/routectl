@@ -692,10 +692,22 @@ pub fn validate_overrides(
 /// Today's date as a proleptic-Gregorian epoch-day count (days since
 /// 1970-01-01), derived from the system clock. Pure arithmetic, no date
 /// library. Returns `0` if the clock is somehow before the epoch.
-fn today_epoch_day() -> i64 {
+#[must_use]
+pub fn today_epoch_day() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
         i64::try_from(d.as_secs()).unwrap_or(0) / SECONDS_PER_DAY
     })
+}
+
+/// Age in whole days of a `"YYYY-MM-DD"` stamp relative to `today` (both
+/// epoch-days), clamped at zero so a future stamp (a skewed clock or a
+/// post-dated verification) reads as `0` rather than a negative age.
+/// `None` when the stamp does not parse -- callers render that honestly
+/// rather than fabricating an age. Shares the exact parse the staleness
+/// checks use, so the age and the stale flag never disagree on a date.
+#[must_use]
+pub fn epoch_day_age(date: &str, today: i64) -> Option<i64> {
+    parse_epoch_day(date).map(|day| (today - day).max(0))
 }
 
 /// Parse a `"YYYY-MM-DD"` string into a proleptic-Gregorian epoch-day
@@ -1330,6 +1342,17 @@ mod tests {
         assert_eq!(parse_epoch_day("1970-01-02"), Some(1));
         // A full year later.
         assert_eq!(parse_epoch_day("1971-01-01"), Some(365));
+    }
+
+    #[test]
+    fn epoch_day_age_counts_whole_days_and_clamps_future_to_zero() {
+        let today = parse_epoch_day("2026-07-11").expect("parse today");
+        assert_eq!(epoch_day_age("2026-07-11", today), Some(0));
+        assert_eq!(epoch_day_age("2026-07-01", today), Some(10));
+        // A post-dated stamp (skewed clock) never reads as a negative age.
+        assert_eq!(epoch_day_age("2026-08-11", today), Some(0));
+        // A malformed stamp yields no age rather than a fabricated one.
+        assert_eq!(epoch_day_age("not-a-date", today), None);
     }
 
     /// Build a one-entry override map tersely.

@@ -27,15 +27,15 @@ use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry, OverrideRow, Source, Status,
-    WouldTrimPanel, overall_exit,
+    CatalogImportState, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry,
+    OverrideRow, Source, Status, WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
 use self::render::render_human;
 use self::sections::{
-    section_auth, section_capability, section_config, section_inventory, section_probe,
-    section_secret_orphans, section_version,
+    section_auth, section_capability, section_config, section_freshness, section_inventory,
+    section_probe, section_secret_orphans, section_version,
 };
 
 pub(crate) use self::gather::gather_context_no_network;
@@ -72,6 +72,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("secrets", section_secret_orphans),
     ("probe", section_probe),
     ("capability", section_capability),
+    ("freshness", section_freshness),
 ];
 
 /// The no-network subset of [`SECTIONS`]: [`SECTIONS`] MINUS the `probe`
@@ -90,6 +91,7 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("auth", section_auth),
     ("secrets", section_secret_orphans),
     ("capability", section_capability),
+    ("freshness", section_freshness),
 ];
 
 /// The read-only inputs every section producer draws from, gathered once
@@ -140,6 +142,10 @@ pub(crate) struct DoctorContext {
     /// consumed by the capability matrix panel renderer.
     #[cfg_attr(not(test), allow(dead_code))]
     capability_matrix: CapabilityMatrixSource,
+    /// The freshness section's read-only inputs: baked catalog stamp, the
+    /// freshest overlay verification, and the last SUCCESSFUL import. Purely
+    /// additive to the context; gathered once like every other input.
+    freshness: FreshnessInputs,
 }
 
 /// Per-layer inputs the capability section maps to findings. The config
@@ -219,6 +225,55 @@ enum CapabilityMatrixSource {
     /// `revision_mismatch` / `tombstone_read` / an open-error class such as
     /// `version_too_new`).
     Unavailable(&'static str),
+}
+
+/// The freshness section's read-only inputs. All ages are computed against
+/// `today_epoch_day` (pinned once at gather time) so the three rows share a
+/// single clock, and every age is epoch-day-clamped at zero.
+struct FreshnessInputs {
+    /// The compiled-in baked catalog version.
+    catalog_version: u32,
+    /// The whole baked table's snapshot date (`YYYY-MM-DD`).
+    snapshot_date: &'static str,
+    /// The freshest `verified_at` (`YYYY-MM-DD`) among the effective view's
+    /// OVERLAY-sourced cells (import / user, never baked). `None` when no
+    /// configured model resolves to an overlay-verified cell -- the operator
+    /// is running on baked defaults, rendered as an honest "no overlay
+    /// verified stamp".
+    overlay_verified_at: Option<String>,
+    /// The operator's display-only staleness horizon in days
+    /// (`[capability].staleness_hint_days`), the threshold both age rows warn
+    /// past.
+    staleness_hint_days: u64,
+    /// Today's epoch-day, pinned once so all rows age against one clock.
+    today_epoch_day: i64,
+    /// The last SUCCESSFUL import's persisted state, or `None` when no import
+    /// has been recorded (missing / unreadable sidecar).
+    last_import: Option<CatalogImportState>,
+    /// Reserved for the future durable import RESULT (timestamp, version,
+    /// outcome token, error detail) the import channel will persist. No such
+    /// state exists today, so this is always `None` and the section renders
+    /// nothing for it; the row lands here when the persistence does.
+    #[allow(dead_code)]
+    import_result: Option<ImportResult>,
+}
+
+/// Reserved shape for the future durable import RESULT. Distinct from
+/// [`CatalogImportState`], which records ONLY successful imports: this will
+/// carry the outcome of the LAST attempt (success or failure) once the
+/// import channel persists it. Never constructed today -- reserved so the
+/// freshness section grows the row without a context reshuffle.
+#[allow(dead_code)]
+struct ImportResult {
+    /// When the attempt ran.
+    at_unix: u64,
+    /// The catalog version the attempt targeted.
+    catalog_version: u32,
+    /// The forever-token outcome vocabulary
+    /// (`ok`/`signature_invalid`/`schema_mismatch`/`io_error`).
+    outcome: &'static str,
+    /// Operator-facing error detail on a failed attempt.
+    detail: Option<String>,
 }
 
 /// Run the doctor aggregator against `config_path` and render the report.

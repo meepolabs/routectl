@@ -209,6 +209,18 @@ pub fn persist_baseline(
     }
 }
 
+/// Load the last SUCCESSFUL import's persisted state for read-only
+/// diagnostics (doctor's freshness section). Folds a missing file (no
+/// import has ever run) and ANY load failure (corrupt JSON, a too-new
+/// `schema_version`, an I/O error) into `None` -- the caller renders "no
+/// successful import recorded" rather than distinguishing the causes.
+/// This file records ONLY successful imports, so a `Some` here is a
+/// genuine last-success stamp, never a failed-attempt result.
+#[must_use]
+pub fn load_last_import(path: &Path) -> Option<CatalogImportState> {
+    load(path).ok().flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +382,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.json");
         assert!(load(&path).unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostic loader: last-success state, missing/unreadable -> None.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_last_import_returns_persisted_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_import_state.json");
+        persist_baseline(&path, "2026-07-11", &sample_counts(), BTreeMap::new());
+
+        let state = load_last_import(&path).expect("state present after persist");
+        assert_eq!(state.last_import_date, "2026-07-11");
+        assert_eq!(state.per_source_counts, sample_counts().per_source);
+    }
+
+    #[test]
+    fn load_last_import_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_import_state.json");
+        assert!(load_last_import(&path).is_none());
+    }
+
+    #[test]
+    fn load_last_import_folds_corrupt_file_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_import_state.json");
+        std::fs::write(&path, b"not json {{{").unwrap();
+        assert!(load_last_import(&path).is_none());
     }
 }
