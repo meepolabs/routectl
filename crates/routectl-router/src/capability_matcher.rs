@@ -7,7 +7,10 @@
 //!
 //! Data-driven, keyed by provider `kind` (the `class_policy` pattern), and
 //! deliberately outside `routectl-core` -- the failure classifier stays
-//! body-parse free, and this is not a `Provider` trait method. Two arms:
+//! body-parse free, and this is not a `Provider` trait method. Each arm also
+//! attributes a detection PHASE: the wire-token arms are `FailurePhase::F1`
+//! (the upstream named a parameter or field path), the feature-naming arm is
+//! `FailurePhase::F2` (the upstream named the feature in prose). Arms:
 //!
 //! - SELF-IDENTIFYING: the classifier already lifted the rejection to
 //!   [`FailureClass::FeatureUnsupported`]. For openai-compat, the class
@@ -36,12 +39,19 @@
 //!   table of phrases grounded in real captured / documented 400 envelopes.
 //!   Precision over recall: an unverified phrase is omitted, and a
 //!   near-miss or embedded phrase never matches.
+//! - FEATURE-NAMING (F2): a [`FailureClass::BadRequest`] whose free-text
+//!   `error.message` names the offending FEATURE explicitly. Matched by the
+//!   anchored-template pipeline (the Bedrock-validation discipline reused for
+//!   the nested `/error/message` shape) against per-provider CLOSED tables
+//!   that ship EMPTY -- so F2 never fires on real traffic until a captured
+//!   envelope grounds a pattern, mirroring the wire-token tables' precision.
 //!
 //! Every other class, provider, or malformed body yields `None` -- the
 //! resolver never manufactures a false positive.
 
 use routectl_core::capability::{
-    STRUCTURED_OUTPUT, SignalTier, WELL_KNOWN_CAPABILITY_KEYS, normalize_capability_key,
+    FailurePhase, STRUCTURED_OUTPUT, SignalTier, WELL_KNOWN_CAPABILITY_KEYS,
+    normalize_capability_key,
 };
 use routectl_core::error::Error;
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
@@ -124,22 +134,57 @@ const ANTHROPIC_INFERRED: &[InferredPhrase] = &[InferredPhrase {
     capability: PREFILL,
 }];
 
-/// Resolve a classified rejection to the CANONICAL capability it names and
-/// the signal tier of that evidence, or `None` when the rejection names no
-/// capability this resolver can attribute. The single shared resolver: its
-/// output keys on the request-capability namespace so learn capture, the
-/// act-side lookup, and probe settlement all meet on identical strings.
+/// Anchored-template extractions for a provider's F2 FEATURE-NAMING rejection
+/// message: a `BadRequest` whose free-text `error.message` names the
+/// offending FEATURE explicitly (self-identifying) rather than a wire token.
+/// Each entry is a `(prefix, suffix)` literal template bracketing exactly ONE
+/// extracted token; the whole trimmed message must equal `prefix + token +
+/// suffix`, so wording drift, an extra sentence, or a missing anchor all fail
+/// closed -- the [`BEDROCK_VALIDATION_TEMPLATES`] discipline reused for the
+/// nested `/error/message` shape.
+///
+/// Ships EMPTY (precision over recall): no entry without a real captured
+/// envelope, mirroring the wire-token tables' discipline exactly. Provisional
+/// shapes live in test data only, so F2 never fires on real traffic until a
+/// pattern is grounded.
+const ANTHROPIC_FEATURE_NAMING_TEMPLATES: &[(&str, &str)] = &[];
+
+/// Closed-set translation of a normalized F2 feature-naming token onto the
+/// canonical request-capability key the request side derives and the act side
+/// looks up (the [`OPENAI_PARAM_TRANSLATIONS`] pattern). A token outside this
+/// set yields `None` (no-learn), keeping the set closed.
+///
+/// Ships EMPTY alongside the template table.
+const ANTHROPIC_FEATURE_NAMING_TRANSLATIONS: &[(&str, &str)] = &[];
+
+/// Resolve a classified rejection to the CANONICAL capability it names, the
+/// signal tier of that evidence, and the DETECTION PHASE that attributed it,
+/// or `None` when the rejection names no capability this resolver can
+/// attribute. The single shared resolver: its output keys on the
+/// request-capability namespace so learn capture, the act-side lookup, and
+/// probe settlement all meet on identical strings.
+///
+/// Every wire-token arm attributes [`FailurePhase::F1`] (the upstream named a
+/// wire parameter or field path). The feature-naming arm attributes
+/// [`FailurePhase::F2`] (the upstream named the offending feature in prose);
+/// its per-provider tables ship EMPTY, so F2 never fires on real traffic
+/// until a captured envelope grounds a pattern.
 pub fn resolve_requested_capability(
     provider_kind: &str,
     err: &Error,
     cf: &ClassifiedFailure,
-) -> Option<(FeatureKey, SignalTier)> {
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     match &cf.class {
         FailureClass::FeatureUnsupported { capability } => {
             resolve_self_identifying(provider_kind, err, capability)
         }
         FailureClass::BadRequest if provider_kind == BEDROCK_KIND => match_bedrock_validation(err),
-        FailureClass::BadRequest => match_inferred(provider_kind, err),
+        // F2 self-identifying feature-naming outranks F1 inferred prose, so it
+        // is tried first; with the shipped-empty tables it always falls
+        // through to the inferred arm on real traffic.
+        FailureClass::BadRequest => {
+            match_feature_naming(provider_kind, err).or_else(|| match_inferred(provider_kind, err))
+        }
         _ => None,
     }
 }
@@ -152,13 +197,14 @@ fn resolve_self_identifying(
     provider_kind: &str,
     err: &Error,
     upstream_token: &str,
-) -> Option<(FeatureKey, SignalTier)> {
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     if provider_kind == OPENAI_COMPAT_KIND {
         return resolve_openai_param(err, upstream_token);
     }
     Some((
         normalize_capability_key(upstream_token, provider_kind),
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
     ))
 }
 
@@ -167,12 +213,19 @@ fn resolve_self_identifying(
 /// well-known tool-type passthrough), so a learned key lands where the
 /// request side derives it. A missing param yields `None` unless the code
 /// token is a paramless route-away.
-fn resolve_openai_param(err: &Error, upstream_token: &str) -> Option<(FeatureKey, SignalTier)> {
+fn resolve_openai_param(
+    err: &Error,
+    upstream_token: &str,
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     if let Some(param) = upstream_error_field(err, "param") {
         return resolve_openai_param_surface(param.trim());
     }
     if OPENAI_PARAMLESS_ROUTE_AWAY.contains(&upstream_token) {
-        return Some((upstream_token.to_string(), SignalTier::SelfIdentifying));
+        return Some((
+            upstream_token.to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+        ));
     }
     None
 }
@@ -182,7 +235,7 @@ fn resolve_openai_param(err: &Error, upstream_token: &str) -> Option<(FeatureKey
 /// (canonicalized via `strip_date_suffix` + `normalize_capability_key`),
 /// else `None`. The set is closed so an arbitrary rejected wire param never
 /// learns a key the act side cannot look up.
-fn resolve_openai_param_surface(param: &str) -> Option<(FeatureKey, SignalTier)> {
+fn resolve_openai_param_surface(param: &str) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     // Share one date-stripped input across both closed-set paths so a dated
     // variant of a translated surface (`response_format_20250305`) still
     // resolves rather than silently falling through to no-learn.
@@ -191,25 +244,36 @@ fn resolve_openai_param_surface(param: &str) -> Option<(FeatureKey, SignalTier)>
         .iter()
         .find(|(surface, _)| *surface == base)
     {
-        return Some(((*canonical).to_string(), SignalTier::SelfIdentifying));
+        return Some((
+            (*canonical).to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+        ));
     }
     let canonical = normalize_capability_key(base, OPENAI_COMPAT_KIND);
     if WELL_KNOWN_CAPABILITY_KEYS.contains(&canonical.as_str()) {
-        return Some((canonical, SignalTier::SelfIdentifying));
+        return Some((canonical, SignalTier::SelfIdentifying, FailurePhase::F1));
     }
     None
 }
 
 /// Whole-phrase match of the upstream `error.message` against the
 /// provider's inferred table.
-fn match_inferred(provider_kind: &str, err: &Error) -> Option<(FeatureKey, SignalTier)> {
+fn match_inferred(
+    provider_kind: &str,
+    err: &Error,
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     let table = inferred_table_for(provider_kind)?;
     let message = upstream_error_field(err, "message")?;
     let needle = message.trim();
     let matched = table
         .iter()
         .find(|entry| entry.phrase.eq_ignore_ascii_case(needle))?;
-    Some((matched.capability.to_string(), SignalTier::Inferred))
+    Some((
+        matched.capability.to_string(),
+        SignalTier::Inferred,
+        FailurePhase::F1,
+    ))
 }
 
 /// The inferred phrase table for a provider `kind`, or `None` when the
@@ -219,6 +283,67 @@ fn inferred_table_for(provider_kind: &str) -> Option<&'static [InferredPhrase]> 
         "anthropic-api" => Some(ANTHROPIC_INFERRED),
         _ => None,
     }
+}
+
+/// The F2 feature-naming arm: a `BadRequest` whose free-text `error.message`
+/// names the offending FEATURE explicitly. Reads the nested `/error/message`,
+/// then runs the provider's anchored-template pipeline. With the shipped-empty
+/// tables this always yields `None`, so F2 never fires on real traffic.
+fn match_feature_naming(
+    provider_kind: &str,
+    err: &Error,
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
+    let (templates, translations) = feature_naming_tables_for(provider_kind)?;
+    let message = upstream_error_field(err, "message")?;
+    extract_feature_naming_capability(&message, provider_kind, templates, translations)
+}
+
+/// The `(templates, translations)` feature-naming tables for a provider
+/// `kind`, or `None` when the provider has no feature-naming matcher in this
+/// slice. Both tables ship EMPTY, so a present provider still yields no match.
+type PatternTable = &'static [(&'static str, &'static str)];
+
+fn feature_naming_tables_for(provider_kind: &str) -> Option<(PatternTable, PatternTable)> {
+    match provider_kind {
+        "anthropic-api" => Some((
+            ANTHROPIC_FEATURE_NAMING_TEMPLATES,
+            ANTHROPIC_FEATURE_NAMING_TRANSLATIONS,
+        )),
+        _ => None,
+    }
+}
+
+/// Run the feature-naming anchored-template pipeline over a trimmed `message`
+/// (the [`extract_bedrock_capability`] precedent): the first template whose
+/// anchors bracket the message extracts its single token; the token must be
+/// token-shaped ASCII ([`is_safe_param_token`]) or the match fails closed; the
+/// normalized token must resolve through the closed `translations` set to a
+/// canonical capability. The upstream named the feature explicitly, so a match
+/// is self-identifying evidence at [`FailurePhase::F2`]. Split from the table
+/// consts so tests can drive the engine with provisional shapes without
+/// touching the shipped-empty production tables.
+fn extract_feature_naming_capability(
+    message: &str,
+    provider_kind: &str,
+    templates: &[(&str, &str)],
+    translations: &[(&str, &str)],
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
+    let needle = message.trim();
+    let token = templates
+        .iter()
+        .find_map(|&(prefix, suffix)| extract_anchored_token(needle, prefix, suffix))?;
+    if !is_safe_param_token(token) {
+        return None;
+    }
+    let normalized = normalize_capability_key(token, provider_kind);
+    let capability = translations
+        .iter()
+        .find_map(|&(surface, canonical)| (normalized == surface).then_some(canonical))?;
+    Some((
+        capability.to_string(),
+        SignalTier::SelfIdentifying,
+        FailurePhase::F2,
+    ))
 }
 
 /// Ceiling on the upstream error body we JSON-parse to extract a field.
@@ -302,7 +427,7 @@ const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[];
 /// The Bedrock `BadRequest` arm: read the flat validation message, then run
 /// the anchored-template extraction pipeline. With the shipped-empty tables
 /// this always yields `None`.
-fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier)> {
+fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     let message = bedrock_validation_message(err)?;
     extract_bedrock_capability(
         &message,
@@ -317,12 +442,13 @@ fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier)> {
 /// the match fails closed; the normalized token must resolve through the
 /// closed `translations` set to a canonical capability. Split from the table
 /// consts so tests can drive the engine with provisional shapes without
-/// touching the shipped-empty production tables.
+/// touching the shipped-empty production tables. A Bedrock validation
+/// rejection names a wire field, so a match is [`FailurePhase::F1`].
 fn extract_bedrock_capability(
     message: &str,
     templates: &[(&str, &str)],
     translations: &[(&str, &str)],
-) -> Option<(FeatureKey, SignalTier)> {
+) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     let needle = message.trim();
     let token = templates
         .iter()
@@ -334,7 +460,11 @@ fn extract_bedrock_capability(
     let capability = translations
         .iter()
         .find_map(|&(surface, canonical)| (normalized == surface).then_some(canonical))?;
-    Some((capability.to_string(), SignalTier::SelfIdentifying))
+    Some((
+        capability.to_string(),
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+    ))
 }
 
 /// Extract the single token an anchored template brackets: the whole message
@@ -395,9 +525,10 @@ mod tests {
     use super::upstream_param;
     use super::{
         BEDROCK_VALIDATION_EXCEPTION_TYPE, MAX_ERROR_BODY_BYTES, MAX_PARAM_TOKEN_LEN,
-        bedrock_validation_message, extract_bedrock_capability, is_bedrock_validation_exception,
+        bedrock_validation_message, extract_bedrock_capability, extract_feature_naming_capability,
+        is_bedrock_validation_exception,
     };
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use routectl_core::error::Error;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify};
 
@@ -469,7 +600,11 @@ mod tests {
             // Assert
             assert_eq!(
                 got,
-                Some((canonical.to_string(), SignalTier::SelfIdentifying)),
+                Some((
+                    canonical.to_string(),
+                    SignalTier::SelfIdentifying,
+                    FailurePhase::F1
+                )),
                 "code {code} param {param}"
             );
         }
@@ -494,7 +629,11 @@ mod tests {
 
         assert_eq!(
             got,
-            Some(("structured_output".to_string(), SignalTier::SelfIdentifying))
+            Some((
+                "structured_output".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
         );
     }
 
@@ -516,7 +655,11 @@ mod tests {
 
         assert_eq!(
             got,
-            Some(("structured_output".to_string(), SignalTier::SelfIdentifying))
+            Some((
+                "structured_output".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
         );
     }
 
@@ -562,7 +705,14 @@ mod tests {
         let err = upstream(400, "{}", Some("invalid_request_error"), Some(code));
         let classified = classify(&err, Some("openai-compat"));
         let got = resolve_requested_capability("openai-compat", &err, &classified);
-        assert_eq!(got, Some((code.to_string(), SignalTier::SelfIdentifying)));
+        assert_eq!(
+            got,
+            Some((
+                code.to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
+        );
     }
 
     #[test]
@@ -581,7 +731,11 @@ mod tests {
         // Assert
         assert_eq!(
             got,
-            Some(("anthropic_beta".to_string(), SignalTier::SelfIdentifying))
+            Some((
+                "anthropic_beta".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
         );
     }
 
@@ -603,7 +757,11 @@ mod tests {
         // Assert
         assert_eq!(
             got,
-            Some(("web_search".to_string(), SignalTier::SelfIdentifying))
+            Some((
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
         );
     }
 
@@ -624,7 +782,14 @@ mod tests {
         let got = resolve_requested_capability("anthropic-api", &err, &classified);
 
         // Assert
-        assert_eq!(got, Some(("prefill".to_string(), SignalTier::Inferred)));
+        assert_eq!(
+            got,
+            Some((
+                "prefill".to_string(),
+                SignalTier::Inferred,
+                FailurePhase::F1
+            ))
+        );
     }
 
     #[test]
@@ -640,7 +805,14 @@ mod tests {
         );
 
         // Assert
-        assert_eq!(got, Some(("prefill".to_string(), SignalTier::Inferred)));
+        assert_eq!(
+            got,
+            Some((
+                "prefill".to_string(),
+                SignalTier::Inferred,
+                FailurePhase::F1
+            ))
+        );
     }
 
     #[test]
@@ -657,7 +829,14 @@ mod tests {
         );
 
         // Assert
-        assert_eq!(got, Some(("prefill".to_string(), SignalTier::Inferred)));
+        assert_eq!(
+            got,
+            Some((
+                "prefill".to_string(),
+                SignalTier::Inferred,
+                FailurePhase::F1
+            ))
+        );
     }
 
     #[test]
@@ -908,7 +1087,11 @@ mod tests {
 
         assert_eq!(
             got,
-            Some((expected.to_string(), SignalTier::SelfIdentifying))
+            Some((
+                expected.to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1
+            ))
         );
     }
 
@@ -1066,5 +1249,114 @@ mod tests {
                 "kind {kind}"
             );
         }
+    }
+
+    // --- Arm 3: F2 feature-naming anchored-template engine ---
+
+    /// Provisional synthetic shapes for the F2 feature-naming engine. The
+    /// PRODUCTION tables ship empty; these drive the engine in isolation and
+    /// are replaced by sanitized captured envelopes once real capture lands.
+    const FEATURE_NAMING_PROVISIONAL_FIXTURE: &str =
+        include_str!("../tests/fixtures/feature_naming_provisional.json");
+
+    fn feature_naming_fixture() -> serde_json::Value {
+        serde_json::from_str(FEATURE_NAMING_PROVISIONAL_FIXTURE)
+            .expect("valid feature-naming provisional fixture json")
+    }
+
+    #[test]
+    fn feature_naming_provisional_template_matches_and_translates() {
+        // The engine, driven with a provisional template + translation,
+        // extracts the single anchored token, normalizes it, and maps it
+        // through the closed set to a canonical capability at SelfIdentifying
+        // tier and the F2 phase.
+        let fx = feature_naming_fixture();
+        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let message = fx["matched"]["message"].as_str().expect("matched message");
+        let expected = fx["matched"]["capability"]
+            .as_str()
+            .expect("matched capability");
+
+        let got =
+            extract_feature_naming_capability(message, "anthropic-api", &templates, &translations);
+
+        assert_eq!(
+            got,
+            Some((
+                expected.to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F2
+            ))
+        );
+    }
+
+    #[test]
+    fn feature_naming_engine_fails_closed_on_drift_and_untranslated_tokens() {
+        // Wording drift, an extra sentence, a missing anchor, an untranslated
+        // (closed-set-miss) token, and a whitespace-bearing (unsafe) token all
+        // yield None -- no fuzzy match, no verdict.
+        let fx = feature_naming_fixture();
+        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        for key in [
+            "wording_drift",
+            "extra_sentence",
+            "missing_seam",
+            "untranslated_token",
+            "whitespace_token",
+        ] {
+            let message = fx["fail_closed_messages"][key]
+                .as_str()
+                .expect("fail-closed message");
+            assert_eq!(
+                extract_feature_naming_capability(
+                    message,
+                    "anthropic-api",
+                    &templates,
+                    &translations
+                ),
+                None,
+                "case {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_naming_engine_fails_closed_on_oversized_token() {
+        // A structurally-anchored match whose extracted token exceeds the
+        // token-shape length cap fails closed rather than surfacing a blob.
+        let fx = feature_naming_fixture();
+        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let (prefix, suffix) = templates[0];
+        let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_PARAM_TOKEN_LEN + 1));
+
+        assert_eq!(
+            extract_feature_naming_capability(
+                &oversized,
+                "anthropic-api",
+                &templates,
+                &translations
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn feature_naming_empty_production_tables_yield_none() {
+        // The shipped-empty feature-naming template + translation tables mean
+        // every provider BadRequest -- even a well-formed message whose wording
+        // a provisional template would match -- yields None through the full
+        // resolver, so F2 never fires on real traffic.
+        let fx = feature_naming_fixture();
+        let message = fx["matched"]["message"].as_str().expect("matched message");
+        let body = anthropic_body(message);
+        let got = resolve_requested_capability(
+            "anthropic-api",
+            &upstream(400, &body, None, None),
+            &cf(FailureClass::BadRequest),
+        );
+        assert_eq!(got, None);
     }
 }

@@ -203,7 +203,8 @@ impl Router {
         let Some(provider_kind) = target.provider_kind else {
             return;
         };
-        let Some((feature_key, tier)) = resolve_requested_capability(provider_kind, err, cf) else {
+        let Some((feature_key, tier, phase)) = resolve_requested_capability(provider_kind, err, cf)
+        else {
             self.observe_bedrock_validation_drift(provider_kind, err, target, dedupe);
             return;
         };
@@ -283,9 +284,7 @@ impl Router {
             &feature_key,
             provider_kind,
             tier,
-            // PLACEHOLDER: the F2 resolver arm rewires this to the resolved
-            // phase; every negative minted here is F1 until then.
-            FailurePhase::F1,
+            phase,
             Instant::now(),
         );
         let acting = matches!(outcome, crate::learned_capability::ObserveOutcome::Acting);
@@ -342,7 +341,7 @@ impl Router {
                 upstream_status,
                 remapped,
                 request_features,
-                phase: FailurePhase::F1,
+                phase,
                 source: EvidenceSource::Live,
             });
         }
