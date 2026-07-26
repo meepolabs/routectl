@@ -21,6 +21,7 @@ use crate::runtime_state::ProviderState;
 
 mod cache_plan;
 mod capability_learn;
+mod capability_observe;
 mod chain;
 mod class_observe;
 mod count_tokens;
@@ -31,6 +32,7 @@ mod runtime_gate;
 mod status;
 mod sticky;
 pub use capability_learn::CapabilityLearnEvent;
+pub use capability_observe::CapabilityObserveEvent;
 #[cfg(test)]
 use feature_filter::FilterSource;
 use feature_filter::{StripDecision, catalog_capabilities};
@@ -281,6 +283,16 @@ struct RouterMetrics {
     /// [`bedrock_validation_unmatched_total`]. Bumped once per request per
     /// target by the learn path.
     feature_naming_unmatched_total: AtomicU64,
+    /// Response-evidence VerifiedWorking positives that reached the acting
+    /// state (a fresh or refreshed positive; structural proof acts on N=1).
+    /// Bumped once per acting positive observation by the response-evidence
+    /// observer on the terminal successful non-streaming dispatch.
+    verified_working_total: AtomicU64,
+    /// Response-evidence F3 suspected-absence negatives that reached the
+    /// acting state (inferred, so acting only once corroborated within the
+    /// window). Advisory-only under the routing gate. Bumped once per acting
+    /// F3 observation by the response-evidence observer.
+    f3_suspect_total: AtomicU64,
 }
 
 impl RouterMetrics {
@@ -355,6 +367,14 @@ impl RouterMetrics {
     fn incr_feature_naming_unmatched(&self) {
         self.feature_naming_unmatched_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_verified_working(&self) {
+        self.verified_working_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_f3_suspect(&self) {
+        self.f3_suspect_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read the cumulative unknown-upstream-classification count.
@@ -462,6 +482,20 @@ impl RouterMetrics {
     #[cfg(test)]
     fn feature_naming_unmatched_total(&self) -> u64 {
         self.feature_naming_unmatched_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative acting-VerifiedWorking-positive count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn verified_working_total(&self) -> u64 {
+        self.verified_working_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative acting-F3-suspected-absence count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn f3_suspect_total(&self) -> u64 {
+        self.f3_suspect_total.load(Ordering::Relaxed)
     }
 }
 
@@ -659,6 +693,13 @@ pub struct DispatchMeta {
     /// so the usage-capture layer can persist them without the router
     /// depending on the ledger writer.
     pub learned_capabilities: Vec<CapabilityLearnEvent>,
+    /// Response-evidence capability observations captured on the terminal
+    /// successful non-streaming dispatch for this request. Empty on the
+    /// common path (no clean-stop success, kill switch off, or no positive /
+    /// suspected-absence evidence); carries one event per eligible, deduped,
+    /// acting observation so the usage-capture layer can persist them without
+    /// the router depending on the ledger writer. Additive, defaults empty.
+    pub capability_observations: Vec<CapabilityObserveEvent>,
 }
 
 impl DispatchMeta {
@@ -691,6 +732,7 @@ impl DispatchMeta {
             would_trim_raw_marks: None,
             would_trim_context_fraction: None,
             learned_capabilities: Vec::new(),
+            capability_observations: Vec::new(),
         }
     }
 

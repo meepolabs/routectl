@@ -78,9 +78,7 @@ struct RegistryKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryVerdict {
     /// A capability confirmed working by positive detection. Constructed
-    /// only by the positive-admission path; allowed dead until the observer
-    /// wiring calls it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// only by the positive-admission path.
     Verified,
     /// A learned negative, attributed to the entry's [`FailurePhase`].
     Negative,
@@ -174,7 +172,6 @@ pub enum ObserveOutcome {
 }
 
 /// Outcome of [`LearnedCapabilityRegistry::observe_positive`].
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositiveOutcome {
     /// The positive was recorded (a fresh VerifiedWorking entry, or a
@@ -354,10 +351,6 @@ impl LearnedCapabilityRegistry {
     ///
     /// R2 stage-2 admission: pure over its arguments plus `now`, consulting
     /// only the resident registry state -- no internal clock.
-    ///
-    /// Allowed dead until the observer wiring calls it; the test suite
-    /// exercises it today.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn observe_positive(
         &self,
         state_key: &str,
@@ -726,7 +719,6 @@ impl LearnedCapabilityRegistry {
     /// positive-detection phase), live source. `expires_at` is set to `now`
     /// but carries no decay meaning -- `is_expired` excludes a positive, so
     /// it never lapses into a re-probe.
-    #[cfg_attr(not(test), allow(dead_code))]
     const fn fresh_positive(now: Instant) -> LearnedEntry {
         LearnedEntry {
             verdict: EntryVerdict::Verified,

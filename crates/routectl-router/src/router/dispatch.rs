@@ -364,6 +364,14 @@ impl Router {
                         // A 2xx proves the capability is not rejected: clear
                         // any learned negative this dispatch re-probed.
                         learned_probe_guard.settle_success();
+                        // Response-evidence observer: the success-arm mirror of
+                        // `observe_for_learning`. Reads structural positive /
+                        // suspected-absence evidence off the assembled response
+                        // and admits it (read-only, post-response, no dispatch
+                        // blocking). Self-gates on the kill switch. The
+                        // streaming arm records nothing (no assembled response
+                        // exists there -- fail closed).
+                        self.observe_capabilities(&req, &resp, target, meta, Instant::now());
                         return Ok(resp);
                     }
                     Err(e) => {
@@ -974,6 +982,10 @@ impl Router {
                         // A first chunk proves the capability is not rejected:
                         // clear any learned negative this dispatch re-probed.
                         learned_probe_guard.settle_success();
+                        // No response-evidence observation on the stream path:
+                        // no assembled response exists here to read structural
+                        // evidence from, so positive detection fails closed. A
+                        // later stream assembler is purely additive.
                         // Stamp the client-visible label on every Ok chunk
                         // (including the terminal / usage-only chunk) before
                         // the breaker wrap. The closure owns the label String
