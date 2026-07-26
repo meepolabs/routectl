@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
+use crate::capability_event::{CapabilityEvent, insert_capability_event};
 use crate::db::{self, UsageDb};
 use crate::handle::{UsageCounters, UsageHandle};
 use crate::learn_event::{CapabilityLearnEvent, insert_learn_event};
@@ -34,6 +35,8 @@ pub enum WriterMessage {
     Request(Box<UsageRecord>),
     /// A capability learn event bound for the `capability_learn_events` table.
     LearnEvent(CapabilityLearnEvent),
+    /// A capability event bound for the unified `capability_events` ledger.
+    CapabilityEvent(CapabilityEvent),
 }
 
 /// Bounded capacity of the producer -> writer channel. Sized to absorb a
@@ -245,6 +248,9 @@ fn run_writer(
         match msg {
             WriterMessage::Request(record) => state.persist(&record, &counters),
             WriterMessage::LearnEvent(event) => state.persist_learn_event(&event, &counters),
+            WriterMessage::CapabilityEvent(event) => {
+                state.persist_capability_event(&event, &counters)
+            }
         }
     }
 }
@@ -282,12 +288,15 @@ impl WriterState {
     }
 
     /// Run the one-shot startup retention prune. Best-effort: failures log
-    /// a WARN and bump a counter but never abort the writer.
+    /// a WARN and bump a counter but never abort the writer. Prunes the
+    /// `requests` table and the `capability_events` ledger (the latter
+    /// exempts the tombstone boundary and everything after it).
     fn prune_once(&self, retention_days: u32, counters: &Arc<UsageCounters>) {
         let Some(conn) = self.conn.as_ref() else {
             return;
         };
-        match retention::prune(conn, retention_days, now_epoch_ms()) {
+        let now = now_epoch_ms();
+        match retention::prune(conn, retention_days, now) {
             Ok(PruneOutcome::Pruned { deleted }) => tracing::info!(
                 target: "routectl_usage::writer",
                 deleted,
@@ -301,6 +310,23 @@ impl WriterState {
                     target: "routectl_usage::writer",
                     error = %err,
                     "usage retention prune failed -- continuing"
+                );
+            }
+        }
+        match retention::prune_capability_events(conn, retention_days, now) {
+            Ok(PruneOutcome::Pruned { deleted }) => tracing::info!(
+                target: "routectl_usage::writer",
+                deleted,
+                retention_days,
+                "capability ledger retention prune complete"
+            ),
+            Ok(PruneOutcome::Skipped) => {}
+            Err(err) => {
+                counters.incr_prune_errors();
+                tracing::warn!(
+                    target: "routectl_usage::writer",
+                    error = %err,
+                    "capability ledger retention prune failed -- continuing"
                 );
             }
         }
@@ -359,6 +385,25 @@ impl WriterState {
         match insert_learn_event(conn, event) {
             Ok(_) => {
                 counters.incr_learn_events_persisted();
+                self.mark_healthy();
+            }
+            Err(err) => self.record_failure(Some(err), counters),
+        }
+    }
+
+    /// Persist one capability event to the unified `capability_events`
+    /// ledger. Append-only (no duplicate collapsing), so any success bumps
+    /// the capability-event persisted counter. A missing connection or an
+    /// insert error drops the event and routes through the shared DB-health
+    /// failure path (write-error counter + degraded-transition log).
+    fn persist_capability_event(&mut self, event: &CapabilityEvent, counters: &Arc<UsageCounters>) {
+        let Some(conn) = self.conn.as_ref() else {
+            self.record_failure(None, counters);
+            return;
+        };
+        match insert_capability_event(conn, event) {
+            Ok(_) => {
+                counters.incr_capability_events_persisted();
                 self.mark_healthy();
             }
             Err(err) => self.record_failure(Some(err), counters),
@@ -1234,5 +1279,132 @@ mod tests {
         assert_eq!(counters.learn_events_dropped_full(), 0);
         assert_eq!(counters.learn_events_persisted(), 0);
         assert_eq!(learn_event_row_count(&path), 0);
+    }
+
+    /// Build a representative capability event.
+    fn capability_event(capability: &str) -> CapabilityEvent {
+        CapabilityEvent {
+            ts: 456,
+            lane_key: "gpt-nick".to_string(),
+            capability: capability.to_string(),
+            verdict: "verified".to_string(),
+            phase: "f3".to_string(),
+            source: "live".to_string(),
+            tier: "self-identifying".to_string(),
+            evidence_class: Some("probe_ok".to_string()),
+            upstream_token: None,
+            catalog_version: 8,
+            overlay_revision: 2,
+        }
+    }
+
+    fn capability_event_row_count(path: &PathBuf) -> i64 {
+        let conn = Connection::open(path).expect("read open");
+        conn.query_row("SELECT COUNT(*) FROM capability_events", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    /// Spin until the capability-event persisted counter reaches `want` or a
+    /// deadline passes; returns whether it was reached.
+    fn wait_capability_events_persisted(counters: &Arc<UsageCounters>, want: u64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while counters.capability_events_persisted() < want {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    #[tokio::test]
+    async fn capability_event_round_trips_through_the_shared_writer() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+
+        // Act
+        handle.try_send_capability_event(capability_event("web_search"));
+        assert!(
+            wait_capability_events_persisted(handle.counters(), 1),
+            "capability event not persisted"
+        );
+        // Drop the handle's sender clone before draining, or shutdown blocks
+        // on the deadline waiting for a channel that never closes.
+        drop(handle);
+        writer.shutdown();
+
+        // Assert: the row round-trips through the one actor / one connection
+        // with every column intact, and request rows are untouched.
+        assert_eq!(capability_event_row_count(&path), 1);
+        assert_eq!(row_count(&path), 0);
+        let conn = Connection::open(&path).expect("read");
+        let rows = crate::query::read_capability_events_after(&conn, 0, 10).expect("read back");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.ts, 456);
+        assert_eq!(row.lane_key.as_deref(), Some("gpt-nick"));
+        assert_eq!(row.capability.as_deref(), Some("web_search"));
+        assert_eq!(row.verdict.as_deref(), Some("verified"));
+        assert_eq!(row.phase.as_deref(), Some("f3"));
+        assert_eq!(row.source.as_deref(), Some("live"));
+        assert_eq!(row.tier.as_deref(), Some("self-identifying"));
+        assert_eq!(row.evidence_class.as_deref(), Some("probe_ok"));
+        assert_eq!(row.upstream_token, None);
+        assert_eq!(row.catalog_version, Some(8));
+        assert_eq!(row.overlay_revision, Some(2));
+    }
+
+    #[tokio::test]
+    async fn full_channel_drops_capability_events_without_blocking() {
+        // Arrange: a handle over a channel whose receiver is never polled.
+        let capacity = 2usize;
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(capacity);
+        let counters = Arc::new(UsageCounters::default());
+        let enabled = Arc::new(AtomicBool::new(true));
+        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters));
+
+        // Act: send well past capacity, timing the loop to prove the enqueue
+        // never blocks.
+        let sends = 50usize;
+        let start = std::time::Instant::now();
+        for i in 0..sends {
+            handle.try_send_capability_event(capability_event(&format!("cap-{i}")));
+        }
+        let elapsed = start.elapsed();
+
+        // Assert: no blocking; exact split of enqueued (capacity) vs overflow
+        // drops (the rest), tracked on the capability-event counters.
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "capability-event send loop blocked: took {elapsed:?} for {sends} sends"
+        );
+        assert_eq!(counters.capability_events_enqueued(), capacity as u64);
+        assert_eq!(
+            counters.capability_events_dropped_full(),
+            (sends - capacity) as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_gate_drops_capability_events() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, false);
+
+        // Act: disabled -> dropped at the gate (counted as a disabled-drop,
+        // not a capability-event overflow).
+        handle.try_send_capability_event(capability_event("gated"));
+        // Snapshot the counters and drop the handle's sender clone before
+        // draining, or shutdown blocks on the deadline.
+        let counters = Arc::clone(handle.counters());
+        drop(handle);
+        writer.shutdown();
+
+        // Assert
+        assert_eq!(counters.dropped_disabled(), 1);
+        assert_eq!(counters.capability_events_dropped_full(), 0);
+        assert_eq!(counters.capability_events_persisted(), 0);
+        assert_eq!(capability_event_row_count(&path), 0);
     }
 }
