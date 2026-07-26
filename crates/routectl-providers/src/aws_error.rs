@@ -34,6 +34,14 @@ use serde_json::Value;
 /// neither token. These are top-level keys, so the lift is inert on a native
 /// nested `{"error": {...}}` body and never overrides a first-party
 /// classifier.
+///
+/// Both tokens are surfaced verbatim to a client-facing `error.type` /
+/// `error.code` past the 403 body scrub, so each is bounded at the lift
+/// boundary ([`is_bounded_aws_token`]): a token carrying an ARN, account id,
+/// or free-form body text (spaces, slashes, oversize) lifts as `None` and
+/// never smuggles principal material through a field the scrub does not
+/// touch. Enforcing it here covers every lane (native, mantle, both OpenAI
+/// readers) from one place.
 pub fn lift_aws_error_tokens(parsed: Option<&Value>) -> (Option<String>, Option<String>) {
     let Some(v) = parsed else {
         return (None, None);
@@ -41,9 +49,37 @@ pub fn lift_aws_error_tokens(parsed: Option<&Value>) -> (Option<String>, Option<
     let upstream_type = v
         .get("__type")
         .and_then(Value::as_str)
+        .filter(|raw| is_bounded_aws_token(raw))
         .map(strip_aws_namespace);
-    let upstream_code = v.get("code").and_then(Value::as_str).map(str::to_string);
+    let upstream_code = v
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|raw| is_bounded_aws_token(raw))
+        .map(str::to_string);
     (upstream_type, upstream_code)
+}
+
+/// Upper bound on a lifted AWS TYPE/CODE token surfaced verbatim to a
+/// client-facing error field. Real AWS exception names and codes -- even
+/// fully namespaced (`com.amazonaws.bedrock#ThrottlingException`) -- sit far
+/// under this; the cap only bounds an adversarial or buggy upstream.
+const MAX_AWS_TOKEN_LEN: usize = 128;
+
+/// True when `token` is safe to lift verbatim into a client-facing
+/// `error.type` / `error.code`: non-empty, within the length cap, and drawn
+/// from the token-shaped charset real AWS exception names and codes use
+/// (ASCII alphanumeric plus the namespace punctuation `.`, `#`, and the
+/// name punctuation `_`, `-`). A token failing this bound carries body text,
+/// an ARN (slashes, spaces), or an oversized blob smuggled through `__type`
+/// / `code`, so it lifts as `None` and never reaches a client-facing field
+/// past the 403 scrub. Applied to the RAW value (before namespace strip) so
+/// the legitimate namespaced form still passes.
+fn is_bounded_aws_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= MAX_AWS_TOKEN_LEN
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'#' | b'_' | b'-'))
 }
 
 /// Strip an AWS namespace prefix from an exception token:
@@ -250,6 +286,43 @@ mod tests {
         )
         .ok();
         assert_eq!(lift_aws_error_tokens(native.as_ref()), (None, None));
+    }
+
+    /// An ARN/principal-bearing `__type` (spaces, slashes, colons from a
+    /// malicious or buggy upstream) fails the token bound and lifts as
+    /// `None`, so it can never smuggle principal material into a
+    /// client-facing `error.type` past the 403 scrub.
+    #[test]
+    fn lift_drops_arn_bearing_type_token() {
+        let arn_type = serde_json::from_str::<Value>(
+            r#"{"__type":"User: arn:aws:iam::123456789012:role/x is not authorized"}"#,
+        )
+        .ok();
+        assert_eq!(lift_aws_error_tokens(arn_type.as_ref()), (None, None));
+    }
+
+    /// A code carrying ARN/account text (slashes) is dropped while a normal
+    /// namespaced type on the same body still lifts stripped -- the bound is
+    /// per-token, not all-or-nothing.
+    #[test]
+    fn lift_drops_arn_bearing_code_but_keeps_clean_type() {
+        let mixed = serde_json::from_str::<Value>(
+            r#"{"__type":"com.amazonaws.bedrock#ValidationException","code":"arn:aws:iam::123456789012:role/x"}"#,
+        )
+        .ok();
+        assert_eq!(
+            lift_aws_error_tokens(mixed.as_ref()),
+            (Some("ValidationException".to_string()), None)
+        );
+    }
+
+    /// A token past the length cap lifts as `None` -- an oversized blob never
+    /// reaches a client-facing error field even if its charset is clean.
+    #[test]
+    fn lift_drops_oversized_token() {
+        let oversized = "a".repeat(MAX_AWS_TOKEN_LEN + 1);
+        let body = serde_json::from_str::<Value>(&format!(r#"{{"code":"{oversized}"}}"#)).ok();
+        assert_eq!(lift_aws_error_tokens(body.as_ref()), (None, None));
     }
 
     #[test]

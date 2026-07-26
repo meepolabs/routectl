@@ -1,0 +1,1 @@
+{"__type":"com.amazon.coral.validate#ValidationException","message":"Malformed input request: extraneous key [synthetic_unknown_field] is not permitted, please reformat your input and try again."}
