@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use routectl_core::capability::SignalTier;
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::failure_class::ClassifiedFailure;
 use routectl_core::{ChatRequest, Error};
 
@@ -68,6 +68,12 @@ pub struct CapabilityLearnEvent {
     /// The request's derived feature set at capture time. Replay verifies
     /// the learned capability was actually in flight.
     pub request_features: Vec<String>,
+    /// The detection phase that attributed this negative. In-memory
+    /// ride-along only -- no `capability_learn_events` column.
+    pub phase: FailurePhase,
+    /// Whether the evidence came from live traffic or an out-of-band probe.
+    /// Fixed to `Live` in this milestone.
+    pub source: EvidenceSource,
 }
 
 impl Router {
@@ -277,6 +283,9 @@ impl Router {
             &feature_key,
             provider_kind,
             tier,
+            // PLACEHOLDER: the F2 resolver arm rewires this to the resolved
+            // phase; every negative minted here is F1 until then.
+            FailurePhase::F1,
             Instant::now(),
         );
         let acting = matches!(outcome, crate::learned_capability::ObserveOutcome::Acting);
@@ -333,6 +342,8 @@ impl Router {
                 upstream_status,
                 remapped,
                 request_features,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
             });
         }
     }

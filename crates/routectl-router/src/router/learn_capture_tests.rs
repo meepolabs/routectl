@@ -14,7 +14,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use routectl_core::ForwardedBearer;
 use routectl_core::ToolDef;
-use routectl_core::capability::SignalTier;
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::{ChatChunk, ChatResponse, Provider, Result};
 use routectl_testkit::{CapturedEvent, with_capture};
 use serde_json::json;
@@ -249,7 +249,10 @@ async fn eligible_self_identifying_records_warns_and_populates_meta() {
             "openai-compat",
             Instant::now(),
         ),
-        crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        crate::learned_capability::RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
     );
 }
 
@@ -437,6 +440,7 @@ async fn masked_cell_rejection_does_not_refresh_resident_entry() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         t0,
     );
     let before = router.learned_capabilities.snapshot();
@@ -661,6 +665,8 @@ fn seed_expired_negative(router: &Router, state_key: &str, feature: &str) {
             first_seen: past,
             last_seen: past,
             expires_at: past,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
             in_flight: false,
             consecutive_failed_probes: 0,
         }]);
@@ -731,7 +737,10 @@ async fn probe_same_capability_rejection_refreshes_with_backoff() {
             "openai-compat",
             Instant::now(),
         ),
-        crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        crate::learned_capability::RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
         "the refreshed negative is non-expired and in_flight released -> route away",
     );
 }
@@ -802,7 +811,10 @@ async fn stream_probe_same_capability_rejection_settles_on_the_stream_arm() {
             "openai-compat",
             Instant::now(),
         ),
-        crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        crate::learned_capability::RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
     );
 }
 

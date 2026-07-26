@@ -41,7 +41,9 @@ use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
-use routectl_core::capability::{SignalTier, normalize_capability_key};
+use routectl_core::capability::{
+    EvidenceSource, FailurePhase, SignalTier, normalize_capability_key,
+};
 
 /// Default resident-entry ceiling. A safety valve, not a cache policy:
 /// eviction should never fire at solo-local volume.
@@ -73,6 +75,13 @@ struct LearnedEntry {
     expires_at: Instant,
     in_flight: bool,
     consecutive_failed_probes: u32,
+    /// The detection phase that attributed this negative. Threaded through
+    /// every contract surface; the derived read-model verdict reads it.
+    phase: FailurePhase,
+    /// Whether the evidence came from live traffic or an out-of-band probe.
+    /// Fixed to `Live` in this milestone -- the field threads through the
+    /// contracts so a later probe-settle pass can populate `Probe`.
+    source: EvidenceSource,
 }
 
 impl LearnedEntry {
@@ -105,8 +114,13 @@ pub enum ObserveOutcome {
 pub enum RoutingDecision {
     /// No acting learned negative applies; route to this target normally.
     Allow,
-    /// An acting learned negative applies; route away from this target.
-    RouteAway(SignalTier),
+    /// An acting learned negative applies; route away from this target,
+    /// carrying the detection phase so the strip site reads it directly
+    /// without a second registry lookup.
+    RouteAway {
+        signal: SignalTier,
+        phase: FailurePhase,
+    },
     /// The negative's decay lapsed and this caller claimed the single
     /// re-probe slot: route to the target and report the result with
     /// [`LearnedCapabilityRegistry::record_probe_outcome`]. Concurrent
@@ -146,6 +160,10 @@ pub struct LearnedRegistryEntry {
     pub last_seen: Instant,
     /// When the negative's decay window lapses.
     pub expires_at: Instant,
+    /// The detection phase that attributed this negative.
+    pub phase: FailurePhase,
+    /// Whether the evidence came from live traffic or an out-of-band probe.
+    pub source: EvidenceSource,
 }
 
 /// Full-fidelity entry for carrying the registry across a hot reload:
@@ -160,6 +178,8 @@ pub struct ExportedEntry {
     pub first_seen: Instant,
     pub last_seen: Instant,
     pub expires_at: Instant,
+    pub phase: FailurePhase,
+    pub source: EvidenceSource,
     // Populated on export for test observation; import intentionally
     // discards it (a probe slot cannot carry across a hot reload).
     #[cfg_attr(not(test), allow(dead_code))]
@@ -201,6 +221,7 @@ impl LearnedCapabilityRegistry {
         feature_key_raw: &str,
         provider_kind: &str,
         tier: SignalTier,
+        phase: FailurePhase,
         now: Instant,
     ) -> ObserveOutcome {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
@@ -209,7 +230,7 @@ impl LearnedCapabilityRegistry {
             return self.observe_existing(existing, tier, now);
         }
         self.evict_if_full(&mut entries);
-        let (entry, outcome) = self.fresh_entry(tier, now);
+        let (entry, outcome) = self.fresh_entry(tier, phase, now);
         entries.insert(key, entry);
         outcome
     }
@@ -238,7 +259,10 @@ impl LearnedCapabilityRegistry {
                         return RoutingDecision::Allow;
                     }
                     if !entry.is_expired(now) || entry.in_flight {
-                        return RoutingDecision::RouteAway(entry.signal);
+                        return RoutingDecision::RouteAway {
+                            signal: entry.signal,
+                            phase: entry.phase,
+                        };
                     }
                     // Lapsed and unclaimed: fall through to claim the probe.
                 }
@@ -254,7 +278,10 @@ impl LearnedCapabilityRegistry {
                 if !entry.is_acting() {
                     RoutingDecision::Allow
                 } else if !entry.is_expired(now) || entry.in_flight {
-                    RoutingDecision::RouteAway(entry.signal)
+                    RoutingDecision::RouteAway {
+                        signal: entry.signal,
+                        phase: entry.phase,
+                    }
                 } else {
                     entry.in_flight = true;
                     tracing::info!(
@@ -325,6 +352,8 @@ impl LearnedCapabilityRegistry {
                 first_seen: entry.first_seen,
                 last_seen: entry.last_seen,
                 expires_at: entry.expires_at,
+                phase: entry.phase,
+                source: entry.source,
             })
             .collect()
     }
@@ -342,6 +371,8 @@ impl LearnedCapabilityRegistry {
                 first_seen: entry.first_seen,
                 last_seen: entry.last_seen,
                 expires_at: entry.expires_at,
+                phase: entry.phase,
+                source: entry.source,
                 in_flight: entry.in_flight,
                 consecutive_failed_probes: entry.consecutive_failed_probes,
             })
@@ -370,6 +401,8 @@ impl LearnedCapabilityRegistry {
                     first_seen: exported.first_seen,
                     last_seen: exported.last_seen,
                     expires_at: exported.expires_at,
+                    phase: exported.phase,
+                    source: exported.source,
                     // A probe settling on the pre-swap router cannot clear a
                     // slot copied onto the new one, so carry across as free.
                     in_flight: false,
@@ -486,8 +519,14 @@ impl LearnedCapabilityRegistry {
         }
     }
 
-    /// Build a brand-new entry for a first observation.
-    fn fresh_entry(&self, tier: SignalTier, now: Instant) -> (LearnedEntry, ObserveOutcome) {
+    /// Build a brand-new entry for a first observation. `source` is fixed to
+    /// `Live` in this milestone; `phase` is the caller's attribution.
+    fn fresh_entry(
+        &self,
+        tier: SignalTier,
+        phase: FailurePhase,
+        now: Instant,
+    ) -> (LearnedEntry, ObserveOutcome) {
         let (expires_at, outcome) = match tier {
             // Self-identifying acts immediately; stamp the decay window.
             SignalTier::SelfIdentifying => (now + self.decay, ObserveOutcome::Acting),
@@ -502,6 +541,8 @@ impl LearnedCapabilityRegistry {
             expires_at,
             in_flight: false,
             consecutive_failed_probes: 0,
+            phase,
+            source: EvidenceSource::Live,
         };
         (entry, outcome)
     }
@@ -587,6 +628,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
 
@@ -594,7 +636,10 @@ mod tests {
         assert_eq!(outcome, ObserveOutcome::Acting);
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
-            RoutingDecision::RouteAway(SignalTier::SelfIdentifying)
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
         );
     }
 
@@ -610,6 +655,7 @@ mod tests {
             "web_search",
             "anthropic-api",
             SignalTier::Inferred,
+            FailurePhase::F1,
             t0,
         );
 
@@ -631,6 +677,7 @@ mod tests {
             "web_search",
             "anthropic-api",
             SignalTier::Inferred,
+            FailurePhase::F1,
             t0,
         );
         let within = t0 + WINDOW / 2;
@@ -641,6 +688,7 @@ mod tests {
             "web_search",
             "anthropic-api",
             SignalTier::Inferred,
+            FailurePhase::F1,
             within,
         );
 
@@ -648,7 +696,10 @@ mod tests {
         assert_eq!(outcome, ObserveOutcome::Acting);
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "anthropic-api", within),
-            RoutingDecision::RouteAway(SignalTier::Inferred)
+            RoutingDecision::RouteAway {
+                signal: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+            }
         );
     }
 
@@ -662,6 +713,7 @@ mod tests {
             "web_search",
             "anthropic-api",
             SignalTier::Inferred,
+            FailurePhase::F1,
             t0,
         );
         let after = t0 + WINDOW + Duration::from_secs(1);
@@ -672,6 +724,7 @@ mod tests {
             "web_search",
             "anthropic-api",
             SignalTier::Inferred,
+            FailurePhase::F1,
             after,
         );
 
@@ -696,6 +749,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -709,7 +763,10 @@ mod tests {
         assert_eq!(first, RoutingDecision::ProbeAdmitted);
         assert_eq!(
             second,
-            RoutingDecision::RouteAway(SignalTier::SelfIdentifying)
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
         );
     }
 
@@ -723,6 +780,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -758,6 +816,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -776,7 +835,10 @@ mod tests {
         // observation count bumped.
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "openai-compat", expired),
-            RoutingDecision::RouteAway(SignalTier::SelfIdentifying)
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
         );
         assert_eq!(reg.snapshot()[0].observations, 2);
     }
@@ -791,6 +853,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -824,6 +887,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -862,6 +926,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -897,6 +962,7 @@ mod tests {
             "cap_a",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         reg.observe(
@@ -904,6 +970,7 @@ mod tests {
             "cap_b",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0 + Duration::from_secs(1),
         );
 
@@ -914,6 +981,7 @@ mod tests {
                 "cap_c",
                 "openai-compat",
                 SignalTier::SelfIdentifying,
+                FailurePhase::F1,
                 t0 + Duration::from_secs(2),
             );
         });
@@ -946,6 +1014,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
 
@@ -962,6 +1031,9 @@ mod tests {
         assert_eq!(entry.first_seen, t0);
         assert_eq!(entry.last_seen, t0);
         assert_eq!(entry.expires_at, t0 + DECAY);
+        // The observe path mints an F1/Live negative in this milestone.
+        assert_eq!(entry.phase, FailurePhase::F1);
+        assert_eq!(entry.source, EvidenceSource::Live);
     }
 
     #[test]
@@ -974,6 +1046,7 @@ mod tests {
             "additionalModelRequestFields.anthropic_beta",
             "bedrock",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
 
@@ -985,7 +1058,10 @@ mod tests {
         assert_eq!(snap[0].feature_key, "anthropic_beta");
         assert_eq!(
             reg.acting_negative_for("nick", "anthropic_beta", "bedrock", t0),
-            RoutingDecision::RouteAway(SignalTier::SelfIdentifying)
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
         );
         assert_eq!(
             reg.acting_negative_for(
@@ -994,7 +1070,10 @@ mod tests {
                 "bedrock",
                 t0
             ),
-            RoutingDecision::RouteAway(SignalTier::SelfIdentifying)
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
         );
     }
 
@@ -1008,6 +1087,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         reg.observe(
@@ -1015,20 +1095,75 @@ mod tests {
             "computer_use",
             "anthropic-api",
             SignalTier::Inferred,
+            FailurePhase::F1,
             t0,
         );
+        // A non-default (phase, source) pair proves both survive the
+        // round-trip, not just the F1/Live the observe path mints.
+        reg.import_entries(vec![ExportedEntry {
+            state_key: "n3".into(),
+            feature_key: "prefill".into(),
+            signal: SignalTier::Inferred,
+            observations: 2,
+            first_seen: t0,
+            last_seen: t0,
+            expires_at: t0 + Duration::from_hours(1),
+            phase: FailurePhase::F2,
+            source: EvidenceSource::Probe,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }]);
 
         // Act
         let exported = reg.export_entries();
         let reg2 = registry();
         reg2.import_entries(exported);
 
-        // Assert -- snapshots match once sorted for a stable comparison.
+        // Assert -- snapshots match once sorted for a stable comparison
+        // (the derived `PartialEq` covers phase + source too).
         let mut a = reg.snapshot();
         let mut b = reg2.snapshot();
         a.sort_by(|x, y| x.feature_key.cmp(&y.feature_key));
         b.sort_by(|x, y| x.feature_key.cmp(&y.feature_key));
         assert_eq!(a, b);
+
+        // The non-default attribution rode across intact.
+        let n3 = b
+            .iter()
+            .find(|e| e.state_key == "n3")
+            .expect("the imported entry survives the round-trip");
+        assert_eq!(n3.phase, FailurePhase::F2);
+        assert_eq!(n3.source, EvidenceSource::Probe);
+    }
+
+    #[test]
+    fn imported_f2_negative_routes_away_carrying_its_phase() {
+        // Arrange -- an acting F2 negative loaded via hot-reload carry-over.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.import_entries(vec![ExportedEntry {
+            state_key: "nick".into(),
+            feature_key: "web_search".into(),
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: t0,
+            last_seen: t0,
+            expires_at: t0 + DECAY,
+            phase: FailurePhase::F2,
+            source: EvidenceSource::Live,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }]);
+
+        // Act / Assert -- the route-away decision surfaces the F2 phase so
+        // the strip site reads it directly, no second registry lookup.
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F2,
+            }
+        );
     }
 
     #[test]
@@ -1041,6 +1176,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         assert!(!reg.is_empty());
@@ -1075,11 +1211,15 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         assert_eq!(
             reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
-            RoutingDecision::RouteAway(SignalTier::SelfIdentifying)
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
         );
 
         // Act -- keyed-expire at t0.
@@ -1117,6 +1257,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1149,6 +1290,7 @@ mod tests {
             "web_search",
             "openai-compat",
             SignalTier::SelfIdentifying,
+            FailurePhase::F1,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);

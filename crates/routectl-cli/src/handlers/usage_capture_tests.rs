@@ -15,8 +15,8 @@
 use super::*;
 use routectl_core::schema::CacheCreation;
 use routectl_core::{
-    ChatChunk, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message, MessageContent, Role, Usage,
-    UsageDelta,
+    ChatChunk, ChatResponse, Choice, ChunkChoice, ChunkDelta, EvidenceSource, FailurePhase,
+    Message, MessageContent, Role, Usage, UsageDelta,
 };
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 
@@ -467,6 +467,8 @@ fn learn_event(
         upstream_status: 400,
         remapped: false,
         request_features: vec!["web_search".to_string(), "prefill".to_string()],
+        phase: FailurePhase::F1,
+        source: EvidenceSource::Live,
     }
 }
 

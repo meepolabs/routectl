@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use parking_lot::Mutex as ParkingMutex;
-use routectl_core::capability::SignalTier;
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, Message, Provider, TokenCount, ToolDef,
 };
@@ -111,6 +111,8 @@ fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::Export
         first_seen: base,
         last_seen: base,
         expires_at: base + Duration::from_hours(48),
+        phase: FailurePhase::F1,
+        source: EvidenceSource::Live,
         in_flight: false,
         consecutive_failed_probes: 0,
     }

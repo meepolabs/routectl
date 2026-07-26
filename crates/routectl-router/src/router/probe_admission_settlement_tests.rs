@@ -19,8 +19,8 @@ use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use routectl_core::Result;
-use routectl_core::capability::SignalTier;
 use routectl_core::capability::normalize_capability_key;
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, Provider, Role,
     ToolDef, Usage,
@@ -125,6 +125,8 @@ fn lapsed_negative(state_key: &str, feature_key: &str) -> ExportedEntry {
         first_seen: base,
         last_seen: base,
         expires_at: base.checked_sub(Duration::from_secs(1)).unwrap_or(base),
+        phase: FailurePhase::F1,
+        source: EvidenceSource::Live,
         in_flight: false,
         consecutive_failed_probes: 0,
     }

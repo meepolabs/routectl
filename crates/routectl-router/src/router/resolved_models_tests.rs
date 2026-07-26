@@ -781,6 +781,7 @@ async fn learned_capability_snapshot_surfaces_negatives() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        routectl_core::capability::FailurePhase::F1,
         Instant::now(),
     );
     let snap = router.learned_capability_snapshot();
@@ -1257,6 +1258,7 @@ fn learned_negative_deprioritizes_target_to_tail() {
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
+        routectl_core::capability::FailurePhase::F1,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1329,6 +1331,7 @@ fn sole_learned_tail_target_still_attempts_and_counts_d17() {
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
+        routectl_core::capability::FailurePhase::F1,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1367,6 +1370,7 @@ fn kill_switch_off_skips_the_learned_consult() {
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
+        routectl_core::capability::FailurePhase::F1,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1398,6 +1402,7 @@ fn expired_learned_negative_admits_one_probe_through_filter() {
         "web_search",
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
+        routectl_core::capability::FailurePhase::F1,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
