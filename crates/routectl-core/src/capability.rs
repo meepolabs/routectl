@@ -18,11 +18,60 @@ pub const COMPUTER_USE: &str = "computer_use";
 /// `output_config.format` structured output or a strict tool.
 pub const STRUCTURED_OUTPUT: &str = "structured_output";
 
+/// Feature key for prompt-caching requests.
+pub const PROMPT_CACHING: &str = "prompt_caching";
+
+/// Feature key for extended-thinking / reasoning requests.
+pub const THINKING: &str = "thinking";
+
 /// All well-known capability keys. Not exhaustive: both `derive_feature_keys`
 /// and the catalog's capability map accept arbitrary tool-type strings
 /// beyond this list; this slice documents the ones routectl itself knows
 /// about.
-pub const WELL_KNOWN_CAPABILITY_KEYS: &[&str] = &[WEB_SEARCH, COMPUTER_USE, STRUCTURED_OUTPUT];
+pub const WELL_KNOWN_CAPABILITY_KEYS: &[&str] = &[
+    WEB_SEARCH,
+    COMPUTER_USE,
+    STRUCTURED_OUTPUT,
+    PROMPT_CACHING,
+    THINKING,
+];
+
+/// Evidence class for a verified structured-output observation: the
+/// response body parsed and every top-level required schema property was
+/// present.
+///
+/// Evidence-class tokens are a persisted contract: each is written
+/// verbatim to a capability ledger and read back on replay, so the
+/// mapping is fixed forever -- changing a token silently re-classifies
+/// every historical row. Replay is open-set-tolerant: an unrecognized
+/// class is skipped, never panicked on.
+pub const SCHEMA_PARSE: &str = "schema_parse";
+
+/// Evidence class for a suspected-absent structured-output observation: a
+/// strict or forced request returned prose or an unparseable body on a
+/// clean stop. Forever contract -- see [`SCHEMA_PARSE`].
+pub const SCHEMA_MISMATCH: &str = "schema_mismatch";
+
+/// Evidence class for a verified web-search observation: canonical
+/// search-result content blocks or usage server-tool evidence were
+/// present. Forever contract -- see [`SCHEMA_PARSE`].
+pub const SEARCH_BLOCKS: &str = "search_blocks";
+
+/// Evidence class for a suspected-absent web-search observation: a
+/// forced-search request produced no search evidence. Forever contract --
+/// see [`SCHEMA_PARSE`].
+pub const SEARCH_ABSENT_FORCED: &str = "search_absent_forced";
+
+/// Evidence class for a verified prompt-caching observation: a cache read
+/// or creation was observed. Positive-only -- the negative side stays
+/// with the existing backstop vocabulary. Forever contract -- see
+/// [`SCHEMA_PARSE`].
+pub const CACHE_HIT: &str = "cache_hit";
+
+/// Evidence class for a verified thinking observation: reasoning or
+/// redacted-reasoning blocks were present when reasoning was requested.
+/// Positive-only. Forever contract -- see [`SCHEMA_PARSE`].
+pub const THINKING_BLOCKS: &str = "thinking_blocks";
 
 /// Whether a learned negative came from a provider that names the
 /// unsupported capability outright, or from an inferred free-text match.
@@ -274,6 +323,27 @@ mod tests {
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&WEB_SEARCH));
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&COMPUTER_USE));
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&STRUCTURED_OUTPUT));
+        assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&PROMPT_CACHING));
+        assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&THINKING));
+    }
+
+    #[test]
+    fn well_known_capability_key_tokens_are_pinned() {
+        assert_eq!(WEB_SEARCH, "web_search");
+        assert_eq!(COMPUTER_USE, "computer_use");
+        assert_eq!(STRUCTURED_OUTPUT, "structured_output");
+        assert_eq!(PROMPT_CACHING, "prompt_caching");
+        assert_eq!(THINKING, "thinking");
+    }
+
+    #[test]
+    fn evidence_class_tokens_are_pinned() {
+        assert_eq!(SCHEMA_PARSE, "schema_parse");
+        assert_eq!(SCHEMA_MISMATCH, "schema_mismatch");
+        assert_eq!(SEARCH_BLOCKS, "search_blocks");
+        assert_eq!(SEARCH_ABSENT_FORCED, "search_absent_forced");
+        assert_eq!(CACHE_HIT, "cache_hit");
+        assert_eq!(THINKING_BLOCKS, "thinking_blocks");
     }
 
     #[test]
@@ -624,5 +694,18 @@ mod tests {
         assert_eq!(source.as_str(), "probe");
         assert_eq!(verdict.as_str(), "broken");
         assert_eq!(verdict.broken_phase(), Some(crate::FailurePhase::F2));
+    }
+
+    #[test]
+    fn well_known_keys_and_evidence_classes_reexported_from_crate_root() {
+        // Pin the public re-export surface consumed by the detector crate.
+        assert_eq!(crate::PROMPT_CACHING, "prompt_caching");
+        assert_eq!(crate::THINKING, "thinking");
+        assert_eq!(crate::SCHEMA_PARSE, "schema_parse");
+        assert_eq!(crate::SCHEMA_MISMATCH, "schema_mismatch");
+        assert_eq!(crate::SEARCH_BLOCKS, "search_blocks");
+        assert_eq!(crate::SEARCH_ABSENT_FORCED, "search_absent_forced");
+        assert_eq!(crate::CACHE_HIT, "cache_hit");
+        assert_eq!(crate::THINKING_BLOCKS, "thinking_blocks");
     }
 }
