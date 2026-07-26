@@ -54,6 +54,7 @@ pub use activation::{
     DeactivatedChange, UnresolvedReason, compute_activation, diff as diff_activation,
 };
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
+pub use capability_matcher::resolve_requested_capability;
 pub use capability_rebuild::{
     CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,
     rebuild_capabilities_into,

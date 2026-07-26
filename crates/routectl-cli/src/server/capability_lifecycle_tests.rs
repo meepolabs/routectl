@@ -665,12 +665,13 @@ async fn missing_tombstone_fails_closed_to_empty_registry() {
     assert_eq!(boundary.overlay_revision, Some(overlay));
 }
 
-// --- Scenario 6b: probe-source and unknown-token rows skip, no panic -----
+// --- Scenario 6b: probe-source rows replay, unknown-token rows skip -------
 
 #[tokio::test]
-async fn probe_source_and_unknown_token_rows_skip_without_panic() {
-    // Arrange: after a matching tombstone, a probe-source row, an
-    // unknown-verdict row, an unknown-source row, and one valid live negative.
+async fn probe_source_replays_and_unknown_token_rows_skip_without_panic() {
+    // Arrange: after a matching tombstone, a probe-source row (now replays
+    // through the shared arms), an unknown-verdict row, an unknown-source row,
+    // and one valid live negative.
     let tmp = TempDir::new().expect("tempdir");
     let router = default_router(&tmp).await;
     let (cat, overlay) = revision_of(&router);
@@ -735,23 +736,28 @@ async fn probe_source_and_unknown_token_rows_skip_without_panic() {
     drop(h2);
     w2.shutdown();
 
-    // Assert: only the valid negative replayed; the odd rows were skipped with
-    // counters and a WARN, and nothing panicked.
+    // Assert: the probe negative and the valid live negative both replayed;
+    // the unknown-verdict and unknown-source rows were skipped with counters
+    // and a WARN, and nothing panicked.
     let snap = router.learned_capability_snapshot();
-    assert_eq!(snap.len(), 1);
+    assert_eq!(snap.len(), 2);
     assert!(
         find(&snap, "valid-lane", WEB_SEARCH).is_some(),
         "the valid negative replays"
     );
+    assert!(
+        find(&snap, "probe-lane", WEB_SEARCH).is_some(),
+        "the probe negative replays through the shared arms"
+    );
 
     let info = events
         .iter()
-        .find(|e| e.level == tracing::Level::INFO && e.field("skipped_probe").is_some())
+        .find(|e| e.level == tracing::Level::INFO && e.field("replayed_probe").is_some())
         .expect("rebuild summary emitted");
     assert_eq!(
-        info.field("skipped_probe"),
+        info.field("replayed_probe"),
         Some("1"),
-        "one probe-source row skipped"
+        "one probe-source row replayed"
     );
     let skipped_unknown: u32 = info
         .field("skipped_unknown")

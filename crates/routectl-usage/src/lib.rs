@@ -21,9 +21,9 @@ mod retention;
 mod schema;
 mod writer;
 
-pub use capability_event::CapabilityEvent;
+pub use capability_event::{CapabilityEvent, insert_capability_event};
 pub use cost::{CostBreakdown, Rates, estimate_cost, estimate_cost_tokens};
-pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail};
+pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail, open_rw};
 pub use handle::{UsageCounters, UsageHandle};
 pub use learn_event::CapabilityLearnEvent;
 pub use migrate::MigrateError;

@@ -69,6 +69,25 @@ fn cleared(rowid: i64, at: Instant, capability: &str) -> CapabilityEventRow {
     row(rowid, at, "cleared", None, "live", None, None, capability)
 }
 
+/// A `broken` (F1 self-identifying, probe) row -- the probe-sourced negative.
+fn probe_broken(rowid: i64, at: Instant, capability: &str) -> CapabilityEventRow {
+    row(
+        rowid,
+        at,
+        "broken",
+        Some("f1"),
+        "probe",
+        Some("self-identifying"),
+        None,
+        capability,
+    )
+}
+
+/// A `cleared` (probe) row.
+fn probe_cleared(rowid: i64, at: Instant, capability: &str) -> CapabilityEventRow {
+    row(rowid, at, "cleared", None, "probe", None, None, capability)
+}
+
 fn registry() -> LearnedCapabilityRegistry {
     // A large decay keeps every replayed negative acting at query time so the
     // ordering assertions read the replayed state, not a lapse.
@@ -293,7 +312,7 @@ fn suspect_row_with_non_f3_phase_skips() {
 }
 
 #[test]
-fn probe_source_rows_skip_with_a_counter() {
+fn probe_source_rows_replay_through_the_shared_arms() {
     let base = Instant::now();
     let reader = FakeReader {
         tombstone: Some(ReplayTombstone::new(0, CV, OV)),
@@ -312,17 +331,100 @@ fn probe_source_rows_skip_with_a_counter() {
 
     let summary = rebuild_capabilities_into(&reader, &reg);
 
-    assert_eq!(summary.skipped_probe, 1);
-    assert_eq!(summary.replayed_negative, 0);
-    assert_eq!(
+    // A probe negative replays through the same admission the live path uses:
+    // the by-verdict counter and the by-source probe tally both bump, and the
+    // negative acts (RouteAway).
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.replayed_probe, 1);
+    assert!(matches!(
         reg.acting_negative_for(
             "nn",
             "web_search",
             "openai-compat",
             base + Duration::from_secs(1)
         ),
+        RoutingDecision::RouteAway { .. },
+    ));
+}
+
+#[test]
+fn probe_cleared_row_removes_a_resident_negative() {
+    let base = Instant::now();
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            // A resident probe negative, then a later probe-sourced clear:
+            // the clear now reaches the source-agnostic cleared arm and
+            // removes the negative.
+            probe_broken(1, base + Duration::from_secs(1), "web_search"),
+            probe_cleared(2, base + Duration::from_secs(2), "web_search"),
+        ],
+    };
+    let reg = registry();
+
+    let summary = rebuild_capabilities_into(&reader, &reg);
+
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.replayed_cleared, 1);
+    // Both probe rows counted in the by-source tally alongside their
+    // by-verdict counters.
+    assert_eq!(summary.replayed_probe, 2);
+    assert_eq!(
+        reg.acting_negative_for(
+            "nn",
+            "web_search",
+            "openai-compat",
+            base + Duration::from_secs(3)
+        ),
         RoutingDecision::Allow,
     );
+}
+
+#[test]
+fn equal_ts_live_and_probe_rows_tie_break_by_rowid() {
+    let base = Instant::now();
+    let at = base + Duration::from_secs(1);
+    let query = base + Duration::from_secs(2);
+
+    // A probe negative (rowid=1) and a live clear (rowid=2) at the SAME
+    // instant, delivered clear-first: rowid order -- not vec order -- places
+    // the negative before the clear across sources, so the clear removes it.
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            cleared(2, at, "web_search"),
+            probe_broken(1, at, "web_search"),
+        ],
+    };
+    let reg = registry();
+    let summary = rebuild_capabilities_into(&reader, &reg);
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.replayed_cleared, 1);
+    assert_eq!(summary.replayed_probe, 1);
+    assert_eq!(
+        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        RoutingDecision::Allow,
+    );
+
+    // Reverse the rowids at the same instant across sources: live clear
+    // (rowid=1) sorts before the probe negative (rowid=2), so the clear
+    // no-ops and the probe negative acts.
+    let reader = FakeReader {
+        tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+        rows: vec![
+            probe_broken(2, at, "web_search"),
+            cleared(1, at, "web_search"),
+        ],
+    };
+    let reg = registry();
+    let summary = rebuild_capabilities_into(&reader, &reg);
+    assert_eq!(summary.cleared_noop, 1);
+    assert_eq!(summary.replayed_negative, 1);
+    assert_eq!(summary.replayed_probe, 1);
+    assert!(matches!(
+        reg.acting_negative_for("nn", "web_search", "openai-compat", query),
+        RoutingDecision::RouteAway { .. },
+    ));
 }
 
 #[test]
@@ -400,7 +502,7 @@ fn unknown_tokens_skip_without_panic() {
     // Every malformed token -- verdict, source, tier, phase, evidence class --
     // skips its row, none replay, and nothing panics.
     assert_eq!(summary.skipped_unknown, 7);
-    assert_eq!(summary.skipped_probe, 0);
+    assert_eq!(summary.replayed_probe, 0);
     assert_eq!(summary.replayed_negative, 0);
     assert_eq!(summary.replayed_verified, 0);
 }
