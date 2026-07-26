@@ -1774,6 +1774,32 @@ fn open_rw_sets_busy_timeout() {
 }
 
 #[test]
+fn open_rw_rejects_a_non_wal_database() {
+    // Arrange: a fully-migrated DB forced out of WAL journal mode.
+    let (_dir, path) = temp_db_path();
+    drop(open(&path).expect("seed db"));
+    {
+        let conn = Connection::open(&path).expect("raw open");
+        let mode: String = conn
+            .pragma_update_and_check(None, "journal_mode", "DELETE", |row| row.get(0))
+            .expect("switch journal mode");
+        assert_eq!(mode.to_ascii_lowercase(), "delete");
+    }
+
+    // Act
+    let err = match open_rw(&path) {
+        Err(err) => err,
+        Ok(_) => panic!("non-WAL db must be rejected"),
+    };
+
+    // Assert: fails closed on the journal-mode contract.
+    assert!(
+        matches!(err, OpenError::NotWal { .. }),
+        "expected NotWal, got {err:?}"
+    );
+}
+
+#[test]
 fn open_readonly_fastfail_on_nonexistent_path_returns_no_data() {
     // Arrange: a path that does not exist.
     let dir = TempDir::new().expect("tempdir");
