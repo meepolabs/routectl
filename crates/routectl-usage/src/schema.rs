@@ -244,8 +244,17 @@ CREATE TABLE IF NOT EXISTS capability_learn_events (
 /// `overlay_revision` stamp the boundary revision a row was written under,
 /// so replay can filter defensively and a tombstone can mark the boundary.
 /// NEVER a body / message / prompt column (log hygiene).
+///
+/// `id` is an explicit `INTEGER PRIMARY KEY` -- an alias for the rowid that
+/// SQLite preserves across `VACUUM`. It is the ledger's insertion-order
+/// boundary key: the tombstone marks a point on it, the replayer reads only
+/// rows after it, and the hygiene prune stays below it. A bare implicit
+/// rowid would be renumbered by `VACUUM` and silently break that boundary,
+/// so the alias is load-bearing, not cosmetic. The read/prune queries
+/// address it through its rowid alias, which resolves to this stable column.
 pub const CREATE_CAPABILITY_EVENTS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS capability_events (
+    id               INTEGER PRIMARY KEY,
     ts               INTEGER NOT NULL,
     lane_key         TEXT,
     capability       TEXT,
