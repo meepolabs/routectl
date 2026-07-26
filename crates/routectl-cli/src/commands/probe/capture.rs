@@ -22,9 +22,7 @@ use serde_json::{Value, json};
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_providers::bedrock::auth::{self, ResolvedCreds};
 use routectl_providers::bedrock::{BedrockCreds, endpoint, signing};
-use routectl_router::{
-    BedrockApiShapeConfig, BedrockCredsConfig, Config, ModelEntry, ProviderEntry,
-};
+use routectl_router::{BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry};
 
 use crate::server::CompositeStore;
 
@@ -173,43 +171,13 @@ struct BedrockTarget {
     user_agent: Option<String>,
 }
 
-/// Resolve `(provider_name, model_id)` from the scoped target. An alias
-/// names both; a bare provider resolves its model id from the single
-/// selectable model referencing it.
-fn resolve_provider_and_model(
-    config: &Config,
-    args: &CaptureArgs,
-) -> Result<(String, String), String> {
-    if let Some(alias) = &args.alias {
-        let model = config
-            .models
-            .get(alias)
-            .ok_or_else(|| format!("no model named `{alias}` is configured"))?;
-        return Ok((model.provider.clone(), model.upstream.clone()));
-    }
-    let provider = args
-        .provider
-        .as_ref()
-        .ok_or_else(|| "an explicit --provider or --alias target is required".to_string())?;
-    let mut matches: Vec<&ModelEntry> = config
-        .models
-        .values()
-        .filter(|m| m.selectable && &m.provider == provider)
-        .collect();
-    match matches.len() {
-        0 => Err(format!(
-            "provider `{provider}` has no selectable model; pass --alias with a model nickname"
-        )),
-        1 => Ok((provider.clone(), matches.remove(0).upstream.clone())),
-        _ => Err(format!(
-            "provider `{provider}` is referenced by multiple models; pass --alias to pick one"
-        )),
-    }
-}
-
 /// Resolve the scoped target to a Bedrock Invoke-shape send target.
 fn resolve_target(config: &Config, args: &CaptureArgs) -> Result<BedrockTarget, String> {
-    let (provider_name, model_id) = resolve_provider_and_model(config, args)?;
+    let (provider_name, model_id) = super::resolve::resolve_provider_and_model(
+        config,
+        args.provider.as_deref(),
+        args.alias.as_deref(),
+    )?;
     let entry = config
         .providers
         .get(&provider_name)
