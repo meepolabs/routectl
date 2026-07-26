@@ -313,6 +313,15 @@ fn feature_naming_tables_for(provider_kind: &str) -> Option<(PatternTable, Patte
     }
 }
 
+/// True when `provider_kind` carries a feature-naming (F2) table at all
+/// (currently or empty). The learn-side drift observer uses it to fire ONLY
+/// for a provider whose F2 table exists yet matched nothing -- a deterministic
+/// feature-carrying rejection that a grounded pattern could have attributed --
+/// rather than for every unresolved rejection on every provider.
+pub fn has_feature_naming_table(provider_kind: &str) -> bool {
+    feature_naming_tables_for(provider_kind).is_some()
+}
+
 /// Run the feature-naming anchored-template pipeline over a trimmed `message`
 /// (the [`extract_bedrock_capability`] precedent): the first template whose
 /// anchors bracket the message extracts its single token; the token must be

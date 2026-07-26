@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
-use routectl_core::failure_class::ClassifiedFailure;
+use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::{ChatRequest, Error};
 
 use super::{DispatchMeta, DispatchTarget, LearnedProbeGuard, Router};
@@ -15,11 +15,12 @@ use crate::capability_matcher::resolve_requested_capability;
 const BEDROCK_PROVIDER_KIND: &str = "bedrock";
 
 /// Per-request dedupe key for the learn path. The capability arm dedupes on
-/// `(state_key, feature_key)`; the Bedrock-validation drift signal dedupes on
-/// `state_key` alone. Distinct enum variants keep the two namespaces disjoint
-/// by TYPE rather than by a whitespace-bearing sentinel string, so a drift
-/// key can never collide with a token-shaped capability key regardless of
-/// what an upstream names.
+/// `(state_key, feature_key)`; the drift signals dedupe on `state_key` alone;
+/// the F1-seen marker keys on `feature_key` alone (cross-lane -- it records
+/// that ANY lane in this attempt chain already minted an F1 negative for that
+/// capability). Distinct enum variants keep the namespaces disjoint by TYPE
+/// rather than by a whitespace-bearing sentinel string, so no key can collide
+/// with a token-shaped capability key regardless of what an upstream names.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum LearnDedupeKey {
     /// One capability observation per `(target, capability)` per request.
@@ -33,6 +34,28 @@ pub(super) enum LearnDedupeKey {
     BedrockDrift {
         /// Breaker state key of the rejecting target.
         state_key: String,
+    },
+    /// One feature-naming drift signal per target per request.
+    FeatureNamingDrift {
+        /// Breaker state key of the rejecting target.
+        state_key: String,
+    },
+    /// Marks that an F1 negative for this capability was minted earlier in
+    /// this attempt chain. Keys on `feature_key` ALONE (cross-lane): a later
+    /// F2 candidate for the same capability -- on any lane -- is suppressed
+    /// rather than blind-minted. Riding the existing dedupe set threads the
+    /// cross-lane signal through both dispatch arms with no extra parameter.
+    F1Seen {
+        /// Normalized capability key the F1 negative named.
+        feature_key: String,
+    },
+    /// Dedupes the same-chain-F1 F2-suppression WARN + counter. Keys on
+    /// `feature_key` ALONE (cross-lane): the suppression is a per-chain signal,
+    /// so N demoted lanes surface exactly one WARN + one counter bump per
+    /// request regardless of how many lanes rejected the capability.
+    F2Suppressed {
+        /// Normalized capability key the suppressed F2 candidate named.
+        feature_key: String,
     },
 }
 
@@ -203,11 +226,64 @@ impl Router {
         let Some(provider_kind) = target.provider_kind else {
             return;
         };
-        let Some((feature_key, tier, phase)) = resolve_requested_capability(provider_kind, err, cf)
-        else {
+        let Some(resolved) = resolve_requested_capability(provider_kind, err, cf) else {
             self.observe_bedrock_validation_drift(provider_kind, err, target, dedupe);
+            self.observe_feature_naming_drift(provider_kind, cf, target, req, dedupe);
             return;
         };
+        self.commit_learned_observation(
+            resolved,
+            &cf.class,
+            err,
+            upstream_status,
+            upstream_code.as_deref(),
+            provider_kind,
+            target,
+            req,
+            remapped,
+            dedupe,
+            meta,
+            probe_guard,
+        );
+    }
+
+    /// Given a resolved `(capability, tier, phase)` for an eligible upstream
+    /// request fault, apply the remaining mint gates and -- when they all hold
+    /// -- record the learned negative, emit the structured WARN, and ride a
+    /// [`CapabilityLearnEvent`] out on `meta`.
+    ///
+    /// Beyond the request-membership, mask, probe-settle, and per-request
+    /// dedupe gates shared with the F1 wire-token path, an F2 feature-naming
+    /// candidate mints ONLY when both hold: the evidence is self-identifying of
+    /// a deterministic request fault (an inferred or transient-derived F2 never
+    /// mints -- [`f2_evidence_is_mintable`]), and no F1 negative for the same
+    /// capability was already observed earlier in this attempt chain (a
+    /// cross-lane fallback must not blind-mint an F2 after an F1 strip on a
+    /// sibling lane; the reverse ordering self-heals -- no deferred-commit
+    /// state machine). Every F1 mint records an [`LearnDedupeKey::F1Seen`]
+    /// marker so a later same-chain F2 candidate is suppressed with a dedicated
+    /// WARN + counter.
+    ///
+    /// Split from [`Router::observe_for_learning`] so the mint pipeline can be
+    /// driven with a provisional F2 resolution in tests -- the production F2
+    /// tables ship empty, so the real resolver never returns F2 on live input.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_learned_observation(
+        &self,
+        resolved: (String, SignalTier, FailurePhase),
+        class: &FailureClass,
+        err: &Error,
+        upstream_status: u16,
+        upstream_code: Option<&str>,
+        provider_kind: &'static str,
+        target: &DispatchTarget,
+        req: &ChatRequest,
+        remapped: bool,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+        meta: &mut DispatchMeta,
+        probe_guard: &mut LearnedProbeGuard,
+    ) {
+        let (feature_key, tier, phase) = resolved;
         if feature_key == crate::class_policy::OPERATOR_REMAP_CAPABILITY {
             return;
         }
@@ -264,11 +340,53 @@ impl Router {
         // this arm again does not re-observe the entry the probe refreshed.
         if probe_guard.settle_same_capability(&state_key, &feature_key, provider_kind) {
             self.metrics.incr_probe_failures();
+            // A re-probe that reconfirms an F1 negative is F1 evidence for this
+            // capability earlier in this attempt chain (criterion (c) reads
+            // "no F1 seen", not "no F1 freshly minted"): record F1Seen so a
+            // later cross-lane F2 candidate is suppressed rather than
+            // blind-minted past the reconfirmed F1. Phase-conditional -- a
+            // reconfirmed F2 must NOT set it, or a sibling lane's own F2 would
+            // be wrongly suppressed.
+            if self.settled_negative_phase(&state_key, &feature_key) == Some(FailurePhase::F1) {
+                dedupe.insert(LearnDedupeKey::F1Seen {
+                    feature_key: feature_key.clone(),
+                });
+            }
             dedupe.insert(LearnDedupeKey::Capability {
                 state_key,
                 feature_key,
             });
             return;
+        }
+        // F2 mint gates. A feature-naming negative is minted only on
+        // self-identifying evidence of a deterministic request fault, and never
+        // when an ACTING F1 negative for this same capability was already
+        // observed earlier in this attempt chain -- otherwise a later cross-lane
+        // 400 could blind-mint an F2 for a capability an F1 strip on a sibling
+        // lane already handled. The suppression WARN dedupes on the capability
+        // alone (the signal is per-chain, not per-lane), so N demoted lanes
+        // surface exactly one WARN + counter bump per request.
+        if phase == FailurePhase::F2 {
+            if !f2_evidence_is_mintable(tier, class) {
+                return;
+            }
+            if dedupe.contains(&LearnDedupeKey::F1Seen {
+                feature_key: feature_key.clone(),
+            }) {
+                if dedupe.insert(LearnDedupeKey::F2Suppressed {
+                    feature_key: feature_key.clone(),
+                }) {
+                    self.metrics.incr_f2_same_chain_suppressed();
+                    tracing::warn!(
+                        event = "suppression",
+                        state_key = %state_key,
+                        capability_key = %feature_key,
+                        phase = FailurePhase::F2.as_str(),
+                        "f2 feature-naming negative suppressed: same-chain f1 already observed for this capability",
+                    );
+                }
+                return;
+            }
         }
         // One observation per request per (state_key, feature): a retry or
         // per-target re-entry that hits this arm again is dropped here.
@@ -288,6 +406,17 @@ impl Router {
             Instant::now(),
         );
         let acting = matches!(outcome, crate::learned_capability::ObserveOutcome::Acting);
+        // An F1 negative records the cross-lane marker ONLY once it ACTS: a
+        // self-identifying F1 acts on its first observation, an inferred F1 only
+        // once corroborated. A still-pending inferred F1 must not suppress a
+        // later same-chain self-identifying F2 -- weak evidence must never mask
+        // strong. This mirrors the probe-settle path, which treats a
+        // reconfirmed RESIDENT (already-acting) F1 as F1-seen.
+        if acting && phase == FailurePhase::F1 {
+            dedupe.insert(LearnDedupeKey::F1Seen {
+                feature_key: feature_key.clone(),
+            });
+        }
         let observations = self
             .learned_capabilities
             .snapshot()
@@ -309,9 +438,10 @@ impl Router {
                 capability_key = %feature_key,
                 provider_kind,
                 upstream_status,
-                upstream_code = upstream_code.as_deref().unwrap_or(""),
+                upstream_code = upstream_code.unwrap_or(""),
                 upstream_param = %param,
                 signal_tier = tier.as_str(),
+                phase = phase.as_str(),
                 observations,
                 acting,
                 "learned-capability negative observed",
@@ -322,8 +452,9 @@ impl Router {
                 capability_key = %feature_key,
                 provider_kind,
                 upstream_status,
-                upstream_code = upstream_code.as_deref().unwrap_or(""),
+                upstream_code = upstream_code.unwrap_or(""),
                 signal_tier = tier.as_str(),
+                phase = phase.as_str(),
                 observations,
                 acting,
                 "learned-capability negative observed",
@@ -331,7 +462,7 @@ impl Router {
         }
 
         if acting {
-            self.metrics.incr_learned_negatives();
+            self.metrics.incr_learned_negatives(phase);
             meta.learned_capabilities.push(CapabilityLearnEvent {
                 state_key,
                 capability_key: feature_key,
@@ -345,6 +476,18 @@ impl Router {
                 source: EvidenceSource::Live,
             });
         }
+    }
+
+    /// The detection phase of the resident learned negative for `(state_key,
+    /// feature_key)`, or `None` when no entry resides. Read at the probe-settle
+    /// site to decide whether a reconfirmed negative is F1 evidence that must
+    /// suppress a later cross-lane F2 candidate in the same attempt chain.
+    fn settled_negative_phase(&self, state_key: &str, feature_key: &str) -> Option<FailurePhase> {
+        self.learned_capabilities
+            .snapshot()
+            .into_iter()
+            .find(|entry| entry.state_key == state_key && entry.feature_key == feature_key)
+            .map(|entry| entry.phase)
     }
 
     /// Drift observability for the Bedrock validation matcher. When the
@@ -381,6 +524,77 @@ impl Router {
             "bedrock validation rejection matched no capability template",
         );
     }
+
+    /// Drift observability for the F2 feature-naming matcher. When the shared
+    /// resolver attributed no capability yet the rejection is a deterministic
+    /// request fault on a feature-carrying request against a provider that HAS
+    /// a feature-naming table, the shipped-empty template table missed a real
+    /// rejection shape: emit a structured WARN and bump a dedicated counter so
+    /// wording drift is visible instead of silently dropping the signal --
+    /// exactly the discipline the Bedrock-validation drift observer applies to
+    /// the wire-token table. Gated to providers that carry an F2 table so it
+    /// never fires on every unresolved rejection on every provider. Deduped to
+    /// once per request per target; only a capability-token-free signal
+    /// (state_key + provider_kind) reaches the log -- never a request body,
+    /// prompt, or the upstream message text.
+    fn observe_feature_naming_drift(
+        &self,
+        provider_kind: &str,
+        cf: &ClassifiedFailure,
+        target: &DispatchTarget,
+        req: &ChatRequest,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+    ) {
+        if !crate::capability_matcher::has_feature_naming_table(provider_kind) {
+            return;
+        }
+        if !f2_class_is_deterministic(&cf.class) {
+            return;
+        }
+        let request_features = crate::feature_keys::derive_feature_keys(
+            req.tools.as_deref().unwrap_or(&[]),
+            req.provider_extras.as_ref(),
+        );
+        if request_features.is_empty() {
+            return;
+        }
+        if !dedupe.insert(LearnDedupeKey::FeatureNamingDrift {
+            state_key: target.state_key.clone(),
+        }) {
+            return;
+        }
+        self.metrics.incr_feature_naming_unmatched();
+        tracing::warn!(
+            event = "feature_naming_unmatched",
+            state_key = %target.state_key,
+            provider_kind,
+            "deterministic feature-carrying rejection matched no feature-naming template",
+        );
+    }
+}
+
+/// True when a resolved F2 feature-naming candidate is eligible to mint a
+/// learned negative on its evidence alone: self-identifying tier (an inferred
+/// F2 never mints) of a deterministic request-fault class. This is the
+/// F2-specific half of the mint gate; the request-membership, mask,
+/// probe-settle, and same-chain-F1 gates are applied separately at the mint
+/// site.
+fn f2_evidence_is_mintable(tier: SignalTier, class: &FailureClass) -> bool {
+    tier == SignalTier::SelfIdentifying && f2_class_is_deterministic(class)
+}
+
+/// True when `class` is a deterministic request fault an F2 feature-naming
+/// negative may be minted from: `BadRequest` or `FeatureUnsupported`. Every
+/// transient or server-side class -- anything a config class-override could
+/// derive a request fault from without the upstream self-reporting a feature
+/// rejection -- returns `false`, so a remapped transient can never plant an F2
+/// negative. A new `#[non_exhaustive]` `FailureClass` variant defaults to
+/// rejected (the safe side) until it is explicitly admitted here.
+const fn f2_class_is_deterministic(class: &FailureClass) -> bool {
+    matches!(
+        class,
+        FailureClass::BadRequest | FailureClass::FeatureUnsupported { .. }
+    )
 }
 
 #[cfg(test)]

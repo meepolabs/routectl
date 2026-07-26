@@ -36,6 +36,7 @@ use feature_filter::FilterSource;
 use feature_filter::{StripDecision, catalog_capabilities};
 use overlays::{apply_layered_overlays, operator_betas};
 pub use overlays::{merge_header_extras, merge_payload_extras};
+use routectl_core::capability::FailurePhase;
 #[cfg(test)]
 use routectl_core::capability::SignalTier;
 use runtime_gate::{LearnedProbeGuard, ProbeAdmission};
@@ -215,6 +216,17 @@ struct RouterMetrics {
     /// on the first observation, inferred on the confirming second).
     /// Bumped by the learn path (later act / learn wiring).
     learned_negatives_total: AtomicU64,
+    /// Learned negatives that reached the acting state via the F1 wire-token
+    /// phase (a droppable capability the provider named directly). The
+    /// per-phase split of [`learned_negatives_total`], so a rising F2 share
+    /// is visible against the well-understood F1 baseline. Bumped by the
+    /// learn path.
+    learned_negatives_f1_total: AtomicU64,
+    /// Learned negatives that reached the acting state via the F2
+    /// feature-naming phase (a capability the provider named in prose). The
+    /// per-phase split of [`learned_negatives_total`]; zero until an F2
+    /// pattern is grounded (the tables ship empty). Bumped by the learn path.
+    learned_negatives_f2_total: AtomicU64,
     /// Re-probes admitted after a learned negative's decay window lapsed.
     /// Bumped by the dispatch path when it claims the single probe slot
     /// (later act / learn wiring).
@@ -255,6 +267,20 @@ struct RouterMetrics {
     /// visible drift instead of silently reintroduced repeat 400s. Bumped
     /// once per request per target by the learn path.
     bedrock_validation_unmatched_total: AtomicU64,
+    /// F2 feature-naming candidates dropped because an ACTING F1 negative for
+    /// the same capability was already observed earlier in the SAME attempt
+    /// chain (a cross-lane fallback must not blind-mint an F2 after an F1
+    /// strip on a sibling lane). Bumped once per request per capability
+    /// (cross-lane dedupe) by the learn path when it suppresses the F2 observe.
+    f2_same_chain_suppressed_total: AtomicU64,
+    /// Deterministic (400/422) feature-carrying rejections against a provider
+    /// that HAS a feature-naming (F2) table, which matched no template. A
+    /// rising count means a real feature-naming rejection shape is arriving
+    /// that the shipped-empty table cannot attribute -- the drift signal that
+    /// the F2 table needs a captured-envelope refresh, mirroring
+    /// [`bedrock_validation_unmatched_total`]. Bumped once per request per
+    /// target by the learn path.
+    feature_naming_unmatched_total: AtomicU64,
 }
 
 impl RouterMetrics {
@@ -268,8 +294,19 @@ impl RouterMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn incr_learned_negatives(&self) {
+    fn incr_learned_negatives(&self, phase: FailurePhase) {
         self.learned_negatives_total.fetch_add(1, Ordering::Relaxed);
+        match phase {
+            FailurePhase::F1 => {
+                self.learned_negatives_f1_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            FailurePhase::F2 => {
+                self.learned_negatives_f2_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            FailurePhase::F3 => {}
+        }
     }
 
     fn incr_probe_attempts(&self) {
@@ -307,6 +344,16 @@ impl RouterMetrics {
 
     fn incr_bedrock_validation_unmatched(&self) {
         self.bedrock_validation_unmatched_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_f2_same_chain_suppressed(&self) {
+        self.f2_same_chain_suppressed_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_feature_naming_unmatched(&self) {
+        self.feature_naming_unmatched_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -387,6 +434,34 @@ impl RouterMetrics {
     fn bedrock_validation_unmatched_total(&self) -> u64 {
         self.bedrock_validation_unmatched_total
             .load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative F1-phase acting-negative count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn learned_negatives_f1_total(&self) -> u64 {
+        self.learned_negatives_f1_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative F2-phase acting-negative count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn learned_negatives_f2_total(&self) -> u64 {
+        self.learned_negatives_f2_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative same-chain-F1 F2-suppression count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn f2_same_chain_suppressed_total(&self) -> u64 {
+        self.f2_same_chain_suppressed_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative unmatched-feature-naming count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn feature_naming_unmatched_total(&self) -> u64 {
+        self.feature_naming_unmatched_total.load(Ordering::Relaxed)
     }
 }
 
