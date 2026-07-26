@@ -31,6 +31,9 @@ use routectl_router::{Config, Finding, ProviderEntry, Status, build_provider, ov
 
 use crate::server::CompositeStore;
 
+#[cfg(feature = "bedrock")]
+pub mod capture;
+
 /// UNSTABLE report schema version for `--json`. Bumped only when the JSON
 /// shape changes in a way a consumer would care about.
 const SCHEMA_VERSION: u32 = 1;
