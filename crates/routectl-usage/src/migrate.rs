@@ -9,6 +9,7 @@
 use rusqlite::Connection;
 
 use crate::schema::{
+    CREATE_CAPABILITY_EVENTS_TABLE, CREATE_CAPABILITY_EVENTS_TS_INDEX,
     CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_META_TABLE, CREATE_REQUESTS_TABLE,
     CREATE_TS_START_INDEX, META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION,
 };
@@ -368,6 +369,31 @@ fn migrate_v11_to_v12(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v12 -> v13 step atomically: create the `capability_events`
+/// table + its `ts` index, bump `PRAGMA user_version` to 13, and update
+/// the human-readable `meta.schema_version` row. All in one transaction so
+/// a crash mid-step rolls back rather than landing a table-without-version
+/// state. The DDL is `CREATE TABLE / INDEX IF NOT EXISTS`, so a re-run is a
+/// no-op.
+///
+/// Like the v8 -> v9 step this creates a WHOLE NEW TABLE (the unified
+/// capability-event ledger the warm rebuild replays). A fresh DB reaches
+/// this arm too (v0->v1 stamps user_version=1, and the loop runs every step
+/// up to `SCHEMA_VERSION`), so `IF NOT EXISTS` covers both the fresh-create
+/// and the migrated-open paths.
+fn migrate_v12_to_v13(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(CREATE_CAPABILITY_EVENTS_TABLE)?;
+    tx.execute_batch(CREATE_CAPABILITY_EVENTS_TS_INDEX)?;
+    tx.execute_batch("PRAGMA user_version = 13")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "13"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -424,6 +450,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             9 => migrate_v9_to_v10(conn)?,
             10 => migrate_v10_to_v11(conn)?,
             11 => migrate_v11_to_v12(conn)?,
+            12 => migrate_v12_to_v13(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
