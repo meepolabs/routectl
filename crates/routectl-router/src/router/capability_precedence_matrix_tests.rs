@@ -355,6 +355,69 @@ fn verified_working_masks_catalog_prior() {
     assert!(strip_keys.is_empty());
 }
 
+// --- override hard-drop > verified-working ---
+
+#[test]
+fn override_route_away_beats_resident_verified_working() {
+    // Arrange -- an override `unsupported` cell AND a resident VerifiedWorking
+    // positive both name `web_search`. The override consult runs first.
+    let router = base_router(
+        "[capability.overrides.p]\n\
+         unsupported = [\"web_search\"]\n",
+    );
+    let target = target_with_priors(&router, "nick", &[]);
+    seed_verified(&router, "nick", "web_search");
+
+    // Act
+    let mut admissions = Vec::new();
+    let mut strip_keys = Vec::new();
+    let verdict = router.unsupported_feature_for_target(
+        &target,
+        &["web_search".to_string()],
+        &mut admissions,
+        &mut strip_keys,
+    );
+
+    // Assert -- the override hard-drops with the `override` label ahead of the
+    // resident positive; a positive never overturns an operator route-away.
+    assert_eq!(
+        verdict,
+        Some(("web_search".to_string(), FilterSource::Override)),
+    );
+    assert!(strip_keys.is_empty(), "a hard-drop carries no strip keys");
+    assert!(admissions.is_empty(), "a hard-drop admits no probe");
+}
+
+// --- verified-working > unknown (permissive) ---
+
+#[test]
+fn verified_working_with_no_prior_is_permissive_noop() {
+    // Arrange -- a resident VerifiedWorking positive on a feature with NO
+    // catalog prior (absent key = unknown, distinct from `Some(false)`).
+    let router = base_router("");
+    let target = target_with_priors(&router, "nick", &[]);
+    seed_verified(&router, "nick", "web_search");
+
+    // Act
+    let mut admissions = Vec::new();
+    let mut strip_keys = Vec::new();
+    let verdict = router.unsupported_feature_for_target(
+        &target,
+        &["web_search".to_string()],
+        &mut admissions,
+        &mut strip_keys,
+    );
+
+    // Assert -- a verified positive over an unknown prior leaves the feature
+    // open and itself contributes no routing signal, strip key, or probe slot.
+    assert_eq!(verdict, None);
+    assert!(
+        admissions.is_empty(),
+        "a verified positive claims no re-probe slot"
+    );
+    assert!(strip_keys.is_empty());
+}
+
 // --- never-empty two-pass ---
 
 #[test]
