@@ -832,3 +832,117 @@ async fn count_tokens_releases_admitted_probe_without_latching() {
         "in_flight released -> the next request re-probes rather than latching",
     );
 }
+
+/// A minimal native-Bedrock provider config. The resolved model is
+/// installed directly (no factory build), so no AWS credential resolution
+/// happens; only `kind_str()` -> "bedrock" is exercised on the dispatch
+/// target.
+#[cfg(feature = "bedrock")]
+const BEDROCK_P1: &str = r#"
+[providers.p1]
+kind = "bedrock"
+region = "us-east-1"
+creds = { kind = "default-chain" }
+"#;
+
+#[cfg(feature = "bedrock")]
+fn bedrock_400_provider(
+    body: &str,
+    upstream_type: Option<&str>,
+) -> Arc<CapabilityRejectingProvider> {
+    Arc::new(CapabilityRejectingProvider {
+        id: "p1",
+        status: 400,
+        body: body.into(),
+        upstream_type: upstream_type.map(str::to_string),
+        upstream_code: None,
+        calls: AtomicUsize::new(0),
+    })
+}
+
+#[cfg(feature = "bedrock")]
+fn bedrock_unmatched_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.message == "bedrock validation rejection matched no capability template")
+        .collect()
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn unmatched_bedrock_validation_warns_and_counts_once() {
+    // A flat AWS ValidationException the shipped-empty template table cannot
+    // match: the drift signal fires exactly once (WARN + counter), carrying
+    // only the token-free safe fields, and nothing is learned.
+    // The REAL native-lane shape: the namespaced wire form rides in the body
+    // byte-exact, and the lift lands the stripped `ValidationException` on
+    // `upstream_type` -- exactly what `build_client_error` produces for a
+    // Bedrock 400. The drift predicate reads the lifted token, so this proves
+    // the signal fires on production input, not a synthetic unnamespaced body.
+    let body = r#"{"__type":"com.amazon.coral.validate#ValidationException","message":"The parameter response_schema is not supported for this model."}"#;
+    let router = router_with(
+        BEDROCK_P1,
+        bedrock_400_provider(body, Some("ValidationException")),
+    );
+
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+    )
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert!(learn_warns(&events).is_empty());
+
+    let drift = bedrock_unmatched_warns(&events);
+    assert_eq!(drift.len(), 1);
+    assert_eq!(
+        drift[0].field("event"),
+        Some("bedrock_validation_unmatched")
+    );
+    assert_eq!(drift[0].field("state_key"), Some("m1"));
+    assert_eq!(drift[0].field("provider_kind"), Some("bedrock"));
+    assert_eq!(
+        drift[0].field("body"),
+        None,
+        "no body/message/prompt fields"
+    );
+    assert_eq!(drift[0].field("message"), None);
+    assert_eq!(router.metrics.bedrock_validation_unmatched_total(), 1);
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn non_validation_bedrock_400_does_not_warn_or_count() {
+    // A bedrock 400 that is NOT a ValidationException (a nested envelope with
+    // no lifted validation type): the matcher still yields None, but the drift
+    // predicate is false, so no WARN and no counter bump.
+    let body = r#"{"error":{"type":"invalid_request_error","message":"nested"}}"#;
+    let router = router_with(BEDROCK_P1, bedrock_400_provider(body, None));
+
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+    )
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert!(bedrock_unmatched_warns(&events).is_empty());
+    assert_eq!(router.metrics.bedrock_validation_unmatched_total(), 0);
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn non_bedrock_match_leaves_bedrock_unmatched_counter_untouched() {
+    // A successful openai-compat match learns web_search; the bedrock drift
+    // counter stays zero -- the drift signal is bedrock-only and fires only
+    // on the matcher's None branch.
+    let router = router_with(OPENAI_P1, self_identifying_provider());
+
+    let (dispatched, _events) = with_capture(
+        router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+    )
+    .await;
+
+    assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+    assert_eq!(router.metrics.bedrock_validation_unmatched_total(), 0);
+}
