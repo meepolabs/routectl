@@ -294,7 +294,7 @@ impl Router {
                     provider_kind,
                     now,
                 ) {
-                    crate::learned_capability::RoutingDecision::RouteAway(_) => {
+                    crate::learned_capability::RoutingDecision::RouteAway { .. } => {
                         // Strip-vs-route: a droppable capability the operator
                         // has not pinned to the wire is stripped in place;
                         // everything else (essentials, unknowns, pinned betas)

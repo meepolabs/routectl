@@ -13,7 +13,7 @@ use crate::router::chain::into_one_dispatch_target;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use parking_lot::Mutex as ParkingMutex;
-use routectl_core::capability::SignalTier;
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, CustomTool, Error, Message, Provider, ToolDef,
 };
@@ -655,6 +655,8 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
             first_seen: base,
             last_seen: base,
             expires_at: base,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
             in_flight: false,
             consecutive_failed_probes: 0,
         },
@@ -666,6 +668,8 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
             first_seen: base,
             last_seen: base,
             expires_at: base + Duration::from_hours(48),
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
             in_flight: false,
             consecutive_failed_probes: 0,
         },
@@ -706,7 +710,10 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
             "openai-compat",
             Instant::now(),
         ),
-        RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
         "the in_flight slot is held until the admission settles",
     );
 
@@ -754,6 +761,8 @@ fn acting_negative(
         first_seen: base,
         last_seen: base,
         expires_at: base + Duration::from_hours(48),
+        phase: FailurePhase::F1,
+        source: EvidenceSource::Live,
         in_flight: false,
         consecutive_failed_probes: 0,
     }
@@ -952,7 +961,10 @@ fn stripped_success_leaves_negative_while_admitted_probe_success_clears() {
         router
             .learned_capabilities
             .acting_negative_for("nick", "advisor", "openai-compat", base,),
-        crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        crate::learned_capability::RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
         "a stripped success never clears the stripped feature's negative",
     );
 }

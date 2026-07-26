@@ -26,7 +26,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the health panel payload.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Per-target health plus learned negatives for the routing surface.
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +75,10 @@ struct LearnedNegative {
     capability_key: String,
     signal_tier: &'static str,
     observations: u32,
+    /// Detection-phase token (`f1`/`f2`/`f3`) from the core `FailurePhase`.
+    phase: &'static str,
+    /// Evidence-source token (`live`/`probe`) from the core `EvidenceSource`.
+    source: &'static str,
 }
 
 /// Map the internal `CircuitPhase` to its snake_case wire token. Owned by
@@ -151,6 +155,8 @@ fn map_learned(entry: LearnedRegistryEntry) -> LearnedNegative {
         capability_key: entry.feature_key,
         signal_tier: entry.signal_tier.as_str(),
         observations: entry.observations,
+        phase: entry.phase.as_str(),
+        source: entry.source.as_str(),
     }
 }
 
@@ -203,7 +209,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
     use routectl_router::runtime_state::ProviderGateStatus;
     use routectl_router::{Config, Router};
     use serde_json::Value;
@@ -404,12 +410,16 @@ mod tests {
             first_seen: Instant::now(),
             last_seen: Instant::now(),
             expires_at: Instant::now(),
+            phase: FailurePhase::F2,
+            source: EvidenceSource::Live,
         };
         let mapped = map_learned(entry);
         assert_eq!(mapped.state_key, "opus");
         assert_eq!(mapped.capability_key, "structured_output");
         assert_eq!(mapped.signal_tier, "self-identifying");
         assert_eq!(mapped.observations, 2);
+        assert_eq!(mapped.phase, "f2");
+        assert_eq!(mapped.source, "live");
     }
 
     /// The DTO field names MUST equal the `docs/LOGGING.md` contract tokens,
@@ -422,6 +432,8 @@ mod tests {
             capability_key: "web_search".into(),
             signal_tier: "inferred",
             observations: 1,
+            phase: "f1",
+            source: "live",
         })
         .unwrap();
         let obj = value.as_object().unwrap();
@@ -429,6 +441,12 @@ mod tests {
         assert!(obj.contains_key(vocabulary::CAPABILITY_KEY));
         assert!(obj.contains_key(vocabulary::SIGNAL_TIER));
         assert!(obj.contains_key("observations"));
+        // The attribution fields added by the phase-on-entry migration
+        // serialize under their own stable snake_case keys.
+        assert!(obj.contains_key("phase"));
+        assert!(obj.contains_key("source"));
+        assert_eq!(obj["phase"], Value::from("f1"));
+        assert_eq!(obj["source"], Value::from("live"));
         // The pre-rename token must NOT surface on the wire.
         assert!(!obj.contains_key("feature_key"));
     }
@@ -482,6 +500,8 @@ mod tests {
             capability_key: "web_search".into(),
             signal_tier: "inferred",
             observations: 1,
+            phase: "f1",
+            source: "live",
         })
         .unwrap();
         let obj = wire.as_object().unwrap();
@@ -540,6 +560,8 @@ mod tests {
                 first_seen: Instant::now(),
                 last_seen: Instant::now(),
                 expires_at: Instant::now(),
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
             })],
         };
         let text = serde_json::to_string(&panel).unwrap();

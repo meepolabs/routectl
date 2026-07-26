@@ -163,7 +163,7 @@ fn override_unsupported_hard_drops_and_empties_chain_like_legacy_list() {
 
 #[test]
 fn force_supported_flips_acting_learned_route_away_to_allow() {
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;
 
     // Arrange -- capability enabled with a self-identifying (acting-now)
@@ -182,6 +182,7 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
 
@@ -212,6 +213,7 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -229,7 +231,7 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
 
 #[test]
 fn force_supported_mask_admits_no_probe_where_unmasked_would() {
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;
 
     // A zero-hour decay lapses an observed negative immediately, so the
@@ -250,6 +252,7 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -277,6 +280,7 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
     let mut admissions = Vec::new();
@@ -296,7 +300,7 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
 
 #[test]
 fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;
 
     // A per-provider override routes `web_search` away; a droppable
@@ -318,6 +322,7 @@ fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
         "advisor",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
 

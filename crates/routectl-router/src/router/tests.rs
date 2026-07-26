@@ -551,7 +551,7 @@ fn carry_over_k_store_from_preserves_windows_and_lru_order() {
 
 #[test]
 fn router_new_builds_learned_registry_reflecting_config_knobs() {
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::{Duration, Instant};
 
     // Arrange: a `[capability]` block with a non-default 1h decay so the
@@ -573,6 +573,7 @@ fn router_new_builds_learned_registry_reflecting_config_knobs() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         t0,
     );
     assert_eq!(
@@ -582,7 +583,10 @@ fn router_new_builds_learned_registry_reflecting_config_knobs() {
             "openai-compat",
             t0 + Duration::from_mins(30),
         ),
-        crate::learned_capability::RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        crate::learned_capability::RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
         "must still act well inside the configured decay window",
     );
     assert_eq!(
@@ -639,7 +643,7 @@ fn router_new_builds_override_registry_with_static_provenance_from_legacy_config
 
 #[test]
 fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;
 
     // Arrange: learn a negative in the outgoing Router; both Routers
@@ -652,6 +656,7 @@ fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -669,7 +674,7 @@ fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
 #[test]
 fn carry_over_learned_from_clears_in_flight_slot() {
     use crate::learned_capability::RoutingDecision;
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::{Duration, Instant};
 
     // Arrange: a 1h decay so the probe slot can be claimed on a lapsed
@@ -686,6 +691,7 @@ fn carry_over_learned_from_clears_in_flight_slot() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         t0,
     );
     let t_probe = t0 + Duration::from_hours(1) + Duration::from_secs(1);
@@ -731,7 +737,7 @@ fn carry_over_learned_from_clears_in_flight_slot() {
 #[test]
 fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     use crate::learned_capability::RoutingDecision;
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;
 
     // Arrange: the outgoing Router masked `web_search` on provider `p`
@@ -748,12 +754,22 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     let t0 = Instant::now();
     // A masked entry (the cell that changes) plus an unrelated healthy
     // entry (no override in either config).
-    before
-        .learned_capabilities
-        .observe("p", "web_search", "", SignalTier::SelfIdentifying, t0);
-    before
-        .learned_capabilities
-        .observe("p", "computer_use", "", SignalTier::SelfIdentifying, t0);
+    before.learned_capabilities.observe(
+        "p",
+        "web_search",
+        "",
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+        t0,
+    );
+    before.learned_capabilities.observe(
+        "p",
+        "computer_use",
+        "",
+        SignalTier::SelfIdentifying,
+        FailurePhase::F1,
+        t0,
+    );
 
     let mut after = Router::new(Arc::new(Config::default()));
     assert_eq!(after.catalog_version, before.catalog_version);
@@ -780,14 +796,17 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
         after
             .learned_capabilities
             .acting_negative_for("p", "computer_use", "", now),
-        RoutingDecision::RouteAway(SignalTier::SelfIdentifying),
+        RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
         "an entry with no override change must ride across untouched",
     );
 }
 
 #[test]
 fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;
 
     // Arrange
@@ -798,6 +817,7 @@ fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -833,7 +853,7 @@ fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
 
 #[test]
 fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
-    use routectl_core::capability::SignalTier;
+    use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::Instant;
 
     // Arrange: the outgoing Router was built against overlay revision 3.
@@ -845,6 +865,7 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
         "web_search",
         "openai-compat",
         SignalTier::SelfIdentifying,
+        FailurePhase::F1,
         Instant::now(),
     );
     // The rebuild picked up a newer overlay revision.
