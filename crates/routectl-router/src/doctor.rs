@@ -61,6 +61,86 @@ pub struct WouldTrimPanel {
 pub struct DoctorPanels {
     /// The steady-state would-trim panel, when computed.
     pub would_trim: Option<WouldTrimPanel>,
+    /// The learned-capability truth matrix panel, when computed.
+    pub capability_matrix: Option<CapabilityMatrixPanel>,
+}
+
+/// Availability of the learned-capability matrix's ledger-replay source, a
+/// first-class tri-state: `Available` (at least one learned row replayed),
+/// `Empty` (the source was readable and had zero rows -- an honest,
+/// non-degraded empty), or `Unavailable` with a path-free class code (the
+/// source could not be read for this run's revision). A diagnostic never
+/// silently collapses "could not read" into "nothing learned".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MatrixAvailability {
+    /// The ledger replayed at least one learned entry.
+    Available,
+    /// The source was readable and held zero learned rows.
+    Empty,
+    /// The source could not be read; `code` is a path-free class token.
+    Unavailable {
+        /// Path-free class token (e.g. `no_data`, `revision_mismatch`).
+        code: &'static str,
+    },
+}
+
+/// One resolved cell of the capability matrix: the display verdict for a
+/// `(lane, capability)` pair. `verdict` is a stable token (the core
+/// `Verdict::as_str` vocabulary plus the panel-only `forced_supported` /
+/// `forced_unsupported` override tokens); `supported` carries the polarity
+/// the token alone omits for a prior `assumed` cell (`None` only for an
+/// `unknown` cell); `source` is the winning layer's tag
+/// (`override` / `live` / `probe` / `prior`), `None` for `unknown`.
+/// `age_ms` is the learned/verified cell's age since last seen (`None` for
+/// prior / override / unknown cells); `stale` flags a verified cell older
+/// than the operator staleness hint or a prior stamp past the same
+/// threshold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatrixCell {
+    /// The display verdict token.
+    pub verdict: &'static str,
+    /// Support polarity; `None` only for an `unknown` cell.
+    pub supported: Option<bool>,
+    /// The winning layer's source tag; `None` only for an `unknown` cell.
+    pub source: Option<&'static str>,
+    /// Age since last seen in ms for a learned/verified cell; else `None`.
+    pub age_ms: Option<i64>,
+    /// Whether the cell is stale past the operator staleness hint.
+    pub stale: bool,
+}
+
+/// One matrix row: a lane (a config model nickname, or a learned state key
+/// with no config entry) and its cells aligned 1:1 with the panel's
+/// `columns`. `routed` is false for a lane the loaded config no longer maps
+/// -- a stale ledger row for a removed model, surfaced honestly rather than
+/// silently dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MatrixLane {
+    /// The lane key (config model nickname or learned state key).
+    pub lane: String,
+    /// Whether the loaded config still maps this lane to a provider.
+    pub routed: bool,
+    /// Cells aligned 1:1 with the panel's `columns`.
+    pub cells: Vec<MatrixCell>,
+}
+
+/// The learned-capability truth matrix panel: lanes (rows) by capability
+/// keys (columns). `columns` is the five well-known capability keys
+/// followed by any observed keys outside that set, capped at a fixed
+/// render width; `other_overflow` is the count of observed keys beyond the
+/// cap (rendered as `(+N more)`). `lanes` is empty when `availability` is
+/// not `Available` and no config-derived cell exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilityMatrixPanel {
+    /// The learned ledger-replay source availability tri-state.
+    pub availability: MatrixAvailability,
+    /// Column keys: the five well-known keys, then capped observed others.
+    pub columns: Vec<String>,
+    /// Count of observed other-column keys beyond the render cap.
+    pub other_overflow: u32,
+    /// Matrix rows.
+    pub lanes: Vec<MatrixLane>,
 }
 
 /// The full doctor report: a flat findings list plus the structured panels.
@@ -157,6 +237,7 @@ mod tests {
                     verdict_cold: 1,
                     verdict_unpriced: 0,
                 }),
+                capability_matrix: None,
             },
         };
 

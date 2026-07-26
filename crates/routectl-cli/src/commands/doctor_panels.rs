@@ -8,9 +8,12 @@
 
 use chrono::{DateTime, Local};
 
-use routectl_router::{Config, WouldTrimPanel};
+use routectl_router::{
+    CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell, WouldTrimPanel,
+};
 use routectl_usage::{OpenError, WouldTrimSummary, open_readonly, would_trim_summary};
 
+use super::catalog::render_table;
 use super::usage::{WindowFlag, human_count, window_bounds};
 use crate::server::ledger_reader::open_error_class;
 
@@ -89,6 +92,88 @@ pub(crate) fn render_would_trim_panel(panel: &WouldTrimPanel) -> String {
         panel.verdict_cold,
         panel.verdict_unpriced,
     )
+}
+
+/// Render the capability matrix panel as a human block: a state line for
+/// the learned ledger-replay source, then an aligned lane-by-capability
+/// grid. Empty and Unavailable render a distinct honest state line and still
+/// show any config-derived (prior / override) cells. A lane the loaded
+/// config no longer maps is marked `(unrouted)`.
+pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> String {
+    let mut out = String::new();
+    out.push_str("capability matrix: ");
+    out.push_str(&matrix_state_line(&panel.availability));
+    out.push('\n');
+
+    if panel.lanes.is_empty() {
+        out.push_str("  no capability lanes observed\n");
+        return out;
+    }
+
+    let mut header: Vec<String> = Vec::with_capacity(panel.columns.len() + 1);
+    header.push("lane".to_string());
+    header.extend(panel.columns.iter().cloned());
+
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(panel.lanes.len() + 1);
+    rows.push(header);
+    for lane in &panel.lanes {
+        let mut row: Vec<String> = Vec::with_capacity(panel.columns.len() + 1);
+        let label = if lane.routed {
+            lane.lane.clone()
+        } else {
+            format!("{} (unrouted)", lane.lane)
+        };
+        row.push(label);
+        row.extend(lane.cells.iter().map(cell_token));
+        rows.push(row);
+    }
+
+    for line in render_table(&rows).lines() {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if panel.other_overflow > 0 {
+        out.push_str(&format!(
+            "  (+{} more capability columns)\n",
+            panel.other_overflow
+        ));
+    }
+    out
+}
+
+/// The honest state line for the learned ledger-replay source. Empty and
+/// Unavailable are distinct: an empty source is readable-with-no-rows, an
+/// unavailable one could not be read (its class code is surfaced).
+fn matrix_state_line(availability: &MatrixAvailability) -> String {
+    match availability {
+        MatrixAvailability::Available => {
+            "learned registry replayed; live/probe cells are current".to_string()
+        }
+        MatrixAvailability::Empty => {
+            "learned registry empty (no learned rows); prior/override cells only".to_string()
+        }
+        MatrixAvailability::Unavailable { code } => {
+            format!("learned registry unavailable ({code}); prior/override cells only")
+        }
+    }
+}
+
+/// One cell as a compact token: `verdict[source]` with a trailing `(stale)`
+/// marker when stale, or `-` for an unknown (no-signal) cell. The precise
+/// age in ms lives on the serialized DTO, not the compact human grid.
+fn cell_token(cell: &MatrixCell) -> String {
+    match cell.source {
+        None => "-".to_string(),
+        Some(source) => {
+            let mut token = format!("{}[{source}]", cell.verdict);
+            if cell.stale {
+                token.push_str(" (stale)");
+            }
+            token
+        }
+    }
 }
 
 #[cfg(test)]

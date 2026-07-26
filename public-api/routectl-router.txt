@@ -359,6 +359,7 @@ pub type routectl_router::catalog::CatalogRow::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::catalog::CatalogRow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::catalog::CatalogRow::into_shared(self) -> Shared
 pub fn routectl_router::catalog::baked_table_rows() -> alloc::vec::Vec<routectl_router::catalog::BakedPricingRow>
+pub fn routectl_router::catalog::epoch_day_age(&str, i64) -> core::option::Option<i64>
 pub fn routectl_router::catalog::is_cataloged_provider_kind(&str) -> bool
 pub fn routectl_router::catalog::is_stale_days(&str, i64, i64) -> bool
 pub fn routectl_router::catalog::is_stale_days_today(&str, i64) -> bool
@@ -369,6 +370,7 @@ pub fn routectl_router::catalog::lookup_overlay_cell<'a>(&str, &str, &'a routect
 pub fn routectl_router::catalog::lookup_with_overrides(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> routectl_router::catalog::CatalogRow
 pub fn routectl_router::catalog::merge(core::option::Option<&routectl_router::catalog::CatalogRow>, core::option::Option<&core::option::Option<routectl_router::OverlayCell>>) -> routectl_router::catalog::EffectiveRow
 pub const fn routectl_router::catalog::stale_after_days() -> i64
+pub fn routectl_router::catalog::today_epoch_day() -> i64
 pub fn routectl_router::catalog::validate_overrides(&alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::catalog::warn_if_stale()
 pub mod routectl_router::class_policy
@@ -4755,6 +4757,66 @@ impl<T> typenum::type_operators::Same for routectl_router::KeepReason
 pub type routectl_router::KeepReason::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::KeepReason where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::KeepReason::into_shared(self) -> Shared
+pub enum routectl_router::MatrixAvailability
+pub routectl_router::MatrixAvailability::Available
+pub routectl_router::MatrixAvailability::Empty
+pub routectl_router::MatrixAvailability::Unavailable
+pub routectl_router::MatrixAvailability::Unavailable::code: &'static str
+impl core::clone::Clone for routectl_router::MatrixAvailability
+pub fn routectl_router::MatrixAvailability::clone(&self) -> routectl_router::MatrixAvailability
+impl core::cmp::Eq for routectl_router::MatrixAvailability
+impl core::cmp::PartialEq for routectl_router::MatrixAvailability
+pub fn routectl_router::MatrixAvailability::eq(&self, &routectl_router::MatrixAvailability) -> bool
+impl core::fmt::Debug for routectl_router::MatrixAvailability
+pub fn routectl_router::MatrixAvailability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::MatrixAvailability
+impl serde_core::ser::Serialize for routectl_router::MatrixAvailability
+pub fn routectl_router::MatrixAvailability::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_router::MatrixAvailability
+impl core::marker::Send for routectl_router::MatrixAvailability
+impl core::marker::Sync for routectl_router::MatrixAvailability
+impl core::marker::Unpin for routectl_router::MatrixAvailability
+impl core::marker::UnsafeUnpin for routectl_router::MatrixAvailability
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::MatrixAvailability
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::MatrixAvailability
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::MatrixAvailability where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::MatrixAvailability::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::MatrixAvailability where U: core::convert::From<T>
+pub fn routectl_router::MatrixAvailability::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::MatrixAvailability where U: core::convert::Into<T>
+pub type routectl_router::MatrixAvailability::Error = core::convert::Infallible
+pub fn routectl_router::MatrixAvailability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::MatrixAvailability where U: core::convert::TryFrom<T>
+pub type routectl_router::MatrixAvailability::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::MatrixAvailability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::MatrixAvailability where T: core::clone::Clone
+pub type routectl_router::MatrixAvailability::Owned = T
+pub fn routectl_router::MatrixAvailability::clone_into(&self, &mut T)
+pub fn routectl_router::MatrixAvailability::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::MatrixAvailability where T: core::clone::Clone
+pub fn routectl_router::MatrixAvailability::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::MatrixAvailability where T: 'static + ?core::marker::Sized
+pub fn routectl_router::MatrixAvailability::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::MatrixAvailability where T: ?core::marker::Sized
+pub fn routectl_router::MatrixAvailability::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::MatrixAvailability where T: ?core::marker::Sized
+pub fn routectl_router::MatrixAvailability::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::MatrixAvailability where T: core::clone::Clone
+pub unsafe fn routectl_router::MatrixAvailability::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::MatrixAvailability
+pub fn routectl_router::MatrixAvailability::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::MatrixAvailability where T: core::clone::Clone
+pub fn routectl_router::MatrixAvailability::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::MatrixAvailability
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::MatrixAvailability where T: ?core::marker::Sized
+pub fn routectl_router::MatrixAvailability::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::MatrixAvailability::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::MatrixAvailability
+impl<T> tracing::instrument::WithSubscriber for routectl_router::MatrixAvailability
+impl<T> typenum::type_operators::Same for routectl_router::MatrixAvailability
+pub type routectl_router::MatrixAvailability::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixAvailability where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::MatrixAvailability::into_shared(self) -> Shared
 pub enum routectl_router::MigrateError
 pub routectl_router::MigrateError::Refused(routectl_router::Refusal)
 pub routectl_router::MigrateError::V1ToV2(routectl_router::MigrationError)
@@ -6873,6 +6935,66 @@ impl<T> typenum::type_operators::Same for routectl_router::CapabilityEventRow
 pub type routectl_router::CapabilityEventRow::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CapabilityEventRow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::CapabilityEventRow::into_shared(self) -> Shared
+pub struct routectl_router::CapabilityMatrixPanel
+pub routectl_router::CapabilityMatrixPanel::availability: routectl_router::MatrixAvailability
+pub routectl_router::CapabilityMatrixPanel::columns: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::CapabilityMatrixPanel::lanes: alloc::vec::Vec<routectl_router::MatrixLane>
+pub routectl_router::CapabilityMatrixPanel::other_overflow: u32
+impl core::clone::Clone for routectl_router::CapabilityMatrixPanel
+pub fn routectl_router::CapabilityMatrixPanel::clone(&self) -> routectl_router::CapabilityMatrixPanel
+impl core::cmp::Eq for routectl_router::CapabilityMatrixPanel
+impl core::cmp::PartialEq for routectl_router::CapabilityMatrixPanel
+pub fn routectl_router::CapabilityMatrixPanel::eq(&self, &routectl_router::CapabilityMatrixPanel) -> bool
+impl core::fmt::Debug for routectl_router::CapabilityMatrixPanel
+pub fn routectl_router::CapabilityMatrixPanel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::CapabilityMatrixPanel
+impl serde_core::ser::Serialize for routectl_router::CapabilityMatrixPanel
+pub fn routectl_router::CapabilityMatrixPanel::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_router::CapabilityMatrixPanel
+impl core::marker::Send for routectl_router::CapabilityMatrixPanel
+impl core::marker::Sync for routectl_router::CapabilityMatrixPanel
+impl core::marker::Unpin for routectl_router::CapabilityMatrixPanel
+impl core::marker::UnsafeUnpin for routectl_router::CapabilityMatrixPanel
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CapabilityMatrixPanel
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CapabilityMatrixPanel
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CapabilityMatrixPanel where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CapabilityMatrixPanel::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CapabilityMatrixPanel where U: core::convert::From<T>
+pub fn routectl_router::CapabilityMatrixPanel::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CapabilityMatrixPanel where U: core::convert::Into<T>
+pub type routectl_router::CapabilityMatrixPanel::Error = core::convert::Infallible
+pub fn routectl_router::CapabilityMatrixPanel::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CapabilityMatrixPanel where U: core::convert::TryFrom<T>
+pub type routectl_router::CapabilityMatrixPanel::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CapabilityMatrixPanel::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CapabilityMatrixPanel where T: core::clone::Clone
+pub type routectl_router::CapabilityMatrixPanel::Owned = T
+pub fn routectl_router::CapabilityMatrixPanel::clone_into(&self, &mut T)
+pub fn routectl_router::CapabilityMatrixPanel::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CapabilityMatrixPanel where T: core::clone::Clone
+pub fn routectl_router::CapabilityMatrixPanel::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CapabilityMatrixPanel where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CapabilityMatrixPanel::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CapabilityMatrixPanel where T: ?core::marker::Sized
+pub fn routectl_router::CapabilityMatrixPanel::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CapabilityMatrixPanel where T: ?core::marker::Sized
+pub fn routectl_router::CapabilityMatrixPanel::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CapabilityMatrixPanel where T: core::clone::Clone
+pub unsafe fn routectl_router::CapabilityMatrixPanel::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CapabilityMatrixPanel
+pub fn routectl_router::CapabilityMatrixPanel::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CapabilityMatrixPanel where T: core::clone::Clone
+pub fn routectl_router::CapabilityMatrixPanel::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CapabilityMatrixPanel
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CapabilityMatrixPanel where T: ?core::marker::Sized
+pub fn routectl_router::CapabilityMatrixPanel::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CapabilityMatrixPanel::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CapabilityMatrixPanel
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CapabilityMatrixPanel
+impl<T> typenum::type_operators::Same for routectl_router::CapabilityMatrixPanel
+pub type routectl_router::CapabilityMatrixPanel::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CapabilityMatrixPanel where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CapabilityMatrixPanel::into_shared(self) -> Shared
 pub struct routectl_router::CapabilityObservation
 pub routectl_router::CapabilityObservation::capability_key: &'static str
 pub routectl_router::CapabilityObservation::direction: routectl_router::ObservationDirection
@@ -7698,7 +7820,68 @@ impl<T> typenum::type_operators::Same for routectl_router::router::DispatchedStr
 pub type routectl_router::router::DispatchedStream::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::DispatchedStream where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::DispatchedStream::into_shared(self) -> Shared
+pub struct routectl_router::DisplayVerdict
+pub routectl_router::DisplayVerdict::source: core::option::Option<&'static str>
+pub routectl_router::DisplayVerdict::supported: core::option::Option<bool>
+pub routectl_router::DisplayVerdict::verdict: &'static str
+impl core::clone::Clone for routectl_router::DisplayVerdict
+pub fn routectl_router::DisplayVerdict::clone(&self) -> routectl_router::DisplayVerdict
+impl core::cmp::Eq for routectl_router::DisplayVerdict
+impl core::cmp::PartialEq for routectl_router::DisplayVerdict
+pub fn routectl_router::DisplayVerdict::eq(&self, &routectl_router::DisplayVerdict) -> bool
+impl core::fmt::Debug for routectl_router::DisplayVerdict
+pub fn routectl_router::DisplayVerdict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::DisplayVerdict
+impl core::marker::StructuralPartialEq for routectl_router::DisplayVerdict
+impl core::marker::Freeze for routectl_router::DisplayVerdict
+impl core::marker::Send for routectl_router::DisplayVerdict
+impl core::marker::Sync for routectl_router::DisplayVerdict
+impl core::marker::Unpin for routectl_router::DisplayVerdict
+impl core::marker::UnsafeUnpin for routectl_router::DisplayVerdict
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::DisplayVerdict
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::DisplayVerdict
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::DisplayVerdict where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::DisplayVerdict::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::DisplayVerdict where U: core::convert::From<T>
+pub fn routectl_router::DisplayVerdict::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::DisplayVerdict where U: core::convert::Into<T>
+pub type routectl_router::DisplayVerdict::Error = core::convert::Infallible
+pub fn routectl_router::DisplayVerdict::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::DisplayVerdict where U: core::convert::TryFrom<T>
+pub type routectl_router::DisplayVerdict::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::DisplayVerdict::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::DisplayVerdict where T: core::clone::Clone
+pub type routectl_router::DisplayVerdict::Owned = T
+pub fn routectl_router::DisplayVerdict::clone_into(&self, &mut T)
+pub fn routectl_router::DisplayVerdict::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::DisplayVerdict where T: core::clone::Clone
+pub fn routectl_router::DisplayVerdict::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::DisplayVerdict where T: 'static + ?core::marker::Sized
+pub fn routectl_router::DisplayVerdict::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::DisplayVerdict where T: ?core::marker::Sized
+pub fn routectl_router::DisplayVerdict::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::DisplayVerdict where T: ?core::marker::Sized
+pub fn routectl_router::DisplayVerdict::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::DisplayVerdict where T: core::clone::Clone
+pub unsafe fn routectl_router::DisplayVerdict::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::DisplayVerdict
+pub fn routectl_router::DisplayVerdict::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::DisplayVerdict where T: core::clone::Clone
+pub fn routectl_router::DisplayVerdict::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::DisplayVerdict
+impl<T> outref::AsOut<T> for routectl_router::DisplayVerdict where T: core::marker::Copy
+pub fn routectl_router::DisplayVerdict::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::DisplayVerdict where T: ?core::marker::Sized
+pub fn routectl_router::DisplayVerdict::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::DisplayVerdict::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::DisplayVerdict
+impl<T> tracing::instrument::WithSubscriber for routectl_router::DisplayVerdict
+impl<T> typenum::type_operators::Same for routectl_router::DisplayVerdict
+pub type routectl_router::DisplayVerdict::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::DisplayVerdict where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::DisplayVerdict::into_shared(self) -> Shared
 pub struct routectl_router::DoctorPanels
+pub routectl_router::DoctorPanels::capability_matrix: core::option::Option<routectl_router::CapabilityMatrixPanel>
 pub routectl_router::DoctorPanels::would_trim: core::option::Option<routectl_router::WouldTrimPanel>
 impl core::clone::Clone for routectl_router::DoctorPanels
 pub fn routectl_router::DoctorPanels::clone(&self) -> routectl_router::DoctorPanels
@@ -8428,6 +8611,55 @@ impl<T> typenum::type_operators::Same for routectl_router::KSessionWindow
 pub type routectl_router::KSessionWindow::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::KSessionWindow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::KSessionWindow::into_shared(self) -> Shared
+pub struct routectl_router::LearnedCapabilityRegistry
+impl routectl_router::LearnedCapabilityRegistry
+pub fn routectl_router::LearnedCapabilityRegistry::acting_negative_for(&self, &str, &str, &str, std::time::Instant) -> routectl_router::learned_capability::RoutingDecision
+pub fn routectl_router::LearnedCapabilityRegistry::expire_keyed(&self, &str, &str, &str, std::time::Instant) -> bool
+pub fn routectl_router::LearnedCapabilityRegistry::export_entries(&self) -> alloc::vec::Vec<routectl_router::learned_capability::ExportedEntry>
+pub fn routectl_router::LearnedCapabilityRegistry::from_capability_config(&routectl_router::CapabilityConfig) -> Self
+pub fn routectl_router::LearnedCapabilityRegistry::import_entries(&self, alloc::vec::Vec<routectl_router::learned_capability::ExportedEntry>)
+pub fn routectl_router::LearnedCapabilityRegistry::is_verified_working(&self, &str, &str, &str, std::time::Instant) -> bool
+pub fn routectl_router::LearnedCapabilityRegistry::new(core::time::Duration, core::time::Duration, usize) -> Self
+pub fn routectl_router::LearnedCapabilityRegistry::observe(&self, &str, &str, &str, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase, routectl_core::capability::EvidenceSource, std::time::Instant) -> routectl_router::learned_capability::ObserveOutcome
+pub fn routectl_router::LearnedCapabilityRegistry::observe_positive(&self, &str, &str, &str, routectl_core::capability::EvidenceSource, std::time::Instant) -> routectl_router::learned_capability::PositiveOutcome
+pub fn routectl_router::LearnedCapabilityRegistry::record_probe_outcome(&self, &str, &str, &str, routectl_router::learned_capability::ProbeOutcome, std::time::Instant)
+pub fn routectl_router::LearnedCapabilityRegistry::remove_keyed(&self, &str, &str, &str) -> bool
+pub fn routectl_router::LearnedCapabilityRegistry::snapshot(&self) -> alloc::vec::Vec<routectl_router::LearnedRegistryEntry>
+impl core::fmt::Debug for routectl_router::LearnedCapabilityRegistry
+pub fn routectl_router::LearnedCapabilityRegistry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl !core::marker::Freeze for routectl_router::LearnedCapabilityRegistry
+impl core::marker::Send for routectl_router::LearnedCapabilityRegistry
+impl core::marker::Sync for routectl_router::LearnedCapabilityRegistry
+impl core::marker::Unpin for routectl_router::LearnedCapabilityRegistry
+impl core::marker::UnsafeUnpin for routectl_router::LearnedCapabilityRegistry
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_router::LearnedCapabilityRegistry
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::LearnedCapabilityRegistry
+impl<T, U> core::convert::Into<U> for routectl_router::LearnedCapabilityRegistry where U: core::convert::From<T>
+pub fn routectl_router::LearnedCapabilityRegistry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::LearnedCapabilityRegistry where U: core::convert::Into<T>
+pub type routectl_router::LearnedCapabilityRegistry::Error = core::convert::Infallible
+pub fn routectl_router::LearnedCapabilityRegistry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::LearnedCapabilityRegistry where U: core::convert::TryFrom<T>
+pub type routectl_router::LearnedCapabilityRegistry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::LearnedCapabilityRegistry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_router::LearnedCapabilityRegistry where T: 'static + ?core::marker::Sized
+pub fn routectl_router::LearnedCapabilityRegistry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::LearnedCapabilityRegistry where T: ?core::marker::Sized
+pub fn routectl_router::LearnedCapabilityRegistry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::LearnedCapabilityRegistry where T: ?core::marker::Sized
+pub fn routectl_router::LearnedCapabilityRegistry::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_router::LearnedCapabilityRegistry
+pub fn routectl_router::LearnedCapabilityRegistry::from(T) -> T
+impl<T> either::into_either::IntoEither for routectl_router::LearnedCapabilityRegistry
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::LearnedCapabilityRegistry where T: ?core::marker::Sized
+pub fn routectl_router::LearnedCapabilityRegistry::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::LearnedCapabilityRegistry::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::LearnedCapabilityRegistry
+impl<T> tracing::instrument::WithSubscriber for routectl_router::LearnedCapabilityRegistry
+impl<T> typenum::type_operators::Same for routectl_router::LearnedCapabilityRegistry
+pub type routectl_router::LearnedCapabilityRegistry::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::LearnedCapabilityRegistry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::LearnedCapabilityRegistry::into_shared(self) -> Shared
 pub struct routectl_router::LearnedRegistryEntry
 pub routectl_router::LearnedRegistryEntry::expires_at: std::time::Instant
 pub routectl_router::LearnedRegistryEntry::feature_key: alloc::string::String
@@ -8716,6 +8948,126 @@ impl<T> typenum::type_operators::Same for routectl_router::LogConfig
 pub type routectl_router::LogConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::LogConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::LogConfig::into_shared(self) -> Shared
+pub struct routectl_router::MatrixCell
+pub routectl_router::MatrixCell::age_ms: core::option::Option<i64>
+pub routectl_router::MatrixCell::source: core::option::Option<&'static str>
+pub routectl_router::MatrixCell::stale: bool
+pub routectl_router::MatrixCell::supported: core::option::Option<bool>
+pub routectl_router::MatrixCell::verdict: &'static str
+impl core::clone::Clone for routectl_router::MatrixCell
+pub fn routectl_router::MatrixCell::clone(&self) -> routectl_router::MatrixCell
+impl core::cmp::Eq for routectl_router::MatrixCell
+impl core::cmp::PartialEq for routectl_router::MatrixCell
+pub fn routectl_router::MatrixCell::eq(&self, &routectl_router::MatrixCell) -> bool
+impl core::fmt::Debug for routectl_router::MatrixCell
+pub fn routectl_router::MatrixCell::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::MatrixCell
+impl serde_core::ser::Serialize for routectl_router::MatrixCell
+pub fn routectl_router::MatrixCell::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_router::MatrixCell
+impl core::marker::Send for routectl_router::MatrixCell
+impl core::marker::Sync for routectl_router::MatrixCell
+impl core::marker::Unpin for routectl_router::MatrixCell
+impl core::marker::UnsafeUnpin for routectl_router::MatrixCell
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::MatrixCell
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::MatrixCell
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::MatrixCell where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::MatrixCell::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::MatrixCell where U: core::convert::From<T>
+pub fn routectl_router::MatrixCell::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::MatrixCell where U: core::convert::Into<T>
+pub type routectl_router::MatrixCell::Error = core::convert::Infallible
+pub fn routectl_router::MatrixCell::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::MatrixCell where U: core::convert::TryFrom<T>
+pub type routectl_router::MatrixCell::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::MatrixCell::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::MatrixCell where T: core::clone::Clone
+pub type routectl_router::MatrixCell::Owned = T
+pub fn routectl_router::MatrixCell::clone_into(&self, &mut T)
+pub fn routectl_router::MatrixCell::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::MatrixCell where T: core::clone::Clone
+pub fn routectl_router::MatrixCell::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::MatrixCell where T: 'static + ?core::marker::Sized
+pub fn routectl_router::MatrixCell::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::MatrixCell where T: ?core::marker::Sized
+pub fn routectl_router::MatrixCell::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::MatrixCell where T: ?core::marker::Sized
+pub fn routectl_router::MatrixCell::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::MatrixCell where T: core::clone::Clone
+pub unsafe fn routectl_router::MatrixCell::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::MatrixCell
+pub fn routectl_router::MatrixCell::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::MatrixCell where T: core::clone::Clone
+pub fn routectl_router::MatrixCell::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::MatrixCell
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::MatrixCell where T: ?core::marker::Sized
+pub fn routectl_router::MatrixCell::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::MatrixCell::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::MatrixCell
+impl<T> tracing::instrument::WithSubscriber for routectl_router::MatrixCell
+impl<T> typenum::type_operators::Same for routectl_router::MatrixCell
+pub type routectl_router::MatrixCell::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixCell where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::MatrixCell::into_shared(self) -> Shared
+pub struct routectl_router::MatrixLane
+pub routectl_router::MatrixLane::cells: alloc::vec::Vec<routectl_router::MatrixCell>
+pub routectl_router::MatrixLane::lane: alloc::string::String
+pub routectl_router::MatrixLane::routed: bool
+impl core::clone::Clone for routectl_router::MatrixLane
+pub fn routectl_router::MatrixLane::clone(&self) -> routectl_router::MatrixLane
+impl core::cmp::Eq for routectl_router::MatrixLane
+impl core::cmp::PartialEq for routectl_router::MatrixLane
+pub fn routectl_router::MatrixLane::eq(&self, &routectl_router::MatrixLane) -> bool
+impl core::fmt::Debug for routectl_router::MatrixLane
+pub fn routectl_router::MatrixLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::MatrixLane
+impl serde_core::ser::Serialize for routectl_router::MatrixLane
+pub fn routectl_router::MatrixLane::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_router::MatrixLane
+impl core::marker::Send for routectl_router::MatrixLane
+impl core::marker::Sync for routectl_router::MatrixLane
+impl core::marker::Unpin for routectl_router::MatrixLane
+impl core::marker::UnsafeUnpin for routectl_router::MatrixLane
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::MatrixLane
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::MatrixLane
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::MatrixLane where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::MatrixLane::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::MatrixLane where U: core::convert::From<T>
+pub fn routectl_router::MatrixLane::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::MatrixLane where U: core::convert::Into<T>
+pub type routectl_router::MatrixLane::Error = core::convert::Infallible
+pub fn routectl_router::MatrixLane::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::MatrixLane where U: core::convert::TryFrom<T>
+pub type routectl_router::MatrixLane::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::MatrixLane::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::MatrixLane where T: core::clone::Clone
+pub type routectl_router::MatrixLane::Owned = T
+pub fn routectl_router::MatrixLane::clone_into(&self, &mut T)
+pub fn routectl_router::MatrixLane::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::MatrixLane where T: core::clone::Clone
+pub fn routectl_router::MatrixLane::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::MatrixLane where T: 'static + ?core::marker::Sized
+pub fn routectl_router::MatrixLane::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::MatrixLane where T: ?core::marker::Sized
+pub fn routectl_router::MatrixLane::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::MatrixLane where T: ?core::marker::Sized
+pub fn routectl_router::MatrixLane::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::MatrixLane where T: core::clone::Clone
+pub unsafe fn routectl_router::MatrixLane::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::MatrixLane
+pub fn routectl_router::MatrixLane::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::MatrixLane where T: core::clone::Clone
+pub fn routectl_router::MatrixLane::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::MatrixLane
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::MatrixLane where T: ?core::marker::Sized
+pub fn routectl_router::MatrixLane::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::MatrixLane::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::MatrixLane
+impl<T> tracing::instrument::WithSubscriber for routectl_router::MatrixLane
+impl<T> typenum::type_operators::Same for routectl_router::MatrixLane
+pub type routectl_router::MatrixLane::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MatrixLane where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::MatrixLane::into_shared(self) -> Shared
 pub struct routectl_router::MigrationPlan
 pub routectl_router::MigrationPlan::from: u32
 pub routectl_router::MigrationPlan::removed_keys: alloc::vec::Vec<alloc::string::String>
@@ -11068,6 +11420,7 @@ pub fn routectl_router::diff_activation(&routectl_router::ActivationState, &rout
 pub fn routectl_router::diff_has_no_effective_change(&routectl_router::ImportDiff) -> bool
 pub fn routectl_router::diff_overlay(&routectl_router::CatalogOverlay, &routectl_router::ImportCandidate, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CatalogRow>) -> routectl_router::ImportDiff
 pub fn routectl_router::edit_config_toml<E, F>(&std::path::Path, &[u8], F) -> core::result::Result<routectl_router::EditResult, routectl_router::ConfigWriteError<E>> where E: core::error::Error, F: core::ops::function::FnOnce(&mut toml_edit::document::DocumentMut) -> core::result::Result<routectl_router::EditOutcome, E>
+pub fn routectl_router::epoch_day_age(&str, i64) -> core::option::Option<i64>
 pub const fn routectl_router::escalate(routectl_router::ImpactClass, routectl_router::ImpactClass) -> routectl_router::ImpactClass
 pub fn routectl_router::evaluate(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
 pub fn routectl_router::is_cataloged_provider_kind(&str) -> bool
@@ -11076,6 +11429,7 @@ pub fn routectl_router::is_stale_days_today(&str, i64) -> bool
 pub fn routectl_router::is_stale_today(&str) -> bool
 pub fn routectl_router::load_catalog_import_baseline(&std::path::Path, routectl_router::ShrinkCounts) -> routectl_router::ShrinkCounts
 pub fn routectl_router::load_catalog_overlay(&std::path::Path) -> core::result::Result<routectl_router::CatalogOverlay, routectl_router::OverlayError>
+pub fn routectl_router::load_last_import(&std::path::Path) -> core::option::Option<routectl_router::CatalogImportState>
 pub fn routectl_router::locate_dotted_path(&str, &str) -> core::option::Option<usize>
 pub fn routectl_router::lookup(&str, &str, core::option::Option<&str>) -> routectl_router::catalog::CatalogRow
 pub fn routectl_router::lookup_baked_with_overrides(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> core::option::Option<routectl_router::catalog::CatalogRow>
@@ -11094,12 +11448,14 @@ pub fn routectl_router::plan_migration(&toml_edit::document::DocumentMut, u32, &
 pub fn routectl_router::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
 pub fn routectl_router::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
 pub fn routectl_router::propose_steady_state_trim(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimParams) -> core::option::Option<routectl_router::SteadyStateTrimPlan>
-pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::learned_capability::LearnedCapabilityRegistry) -> routectl_router::CapabilityRebuildSummary
+pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::rebuild_into(&dyn routectl_router::LedgerReader, &routectl_router::KSessionStore, std::time::SystemTime, usize)
+pub const fn routectl_router::resolve_display_verdict(core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
 pub fn routectl_router::resolve_requested_capability(&str, &routectl_core::error::Error, &routectl_core::failure_class::ClassifiedFailure) -> core::option::Option<(alloc::string::String, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase)>
 pub fn routectl_router::save_catalog_overlay(&std::path::Path, u64, alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<routectl_router::OverlayCell>>) -> core::result::Result<routectl_router::CatalogOverlay, routectl_router::OverlayError>
 pub fn routectl_router::shrink_guard(&routectl_router::ShrinkCounts, &routectl_router::ShrinkCounts) -> routectl_router::ShrinkVerdict
 pub const fn routectl_router::stale_after_days() -> i64
+pub fn routectl_router::today_epoch_day() -> i64
 pub fn routectl_router::trimmed_prefix_fingerprint(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimPlan) -> u64
 pub fn routectl_router::validate_alias_chain_targets(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_alias_patterns(&routectl_router::config::Config) -> routectl_core::error::Result<()>

@@ -13,6 +13,7 @@
 //! section is added with a one-line edit (producer + render title).
 
 mod gather;
+mod matrix;
 mod render;
 mod sections;
 
@@ -27,8 +28,8 @@ use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CatalogImportState, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry,
-    OverrideRow, Source, Status, WouldTrimPanel, overall_exit,
+    CatalogImportState, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry, Status,
+    WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -53,7 +54,12 @@ pub(crate) use self::gather::gather_context_no_network;
 /// v2 -> v3: the status doctor panel's per-target reachability is derived
 /// from the last settled dispatch outcome (three states: reachable / unknown
 /// / degraded) instead of the coarse circuit phase.
-const SCHEMA_VERSION: u32 = 3;
+///
+/// v3 -> v4: the capability section's override / prior / learned findings are
+/// superseded by the structured `capability_matrix` panel (lanes by
+/// capability keys, one resolved display cell each), and the freshness
+/// section joins the report.
+const SCHEMA_VERSION: u32 = 4;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -139,8 +145,7 @@ pub(crate) struct DoctorContext {
     /// The learned-capability matrix source: a read-only one-shot ledger
     /// replay for this run's revision, availability classified as a
     /// first-class tri-state. Populated in the single gather pass and
-    /// consumed by the capability matrix panel renderer.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// consumed by the capability matrix panel builder.
     capability_matrix: CapabilityMatrixSource,
     /// The freshness section's read-only inputs: baked catalog stamp, the
     /// freshest overlay verification, and the last SUCCESSFUL import. Purely
@@ -165,36 +170,26 @@ struct CapabilityInputs {
     panel_unavailable: Option<String>,
 }
 
-/// The config-derived capability view: everything the section renders when
-/// the config parsed.
+/// The config-derived capability view: everything the section and the
+/// matrix panel draw from the parsed config.
 struct CapabilityConfig {
-    /// Flattened operator override cells, in the registry's snapshot order.
-    override_rows: Vec<OverrideRow>,
     /// Present legacy capability-list key NAMES (never values) driving the
     /// migrate nudge.
     legacy_keys: Vec<&'static str>,
-    /// The catalog/overlay capability prior cells, or unavailable when the
-    /// overlay could not be read.
-    priors: PriorLayer,
-}
-
-/// The catalog capability prior layer, degraded independently of the config.
-enum PriorLayer {
-    /// The overlay loaded: the capability prior cells (empty when no cell
-    /// carries capability data -- baked cells are empty today).
-    Present(Vec<PriorCell>),
-    /// The overlay could not be read: priors are unavailable. Override rows
-    /// still render.
-    Unavailable,
+    /// The catalog/overlay capability prior cells, one per configured model
+    /// whose resolved catalog row carries capability data. Empty when the
+    /// overlay could not be read -- priors are then absent, while the
+    /// learned and override matrix cells still render.
+    priors: Vec<PriorCell>,
 }
 
 /// One catalog/overlay capability prior cell: a `[models.X]` entry whose
-/// resolved catalog row carries capability data, tagged with the winning
-/// layer.
+/// resolved catalog row carries capability data, with its verification
+/// stamp so the matrix panel can flag a prior stale past the operator
+/// staleness hint.
 struct PriorCell {
     nickname: String,
-    selector: String,
-    source: Source,
+    verified_at: String,
     capabilities: Vec<(String, bool)>,
 }
 
@@ -207,7 +202,6 @@ struct PriorCell {
 /// path-free class token, NEVER a silent empty: boot's fail-closed-to-empty
 /// is correct for serving but would mislead a diagnostic into reporting
 /// "nothing learned" when the truth is "could not read".
-#[cfg_attr(not(test), allow(dead_code))]
 enum CapabilityMatrixSource {
     /// The ledger replayed at least one learned entry. `now` / `now_ms` are
     /// the single pinned clock anchors the mapped instants were taken
@@ -215,6 +209,11 @@ enum CapabilityMatrixSource {
     Available {
         entries: Vec<LearnedRegistryEntry>,
         now: Instant,
+        /// The pinned wall-clock anchor the ledger replay read once. The
+        /// matrix panel derives cell ages from the monotonic `now`
+        /// (skew-free relative deltas), so this absolute anchor is reserved
+        /// for a future consumer that needs epoch-ms timestamps.
+        #[cfg_attr(not(test), allow(dead_code))]
         now_ms: i64,
     },
     /// Readable ledger, matched tombstone, zero post-boundary rows: an honest,
@@ -334,6 +333,7 @@ fn build_report_over(ctx: &DoctorContext, sections: &[(&str, SectionFn)]) -> Doc
         findings,
         panels: DoctorPanels {
             would_trim: ctx.would_trim,
+            capability_matrix: Some(matrix::build_capability_matrix_panel(ctx)),
         },
     }
 }

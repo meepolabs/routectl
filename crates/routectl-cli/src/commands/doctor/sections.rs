@@ -2,9 +2,8 @@
 
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_router::{
-    ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding,
-    OverrideProvenance, OverrideRow, OverrideVerdict, Source, Status, UnresolvedReason,
-    compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
+    ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding, Status,
+    UnresolvedReason, compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
 };
 
 use crate::commands::capability_legacy::{
@@ -13,7 +12,7 @@ use crate::commands::capability_legacy::{
 use crate::commands::probe::{login_id_for, probe_finding};
 
 use super::gather::{SecretCheck, SecretPresence};
-use super::{DoctorContext, FreshnessInputs, PriorCell, PriorLayer};
+use super::{DoctorContext, FreshnessInputs};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -329,13 +328,13 @@ fn seat_provider(seat_key: &str) -> &str {
     seat_key.split_once('#').map_or(seat_key, |(p, _)| p)
 }
 
-/// Capability section: a pure mapping of the gathered [`CapabilityInputs`]
-/// to findings. NON-CONTRACTUAL, human-facing content -- no typed panel
-/// struct. Every finding here is `Pass` or `Warn`; the section NEVER emits a
-/// `Fail`, so it can never flip the doctor exit code. Per-layer degradation
-/// (config unavailable, overlay unavailable, absent catalog cell) is
-/// rendered honestly, never a whole-doctor fallback and never raw loader
-/// text.
+/// Capability section: the config-derived findings NOT absorbed by the
+/// capability matrix panel. The operator override cells, the catalog priors,
+/// and the runtime-only learned line are now structured cells on the matrix
+/// panel; only the config-unavailable degradation line and the legacy-key
+/// migrate nudge remain findings here. Every finding is `Pass` or `Warn`;
+/// the section NEVER emits a `Fail`, so it can never flip the doctor exit
+/// code.
 pub(super) fn section_capability(ctx: &DoctorContext) -> Vec<Finding> {
     let Some(config) = &ctx.capability.config else {
         return vec![capability_unavailable(
@@ -344,9 +343,6 @@ pub(super) fn section_capability(ctx: &DoctorContext) -> Vec<Finding> {
     };
 
     let mut findings = Vec::new();
-    findings.extend(config.override_rows.iter().map(override_finding));
-    findings.push(prior_finding(&config.priors));
-    findings.push(learned_line());
     if let Some(nudge) = legacy_nudge(&config.legacy_keys) {
         findings.push(nudge);
     }
@@ -373,117 +369,6 @@ fn capability_unavailable(redacted: Option<&str>) -> Finding {
         remediation: Some(
             "resolve the config error reported above, then re-run `routectl doctor`".to_string(),
         ),
-    }
-}
-
-/// One informational `Pass` finding per operator override cell: the target
-/// spec, the capability key, the verdict, and the source label from
-/// provenance. Never flips the exit code.
-fn override_finding(row: &OverrideRow) -> Finding {
-    Finding {
-        section: "capability",
-        name: row.target_spec.clone(),
-        status: Status::Pass,
-        detail: format!(
-            "{} {} (source: {})",
-            row.capability_key,
-            verdict_label(row.verdict),
-            provenance_label(row.provenance),
-        ),
-        remediation: None,
-    }
-}
-
-const fn verdict_label(verdict: OverrideVerdict) -> &'static str {
-    match verdict {
-        OverrideVerdict::RouteAway => "route-away",
-        OverrideVerdict::ForceSupported => "force-supported",
-    }
-}
-
-const fn provenance_label(provenance: OverrideProvenance) -> &'static str {
-    match provenance {
-        OverrideProvenance::Override => "override",
-        OverrideProvenance::ProviderStatic => "provider-static",
-        OverrideProvenance::ModelStatic => "model-static",
-    }
-}
-
-const fn source_label(source: Source) -> &'static str {
-    match source {
-        Source::Baked => "baked",
-        Source::Import => "import",
-        Source::User => "user",
-    }
-}
-
-/// The catalog/overlay prior layer as findings. Present-with-cells renders
-/// one `Pass` per cell; present-but-empty an honest "no priors" note;
-/// unavailable a `Warn` that leaves the override rows intact.
-fn prior_finding(priors: &PriorLayer) -> Finding {
-    match priors {
-        PriorLayer::Unavailable => Finding {
-            section: "capability",
-            name: "catalog priors".to_string(),
-            status: Status::Warn,
-            detail: "catalog capability priors unavailable: the catalog overlay could not be read"
-                .to_string(),
-            remediation: Some(
-                "resolve the catalog overlay error, then re-run `routectl doctor`".to_string(),
-            ),
-        },
-        PriorLayer::Present(cells) if cells.is_empty() => Finding {
-            section: "capability",
-            name: "catalog priors".to_string(),
-            status: Status::Pass,
-            detail: "no catalog capability priors present".to_string(),
-            remediation: None,
-        },
-        PriorLayer::Present(cells) => {
-            let detail = cells
-                .iter()
-                .map(prior_cell_detail)
-                .collect::<Vec<_>>()
-                .join("; ");
-            Finding {
-                section: "capability",
-                name: "catalog priors".to_string(),
-                status: Status::Pass,
-                detail,
-                remediation: None,
-            }
-        }
-    }
-}
-
-/// One prior cell rendered as `nickname (selector) [source]: cap=bool, ...`.
-fn prior_cell_detail(cell: &PriorCell) -> String {
-    let caps = cell
-        .capabilities
-        .iter()
-        .map(|(key, supported)| format!("{key}={supported}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "{} ({}) [{}]: {caps}",
-        cell.nickname,
-        cell.selector,
-        source_label(cell.source),
-    )
-}
-
-/// The single fixed learned-layer line. Capability learning is runtime-only
-/// (in the live serve registry); a one-shot doctor cannot read it. No
-/// fabricated counts -- just the fixed statement of where learning lives.
-pub(super) fn learned_line() -> Finding {
-    Finding {
-        section: "capability",
-        name: "learned".to_string(),
-        status: Status::Pass,
-        detail: "capability learning is runtime-only, visible in serve logs; \
-                 a future status surface will expose the live registry"
-            .to_string(),
-        remediation: None,
     }
 }
 
@@ -667,6 +552,6 @@ fn last_import_finding(f: &FreshnessInputs) -> Finding {
 /// The operator staleness hint as the `i64` the epoch-day checks take. A
 /// hint larger than `i64::MAX` days is nonsensical; saturate rather than
 /// wrap so an absurd config never reads as fresh.
-fn staleness_threshold_days(hint_days: u64) -> i64 {
+pub(super) fn staleness_threshold_days(hint_days: u64) -> i64 {
     i64::try_from(hint_days).unwrap_or(i64::MAX)
 }
