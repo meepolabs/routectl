@@ -1,0 +1,1 @@
+{"__type":"com.amazonaws.bedrock#AccessDeniedException","message":"User: arn:aws:iam::123456789012:role/AppRole is not authorized to perform: bedrock:InvokeModel on resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus-20240229-v1:0 because no identity-based policy allows the bedrock:InvokeModel action"}
