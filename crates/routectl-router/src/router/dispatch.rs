@@ -2287,3 +2287,7 @@ mod forwarded_coexistence_tests;
 #[cfg(test)]
 #[path = "auto_emit_cache_control_tests.rs"]
 mod auto_emit_cache_control_tests;
+
+#[cfg(test)]
+#[path = "capability_acceptance_tests.rs"]
+mod capability_acceptance_tests;
