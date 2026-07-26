@@ -7,6 +7,7 @@
 
 use super::*;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -15,8 +16,9 @@ use futures::stream::BoxStream;
 use routectl_core::ForwardedBearer;
 use routectl_core::ToolDef;
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
+use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatChunk, ChatResponse, Provider, Result};
-use routectl_testkit::{CapturedEvent, with_capture};
+use routectl_testkit::{CapturedEvent, capture_events, with_capture};
 use serde_json::json;
 
 use crate::config::Config;
@@ -957,4 +959,748 @@ async fn non_bedrock_match_leaves_bedrock_unmatched_counter_untouched() {
 
     assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
     assert_eq!(router.metrics.bedrock_validation_unmatched_total(), 0);
+}
+
+// --- F2 feature-naming mint gates ---
+
+/// The F2 mint-eligibility predicate is self-identifying-tier AND a
+/// deterministic request-fault class. Both sides pinned directly: an inferred
+/// tier never mints (no inferred F2 ever), and a transient / server-side class
+/// -- anything a config class-override could derive from a non-feature fault
+/// -- never mints even at self-identifying tier.
+#[test]
+fn f2_evidence_mintable_predicate_accepts_and_rejects() {
+    // Accept: self-identifying evidence of a deterministic request fault.
+    assert!(f2_evidence_is_mintable(
+        SignalTier::SelfIdentifying,
+        &FailureClass::BadRequest
+    ));
+    assert!(f2_evidence_is_mintable(
+        SignalTier::SelfIdentifying,
+        &FailureClass::FeatureUnsupported {
+            capability: "web_search".to_string(),
+        }
+    ));
+
+    // Reject: an inferred tier never mints an F2 regardless of class.
+    assert!(!f2_evidence_is_mintable(
+        SignalTier::Inferred,
+        &FailureClass::BadRequest
+    ));
+
+    // Reject: a transient / server-side class never mints, even at
+    // self-identifying tier (a remapped transient must not plant an F2).
+    for class in [
+        FailureClass::RateLimited,
+        FailureClass::Auth,
+        FailureClass::ContentPolicy,
+        FailureClass::ContextWindow,
+        FailureClass::ServerError,
+        FailureClass::NetworkError,
+        FailureClass::Overloaded,
+        FailureClass::Timeout,
+        FailureClass::Unknown,
+    ] {
+        assert!(
+            !f2_evidence_is_mintable(SignalTier::SelfIdentifying, &class),
+            "class {class:?} must not be F2-mintable"
+        );
+    }
+}
+
+/// The deterministic-class predicate accepts exactly the two request-fault
+/// classes and rejects everything else.
+#[test]
+fn f2_deterministic_class_predicate_accepts_only_request_faults() {
+    assert!(f2_class_is_deterministic(&FailureClass::BadRequest));
+    assert!(f2_class_is_deterministic(
+        &FailureClass::FeatureUnsupported {
+            capability: "x".to_string(),
+        }
+    ));
+    for class in [
+        FailureClass::RateLimited,
+        FailureClass::Auth,
+        FailureClass::ContentPolicy,
+        FailureClass::ContextWindow,
+        FailureClass::ServerError,
+        FailureClass::NetworkError,
+        FailureClass::Overloaded,
+        FailureClass::Timeout,
+        FailureClass::Unknown,
+    ] {
+        assert!(
+            !f2_class_is_deterministic(&class),
+            "class {class:?} must be rejected"
+        );
+    }
+}
+
+/// A minimal anthropic-api dispatch target for driving the mint pipeline
+/// directly with a provisional F2 resolution -- `expand_chain_to_targets`
+/// stamps `provider_kind = "anthropic-api"` from the config, which carries
+/// the (empty) feature-naming table.
+fn anthropic_target(router: &Router) -> DispatchTarget {
+    let p: Arc<dyn Provider> = Arc::new(SuccessProvider { id: "p1" });
+    let model = ResolvedModel::new("m1", "p1", p, "claude-x");
+    router
+        .expand_chain_to_targets(vec![Arc::new(model)], None)
+        .pop()
+        .expect("one target for a non-seat model")
+}
+
+/// A generic 400 upstream error for driving the mint pipeline (the resolution
+/// is supplied provisionally, so the body is never parsed for a capability).
+fn generic_400() -> Error {
+    Error::upstream_full("p1", 400, "{}".to_string(), None, None, None)
+}
+
+#[test]
+fn f2_all_gates_pass_mints_a_phase_f2_negative() {
+    // A provisional F2 resolution (the production tables ship empty) whose
+    // capability the request carried, at self-identifying tier of a
+    // deterministic fault, with no same-chain F1: the mint pipeline records a
+    // phase-F2 acting negative, rides a phase-F2 event out on meta, bumps the
+    // F2-phase counter (not the F1 one), and the learn WARN carries phase=f2.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    let events = capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F2,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+
+    assert_eq!(meta.learned_capabilities.len(), 1);
+    assert_eq!(meta.learned_capabilities[0].phase, FailurePhase::F2);
+    assert_eq!(meta.learned_capabilities[0].capability_key, "web_search");
+    assert_eq!(router.metrics.learned_negatives_f2_total(), 1);
+    assert_eq!(router.metrics.learned_negatives_f1_total(), 0);
+
+    let warns = learn_warns(&events);
+    assert_eq!(warns.len(), 1);
+    assert_eq!(warns[0].field("phase"), Some("f2"));
+    assert_eq!(warns[0].field("capability_key"), Some("web_search"));
+
+    assert_eq!(
+        router.learned_capabilities.acting_negative_for(
+            "m1",
+            "web_search",
+            "anthropic-api",
+            Instant::now(),
+        ),
+        crate::learned_capability::RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F2,
+        },
+    );
+}
+
+#[test]
+fn f2_candidate_with_same_chain_f1_is_suppressed_not_minted() {
+    // An F1 negative for `web_search` was already minted earlier in this
+    // attempt chain (F1Seen is resident in the dedupe set). A later F2
+    // candidate for the SAME capability on a DIFFERENT lane is dropped: no
+    // observe, no learn WARN, no F2-phase counter -- one deduped suppression
+    // WARN carrying only the safe fields, and one suppression counter bump,
+    // deduped cross-lane (feature-only) so N demoted lanes surface exactly one.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target_a = anthropic_target(&router);
+    let p: Arc<dyn Provider> = Arc::new(SuccessProvider { id: "p1" });
+    let target_b = router
+        .expand_chain_to_targets(
+            vec![Arc::new(ResolvedModel::new("m2", "p1", p, "claude-x"))],
+            None,
+        )
+        .pop()
+        .expect("one target");
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    dedupe.insert(LearnDedupeKey::F1Seen {
+        feature_key: "web_search".to_string(),
+    });
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    let events = capture_events(|| {
+        // Two DISTINCT lanes in one chain both reject the same capability: the
+        // suppression WARN must fire exactly once (cross-lane dedupe).
+        for target in [&target_a, &target_b] {
+            router.commit_learned_observation(
+                (
+                    "web_search".to_string(),
+                    SignalTier::SelfIdentifying,
+                    FailurePhase::F2,
+                ),
+                &FailureClass::BadRequest,
+                &err,
+                400,
+                None,
+                "anthropic-api",
+                target,
+                &req,
+                false,
+                &mut dedupe,
+                &mut meta,
+                &mut guard,
+            );
+        }
+    });
+
+    assert!(
+        meta.learned_capabilities.is_empty(),
+        "a same-chain-F1 F2 candidate must never mint",
+    );
+    assert!(learn_warns(&events).is_empty());
+    assert!(
+        router.learned_capabilities.is_empty(),
+        "no registry entry for a suppressed F2 candidate",
+    );
+    assert_eq!(router.metrics.learned_negatives_f2_total(), 0);
+
+    let supp = suppression_warns_f2(&events);
+    assert_eq!(
+        supp.len(),
+        1,
+        "suppression WARN must be deduped to once per request even across lanes",
+    );
+    assert_eq!(supp[0].field("event"), Some("suppression"));
+    assert_eq!(supp[0].field("capability_key"), Some("web_search"));
+    assert_eq!(supp[0].field("phase"), Some("f2"));
+    assert_eq!(supp[0].field("body"), None, "no body/message/prompt fields");
+    assert_eq!(supp[0].field("message"), None);
+    assert_eq!(router.metrics.f2_same_chain_suppressed_total(), 1);
+}
+
+#[test]
+fn f2_inferred_tier_never_mints_through_the_pipeline() {
+    // Gate (a) end-to-end: an F2 candidate at inferred tier is dropped by the
+    // mint gate -- no observe, no event, no counter.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    let events = capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::Inferred,
+                FailurePhase::F2,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+
+    assert!(meta.learned_capabilities.is_empty());
+    assert!(learn_warns(&events).is_empty());
+    assert!(router.learned_capabilities.is_empty());
+    assert_eq!(router.metrics.learned_negatives_f2_total(), 0);
+}
+
+#[test]
+fn f2_transient_derived_class_never_mints_through_the_pipeline() {
+    // Gate (b) end-to-end: an F2 candidate whose class is a transient (a
+    // config class-override could derive it) is dropped by the mint gate.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    let events = capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F2,
+            ),
+            &FailureClass::RateLimited,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+
+    assert!(meta.learned_capabilities.is_empty());
+    assert!(learn_warns(&events).is_empty());
+    assert!(router.learned_capabilities.is_empty());
+    assert_eq!(router.metrics.learned_negatives_f2_total(), 0);
+}
+
+#[test]
+fn f1_mint_inserts_the_cross_lane_f1_seen_marker() {
+    // An F1 negative mint records F1Seen (feature-key only) in the dedupe set,
+    // so a later cross-lane F2 candidate for the same capability is caught.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+
+    assert_eq!(router.metrics.learned_negatives_f1_total(), 1);
+    assert!(
+        dedupe.contains(&LearnDedupeKey::F1Seen {
+            feature_key: "web_search".to_string(),
+        }),
+        "an F1 mint must record the cross-lane F1Seen marker",
+    );
+}
+
+/// Seed an already-expired, still-acting negative of the given phase so the
+/// next dispatch would claim the single re-probe slot; used to drive the
+/// probe-settle branch of `commit_learned_observation` directly.
+fn seed_expired_phase_negative(router: &Router, feature: &str, phase: FailurePhase) {
+    let past = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("test clock is well past boot");
+    router
+        .learned_capabilities
+        .import_entries(vec![crate::learned_capability::ExportedEntry {
+            state_key: "m1".into(),
+            feature_key: feature.into(),
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: past,
+            last_seen: past,
+            expires_at: past,
+            phase,
+            source: EvidenceSource::Live,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }]);
+}
+
+/// An armed probe guard holding a single admission for `(m1, feature)`.
+fn armed_guard_for(router: &Router, feature: &str) -> LearnedProbeGuard {
+    LearnedProbeGuard::armed(
+        router.learned_capabilities.clone(),
+        vec![super::super::runtime_gate::ProbeAdmission {
+            state_key: "m1".into(),
+            feature: feature.into(),
+            provider_kind: "anthropic-api",
+        }],
+        "complete",
+    )
+}
+
+#[test]
+fn probe_settle_of_an_f1_negative_records_f1_seen() {
+    // A re-probe that reconfirms a resident F1 negative is F1 evidence for the
+    // capability in this attempt chain: the settle path must record F1Seen so a
+    // later cross-lane F2 candidate is suppressed, not blind-minted.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    seed_expired_phase_negative(&router, "web_search", FailurePhase::F1);
+    let mut guard = armed_guard_for(&router, "web_search");
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+
+    capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+
+    assert_eq!(
+        router.metrics.probe_failures_total(),
+        1,
+        "the re-probe rejection settled",
+    );
+    assert!(
+        dedupe.contains(&LearnDedupeKey::F1Seen {
+            feature_key: "web_search".to_string(),
+        }),
+        "a reconfirmed-F1 re-probe must record the cross-lane F1Seen marker",
+    );
+}
+
+#[test]
+fn probe_settle_of_an_f2_negative_does_not_record_f1_seen() {
+    // A re-probe that reconfirms a resident F2 negative is NOT F1 evidence:
+    // recording F1Seen would wrongly suppress a sibling lane's own F2 mint.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target = anthropic_target(&router);
+    seed_expired_phase_negative(&router, "web_search", FailurePhase::F2);
+    let mut guard = armed_guard_for(&router, "web_search");
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+
+    capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F2,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+
+    assert_eq!(router.metrics.probe_failures_total(), 1);
+    assert!(
+        !dedupe.contains(&LearnDedupeKey::F1Seen {
+            feature_key: "web_search".to_string(),
+        }),
+        "a reconfirmed-F2 re-probe must NOT record an F1Seen marker",
+    );
+}
+
+#[test]
+fn reverse_order_f2_then_f1_both_mint_self_healing() {
+    // The reverse ordering is left self-healing: an F2 mint records NO F1Seen,
+    // so a later F1 mint for the same capability on another lane proceeds
+    // normally -- no deferred-commit state machine blocks it.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target_a = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    // Lane A mints an F2 first.
+    capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F2,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target_a,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+    assert_eq!(router.metrics.learned_negatives_f2_total(), 1);
+    assert!(
+        !dedupe.contains(&LearnDedupeKey::F1Seen {
+            feature_key: "web_search".to_string(),
+        }),
+        "an F2 mint must not record F1Seen (reverse order self-heals)",
+    );
+
+    // Lane B (a distinct state_key) then mints an F1 for the same capability.
+    let p: Arc<dyn Provider> = Arc::new(SuccessProvider { id: "p1" });
+    let model_b = ResolvedModel::new("m2", "p1", p, "claude-x");
+    let target_b = router
+        .expand_chain_to_targets(vec![Arc::new(model_b)], None)
+        .pop()
+        .expect("one target");
+    let mut guard_b = LearnedProbeGuard::inert();
+    capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target_b,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard_b,
+        );
+    });
+
+    assert_eq!(
+        router.metrics.learned_negatives_f1_total(),
+        1,
+        "the later F1 on another lane mints normally",
+    );
+    assert_eq!(meta.learned_capabilities.len(), 2);
+}
+
+#[test]
+fn pending_inferred_f1_does_not_suppress_a_later_f2() {
+    // An inferred F1 is PENDING on its first observation (below the acting
+    // threshold), so it must NOT record F1Seen -- otherwise weak, unconfirmed
+    // evidence would mask a later self-identifying F2 and the request would
+    // learn no acting negative at all. The stronger F2 must mint.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    let target_a = anthropic_target(&router);
+    let req = req_with_tool("web_search");
+    let err = generic_400();
+    let mut dedupe = HashSet::new();
+    let mut meta = DispatchMeta::for_alias("m1");
+    let mut guard = LearnedProbeGuard::inert();
+
+    // Lane A: an inferred F1 -- pending, not acting.
+    capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::Inferred,
+                FailurePhase::F1,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target_a,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard,
+        );
+    });
+    assert!(
+        !dedupe.contains(&LearnDedupeKey::F1Seen {
+            feature_key: "web_search".to_string(),
+        }),
+        "a pending (non-acting) inferred F1 must not record F1Seen",
+    );
+    assert!(
+        meta.learned_capabilities.is_empty(),
+        "an inferred F1 is pending on its first observation, not acting",
+    );
+
+    // Lane B: a self-identifying F2 for the same capability -> MINTS.
+    let p: Arc<dyn Provider> = Arc::new(SuccessProvider { id: "p1" });
+    let target_b = router
+        .expand_chain_to_targets(
+            vec![Arc::new(ResolvedModel::new("m2", "p1", p, "claude-x"))],
+            None,
+        )
+        .pop()
+        .expect("one target");
+    let mut guard_b = LearnedProbeGuard::inert();
+    capture_events(|| {
+        router.commit_learned_observation(
+            (
+                "web_search".to_string(),
+                SignalTier::SelfIdentifying,
+                FailurePhase::F2,
+            ),
+            &FailureClass::BadRequest,
+            &err,
+            400,
+            None,
+            "anthropic-api",
+            &target_b,
+            &req,
+            false,
+            &mut dedupe,
+            &mut meta,
+            &mut guard_b,
+        );
+    });
+
+    assert_eq!(
+        router.metrics.learned_negatives_f2_total(),
+        1,
+        "strong self-identifying F2 evidence mints past a weak pending inferred F1",
+    );
+    assert_eq!(meta.learned_capabilities.len(), 1);
+    assert_eq!(meta.learned_capabilities[0].phase, FailurePhase::F2);
+}
+
+// --- Feature-naming drift observability ---
+
+fn feature_naming_unmatched_warns(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            e.message
+                == "deterministic feature-carrying rejection matched no feature-naming template"
+        })
+        .collect()
+}
+
+fn suppression_warns_f2(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            e.message
+                == "f2 feature-naming negative suppressed: same-chain f1 already observed for this capability"
+        })
+        .collect()
+}
+
+fn generic_anthropic_400_provider() -> Arc<CapabilityRejectingProvider> {
+    Arc::new(CapabilityRejectingProvider {
+        id: "p1",
+        status: 400,
+        body: "{}".into(),
+        upstream_type: Some("invalid_request_error".into()),
+        upstream_code: None,
+        calls: AtomicUsize::new(0),
+    })
+}
+
+#[tokio::test]
+async fn unmatched_feature_naming_warns_and_counts_once() {
+    // A deterministic anthropic-api 400 on a feature-carrying request that the
+    // shipped-empty feature-naming table cannot attribute: the drift signal
+    // fires exactly once (WARN + counter), carrying only the token-free safe
+    // fields, and nothing is learned.
+    let router = router_with(ANTHROPIC_P1, generic_anthropic_400_provider());
+
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+    )
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert!(learn_warns(&events).is_empty());
+
+    let drift = feature_naming_unmatched_warns(&events);
+    assert_eq!(drift.len(), 1);
+    assert_eq!(drift[0].field("event"), Some("feature_naming_unmatched"));
+    assert_eq!(drift[0].field("state_key"), Some("m1"));
+    assert_eq!(drift[0].field("provider_kind"), Some("anthropic-api"));
+    assert_eq!(
+        drift[0].field("body"),
+        None,
+        "no body/message/prompt fields"
+    );
+    assert_eq!(drift[0].field("message"), None);
+    assert_eq!(router.metrics.feature_naming_unmatched_total(), 1);
+}
+
+#[tokio::test]
+async fn unmatched_feature_naming_skips_non_feature_carrying_request() {
+    // A deterministic 400 with NO derived features is not a feature-naming
+    // candidate: the drift signal stays silent.
+    let router = router_with(ANTHROPIC_P1, generic_anthropic_400_provider());
+    let req = ChatRequest {
+        model: "m1".into(),
+        messages: vec![].into(),
+        ..Default::default()
+    };
+
+    let (dispatched, events) =
+        with_capture(router.complete_with_options(req, RouterOptions::default())).await;
+
+    assert!(dispatched.result.is_err());
+    assert!(feature_naming_unmatched_warns(&events).is_empty());
+    assert_eq!(router.metrics.feature_naming_unmatched_total(), 0);
+}
+
+#[tokio::test]
+async fn unmatched_feature_naming_skips_provider_without_a_table() {
+    // openai-compat carries no feature-naming table, so an unresolved
+    // deterministic 400 there never bumps the feature-naming drift counter.
+    let router = router_with(OPENAI_P1, paramless_unsupported_provider());
+
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
+    )
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert!(feature_naming_unmatched_warns(&events).is_empty());
+    assert_eq!(router.metrics.feature_naming_unmatched_total(), 0);
 }
