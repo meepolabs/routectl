@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use routectl_core::capability::normalize_capability_key;
+use routectl_core::capability::{FailurePhase, normalize_capability_key};
 use routectl_core::failure_class::MatchedBy;
 use routectl_core::{ChatRequest, Error, Result};
 
@@ -38,19 +38,26 @@ pub(super) enum FilterSource {
     /// registry. A soft signal: the target is de-prioritized to the tail,
     /// never hard-dropped.
     Learned,
+    /// Matched a `Some(false)` catalog capability prior for a feature the
+    /// learned pass did not already decide. The weakest signal: a static
+    /// catalog assertion of absence, de-prioritized to the tail (ahead of
+    /// the learned tail), never hard-dropped and never contributing a
+    /// strip key.
+    Prior,
 }
 
 impl FilterSource {
     /// Stable lowercase token for the skip-log `source` field. The
-    /// `"learned"` and `"override"` tokens are a CONTRACT consumed by
-    /// downstream features (action dispatch, doctor labels, the future
-    /// status endpoint).
+    /// `"learned"`, `"override"`, and `"prior"` tokens are a CONTRACT
+    /// consumed by downstream features (action dispatch, doctor labels, the
+    /// future status endpoint).
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::ProviderStatic => "provider",
             Self::ModelStatic => "model",
             Self::Override => "override",
             Self::Learned => "learned",
+            Self::Prior => "prior",
         }
     }
 }
@@ -108,12 +115,16 @@ impl Router {
             return Ok(chain);
         }
         // SOFT-DROP: a static (provider / model) match hard-drops the
-        // target; a learned match moves it to a de-prioritized tail. The
-        // result is [supported...] ++ [learned tail], each in original
-        // chain order.
+        // target; a learned or catalog-prior match moves it to a
+        // de-prioritized tail. The result is
+        // [supported...] ++ [prior tail] ++ [learned tail]: a catalog
+        // prior is weaker evidence than a learned negative, so
+        // prior-demoted targets sort ahead of learned-demoted ones;
+        // original chain order is preserved within each bucket.
         let mut supported: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
-        let mut tail: Vec<DispatchTarget> = Vec::new();
-        let mut route_aways: Vec<(String, String)> = Vec::new();
+        let mut prior_tail: Vec<DispatchTarget> = Vec::new();
+        let mut learned_tail: Vec<DispatchTarget> = Vec::new();
+        let mut route_aways: Vec<(String, String, FilterSource)> = Vec::new();
         for mut target in chain {
             let mut strip_keys: Vec<String> = Vec::new();
             match self.unsupported_feature_for_target(
@@ -136,9 +147,20 @@ impl Router {
                     // The route_away event is deferred until the final chain
                     // shape is known: its level distinguishes "an alternative
                     // remains" (INFO) from "the request survives only on the
-                    // learned tail" (WARN).
-                    route_aways.push((target.state_key.clone(), feature));
-                    tail.push(target);
+                    // tail" (WARN).
+                    route_aways.push((target.state_key.clone(), feature, FilterSource::Learned));
+                    learned_tail.push(target);
+                }
+                Some((feature, FilterSource::Prior)) => {
+                    // Prior demotion: the catalog asserts this feature absent.
+                    // F1 strip keys the learned pass already resolved SURVIVE
+                    // so a demoted lane that still gets attempted strips its
+                    // known tokens (the prior itself never adds a strip key).
+                    if !strip_keys.is_empty() {
+                        target.strip_capabilities = std::sync::Arc::from(strip_keys);
+                    }
+                    route_aways.push((target.state_key.clone(), feature, FilterSource::Prior));
+                    prior_tail.push(target);
                 }
                 Some((feature, source)) => {
                     tracing::debug!(
@@ -152,8 +174,8 @@ impl Router {
             }
         }
         // NotImplemented fires ONLY when the static lists hard-dropped
-        // every entry (nothing survived, not even the learned tail).
-        if supported.is_empty() && tail.is_empty() {
+        // every entry (nothing survived, not even the de-prioritized tail).
+        if supported.is_empty() && prior_tail.is_empty() && learned_tail.is_empty() {
             let feature_list = features.join(", ");
             tracing::warn!(
                 alias = %alias,
@@ -166,34 +188,38 @@ impl Router {
                 format!("no provider in chain supports features: {feature_list}"),
             ));
         }
-        // Route-away observability: each learned-tail demotion emits one
-        // route_away event. INFO while a supported alternative remains; WARN
-        // when the chain survives ONLY via the de-prioritized learned tail
-        // (the route-away floor). Capability TOKEN + state_key only -- never a
-        // request body.
+        // Route-away observability: each tail demotion (learned or catalog
+        // prior) emits one route_away event tagged with its source. INFO
+        // while a supported alternative remains; WARN when the chain
+        // survives ONLY via the de-prioritized tail (the route-away floor).
+        // Capability TOKEN + state_key only -- never a request body.
         let tail_only = supported.is_empty();
         if tail_only {
             self.metrics.incr_d17_tail();
         }
-        for (state_key, capability_key) in route_aways {
+        for (state_key, capability_key, source) in route_aways {
             if tail_only {
                 tracing::warn!(
                     event = "route_away",
                     state_key = %state_key,
                     capability_key = %capability_key,
-                    "learned-capability negative routed this target away; request \
-                     survives only via the de-prioritized learned tail",
+                    source = %source.as_str(),
+                    "capability negative routed this target away; request \
+                     survives only via the de-prioritized tail",
                 );
             } else {
                 tracing::info!(
                     event = "route_away",
                     state_key = %state_key,
                     capability_key = %capability_key,
-                    "learned-capability negative de-prioritized this target to the tail",
+                    source = %source.as_str(),
+                    "capability negative de-prioritized this target to the tail",
                 );
             }
         }
-        supported.extend(tail);
+        // Prior-demoted targets sort ahead of learned-demoted ones.
+        supported.extend(prior_tail);
+        supported.extend(learned_tail);
         Ok(supported)
     }
 
@@ -226,16 +252,27 @@ impl Router {
     ///
     /// Strip-vs-route verdict: when the learned pass finds acting negatives,
     /// each is classified by [`capability_strip::action_for`]. If EVERY
-    /// acting negative is a droppable `Strip` capability that no operator
-    /// beta floor pins to the wire, the target is NOT unsupported -- it
-    /// returns `None` and the strip keys land in `strip_keys` (sorted,
-    /// normalized) for the caller to attach. If ANY acting negative maps to
-    /// `RouteAway` or is operator-pinned, the whole target routes away
-    /// (`Some((feature, Learned))`, `strip_keys` left empty) -- a target is
-    /// never half-stripped. An admitted re-probe is excluded from
+    /// acting negative is a droppable `Strip` capability detected in phase
+    /// F1 that no operator beta floor pins to the wire, the target is NOT
+    /// unsupported -- it returns `None` and the strip keys land in
+    /// `strip_keys` (sorted, normalized) for the caller to attach. If ANY
+    /// acting negative maps to `RouteAway`, is operator-pinned, or was
+    /// detected in a phase other than F1 (F2 feature-naming negatives NEVER
+    /// strip -- they are not droppable wire tokens), the whole target routes
+    /// away (`Some((feature, Learned))`, `strip_keys` left empty) -- a target
+    /// is never half-stripped. An admitted re-probe is excluded from
     /// `strip_keys` (the full request tests the real capability); its
     /// admission still reaches `admissions`. Override `RouteAway` matches
     /// hard-drop FIRST, ahead of any learned or strip decision.
+    ///
+    /// Prior pass (lowest precedence): after override and learned, a
+    /// `Some(false)` catalog capability prior for a feature the learned pass
+    /// left open soft-tails the target (`Some((feature, Prior))`). Gated
+    /// behind the same kill switch as the learned pass -- one switch covers
+    /// the whole capability-truth subsystem, so an operator can neutralize a
+    /// bad shipped prior. The prior never contributes a strip key, and it
+    /// never re-decides a feature the learned pass already ruled on (override
+    /// hard-drop > learned > prior).
     fn unsupported_feature_for_target(
         &self,
         target: &DispatchTarget,
@@ -277,6 +314,12 @@ impl Router {
             let now = Instant::now();
             let mut route_away: Option<FeatureKey> = None;
             let mut strip: Vec<String> = Vec::new();
+            // Features the learned pass acted on (strip, route-away, or
+            // probe-admit). A catalog prior is weaker evidence and must not
+            // re-decide a feature the learned registry already ruled on, so
+            // the prior pass below skips these; a feature the learned pass
+            // found `Allow` (no evidence) stays open to the prior.
+            let mut learned_claimed: Vec<&str> = Vec::new();
             for feature in features {
                 // ForceSupported mask: an operator `force_supported`
                 // override short-circuits this feature to Allow BEFORE
@@ -294,16 +337,22 @@ impl Router {
                     provider_kind,
                     now,
                 ) {
-                    crate::learned_capability::RoutingDecision::RouteAway { .. } => {
+                    crate::learned_capability::RoutingDecision::RouteAway { phase, .. } => {
+                        learned_claimed.push(feature);
                         // Strip-vs-route: a droppable capability the operator
-                        // has not pinned to the wire is stripped in place;
-                        // everything else (essentials, unknowns, pinned betas)
-                        // routes away. A pinned strip would be re-added
+                        // has not pinned to the wire is stripped in place ONLY
+                        // when the negative was detected in F1 (a wire-token
+                        // strip phase). F2 (feature-naming) and any other phase
+                        // ALWAYS route away and NEVER strip -- an F2 negative is
+                        // not a droppable wire token, so stripping cannot make
+                        // the request succeed. A pinned strip would be re-added
                         // downstream, so its "success" is false -- route away.
-                        if matches!(
-                            crate::capability_strip::action_for(feature),
-                            crate::capability_strip::CapabilityAction::Strip(_)
-                        ) && !self.beta_pinned_for_target(target, feature)
+                        if phase == FailurePhase::F1
+                            && matches!(
+                                crate::capability_strip::action_for(feature),
+                                crate::capability_strip::CapabilityAction::Strip(_)
+                            )
+                            && !self.beta_pinned_for_target(target, feature)
                         {
                             strip.push(normalize_capability_key(feature, provider_kind));
                         } else if route_away.is_none() {
@@ -311,6 +360,7 @@ impl Router {
                         }
                     }
                     crate::learned_capability::RoutingDecision::ProbeAdmitted => {
+                        learned_claimed.push(feature);
                         self.metrics.incr_probe_attempts();
                         let normalized = normalize_capability_key(feature, provider_kind);
                         // Probe bypass: the admitted feature tests the REAL
@@ -326,6 +376,12 @@ impl Router {
                         // `apply_strip_interceptor`. Route-away features do not
                         // fire -- they were never strip-eligible. Capability
                         // TOKEN and state_key only -- never request bodies.
+                        //
+                        // No F2 phase guard here: `ProbeAdmitted` carries no
+                        // phase (the negative lapsed into a re-probe), so this
+                        // WARN cannot be phase-refined. It is harmless -- an
+                        // admitted probe bypasses stripping regardless of phase,
+                        // so no F2 negative is ever actually stripped here.
                         if matches!(
                             crate::capability_strip::action_for(feature),
                             crate::capability_strip::CapabilityAction::Strip(_)
@@ -358,6 +414,30 @@ impl Router {
                 strip.sort_unstable();
                 strip.dedup();
                 *strip_keys = strip;
+            }
+            // Prior pass: the catalog capability prior is the lowest-
+            // precedence signal (override hard-drop > learned > prior >
+            // unknown), so it runs LAST and only speaks for a feature the
+            // learned pass left open. It is gated behind the SAME kill switch
+            // as the learned pass: a catalog prior is shipped vendor data that
+            // can be wrong or stale, so an operator hit by a bad `prior=false`
+            // needs the kill switch to neutralize it (one switch covers the
+            // whole capability-truth subsystem). `force_supported` masks a
+            // prior the same way it masks a learned negative. A `Some(false)`
+            // prior soft-tails the target (weaker evidence -> the prior tail);
+            // `None` / `Some(true)` are permissive no-ops. The prior never
+            // contributes a strip key -- a catalog assertion is not a
+            // strippable wire token -- but any strip key the learned pass set
+            // above SURVIVES this demotion.
+            for feature in features {
+                if learned_claimed.contains(&feature.as_str())
+                    || self.override_forces_supported(target, feature, provider_kind)
+                {
+                    continue;
+                }
+                if target.capability_prior(feature) == Some(false) {
+                    return Some((feature.clone(), FilterSource::Prior));
+                }
             }
         }
         None
