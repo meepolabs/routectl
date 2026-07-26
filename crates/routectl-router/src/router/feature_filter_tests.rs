@@ -1461,6 +1461,10 @@ fn bedrock_target_threads_kind_so_dotted_capability_resolves_to_head() {
     );
     assert_eq!(
         resolved,
-        Some(("anthropic_beta".to_string(), SignalTier::SelfIdentifying)),
+        Some((
+            "anthropic_beta".to_string(),
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1
+        )),
     );
 }

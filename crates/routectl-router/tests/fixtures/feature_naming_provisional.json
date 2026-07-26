@@ -1,0 +1,20 @@
+{
+  "note": "PARKED: provisional synthetic shapes for the F2 feature-naming anchored-template extraction engine tests. Replace with sanitized captured feature-naming rejection envelopes once real capture lands. No value here is a real captured token.",
+  "templates": [
+    { "prefix": "This model does not support the ", "suffix": " capability." }
+  ],
+  "translations": [
+    { "token": "citations_mode", "capability": "citations" }
+  ],
+  "matched": {
+    "message": "This model does not support the citations_mode capability.",
+    "capability": "citations"
+  },
+  "fail_closed_messages": {
+    "wording_drift": "This model doesn't support the citations_mode capability.",
+    "extra_sentence": "This model does not support the citations_mode capability. Choose another model.",
+    "missing_seam": "citations_mode capability.",
+    "untranslated_token": "This model does not support the mystery_mode capability.",
+    "whitespace_token": "This model does not support the citations mode capability."
+  }
+}
