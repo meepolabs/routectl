@@ -138,3 +138,7 @@ mod test_support;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "capability_lifecycle_tests.rs"]
+mod capability_lifecycle_tests;
