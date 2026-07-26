@@ -68,6 +68,7 @@ fn section_title(key: &str) -> &'static str {
         "secrets" => "Managed secrets",
         "probe" => "Provider reachability",
         "capability" => "Capability",
+        "freshness" => "Catalog freshness",
         _ => "Other",
     }
 }

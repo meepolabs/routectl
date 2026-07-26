@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use chrono::Local;
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_router::{
-    AliasValue, CURRENT_CONFIG_VERSION, CatalogOverlay, ModelEntry, ProviderEntry,
+    AliasValue, CURRENT_CONFIG_VERSION, CatalogImportState, CatalogOverlay, ModelEntry,
+    ProviderEntry,
 };
 use routectl_testkit::ScopedEnv;
 
@@ -17,8 +18,8 @@ use super::gather::{
     sanitize_store_open_error,
 };
 use super::sections::{
-    learned_line, legacy_nudge, secret_finding, section_auth, section_capability, section_config,
-    section_probe, section_secret_orphans, section_version,
+    freshness_findings, learned_line, legacy_nudge, secret_finding, section_auth,
+    section_capability, section_config, section_probe, section_secret_orphans, section_version,
 };
 use super::*;
 
@@ -67,8 +68,27 @@ fn ctx(
         binary_version: "test",
         capability,
         capability_matrix: CapabilityMatrixSource::Unavailable("no_data"),
+        freshness: sample_freshness(),
     }
 }
+
+/// A minimal all-honest-missing freshness input: no overlay verification and
+/// no recorded import, pinned to a fixed "today" so age assertions are
+/// deterministic. Individual freshness tests override the fields they probe.
+fn sample_freshness() -> FreshnessInputs {
+    FreshnessInputs {
+        catalog_version: routectl_router::CATALOG_VERSION,
+        snapshot_date: routectl_router::CATALOG_SNAPSHOT_DATE,
+        overlay_verified_at: None,
+        staleness_hint_days: 14,
+        today_epoch_day: FRESHNESS_TODAY,
+        last_import: None,
+        import_result: None,
+    }
+}
+
+/// A fixed "today" epoch-day (2026-07-11) for deterministic freshness ages.
+const FRESHNESS_TODAY: i64 = 20_645;
 
 /// A config whose alias table reaches an `oauth://anthropic`-backed
 /// provider, so the anthropic inventory entry is `referenced_by_aliases`.
@@ -1505,6 +1525,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
             None,
         ),
         capability_matrix: CapabilityMatrixSource::Unavailable("config_unavailable"),
+        freshness: sample_freshness(),
     };
     let report = build_report(&context);
 
@@ -1861,4 +1882,169 @@ mod capability_matrix {
             "the read-only matrix gather must not mutate the usage db"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Freshness section: three findings-shaped rows, honest missing, no Fail.
+// ---------------------------------------------------------------------------
+
+fn import_state(date: &str) -> CatalogImportState {
+    let mut per_source_counts = BTreeMap::new();
+    per_source_counts.insert("anthropic-api".to_string(), 7);
+    per_source_counts.insert("openai".to_string(), 5);
+    CatalogImportState {
+        schema_version: 1,
+        last_import_date: date.to_string(),
+        per_source_counts,
+        per_family_counts: BTreeMap::new(),
+        source_hashes: BTreeMap::new(),
+    }
+}
+
+#[test]
+fn freshness_renders_three_rows_with_both_honest_missing_lines() {
+    let findings = freshness_findings(&sample_freshness());
+    assert_eq!(findings.len(), 3, "freshness renders exactly three rows");
+
+    let baked = find(&findings, "freshness", "baked catalog");
+    assert!(baked.detail.contains("baked catalog v"));
+    assert!(
+        baked
+            .detail
+            .contains(routectl_router::CATALOG_SNAPSHOT_DATE)
+    );
+    assert_eq!(baked.status, Status::Pass);
+
+    let overlay = find(&findings, "freshness", "overlay");
+    assert_eq!(overlay.status, Status::Pass);
+    assert!(
+        overlay.detail.contains("no overlay verified stamp"),
+        "absent overlay stamp must render honestly: {}",
+        overlay.detail
+    );
+
+    let import = find(&findings, "freshness", "last successful import");
+    assert_eq!(import.status, Status::Pass);
+    assert_eq!(import.detail, "no successful import recorded");
+}
+
+#[test]
+fn freshness_never_says_result_only_last_successful_import() {
+    let mut f = sample_freshness();
+    f.last_import = Some(import_state("2026-07-01"));
+    let findings = freshness_findings(&f);
+    for finding in &findings {
+        assert!(
+            !finding.detail.to_lowercase().contains("result"),
+            "freshness must never say 'result': {}",
+            finding.detail
+        );
+    }
+    let import = find(&findings, "freshness", "last successful import");
+    assert!(import.name.contains("last successful import"));
+    assert!(import.detail.contains("12 rows across 2 sources"));
+    assert!(import.detail.contains("10 days ago"));
+}
+
+#[test]
+fn freshness_overlay_and_import_warn_when_stale_past_hint() {
+    let mut f = sample_freshness();
+    f.staleness_hint_days = 14;
+    // 30 days before the pinned today: stale past the 14-day hint.
+    f.overlay_verified_at = Some("2026-06-11".to_string());
+    f.last_import = Some(import_state("2026-06-11"));
+
+    let findings = freshness_findings(&f);
+    let overlay = find(&findings, "freshness", "overlay");
+    assert_eq!(overlay.status, Status::Warn);
+    assert!(overlay.detail.contains("stale past 14 days"));
+    assert!(overlay.remediation.is_some());
+
+    let import = find(&findings, "freshness", "last successful import");
+    assert_eq!(import.status, Status::Warn);
+    assert!(import.remediation.is_some());
+}
+
+#[test]
+fn freshness_fresh_overlay_and_import_pass() {
+    let mut f = sample_freshness();
+    f.overlay_verified_at = Some("2026-07-05".to_string());
+    f.last_import = Some(import_state("2026-07-05"));
+
+    let findings = freshness_findings(&f);
+    assert_eq!(find(&findings, "freshness", "overlay").status, Status::Pass);
+    assert_eq!(
+        find(&findings, "freshness", "last successful import").status,
+        Status::Pass
+    );
+}
+
+#[test]
+fn freshness_future_stamp_ages_clamp_to_zero() {
+    let mut f = sample_freshness();
+    // A post-dated stamp (skewed clock) must read as 0 days, never negative.
+    f.overlay_verified_at = Some("2026-08-11".to_string());
+    f.last_import = Some(import_state("2026-08-11"));
+
+    let findings = freshness_findings(&f);
+    let overlay = find(&findings, "freshness", "overlay");
+    assert_eq!(overlay.status, Status::Pass);
+    assert!(overlay.detail.contains("0 days ago"), "{}", overlay.detail);
+
+    let import = find(&findings, "freshness", "last successful import");
+    assert!(import.detail.contains("0 days ago"), "{}", import.detail);
+    assert!(
+        !import.detail.contains("-1 days"),
+        "no negative age: {}",
+        import.detail
+    );
+}
+
+#[test]
+fn freshness_never_emits_fail() {
+    // Exercise every branch: missing, fresh, stale, malformed.
+    for overlay in [
+        None,
+        Some("2026-07-05".to_string()),
+        Some("2026-01-01".to_string()),
+        Some("not-a-date".to_string()),
+    ] {
+        for import in [None, Some(import_state("2026-01-01"))] {
+            let mut f = sample_freshness();
+            f.overlay_verified_at = overlay.clone();
+            f.last_import = import;
+            for finding in freshness_findings(&f) {
+                assert_ne!(
+                    finding.status,
+                    Status::Fail,
+                    "freshness must never emit Fail: {}",
+                    finding.detail
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn freshness_registered_in_both_section_lists_and_render_title() {
+    assert!(
+        SECTIONS.iter().any(|(k, _)| *k == "freshness"),
+        "freshness must be in SECTIONS (CLI doctor)"
+    );
+    assert!(
+        NO_NETWORK_SECTIONS.iter().any(|(k, _)| *k == "freshness"),
+        "freshness must be in NO_NETWORK_SECTIONS (offline status doctor)"
+    );
+    let context = ctx(
+        Config::default(),
+        Some("version = 3\n"),
+        Vec::new(),
+        Vec::new(),
+    );
+    let report = build_report(&context);
+    let text = render_human(&report).join("\n");
+    assert!(
+        text.contains("Catalog freshness"),
+        "freshness section title must render: {text}"
+    );
 }

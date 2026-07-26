@@ -4,7 +4,7 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_router::{
     ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding,
     OverrideProvenance, OverrideRow, OverrideVerdict, Source, Status, UnresolvedReason,
-    compute_activation, preflight_config_version,
+    compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
 };
 
 use crate::commands::capability_legacy::{
@@ -13,7 +13,7 @@ use crate::commands::capability_legacy::{
 use crate::commands::probe::{login_id_for, probe_finding};
 
 use super::gather::{SecretCheck, SecretPresence};
-use super::{DoctorContext, PriorCell, PriorLayer};
+use super::{DoctorContext, FreshnessInputs, PriorCell, PriorLayer};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -526,4 +526,147 @@ pub(super) fn legacy_nudge(legacy_keys: &[&'static str]) -> Option<Finding> {
                 .to_string(),
         ),
     })
+}
+
+/// Freshness section: three findings-shaped rows describing how current the
+/// catalog data backing this install is. Every row is `Pass` or `Warn` --
+/// NEVER `Fail`, so it can never flip the doctor exit code. Staleness is
+/// advisory: an old overlay or import is a WARN, never an error.
+pub(super) fn section_freshness(ctx: &DoctorContext) -> Vec<Finding> {
+    freshness_findings(&ctx.freshness)
+}
+
+/// Pure mapping of the gathered [`FreshnessInputs`] to the three freshness
+/// rows. The reserved `import_result` field is intentionally not read: no
+/// durable import RESULT exists yet, so it renders nothing.
+pub(super) fn freshness_findings(f: &FreshnessInputs) -> Vec<Finding> {
+    vec![
+        baked_catalog_finding(f),
+        overlay_age_finding(f),
+        last_import_finding(f),
+    ]
+}
+
+/// Row 1: the compiled-in baked catalog version and its snapshot date.
+/// Informational `Pass` -- the baked table is always present, and the
+/// separate startup staleness WARN owns the "baked snapshot is old" signal.
+fn baked_catalog_finding(f: &FreshnessInputs) -> Finding {
+    Finding {
+        section: "freshness",
+        name: "baked catalog".to_string(),
+        status: Status::Pass,
+        detail: format!(
+            "baked catalog v{} snapshot {}",
+            f.catalog_version, f.snapshot_date
+        ),
+        remediation: None,
+    }
+}
+
+/// Row 2: the freshest overlay verification stamp and its age. WARN when the
+/// stamp is stale past the operator's staleness hint or does not parse;
+/// PASS when fresh; an honest PASS when no overlay verification exists (the
+/// operator is running on baked defaults).
+fn overlay_age_finding(f: &FreshnessInputs) -> Finding {
+    let Some(verified_at) = &f.overlay_verified_at else {
+        return Finding {
+            section: "freshness",
+            name: "overlay".to_string(),
+            status: Status::Pass,
+            detail: "no overlay verified stamp present; running on the baked catalog".to_string(),
+            remediation: None,
+        };
+    };
+    let threshold = staleness_threshold_days(f.staleness_hint_days);
+    match epoch_day_age(verified_at, f.today_epoch_day) {
+        None => Finding {
+            section: "freshness",
+            name: "overlay".to_string(),
+            status: Status::Warn,
+            detail: "overlay verified stamp could not be parsed".to_string(),
+            remediation: Some(
+                "run `routectl catalog import` to refresh the catalog overlay".to_string(),
+            ),
+        },
+        Some(age) if is_stale_days(verified_at, f.today_epoch_day, threshold) => Finding {
+            section: "freshness",
+            name: "overlay".to_string(),
+            status: Status::Warn,
+            detail: format!(
+                "overlay verified {age} days ago (stale past {} days)",
+                f.staleness_hint_days
+            ),
+            remediation: Some(
+                "run `routectl catalog import` to refresh the catalog overlay".to_string(),
+            ),
+        },
+        Some(age) => Finding {
+            section: "freshness",
+            name: "overlay".to_string(),
+            status: Status::Pass,
+            detail: format!("overlay verified {age} days ago"),
+            remediation: None,
+        },
+    }
+}
+
+/// Row 3: the LAST SUCCESSFUL import's date, age, and row counts. WARN when
+/// that import is stale past the operator's hint; PASS when fresh; an honest
+/// PASS when no import has ever been recorded (`catalog_import_state.json`
+/// missing or unreadable). Named "last successful import" on purpose: the
+/// sidecar records only successes, so this is never a failed-attempt result.
+fn last_import_finding(f: &FreshnessInputs) -> Finding {
+    let Some(state) = &f.last_import else {
+        return Finding {
+            section: "freshness",
+            name: "last successful import".to_string(),
+            status: Status::Pass,
+            detail: "no successful import recorded".to_string(),
+            remediation: None,
+        };
+    };
+    let rows: usize = state.per_source_counts.values().sum();
+    let sources = state.per_source_counts.len();
+    let threshold = staleness_threshold_days(f.staleness_hint_days);
+    let counts = format!("{rows} rows across {sources} sources");
+    match epoch_day_age(&state.last_import_date, f.today_epoch_day) {
+        Some(age) if is_stale_days(&state.last_import_date, f.today_epoch_day, threshold) => {
+            Finding {
+                section: "freshness",
+                name: "last successful import".to_string(),
+                status: Status::Warn,
+                detail: format!(
+                    "last successful import {} ({age} days ago, stale past {} days): {counts}",
+                    state.last_import_date, f.staleness_hint_days
+                ),
+                remediation: Some(
+                    "run `routectl catalog import` to refresh the catalog".to_string(),
+                ),
+            }
+        }
+        Some(age) => Finding {
+            section: "freshness",
+            name: "last successful import".to_string(),
+            status: Status::Pass,
+            detail: format!(
+                "last successful import {} ({age} days ago): {counts}",
+                state.last_import_date
+            ),
+            remediation: None,
+        },
+        None => Finding {
+            section: "freshness",
+            name: "last successful import".to_string(),
+            status: Status::Pass,
+            detail: format!("last successful import recorded (undated stamp): {counts}"),
+            remediation: None,
+        },
+    }
+}
+
+/// The operator staleness hint as the `i64` the epoch-day checks take. A
+/// hint larger than `i64::MAX` days is nonsensical; saturate rather than
+/// wrap so an absurd config never reads as fresh.
+fn staleness_threshold_days(hint_days: u64) -> i64 {
+    i64::try_from(hint_days).unwrap_or(i64::MAX)
 }

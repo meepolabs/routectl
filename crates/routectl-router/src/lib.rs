@@ -61,9 +61,9 @@ pub use capability_rebuild::{
 };
 pub use catalog::{
     BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
-    baked_table_rows, is_cataloged_provider_kind, is_stale_days, is_stale_days_today,
-    is_stale_today, lookup, lookup_baked_with_overrides, lookup_overlay_cell,
-    lookup_with_overrides, merge, stale_after_days, validate_overrides,
+    baked_table_rows, epoch_day_age, is_cataloged_provider_kind, is_stale_days,
+    is_stale_days_today, is_stale_today, lookup, lookup_baked_with_overrides, lookup_overlay_cell,
+    lookup_with_overrides, merge, stale_after_days, today_epoch_day, validate_overrides,
 };
 pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
 pub use catalog_import::{
@@ -74,7 +74,7 @@ pub use catalog_import::{
 };
 pub use catalog_import_state::{
     CatalogImportState, CatalogImportStateError, default_path as catalog_import_state_default_path,
-    load_baseline as load_catalog_import_baseline,
+    load_baseline as load_catalog_import_baseline, load_last_import,
     persist_baseline as persist_catalog_import_baseline,
 };
 pub use catalog_overlay::{
