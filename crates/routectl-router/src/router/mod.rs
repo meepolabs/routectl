@@ -798,9 +798,9 @@ struct DispatchTarget {
     /// absence). Empty when the resolved cell is `Disabled` / `Missing` or
     /// carries no capability data. The third precedence baseline
     /// (override -> learned -> prior); read via
-    /// [`DispatchTarget::capability_prior`]. NO filter behavior consumes it
-    /// yet -- the prior-driven drop lands when the override layer wires the
-    /// full precedence chain.
+    /// [`DispatchTarget::capability_prior`] in the feature filter's prior
+    /// pass, where a `Some(false)` prior for an otherwise-open feature
+    /// soft-tails the target.
     capabilities: BTreeMap<String, bool>,
 }
 
@@ -808,9 +808,9 @@ impl DispatchTarget {
     /// The catalog capability prior for `feature`: `Some(true)` /
     /// `Some(false)` when the resolved cell asserts support / absence, or
     /// `None` when the cell carries no prior for the key. The lowest-
-    /// precedence baseline in the override -> learned -> prior chain; NO
-    /// filter consumes it in this increment.
-    #[allow(dead_code)]
+    /// precedence baseline in the override -> learned -> prior chain,
+    /// consumed by the feature filter's prior pass: a `Some(false)` prior
+    /// for a feature the learned pass left open soft-tails the target.
     fn capability_prior(&self, feature: &str) -> Option<bool> {
         self.capabilities.get(feature).copied()
     }

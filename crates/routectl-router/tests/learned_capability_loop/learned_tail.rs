@@ -54,8 +54,9 @@ async fn all_targets_learned_still_attempts_the_tail() {
     );
     assert!(
         events.iter().any(|e| e.level == tracing::Level::WARN
-            && e.message.contains("de-prioritized learned tail")),
-        "entering the learned tail must emit a WARN",
+            && e.message.contains("de-prioritized tail")
+            && e.field("source") == Some("learned")),
+        "entering the learned tail must emit a WARN tagged source=learned",
     );
 }
 
