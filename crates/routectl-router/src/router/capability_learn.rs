@@ -268,7 +268,7 @@ impl Router {
     /// driven with a provisional F2 resolution in tests -- the production F2
     /// tables ship empty, so the real resolver never returns F2 on live input.
     #[allow(clippy::too_many_arguments)]
-    fn commit_learned_observation(
+    pub(super) fn commit_learned_observation(
         &self,
         resolved: (String, SignalTier, FailurePhase),
         class: &FailureClass,
@@ -579,7 +579,7 @@ impl Router {
 /// F2-specific half of the mint gate; the request-membership, mask,
 /// probe-settle, and same-chain-F1 gates are applied separately at the mint
 /// site.
-fn f2_evidence_is_mintable(tier: SignalTier, class: &FailureClass) -> bool {
+pub(super) fn f2_evidence_is_mintable(tier: SignalTier, class: &FailureClass) -> bool {
     tier == SignalTier::SelfIdentifying && f2_class_is_deterministic(class)
 }
 
@@ -590,7 +590,7 @@ fn f2_evidence_is_mintable(tier: SignalTier, class: &FailureClass) -> bool {
 /// rejection -- returns `false`, so a remapped transient can never plant an F2
 /// negative. A new `#[non_exhaustive]` `FailureClass` variant defaults to
 /// rejected (the safe side) until it is explicitly admitted here.
-const fn f2_class_is_deterministic(class: &FailureClass) -> bool {
+pub(super) const fn f2_class_is_deterministic(class: &FailureClass) -> bool {
     matches!(
         class,
         FailureClass::BadRequest | FailureClass::FeatureUnsupported { .. }

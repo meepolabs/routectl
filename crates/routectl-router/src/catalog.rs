@@ -128,9 +128,12 @@ pub struct CatalogRow {
     pub max_context_tokens: Option<u32>,
     /// Capability priors keyed on the well-known namespace
     /// (`routectl_core::capability`). Absent key = NO PRIOR (distinct from
-    /// `Some(false)`, an asserted absence). Empty on every transitional
-    /// baked row (a later codegen pass populates this); an overlay cell can
-    /// still set entries via [`crate::catalog_overlay::OverlayCell::capabilities`].
+    /// `Some(false)`, an asserted absence). A baked row carries the priors its
+    /// vendored snapshot recorded for this cell; a cell whose snapshot named no
+    /// capability leaves this map empty. An overlay cell merges its own entries
+    /// over the baked map per key (see
+    /// [`crate::catalog_overlay::OverlayCell::capabilities`]), so an operator
+    /// can add or flip a single prior without discarding the rest.
     pub capabilities: BTreeMap<String, bool>,
 }
 
