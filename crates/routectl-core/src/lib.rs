@@ -37,8 +37,8 @@ pub use cache_control::{
     OwnedBreakpoint, compute_frozen_floor, mutable_suffix_start, validate_source,
 };
 pub use capability::{
-    COMPUTER_USE, STRUCTURED_OUTPUT, SignalTier, WEB_SEARCH, WELL_KNOWN_CAPABILITY_KEYS,
-    normalize_capability_key,
+    COMPUTER_USE, EvidenceSource, FailurePhase, STRUCTURED_OUTPUT, SignalTier, Verdict, WEB_SEARCH,
+    WELL_KNOWN_CAPABILITY_KEYS, normalize_capability_key,
 };
 pub use cloud_project::{CloudProjectCache, InMemoryProjectCache};
 pub use content_part::{ContentPart, KnownContentPart};
