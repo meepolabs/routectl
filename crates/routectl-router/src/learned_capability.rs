@@ -298,6 +298,7 @@ impl LearnedCapabilityRegistry {
     /// Callers are responsible for one observation per request per target
     /// (dedupe upstream); this method treats each call as a distinct
     /// learn event.
+    #[allow(clippy::too_many_arguments)]
     pub fn observe(
         &self,
         state_key: &str,
@@ -305,6 +306,7 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
         tier: SignalTier,
         phase: FailurePhase,
+        source: EvidenceSource,
         now: Instant,
     ) -> ObserveOutcome {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
@@ -325,7 +327,7 @@ impl LearnedCapabilityRegistry {
                 // negative, hence `Pending`.
                 EntryVerdict::Verified => match tier {
                     SignalTier::SelfIdentifying => {
-                        let (entry, outcome) = self.fresh_entry(tier, phase, now);
+                        let (entry, outcome) = self.fresh_entry(tier, phase, source, now);
                         *existing = entry;
                         outcome
                     }
@@ -334,7 +336,7 @@ impl LearnedCapabilityRegistry {
             };
         }
         self.evict_if_full(&mut entries);
-        let (entry, outcome) = self.fresh_entry(tier, phase, now);
+        let (entry, outcome) = self.fresh_entry(tier, phase, source, now);
         entries.insert(key, entry);
         outcome
     }
@@ -356,6 +358,7 @@ impl LearnedCapabilityRegistry {
         state_key: &str,
         feature_key_raw: &str,
         provider_kind: &str,
+        source: EvidenceSource,
         now: Instant,
     ) -> PositiveOutcome {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
@@ -371,7 +374,7 @@ impl LearnedCapabilityRegistry {
             };
         }
         self.evict_if_full(&mut entries);
-        entries.insert(key, Self::fresh_positive(now));
+        entries.insert(key, Self::fresh_positive(source, now));
         PositiveOutcome::Recorded
     }
 
@@ -703,12 +706,14 @@ impl LearnedCapabilityRegistry {
         }
     }
 
-    /// Build a brand-new entry for a first observation. `source` is fixed to
-    /// `Live` in this milestone; `phase` is the caller's attribution.
+    /// Build a brand-new entry for a first observation. `source` attributes
+    /// the evidence (a real in-flight request or a routectl-issued probe);
+    /// `phase` is the caller's attribution.
     fn fresh_entry(
         &self,
         tier: SignalTier,
         phase: FailurePhase,
+        source: EvidenceSource,
         now: Instant,
     ) -> (LearnedEntry, ObserveOutcome) {
         let (expires_at, outcome) = match tier {
@@ -727,17 +732,17 @@ impl LearnedCapabilityRegistry {
             in_flight: false,
             consecutive_failed_probes: 0,
             phase,
-            source: EvidenceSource::Live,
+            source,
         };
         (entry, outcome)
     }
 
     /// Build a brand-new VerifiedWorking positive: self-identifying
     /// (structural proof acts on a single observation), phase F3 (the
-    /// positive-detection phase), live source. `expires_at` is set to `now`
-    /// but carries no decay meaning -- `is_expired` excludes a positive, so
-    /// it never lapses into a re-probe.
-    const fn fresh_positive(now: Instant) -> LearnedEntry {
+    /// positive-detection phase). `source` attributes the evidence.
+    /// `expires_at` is set to `now` but carries no decay meaning --
+    /// `is_expired` excludes a positive, so it never lapses into a re-probe.
+    const fn fresh_positive(source: EvidenceSource, now: Instant) -> LearnedEntry {
         LearnedEntry {
             verdict: EntryVerdict::Verified,
             signal: SignalTier::SelfIdentifying,
@@ -748,7 +753,7 @@ impl LearnedCapabilityRegistry {
             in_flight: false,
             consecutive_failed_probes: 0,
             phase: FailurePhase::F3,
-            source: EvidenceSource::Live,
+            source,
         }
     }
 
@@ -834,6 +839,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
 
@@ -861,6 +867,7 @@ mod tests {
             "anthropic-api",
             SignalTier::Inferred,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
 
@@ -883,6 +890,7 @@ mod tests {
             "anthropic-api",
             SignalTier::Inferred,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let within = t0 + WINDOW / 2;
@@ -894,6 +902,7 @@ mod tests {
             "anthropic-api",
             SignalTier::Inferred,
             FailurePhase::F1,
+            EvidenceSource::Live,
             within,
         );
 
@@ -919,6 +928,7 @@ mod tests {
             "anthropic-api",
             SignalTier::Inferred,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let after = t0 + WINDOW + Duration::from_secs(1);
@@ -930,6 +940,7 @@ mod tests {
             "anthropic-api",
             SignalTier::Inferred,
             FailurePhase::F1,
+            EvidenceSource::Live,
             after,
         );
 
@@ -955,6 +966,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -986,6 +998,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1022,6 +1035,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1059,6 +1073,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1093,6 +1108,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -1132,6 +1148,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -1168,6 +1185,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         reg.observe(
@@ -1176,6 +1194,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0 + Duration::from_secs(1),
         );
 
@@ -1187,6 +1206,7 @@ mod tests {
                 "openai-compat",
                 SignalTier::SelfIdentifying,
                 FailurePhase::F1,
+                EvidenceSource::Live,
                 t0 + Duration::from_secs(2),
             );
         });
@@ -1220,6 +1240,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
 
@@ -1252,6 +1273,7 @@ mod tests {
             "bedrock",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
 
@@ -1293,6 +1315,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         reg.observe(
@@ -1301,6 +1324,7 @@ mod tests {
             "anthropic-api",
             SignalTier::Inferred,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         // A non-default (phase, source) pair proves both survive the
@@ -1384,6 +1408,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         assert!(!reg.is_empty());
@@ -1419,6 +1444,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         assert_eq!(
@@ -1465,6 +1491,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1498,6 +1525,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -1534,7 +1562,13 @@ mod tests {
         let t0 = Instant::now();
 
         // Act -- a single structural positive.
-        let outcome = reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        let outcome = reg.observe_positive(
+            "nick",
+            "web_search",
+            "openai-compat",
+            EvidenceSource::Live,
+            t0,
+        );
 
         // Assert -- recorded, acting, but routes NOTHING (a positive never
         // routes away).
@@ -1555,7 +1589,13 @@ mod tests {
         // Arrange -- a positive far past any plausible decay window.
         let reg = registry();
         let t0 = Instant::now();
-        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        reg.observe_positive(
+            "nick",
+            "web_search",
+            "openai-compat",
+            EvidenceSource::Live,
+            t0,
+        );
         let long_after = t0 + DECAY * 100;
 
         // Act / Assert -- still Allow, never ProbeAdmitted: a positive is
@@ -1577,11 +1617,18 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
 
         // Act -- a passive positive must NOT clear the negative.
-        let outcome = reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        let outcome = reg.observe_positive(
+            "nick",
+            "web_search",
+            "openai-compat",
+            EvidenceSource::Live,
+            t0,
+        );
 
         // Assert -- suppressed; the negative still routes away.
         assert_eq!(outcome, PositiveOutcome::SuppressedByNegative);
@@ -1603,7 +1650,13 @@ mod tests {
         // Arrange -- a resident VerifiedWorking positive.
         let reg = registry();
         let t0 = Instant::now();
-        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        reg.observe_positive(
+            "nick",
+            "web_search",
+            "openai-compat",
+            EvidenceSource::Live,
+            t0,
+        );
         assert_eq!(reg.snapshot()[0].verdict, Verdict::VerifiedWorking);
 
         // Act -- a fresh self-identifying negative supersedes it.
@@ -1613,6 +1666,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
 
@@ -1635,7 +1689,13 @@ mod tests {
         // Arrange -- a resident VerifiedWorking positive.
         let reg = registry();
         let t0 = Instant::now();
-        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        reg.observe_positive(
+            "nick",
+            "web_search",
+            "openai-compat",
+            EvidenceSource::Live,
+            t0,
+        );
 
         // Act -- a single INFERRED negative is sub-threshold evidence, weaker
         // than the structural positive: it must be dropped, leaving the
@@ -1646,6 +1706,7 @@ mod tests {
             "openai-compat",
             SignalTier::Inferred,
             FailurePhase::F3,
+            EvidenceSource::Live,
             t0,
         );
 
@@ -1668,6 +1729,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         assert_eq!(outcome, ObserveOutcome::Acting);
@@ -1689,6 +1751,7 @@ mod tests {
             "openai-compat",
             SignalTier::Inferred,
             FailurePhase::F3,
+            EvidenceSource::Live,
             t0,
         );
         let confirm = t0 + WINDOW / 2;
@@ -1698,6 +1761,7 @@ mod tests {
             "openai-compat",
             SignalTier::Inferred,
             FailurePhase::F3,
+            EvidenceSource::Live,
             confirm,
         );
 
@@ -1716,35 +1780,43 @@ mod tests {
 
     #[test]
     fn f3_probe_acting_negative_routes_away() {
-        // Arrange -- the f5 authority contract: an F3 negative sourced from a
-        // probe DOES route away. Dead code in this milestone (no probe writes
-        // Probe source live), so pin it via an import-constructed entry, the
-        // established precedent for a not-yet-live source.
+        // Arrange -- the same F3 suspect-absence admission as the live case
+        // (inferred window reaching N=2), differing ONLY in evidence source.
+        // A probe-sourced F3 negative carries routing authority, so it routes
+        // away where the live-sourced twin stays advisory.
         let reg = registry();
         let t0 = Instant::now();
-        reg.import_entries(vec![ExportedEntry {
-            state_key: "nick".into(),
-            feature_key: "structured_output".into(),
-            verdict: EntryVerdict::Negative,
-            signal: SignalTier::SelfIdentifying,
-            observations: 1,
-            first_seen: t0,
-            last_seen: t0,
-            expires_at: t0 + DECAY,
-            phase: FailurePhase::F3,
-            source: EvidenceSource::Probe,
-            in_flight: false,
-            consecutive_failed_probes: 0,
-        }]);
+        reg.observe(
+            "nick",
+            "structured_output",
+            "openai-compat",
+            SignalTier::Inferred,
+            FailurePhase::F3,
+            EvidenceSource::Probe,
+            t0,
+        );
+        let confirm = t0 + WINDOW / 2;
+        let outcome = reg.observe(
+            "nick",
+            "structured_output",
+            "openai-compat",
+            SignalTier::Inferred,
+            FailurePhase::F3,
+            EvidenceSource::Probe,
+            confirm,
+        );
 
-        // Act / Assert
+        // Assert -- acting (N=2), and F3+Probe routes away (not advisory).
+        assert_eq!(outcome, ObserveOutcome::Acting);
         assert_eq!(
-            reg.acting_negative_for("nick", "structured_output", "openai-compat", t0),
+            reg.acting_negative_for("nick", "structured_output", "openai-compat", confirm),
             RoutingDecision::RouteAway {
-                signal: SignalTier::SelfIdentifying,
+                signal: SignalTier::Inferred,
                 phase: FailurePhase::F3,
             }
         );
+        let snap = reg.snapshot();
+        assert_eq!(snap[0].source, EvidenceSource::Probe);
     }
 
     #[test]
@@ -1757,7 +1829,13 @@ mod tests {
         assert!(!reg.is_verified_working("nick", "web_search", "openai-compat", t0));
 
         // A positive: verified.
-        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        reg.observe_positive(
+            "nick",
+            "web_search",
+            "openai-compat",
+            EvidenceSource::Live,
+            t0,
+        );
         assert!(reg.is_verified_working("nick", "web_search", "openai-compat", t0));
 
         // A negative on a different key: not verified.
@@ -1767,6 +1845,7 @@ mod tests {
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F1,
+            EvidenceSource::Live,
             t0,
         );
         assert!(!reg.is_verified_working("nick", "computer_use", "openai-compat", t0));
@@ -1777,13 +1856,20 @@ mod tests {
         // Arrange -- a positive and a negative coexisting on distinct keys.
         let reg = registry();
         let t0 = Instant::now();
-        reg.observe_positive("np", "web_search", "openai-compat", t0);
+        reg.observe_positive(
+            "np",
+            "web_search",
+            "openai-compat",
+            EvidenceSource::Live,
+            t0,
+        );
         reg.observe(
             "nn",
             "computer_use",
             "openai-compat",
             SignalTier::SelfIdentifying,
             FailurePhase::F2,
+            EvidenceSource::Live,
             t0,
         );
 
@@ -1812,13 +1898,11 @@ mod tests {
         let t0 = Instant::now();
         let apply = |t0: Instant| {
             let reg = registry();
-            reg.observe_positive("np", "web_search", "openai-compat", t0);
-            reg.observe(
-                "nn",
-                "structured_output",
+            reg.observe_positive(
+                "np",
+                "web_search",
                 "openai-compat",
-                SignalTier::Inferred,
-                FailurePhase::F3,
+                EvidenceSource::Live,
                 t0,
             );
             reg.observe(
@@ -1827,6 +1911,16 @@ mod tests {
                 "openai-compat",
                 SignalTier::Inferred,
                 FailurePhase::F3,
+                EvidenceSource::Live,
+                t0,
+            );
+            reg.observe(
+                "nn",
+                "structured_output",
+                "openai-compat",
+                SignalTier::Inferred,
+                FailurePhase::F3,
+                EvidenceSource::Live,
                 t0 + WINDOW / 2,
             );
             reg.observe(
@@ -1835,6 +1929,7 @@ mod tests {
                 "openai-compat",
                 SignalTier::SelfIdentifying,
                 FailurePhase::F1,
+                EvidenceSource::Live,
                 t0,
             );
             let mut snap = reg.snapshot();

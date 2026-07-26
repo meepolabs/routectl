@@ -9,6 +9,7 @@ use crate::config::{ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use routectl_core::capability::EvidenceSource;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -782,6 +783,7 @@ async fn learned_capability_snapshot_surfaces_negatives() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         routectl_core::capability::FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     let snap = router.learned_capability_snapshot();
@@ -1259,6 +1261,7 @@ fn learned_negative_deprioritizes_target_to_tail() {
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
         routectl_core::capability::FailurePhase::F1,
+        EvidenceSource::Live,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1332,6 +1335,7 @@ fn sole_learned_tail_target_still_attempts_and_counts_d17() {
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
         routectl_core::capability::FailurePhase::F1,
+        EvidenceSource::Live,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1371,6 +1375,7 @@ fn kill_switch_off_skips_the_learned_consult() {
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
         routectl_core::capability::FailurePhase::F1,
+        EvidenceSource::Live,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1403,6 +1408,7 @@ fn expired_learned_negative_admits_one_probe_through_filter() {
         "anthropic-api",
         routectl_core::capability::SignalTier::SelfIdentifying,
         routectl_core::capability::FailurePhase::F1,
+        EvidenceSource::Live,
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];

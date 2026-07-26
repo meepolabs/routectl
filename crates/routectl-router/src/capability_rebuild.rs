@@ -278,6 +278,7 @@ fn replay_row(
                 &row.state_key,
                 &row.capability,
                 &row.provider_kind,
+                EvidenceSource::Live,
                 row.observed_at,
             );
             summary.replayed_verified += 1;
@@ -394,6 +395,7 @@ fn mint_negative(
         &row.provider_kind,
         tier,
         phase,
+        EvidenceSource::Live,
         row.observed_at,
     );
     summary.replayed_negative += 1;

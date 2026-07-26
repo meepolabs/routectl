@@ -274,6 +274,7 @@ fn verified_positive_no_ops_when_a_negative_resides() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     let req = structured_output_request(&["name"]);

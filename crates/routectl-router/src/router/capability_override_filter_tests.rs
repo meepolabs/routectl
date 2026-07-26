@@ -5,6 +5,7 @@ use super::*;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::chain::into_one_dispatch_target;
+use routectl_core::capability::EvidenceSource;
 use routectl_core::{ChatChunk, ChatResponse, Provider};
 use std::sync::Arc;
 
@@ -183,6 +184,7 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
 
@@ -214,6 +216,7 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -253,6 +256,7 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -281,6 +285,7 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
     let mut admissions = Vec::new();
@@ -323,6 +328,7 @@ fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
         "openai-compat",
         SignalTier::SelfIdentifying,
         FailurePhase::F1,
+        EvidenceSource::Live,
         Instant::now(),
     );
 
