@@ -214,6 +214,13 @@ impl UsageHandle {
     /// enabled gate applies (a learn event is a usage write), and a full or
     /// closed channel drops the event with its own counter and rate-limited
     /// WARN. Routing never depends on this landing -- it is best-effort.
+    ///
+    /// DEPRECATED: the request path no longer calls this -- learned negatives
+    /// now ride out as `broken` rows through [`Self::try_send_capability_event`]
+    /// into the unified `capability_events` ledger. Retained (with the
+    /// `LearnEvent` writer branch and the `capability_learn_events` DDL) so the
+    /// legacy write path stays compilable and existing rows are untouched;
+    /// removal is a later change.
     pub fn try_send_learn_event(&self, event: CapabilityLearnEvent) {
         if !self.is_enabled() {
             self.counters.incr_dropped_disabled();

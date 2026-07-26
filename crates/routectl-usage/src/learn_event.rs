@@ -1,5 +1,11 @@
 //! The `capability_learn_events` row shape and its insert.
 //!
+//! DEPRECATED: superseded by the unified `capability_events` ledger
+//! (`capability_event.rs`). The request path no longer produces these rows --
+//! learned negatives now land as `broken` rows in `capability_events`. This
+//! module and the table remain (no DROP) so the legacy write path stays
+//! compilable and existing rows survive; removal is a later change.
+//!
 //! A learn event is one confirmed observation that a routing target does
 //! not support a capability. It is captured off the hot path and rides the
 //! single usage-writer actor, exactly like a `UsageRecord`, but lands in

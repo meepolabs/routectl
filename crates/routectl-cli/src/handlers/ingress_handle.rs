@@ -445,7 +445,11 @@ async fn complete_response<A: IngressAdapter>(
     // from (`build_usage_draft`) -- one derivation, read twice.
     let session_key = req.routectl_internal.inbound_session_key.clone();
     let dispatched = router.complete_with_options(req, opts).await;
-    capture.observe_meta(&dispatched.meta);
+    capture.observe_meta(
+        &dispatched.meta,
+        router.catalog_version(),
+        router.overlay_revision(),
+    );
     match dispatched.result {
         Ok(resp) => {
             // Non-streaming first byte == the response being ready.
@@ -575,7 +579,11 @@ async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
 
     match fast {
         Some(dispatched) => {
-            capture.observe_meta(&dispatched.meta);
+            capture.observe_meta(
+                &dispatched.meta,
+                router.catalog_version(),
+                router.overlay_revision(),
+            );
             match dispatched.result {
                 Ok(upstream) => {
                     // `adapter` + `capture` move INTO the render task, which
@@ -686,7 +694,11 @@ async fn warm_render_task<A: IngressAdapter>(
     }
     // Now await the SAME dispatch that outran the grace window.
     let dispatched = fut.await;
-    capture.observe_meta(&dispatched.meta);
+    capture.observe_meta(
+        &dispatched.meta,
+        router.catalog_version(),
+        router.overlay_revision(),
+    );
     match dispatched.result {
         Ok(upstream) => {
             drive_stream(upstream, adapter, capture, tx, router, session_key, state).await;

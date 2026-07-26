@@ -276,7 +276,13 @@ impl LearnedProbeGuard {
     }
 
     /// The dispatch succeeded (2xx): clear every held entry, then disarm.
-    pub(super) fn settle_success(&mut self) {
+    /// Returns one [`CapabilityClearedEvent`](super::CapabilityClearedEvent)
+    /// per cleared entry so the caller can ride the clears out on the dispatch
+    /// meta; this is the ONLY settlement arm that clears a resident negative
+    /// (a same-capability rejection refreshes with backoff, a drop records a
+    /// transient error -- neither clears), so it is the ONLY arm that emits.
+    pub(super) fn settle_success(&mut self) -> Vec<super::CapabilityClearedEvent> {
+        let mut cleared = Vec::new();
         if let Some(registry) = self.registry.take() {
             let now = Instant::now();
             for probe in self.probes.drain(..) {
@@ -288,8 +294,14 @@ impl LearnedProbeGuard {
                     now,
                 );
                 emit_probe_settlement(&probe, self.surface, "success", true, "success");
+                cleared.push(super::CapabilityClearedEvent {
+                    state_key: probe.state_key,
+                    capability_key: probe.feature,
+                    provider_kind: probe.provider_kind.to_string(),
+                });
             }
         }
+        cleared
     }
 
     /// The dispatch hit the same capability rejection for one held probe:

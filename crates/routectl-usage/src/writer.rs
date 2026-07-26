@@ -34,6 +34,10 @@ pub enum WriterMessage {
     /// A usage-accounting row bound for the `requests` table.
     Request(Box<UsageRecord>),
     /// A capability learn event bound for the `capability_learn_events` table.
+    ///
+    /// DEPRECATED: the request path no longer produces this variant -- learned
+    /// negatives now ride out as `CapabilityEvent` `broken` rows. Retained so
+    /// the legacy write path stays compilable; removal is a later change.
     LearnEvent(CapabilityLearnEvent),
     /// A capability event bound for the unified `capability_events` ledger.
     CapabilityEvent(CapabilityEvent),
@@ -377,6 +381,10 @@ impl WriterState {
     /// learn-event persisted counter. A missing connection or an insert
     /// error drops the event and routes through the shared DB-health
     /// failure path (write-error counter + degraded-transition log).
+    ///
+    /// DEPRECATED: the request path no longer enqueues `LearnEvent`, so this
+    /// consumer branch is dormant. Retained with the legacy table; removal is
+    /// a later change.
     fn persist_learn_event(&mut self, event: &CapabilityLearnEvent, counters: &Arc<UsageCounters>) {
         let Some(conn) = self.conn.as_ref() else {
             self.record_failure(None, counters);

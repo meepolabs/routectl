@@ -379,7 +379,7 @@ async fn observe_meta_forwarded_credential_stamps_credential_source_marker() {
     let (mut cap, _w, _dir) = capture();
 
     // Act
-    cap.observe_meta(&meta);
+    cap.observe_meta(&meta, 0, 0);
 
     // Assert: the client's model lands in the `upstream` column, and the
     // disambiguation marker is stamped into the existing `extra` JSON
@@ -400,7 +400,7 @@ async fn observe_meta_own_credential_leaves_extra_untouched() {
     let (mut cap, _w, _dir) = capture();
 
     // Act
-    cap.observe_meta(&meta);
+    cap.observe_meta(&meta, 0, 0);
 
     // Assert: byte-for-byte unchanged -- no disambiguation marker on an
     // own-credential row.
@@ -417,7 +417,7 @@ async fn observe_meta_forwarded_credential_preserves_existing_extra_keys() {
     cap.mark_stream_stage(StreamStage::MidStream);
 
     // Act
-    cap.observe_meta(&meta);
+    cap.observe_meta(&meta, 0, 0);
 
     // Assert: additive -- both keys survive.
     assert_eq!(
@@ -429,23 +429,25 @@ async fn observe_meta_forwarded_credential_preserves_existing_extra_keys() {
     );
 }
 
-// -------- observe_meta: learn-event drain to the usage writer -------------
+// -------- observe_meta: unified capability-event drain --------------------
 //
-// `observe_meta` drains `DispatchMeta::learned_capabilities` into the
-// usage writer via `try_send_learn_event` -- one enqueue per captured
-// event, mapping the router-side struct to the plain usage-side row
-// (`SignalTier::as_str` for the tier, the derived feature set carried
-// through for replay verification). These tests build a REAL router meta
-// (`any_dispatch_meta`, the `#[non_exhaustive]` construction pattern above)
-// and push learn events onto its public `learned_capabilities` vec, then
-// assert the writer receives / persists exactly N rows and that the field
-// mapping survives the round trip. The handle is dropped before the writer
-// shutdown so the channel closes (repo learning: shutdown otherwise blocks
-// on a deadline waiting for a channel that never closes).
+// `observe_meta` drains `DispatchMeta`'s captured capability signals into the
+// unified `capability_events` ledger via `try_send_capability_event` -- one
+// row per event, stamped with the `(catalog_version, overlay_revision)` the
+// ingress boundary reads off the router getters. Learned negatives map to
+// `broken` rows, response-evidence observations to `verified` / `suspect`
+// rows, probe-settled clears to `cleared` rows. The LEGACY
+// `capability_learn_events` table takes NO new writes on this path (pinned
+// below). These tests build a REAL router meta (`any_dispatch_meta`, the
+// `#[non_exhaustive]` construction pattern above) and push events onto its
+// public vecs, then assert the writer persists the mapped rows. The handle is
+// dropped before the writer shutdown so the channel closes (repo learning:
+// shutdown otherwise blocks on a deadline waiting for a channel that never
+// closes).
 
-fn wait_learn_persisted(handle: &UsageHandle, want: u64) -> bool {
+fn wait_capability_persisted(handle: &UsageHandle, want: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while handle.counters().learn_events_persisted() < want {
+    while handle.counters().capability_events_persisted() < want {
         if std::time::Instant::now() > deadline {
             return false;
         }
@@ -472,8 +474,66 @@ fn learn_event(
     }
 }
 
+fn observe_event(
+    capability_key: &str,
+    direction: routectl_router::ObservationDirection,
+    evidence_class: &str,
+) -> routectl_router::router::CapabilityObserveEvent {
+    routectl_router::router::CapabilityObserveEvent {
+        state_key: "prov".to_string(),
+        capability_key: capability_key.to_string(),
+        provider_kind: "anthropic-api".to_string(),
+        evidence_class: evidence_class.to_string(),
+        direction,
+        signal_tier: routectl_core::SignalTier::Inferred,
+        source: EvidenceSource::Live,
+        request_features: vec!["web_search".to_string()],
+    }
+}
+
+fn cleared_event(capability_key: &str) -> routectl_router::router::CapabilityClearedEvent {
+    routectl_router::router::CapabilityClearedEvent {
+        state_key: "prov".to_string(),
+        capability_key: capability_key.to_string(),
+        provider_kind: "anthropic-api".to_string(),
+    }
+}
+
+/// Drain `meta` through `observe_meta` against a fresh on-disk usage DB, wait
+/// for `want` capability rows to persist, and return an open connection to the
+/// DB (plus the owning tempdir the caller must keep alive) for row assertions.
+/// Shuts the writer down (dropping the handle first) so every enqueued row has
+/// flushed before the read.
+fn drain_and_open(
+    meta: &routectl_router::DispatchMeta,
+    catalog: u32,
+    overlay: u64,
+    want: u64,
+) -> (rusqlite::Connection, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (handle, writer) = routectl_usage::UsageWriter::start(
+        db_path.clone(),
+        routectl_usage::CHANNEL_CAPACITY,
+        0,
+        true,
+    );
+    let draft = build_usage_draft("anthropic", &minimal_request(), "req-cap".to_string());
+    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    cap.observe_meta(meta, catalog, overlay);
+    assert!(
+        wait_capability_persisted(&handle, want),
+        "capability events not persisted"
+    );
+    drop(cap);
+    drop(handle);
+    writer.shutdown();
+    let conn = rusqlite::Connection::open(&db_path).expect("read db");
+    (conn, dir)
+}
+
 #[tokio::test]
-async fn observe_meta_drains_each_learn_event_to_one_row() {
+async fn observe_meta_drains_each_capability_event_to_one_row() {
     // Arrange: two captured learn events ride the dispatch meta.
     let mut meta = any_dispatch_meta().await;
     meta.learned_capabilities = vec![
@@ -483,13 +543,13 @@ async fn observe_meta_drains_each_learn_event_to_one_row() {
     let (mut cap, handle, writer, _dir) = capture_with_handle();
 
     // Act: observe_meta drains both events into the writer.
-    cap.observe_meta(&meta);
+    cap.observe_meta(&meta, 7, 3);
 
     // Assert: N events -> N enqueued and N persisted rows.
-    assert_eq!(handle.counters().learn_events_enqueued(), 2);
+    assert_eq!(handle.counters().capability_events_enqueued(), 2);
     assert!(
-        wait_learn_persisted(&handle, 2),
-        "learn events not persisted"
+        wait_capability_persisted(&handle, 2),
+        "capability events not persisted"
     );
     drop(cap);
     drop(handle);
@@ -497,70 +557,52 @@ async fn observe_meta_drains_each_learn_event_to_one_row() {
 }
 
 #[tokio::test]
-async fn observe_meta_empty_learn_events_enqueues_nothing() {
-    // Arrange: the common path -- no captured capability observations.
+async fn observe_meta_empty_capability_events_enqueues_nothing() {
+    // Arrange: the common path -- no captured capability signals.
     let meta = any_dispatch_meta().await;
     assert!(
-        meta.learned_capabilities.is_empty(),
+        meta.learned_capabilities.is_empty()
+            && meta.capability_observations.is_empty()
+            && meta.cleared_capabilities.is_empty(),
         "sanity: none captured"
     );
     let (mut cap, handle, writer, _dir) = capture_with_handle();
 
     // Act
-    cap.observe_meta(&meta);
+    cap.observe_meta(&meta, 7, 3);
 
-    // Assert: an empty vec enqueues nothing.
-    assert_eq!(handle.counters().learn_events_enqueued(), 0);
+    // Assert: empty vecs enqueue nothing.
+    assert_eq!(handle.counters().capability_events_enqueued(), 0);
     drop(cap);
     drop(handle);
     writer.shutdown();
 }
 
 #[tokio::test]
-async fn observe_meta_maps_learn_event_fields_onto_the_row() {
-    // Arrange: one inferred event with a known feature set.
+async fn observe_meta_learned_negative_maps_to_broken_row() {
+    // Arrange: one inferred F1 learned negative.
     let mut meta = any_dispatch_meta().await;
     meta.learned_capabilities = vec![learn_event(
         "web_search",
         routectl_core::SignalTier::Inferred,
     )];
-    let dir = tempfile::tempdir().expect("usage tempdir");
-    let db_path = dir.path().join("usage.db");
-    let (handle, writer) = routectl_usage::UsageWriter::start(
-        db_path.clone(),
-        routectl_usage::CHANNEL_CAPACITY,
-        0,
-        true,
-    );
-    let draft = build_usage_draft("anthropic", &minimal_request(), "req-learn".to_string());
-    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
 
     // Act
-    cap.observe_meta(&meta);
-    assert!(
-        wait_learn_persisted(&handle, 1),
-        "learn event not persisted"
-    );
-    drop(cap);
-    drop(handle);
-    writer.shutdown();
+    let (conn, _dir) = drain_and_open(&meta, 7, 3, 1);
 
-    // Assert: the router struct maps onto the plain usage row -- the tier is
-    // the persisted `as_str` token and the feature set is the JSON array.
-    let conn = rusqlite::Connection::open(&db_path).expect("read db");
-    let (state_key, capability_key, provider_kind, tier, observations, status, remapped, features): (
+    // Assert: a `broken` row -- phase / tier from the event, live source, no
+    // evidence class / upstream token, revisions stamped from the boundary.
+    let (lane, cap_key, verdict, phase, source, tier): (
         String,
         String,
         String,
         String,
-        i64,
-        i64,
-        i64,
+        String,
         String,
     ) = conn
         .query_row(
-            "SELECT state_key, capability_key, provider_kind, signal_tier, observations, \
-             upstream_status, remapped, request_features FROM capability_learn_events",
+            "SELECT lane_key, capability, verdict, phase, source, tier \
+             FROM capability_events",
             [],
             |r| {
                 Ok((
@@ -570,74 +612,114 @@ async fn observe_meta_maps_learn_event_fields_onto_the_row() {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
                 ))
             },
         )
-        .expect("one learn event row");
-    assert_eq!(state_key, "prov");
-    assert_eq!(capability_key, "web_search");
-    assert_eq!(provider_kind, "anthropic-api");
+        .expect("one broken row");
+    assert_eq!(lane, "prov");
+    assert_eq!(cap_key, "web_search");
+    assert_eq!(verdict, "broken");
+    assert_eq!(phase, "f1");
+    assert_eq!(source, "live");
     assert_eq!(tier, "inferred");
-    assert_eq!(observations, 2);
-    assert_eq!(status, 400);
-    assert_eq!(remapped, 0);
-    assert_eq!(features, r#"["web_search","prefill"]"#);
+    let (ec, ut, cat, ovr): (Option<String>, Option<String>, i64, i64) = conn
+        .query_row(
+            "SELECT evidence_class, upstream_token, catalog_version, overlay_revision \
+             FROM capability_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .expect("one broken row");
+    assert!(ec.is_none(), "broken row carries no evidence class");
+    assert!(ut.is_none(), "broken row carries no upstream token");
+    assert_eq!(cat, 7);
+    assert_eq!(ovr, 3);
+    // The legacy table takes NO new writes on this path.
+    let legacy: i64 = conn
+        .query_row("SELECT COUNT(*) FROM capability_learn_events", [], |r| {
+            r.get(0)
+        })
+        .expect("legacy count");
+    assert_eq!(legacy, 0, "legacy learn table must take no new writes");
 }
 
 #[tokio::test]
-async fn observe_meta_bounds_untrusted_request_features_on_the_row() {
-    // Arrange: a learn event whose feature set is both too long (more than
-    // the entry cap) and holds an overlong string -- both derive from
-    // arbitrary client tool-type strings, so both must be bounded before
-    // they reach the persisted row.
+async fn observe_meta_verified_observation_maps_to_verified_row() {
+    // Arrange: one Verified response-evidence observation.
     let mut meta = any_dispatch_meta().await;
-    let mut ev = learn_event("web_search", routectl_core::SignalTier::Inferred);
-    let overlong = "a".repeat(500);
-    let mut features: Vec<String> = (0..40).map(|i| format!("feature_{i}")).collect();
-    features.push(overlong);
-    ev.request_features = features;
-    meta.learned_capabilities = vec![ev];
-
-    let dir = tempfile::tempdir().expect("usage tempdir");
-    let db_path = dir.path().join("usage.db");
-    let (handle, writer) = routectl_usage::UsageWriter::start(
-        db_path.clone(),
-        routectl_usage::CHANNEL_CAPACITY,
-        0,
-        true,
-    );
-    let draft = build_usage_draft("anthropic", &minimal_request(), "req-bound".to_string());
-    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    meta.capability_observations = vec![observe_event(
+        "structured_output",
+        routectl_router::ObservationDirection::Verified,
+        routectl_core::capability::SCHEMA_MISMATCH,
+    )];
 
     // Act
-    cap.observe_meta(&meta);
-    assert!(
-        wait_learn_persisted(&handle, 1),
-        "learn event not persisted"
-    );
-    drop(cap);
-    drop(handle);
-    writer.shutdown();
+    let (conn, _dir) = drain_and_open(&meta, 1, 1, 1);
 
-    // Assert: the persisted JSON array is capped at 16 entries and no entry
-    // exceeds 128 chars.
-    let conn = rusqlite::Connection::open(&db_path).expect("read db");
-    let features_json: String = conn
+    // Assert: a `verified` row -- phase f3, the pinned evidence-class token.
+    let (verdict, phase, source, ec): (String, String, String, Option<String>) = conn
         .query_row(
-            "SELECT request_features FROM capability_learn_events",
+            "SELECT verdict, phase, source, evidence_class FROM capability_events",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
-        .expect("one learn event row");
-    let persisted: Vec<String> =
-        serde_json::from_str(&features_json).expect("features are a JSON array");
-    assert_eq!(persisted.len(), 16, "entry count is capped");
-    assert!(
-        persisted.iter().all(|f| f.chars().count() <= 128),
-        "each entry is truncated to the char cap"
-    );
+        .expect("one verified row");
+    assert_eq!(verdict, "verified");
+    assert_eq!(phase, "f3");
+    assert_eq!(source, "live");
+    assert_eq!(ec.as_deref(), Some("schema_mismatch"));
+}
+
+#[tokio::test]
+async fn observe_meta_suspect_observation_maps_to_suspect_row() {
+    // Arrange: one SuspectAbsence response-evidence observation.
+    let mut meta = any_dispatch_meta().await;
+    meta.capability_observations = vec![observe_event(
+        "web_search",
+        routectl_router::ObservationDirection::SuspectAbsence,
+        routectl_core::capability::SEARCH_BLOCKS,
+    )];
+
+    // Act
+    let (conn, _dir) = drain_and_open(&meta, 1, 1, 1);
+
+    // Assert: a `suspect` row -- phase f3, the pinned evidence-class token.
+    let (verdict, phase, ec): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT verdict, phase, evidence_class FROM capability_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("one suspect row");
+    assert_eq!(verdict, "suspect");
+    assert_eq!(phase, "f3");
+    assert_eq!(ec.as_deref(), Some("search_blocks"));
+}
+
+#[tokio::test]
+async fn observe_meta_probe_clear_maps_to_cleared_row() {
+    // Arrange: one probe-settled clear rides the meta.
+    let mut meta = any_dispatch_meta().await;
+    meta.cleared_capabilities = vec![cleared_event("web_search")];
+
+    // Act
+    let (conn, _dir) = drain_and_open(&meta, 2, 5, 1);
+
+    // Assert: a `cleared` row keyed on (lane, capability), live source, no
+    // evidence class -- the replayer removes the resident negative by key.
+    let (lane, cap_key, verdict, source, ec): (String, String, String, String, Option<String>) =
+        conn.query_row(
+            "SELECT lane_key, capability, verdict, source, evidence_class \
+             FROM capability_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .expect("one cleared row");
+    assert_eq!(lane, "prov");
+    assert_eq!(cap_key, "web_search");
+    assert_eq!(verdict, "cleared");
+    assert_eq!(source, "live");
+    assert!(ec.is_none(), "cleared row carries no evidence class");
 }
 
 fn minimal_request() -> routectl_core::ChatRequest {
