@@ -26,7 +26,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the health panel payload.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Per-target health plus learned negatives for the routing surface.
 #[derive(Debug, Clone, Serialize)]
@@ -65,14 +65,20 @@ struct TargetHealth {
     last_outcome_at_ms: Option<i64>,
 }
 
-/// One resident learned-capability negative. Field names are the
+/// One resident learned-capability row. Field names are the
 /// `docs/LOGGING.md` contract tokens: `state_key`, `capability_key`
 /// (the internal `feature_key`, RENAMED to the contract token),
-/// `signal_tier`.
+/// `signal_tier`. The registry is verdict-discriminated, so a row is
+/// EITHER a learned negative OR a VerifiedWorking positive; `verdict`
+/// distinguishes them, so a positive is never mistaken for a negative
+/// that merely carries `phase=f3`.
 #[derive(Debug, Clone, Serialize)]
 struct LearnedNegative {
     state_key: String,
     capability_key: String,
+    /// Read-model verdict token from the core `Verdict` (`verified` for a
+    /// VerifiedWorking positive, `broken` for a learned negative).
+    verdict: &'static str,
     signal_tier: &'static str,
     observations: u32,
     /// Detection-phase token (`f1`/`f2`/`f3`) from the core `FailurePhase`.
@@ -153,6 +159,7 @@ fn map_learned(entry: LearnedRegistryEntry) -> LearnedNegative {
     LearnedNegative {
         state_key: entry.state_key,
         capability_key: entry.feature_key,
+        verdict: entry.verdict.as_str(),
         signal_tier: entry.signal_tier.as_str(),
         observations: entry.observations,
         phase: entry.phase.as_str(),
@@ -209,7 +216,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
+    use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
     use routectl_router::runtime_state::ProviderGateStatus;
     use routectl_router::{Config, Router};
     use serde_json::Value;
@@ -405,6 +412,7 @@ mod tests {
         let entry = LearnedRegistryEntry {
             state_key: "opus".into(),
             feature_key: "structured_output".into(),
+            verdict: Verdict::LearnedBroken(FailurePhase::F2),
             signal_tier: SignalTier::SelfIdentifying,
             observations: 2,
             first_seen: Instant::now(),
@@ -416,10 +424,33 @@ mod tests {
         let mapped = map_learned(entry);
         assert_eq!(mapped.state_key, "opus");
         assert_eq!(mapped.capability_key, "structured_output");
+        assert_eq!(mapped.verdict, "broken");
         assert_eq!(mapped.signal_tier, "self-identifying");
         assert_eq!(mapped.observations, 2);
         assert_eq!(mapped.phase, "f2");
         assert_eq!(mapped.source, "live");
+    }
+
+    /// A VerifiedWorking snapshot row maps to the `verified` verdict token,
+    /// so a positive is distinguishable from a learned negative that merely
+    /// carries `phase=f3` -- the two share that phase but differ by verdict.
+    #[test]
+    fn map_learned_surfaces_verified_verdict() {
+        let entry = LearnedRegistryEntry {
+            state_key: "opus".into(),
+            feature_key: "web_search".into(),
+            verdict: Verdict::VerifiedWorking,
+            signal_tier: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: Instant::now(),
+            last_seen: Instant::now(),
+            expires_at: Instant::now(),
+            phase: FailurePhase::F3,
+            source: EvidenceSource::Live,
+        };
+        let mapped = map_learned(entry);
+        assert_eq!(mapped.verdict, "verified");
+        assert_eq!(mapped.phase, "f3");
     }
 
     /// The DTO field names MUST equal the `docs/LOGGING.md` contract tokens,
@@ -430,6 +461,7 @@ mod tests {
         let value = serde_json::to_value(LearnedNegative {
             state_key: "k".into(),
             capability_key: "web_search".into(),
+            verdict: "broken",
             signal_tier: "inferred",
             observations: 1,
             phase: "f1",
@@ -447,6 +479,9 @@ mod tests {
         assert!(obj.contains_key("source"));
         assert_eq!(obj["phase"], Value::from("f1"));
         assert_eq!(obj["source"], Value::from("live"));
+        // The verdict discriminator surfaces under its own stable key.
+        assert!(obj.contains_key("verdict"));
+        assert_eq!(obj["verdict"], Value::from("broken"));
         // The pre-rename token must NOT surface on the wire.
         assert!(!obj.contains_key("feature_key"));
     }
@@ -498,6 +533,7 @@ mod tests {
         let wire = serde_json::to_value(LearnedNegative {
             state_key: "k".into(),
             capability_key: "web_search".into(),
+            verdict: "broken",
             signal_tier: "inferred",
             observations: 1,
             phase: "f1",
@@ -555,6 +591,7 @@ mod tests {
             learned_negatives: vec![map_learned(LearnedRegistryEntry {
                 state_key: "opus".into(),
                 feature_key: "web_search".into(),
+                verdict: Verdict::LearnedBroken(FailurePhase::F1),
                 signal_tier: SignalTier::Inferred,
                 observations: 1,
                 first_seen: Instant::now(),

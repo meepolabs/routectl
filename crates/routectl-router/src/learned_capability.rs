@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use routectl_core::capability::{
-    EvidenceSource, FailurePhase, SignalTier, normalize_capability_key,
+    EvidenceSource, FailurePhase, SignalTier, Verdict, normalize_capability_key,
 };
 
 /// Default resident-entry ceiling. A safety valve, not a cache policy:
@@ -64,10 +64,38 @@ struct RegistryKey {
     feature_key: String,
 }
 
-/// A single learned negative. Private storage representation; callers see
-/// [`LearnedRegistryEntry`] (snapshot) or [`ExportedEntry`] (carry-over).
+/// Which side of the capability-truth ledger a resident entry records: a
+/// positive confirmed by structural detection, or a learned negative.
+///
+/// The discriminator is what a phase alone cannot express: an `F3` entry
+/// is a positive-detection phase on BOTH sides -- a VerifiedWorking
+/// positive AND an inferred suspect-absence negative both carry `F3` --
+/// so the read-model verdict is derived from this discriminator plus the
+/// phase, mirroring [`Verdict::from_parts`]: `Verified` maps to
+/// `VerifiedWorking`, `Negative` to `LearnedBroken(phase)`. Snapshot and
+/// export carry it so a reader reconstructs the verdict without a second
+/// registry lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryVerdict {
+    /// A capability confirmed working by positive detection. Constructed
+    /// only by the positive-admission path; allowed dead until the observer
+    /// wiring calls it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Verified,
+    /// A learned negative, attributed to the entry's [`FailurePhase`].
+    Negative,
+}
+
+/// A single resident entry -- a VerifiedWorking positive or a learned
+/// negative, discriminated by [`EntryVerdict`]. Private storage
+/// representation; callers see [`LearnedRegistryEntry`] (snapshot) or
+/// [`ExportedEntry`] (carry-over).
 #[derive(Debug, Clone)]
 struct LearnedEntry {
+    /// Which side of the ledger this entry records. A `Verified` positive
+    /// never decays, never claims a re-probe slot, and routes nothing;
+    /// a `Negative` runs the full decay / re-probe / backoff machinery.
+    verdict: EntryVerdict,
     signal: SignalTier,
     observations: u32,
     first_seen: Instant,
@@ -75,25 +103,61 @@ struct LearnedEntry {
     expires_at: Instant,
     in_flight: bool,
     consecutive_failed_probes: u32,
-    /// The detection phase that attributed this negative. Threaded through
-    /// every contract surface; the derived read-model verdict reads it.
+    /// The detection phase that attributed this entry. For a negative this
+    /// is F1/F2/F3; for a `Verified` positive it is always F3 (the
+    /// positive-detection phase). Threaded through every contract surface;
+    /// the derived read-model verdict reads it together with `verdict`.
     phase: FailurePhase,
     /// Whether the evidence came from live traffic or an out-of-band probe.
-    /// Fixed to `Live` in this milestone -- the field threads through the
-    /// contracts so a later probe-settle pass can populate `Probe`.
     source: EvidenceSource,
 }
 
 impl LearnedEntry {
     /// A self-identifying signal acts on one observation; an inferred
-    /// signal needs corroboration (two observations).
+    /// signal needs corroboration (two observations). A `Verified` positive
+    /// is always self-identifying, so it acts on its single observation.
     const fn is_acting(&self) -> bool {
         matches!(self.signal, SignalTier::SelfIdentifying) || self.observations >= 2
     }
 
     /// The decay window has lapsed and the negative is due for a re-probe.
+    /// A `Verified` positive never decays within a revision, so it is never
+    /// expired -- it can never claim a re-probe slot.
     fn is_expired(&self, now: Instant) -> bool {
-        now >= self.expires_at
+        matches!(self.verdict, EntryVerdict::Negative) && now >= self.expires_at
+    }
+
+    /// The routing decision for this entry when it `is_acting`, keyed on
+    /// (verdict, phase, source):
+    ///
+    /// - `Verified` -> `Allow` (a positive routes nothing);
+    /// - `Negative` F3 + Live -> `Allow` (advisory-only: visible in the
+    ///   snapshot for the status surface, but it routes nothing on its own
+    ///   -- a probe settles it);
+    /// - every other negative (F1/F2 live, and the F3 + Probe authority a
+    ///   later probe pass owns) -> `RouteAway`, carrying its phase to the
+    ///   strip site so no second registry lookup is needed.
+    const fn acting_decision(&self) -> RoutingDecision {
+        match self.verdict {
+            EntryVerdict::Verified => RoutingDecision::Allow,
+            EntryVerdict::Negative => match (self.phase, self.source) {
+                (FailurePhase::F3, EvidenceSource::Live) => RoutingDecision::Allow,
+                _ => RoutingDecision::RouteAway {
+                    signal: self.signal,
+                    phase: self.phase,
+                },
+            },
+        }
+    }
+
+    /// The derived read-model verdict, mirroring [`Verdict::from_parts`]:
+    /// a `Verified` entry is `VerifiedWorking`; a `Negative` is
+    /// `LearnedBroken(phase)`.
+    const fn read_verdict(&self) -> Verdict {
+        match self.verdict {
+            EntryVerdict::Verified => Verdict::VerifiedWorking,
+            EntryVerdict::Negative => Verdict::LearnedBroken(self.phase),
+        }
     }
 }
 
@@ -107,6 +171,19 @@ pub enum ObserveOutcome {
     /// immediately; inferred on the confirming second observation within
     /// the window).
     Acting,
+}
+
+/// Outcome of [`LearnedCapabilityRegistry::observe_positive`].
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositiveOutcome {
+    /// The positive was recorded (a fresh VerifiedWorking entry, or a
+    /// refresh of a resident one): VerifiedWorking now acts for this key.
+    Recorded,
+    /// A learned negative owns the key; the passive positive is a no-op.
+    /// The negative's decay / re-probe lifecycle owns clearing -- a passive
+    /// positive never clears a resident negative.
+    SuppressedByNegative,
 }
 
 /// Dispatch-path decision for a `(target, feature)`.
@@ -146,21 +223,27 @@ pub enum ProbeOutcome {
 /// without a retrofit, so the field set is fixed by contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnedRegistryEntry {
-    /// The routing state key (provider + model) this negative applies to.
+    /// The routing state key (provider + model) this entry applies to.
     pub state_key: String,
-    /// The capability feature key that was rejected.
+    /// The capability feature key this entry records.
     pub feature_key: String,
-    /// The signal tier of the learned negative.
+    /// The derived read-model verdict: `VerifiedWorking` for a positive,
+    /// `LearnedBroken(phase)` for a negative. Derived at read from the
+    /// entry's discriminator, consistent with [`Verdict::from_parts`].
+    pub verdict: Verdict,
+    /// The signal tier of the entry.
     pub signal_tier: SignalTier,
-    /// How many rejections have been observed.
+    /// How many observations have accrued.
     pub observations: u32,
-    /// When the negative was first observed.
+    /// When the entry was first observed.
     pub first_seen: Instant,
-    /// When the negative was most recently observed.
+    /// When the entry was most recently observed.
     pub last_seen: Instant,
-    /// When the negative's decay window lapses.
+    /// When the negative's decay window lapses. For a VerifiedWorking
+    /// positive this carries no decay meaning (a positive never decays);
+    /// read the `verdict` discriminator, not this field, to tell them apart.
     pub expires_at: Instant,
-    /// The detection phase that attributed this negative.
+    /// The detection phase that attributed this entry.
     pub phase: FailurePhase,
     /// Whether the evidence came from live traffic or an out-of-band probe.
     pub source: EvidenceSource,
@@ -173,6 +256,9 @@ pub struct LearnedRegistryEntry {
 pub struct ExportedEntry {
     pub state_key: String,
     pub feature_key: String,
+    /// Which side of the ledger this entry records. Carried at full
+    /// fidelity so the import round-trip reconstructs the identical entry.
+    pub verdict: EntryVerdict,
     pub signal: SignalTier,
     pub observations: u32,
     pub first_seen: Instant,
@@ -227,12 +313,73 @@ impl LearnedCapabilityRegistry {
         let key = Self::make_key(state_key, feature_key_raw, provider_kind);
         let mut entries = self.entries.write();
         if let Some(existing) = entries.get_mut(&key) {
-            return self.observe_existing(existing, tier, now);
+            return match existing.verdict {
+                // A resident negative runs the normal observe path.
+                EntryVerdict::Negative => self.observe_existing(existing, tier, now),
+                // Recency (settled rule): only a SELF-IDENTIFYING negative
+                // supersedes a resident VerifiedWorking positive -- a directly
+                // named failure is fresher, stronger evidence than the
+                // structural positive, so it replaces and acts at once. An
+                // INFERRED negative is sub-threshold evidence weaker than the
+                // positive, so it is DROPPED and the verified entry stays
+                // resident (the no-passive-clear philosophy: weak signal never
+                // overturns strong). A later self-identifying negative still
+                // replaces. The dropped inferred observation produces no acting
+                // negative, hence `Pending`.
+                EntryVerdict::Verified => match tier {
+                    SignalTier::SelfIdentifying => {
+                        let (entry, outcome) = self.fresh_entry(tier, phase, now);
+                        *existing = entry;
+                        outcome
+                    }
+                    SignalTier::Inferred => ObserveOutcome::Pending,
+                },
+            };
         }
         self.evict_if_full(&mut entries);
         let (entry, outcome) = self.fresh_entry(tier, phase, now);
         entries.insert(key, entry);
         outcome
+    }
+
+    /// Record one positive (VerifiedWorking) observation for
+    /// `(state_key, feature_key)`. A structural positive acts on a single
+    /// observation (self-identifying proof), never decays within a
+    /// revision, never claims a re-probe slot, and never backs off.
+    ///
+    /// A no-op when any learned negative resides for the key: a passive
+    /// positive never clears a negative -- the negative's decay / re-probe
+    /// lifecycle owns clearing. A VerifiedWorking entry therefore lands only
+    /// on keys with no resident negative.
+    ///
+    /// R2 stage-2 admission: pure over its arguments plus `now`, consulting
+    /// only the resident registry state -- no internal clock.
+    ///
+    /// Allowed dead until the observer wiring calls it; the test suite
+    /// exercises it today.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn observe_positive(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> PositiveOutcome {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        let mut entries = self.entries.write();
+        if let Some(existing) = entries.get_mut(&key) {
+            return match existing.verdict {
+                EntryVerdict::Negative => PositiveOutcome::SuppressedByNegative,
+                EntryVerdict::Verified => {
+                    existing.observations = existing.observations.saturating_add(1);
+                    existing.last_seen = now;
+                    PositiveOutcome::Recorded
+                }
+            };
+        }
+        self.evict_if_full(&mut entries);
+        entries.insert(key, Self::fresh_positive(now));
+        PositiveOutcome::Recorded
     }
 
     /// Dispatch-path query. Returns the routing decision for this target
@@ -258,11 +405,14 @@ impl LearnedCapabilityRegistry {
                     if !entry.is_acting() {
                         return RoutingDecision::Allow;
                     }
+                    let decision = entry.acting_decision();
+                    // A Verified positive or an advisory F3+Live negative
+                    // routes nothing and never claims a re-probe slot.
+                    if matches!(decision, RoutingDecision::Allow) {
+                        return RoutingDecision::Allow;
+                    }
                     if !entry.is_expired(now) || entry.in_flight {
-                        return RoutingDecision::RouteAway {
-                            signal: entry.signal,
-                            phase: entry.phase,
-                        };
+                        return decision;
                     }
                     // Lapsed and unclaimed: fall through to claim the probe.
                 }
@@ -276,12 +426,13 @@ impl LearnedCapabilityRegistry {
             None => RoutingDecision::Allow,
             Some(entry) => {
                 if !entry.is_acting() {
+                    return RoutingDecision::Allow;
+                }
+                let decision = entry.acting_decision();
+                if matches!(decision, RoutingDecision::Allow) {
                     RoutingDecision::Allow
                 } else if !entry.is_expired(now) || entry.in_flight {
-                    RoutingDecision::RouteAway {
-                        signal: entry.signal,
-                        phase: entry.phase,
-                    }
+                    decision
                 } else {
                     entry.in_flight = true;
                     tracing::info!(
@@ -295,6 +446,25 @@ impl LearnedCapabilityRegistry {
                 }
             }
         }
+    }
+
+    /// Whether a resident acting VerifiedWorking positive owns this key.
+    /// The filter's prior pass consults it: a verified positive masks a
+    /// catalog `prior=false` demotion (precedence: override > learned >
+    /// verified-working > catalog prior > unknown). A positive never decays,
+    /// so `now` is unused; it is kept for query-surface symmetry with the
+    /// rest of the registry.
+    pub fn is_verified_working(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        _now: Instant,
+    ) -> bool {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        self.entries.read().get(&key).is_some_and(|entry| {
+            matches!(entry.verdict, EntryVerdict::Verified) && entry.is_acting()
+        })
     }
 
     /// Settle an in-flight re-probe with its outcome.
@@ -347,6 +517,7 @@ impl LearnedCapabilityRegistry {
             .map(|(key, entry)| LearnedRegistryEntry {
                 state_key: key.state_key.clone(),
                 feature_key: key.feature_key.clone(),
+                verdict: entry.read_verdict(),
                 signal_tier: entry.signal,
                 observations: entry.observations,
                 first_seen: entry.first_seen,
@@ -366,6 +537,7 @@ impl LearnedCapabilityRegistry {
             .map(|(key, entry)| ExportedEntry {
                 state_key: key.state_key.clone(),
                 feature_key: key.feature_key.clone(),
+                verdict: entry.verdict,
                 signal: entry.signal,
                 observations: entry.observations,
                 first_seen: entry.first_seen,
@@ -396,6 +568,7 @@ impl LearnedCapabilityRegistry {
             map.insert(
                 key,
                 LearnedEntry {
+                    verdict: exported.verdict,
                     signal: exported.signal,
                     observations: exported.observations,
                     first_seen: exported.first_seen,
@@ -534,6 +707,7 @@ impl LearnedCapabilityRegistry {
             SignalTier::Inferred => (now, ObserveOutcome::Pending),
         };
         let entry = LearnedEntry {
+            verdict: EntryVerdict::Negative,
             signal: tier,
             observations: 1,
             first_seen: now,
@@ -545,6 +719,27 @@ impl LearnedCapabilityRegistry {
             source: EvidenceSource::Live,
         };
         (entry, outcome)
+    }
+
+    /// Build a brand-new VerifiedWorking positive: self-identifying
+    /// (structural proof acts on a single observation), phase F3 (the
+    /// positive-detection phase), live source. `expires_at` is set to `now`
+    /// but carries no decay meaning -- `is_expired` excludes a positive, so
+    /// it never lapses into a re-probe.
+    #[cfg_attr(not(test), allow(dead_code))]
+    const fn fresh_positive(now: Instant) -> LearnedEntry {
+        LearnedEntry {
+            verdict: EntryVerdict::Verified,
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: now,
+            last_seen: now,
+            expires_at: now,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+            phase: FailurePhase::F3,
+            source: EvidenceSource::Live,
+        }
     }
 
     /// Evict the entry with the oldest `last_seen` when the map is at cap,
@@ -1103,6 +1298,7 @@ mod tests {
         reg.import_entries(vec![ExportedEntry {
             state_key: "n3".into(),
             feature_key: "prefill".into(),
+            verdict: EntryVerdict::Negative,
             signal: SignalTier::Inferred,
             observations: 2,
             first_seen: t0,
@@ -1144,6 +1340,7 @@ mod tests {
         reg.import_entries(vec![ExportedEntry {
             state_key: "nick".into(),
             feature_key: "web_search".into(),
+            verdict: EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
             observations: 1,
             first_seen: t0,
@@ -1316,5 +1513,331 @@ mod tests {
         assert_eq!(ev.field("state_key"), Some("nick"));
         assert_eq!(ev.field("capability_key"), Some("web_search"));
         assert_eq!(ev.field("signal_tier"), Some("self-identifying"));
+    }
+
+    // --- VerifiedWorking coexistence (verdict discriminator) ---
+
+    #[test]
+    fn observe_positive_acts_on_first_observation_and_routes_allow() {
+        // Arrange
+        let reg = registry();
+        let t0 = Instant::now();
+
+        // Act -- a single structural positive.
+        let outcome = reg.observe_positive("nick", "web_search", "openai-compat", t0);
+
+        // Assert -- recorded, acting, but routes NOTHING (a positive never
+        // routes away).
+        assert_eq!(outcome, PositiveOutcome::Recorded);
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
+            RoutingDecision::Allow
+        );
+        let snap = reg.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].verdict, Verdict::VerifiedWorking);
+        assert_eq!(snap[0].signal_tier, SignalTier::SelfIdentifying);
+        assert_eq!(snap[0].observations, 1);
+    }
+
+    #[test]
+    fn verified_positive_never_decays_or_claims_a_probe() {
+        // Arrange -- a positive far past any plausible decay window.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        let long_after = t0 + DECAY * 100;
+
+        // Act / Assert -- still Allow, never ProbeAdmitted: a positive is
+        // excluded from is_expired and can never claim a re-probe slot.
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", long_after),
+            RoutingDecision::Allow
+        );
+    }
+
+    #[test]
+    fn passive_positive_no_ops_on_resident_negative() {
+        // Arrange -- an acting self-identifying negative resides.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            t0,
+        );
+
+        // Act -- a passive positive must NOT clear the negative.
+        let outcome = reg.observe_positive("nick", "web_search", "openai-compat", t0);
+
+        // Assert -- suppressed; the negative still routes away.
+        assert_eq!(outcome, PositiveOutcome::SuppressedByNegative);
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
+        );
+        assert_eq!(
+            reg.snapshot()[0].verdict,
+            Verdict::LearnedBroken(FailurePhase::F1)
+        );
+    }
+
+    #[test]
+    fn fresh_self_identifying_negative_replaces_resident_verified() {
+        // Arrange -- a resident VerifiedWorking positive.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        assert_eq!(reg.snapshot()[0].verdict, Verdict::VerifiedWorking);
+
+        // Act -- a fresh self-identifying negative supersedes it.
+        let outcome = reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            t0,
+        );
+
+        // Assert -- the positive is replaced by an acting negative.
+        assert_eq!(outcome, ObserveOutcome::Acting);
+        let snap = reg.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].verdict, Verdict::LearnedBroken(FailurePhase::F1));
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+            }
+        );
+    }
+
+    #[test]
+    fn inferred_negative_does_not_replace_resident_verified() {
+        // Arrange -- a resident VerifiedWorking positive.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+
+        // Act -- a single INFERRED negative is sub-threshold evidence, weaker
+        // than the structural positive: it must be dropped, leaving the
+        // verified entry resident.
+        let outcome = reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::Inferred,
+            FailurePhase::F3,
+            t0,
+        );
+
+        // Assert -- no acting negative; the verified positive survives intact
+        // and routing stays Allow.
+        assert_eq!(outcome, ObserveOutcome::Pending);
+        let snap = reg.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].verdict, Verdict::VerifiedWorking);
+        assert_eq!(snap[0].observations, 1);
+        assert_eq!(
+            reg.acting_negative_for("nick", "web_search", "openai-compat", t0),
+            RoutingDecision::Allow
+        );
+
+        // A later SELF-IDENTIFYING negative still replaces the survivor.
+        let outcome = reg.observe(
+            "nick",
+            "web_search",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            t0,
+        );
+        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(
+            reg.snapshot()[0].verdict,
+            Verdict::LearnedBroken(FailurePhase::F1)
+        );
+    }
+
+    #[test]
+    fn f3_live_acting_negative_is_advisory_and_routes_allow() {
+        // Arrange -- an F3 suspect-absence negative via the inferred window
+        // reaching N=2 (the existing corroboration path, no new threshold).
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe(
+            "nick",
+            "structured_output",
+            "openai-compat",
+            SignalTier::Inferred,
+            FailurePhase::F3,
+            t0,
+        );
+        let confirm = t0 + WINDOW / 2;
+        let outcome = reg.observe(
+            "nick",
+            "structured_output",
+            "openai-compat",
+            SignalTier::Inferred,
+            FailurePhase::F3,
+            confirm,
+        );
+
+        // Assert -- acting (N=2), but F3+Live routes NOTHING (advisory-only);
+        // it stays visible in the snapshot for the status surface.
+        assert_eq!(outcome, ObserveOutcome::Acting);
+        assert_eq!(
+            reg.acting_negative_for("nick", "structured_output", "openai-compat", confirm),
+            RoutingDecision::Allow
+        );
+        let snap = reg.snapshot();
+        assert_eq!(snap[0].verdict, Verdict::LearnedBroken(FailurePhase::F3));
+        assert_eq!(snap[0].phase, FailurePhase::F3);
+        assert_eq!(snap[0].source, EvidenceSource::Live);
+    }
+
+    #[test]
+    fn f3_probe_acting_negative_routes_away() {
+        // Arrange -- the f5 authority contract: an F3 negative sourced from a
+        // probe DOES route away. Dead code in this milestone (no probe writes
+        // Probe source live), so pin it via an import-constructed entry, the
+        // established precedent for a not-yet-live source.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.import_entries(vec![ExportedEntry {
+            state_key: "nick".into(),
+            feature_key: "structured_output".into(),
+            verdict: EntryVerdict::Negative,
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: t0,
+            last_seen: t0,
+            expires_at: t0 + DECAY,
+            phase: FailurePhase::F3,
+            source: EvidenceSource::Probe,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+        }]);
+
+        // Act / Assert
+        assert_eq!(
+            reg.acting_negative_for("nick", "structured_output", "openai-compat", t0),
+            RoutingDecision::RouteAway {
+                signal: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F3,
+            }
+        );
+    }
+
+    #[test]
+    fn is_verified_working_reflects_resident_verdict() {
+        // Arrange
+        let reg = registry();
+        let t0 = Instant::now();
+
+        // Absent key: not verified.
+        assert!(!reg.is_verified_working("nick", "web_search", "openai-compat", t0));
+
+        // A positive: verified.
+        reg.observe_positive("nick", "web_search", "openai-compat", t0);
+        assert!(reg.is_verified_working("nick", "web_search", "openai-compat", t0));
+
+        // A negative on a different key: not verified.
+        reg.observe(
+            "nick",
+            "computer_use",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F1,
+            t0,
+        );
+        assert!(!reg.is_verified_working("nick", "computer_use", "openai-compat", t0));
+    }
+
+    #[test]
+    fn export_import_round_trips_the_verified_discriminator() {
+        // Arrange -- a positive and a negative coexisting on distinct keys.
+        let reg = registry();
+        let t0 = Instant::now();
+        reg.observe_positive("np", "web_search", "openai-compat", t0);
+        reg.observe(
+            "nn",
+            "computer_use",
+            "openai-compat",
+            SignalTier::SelfIdentifying,
+            FailurePhase::F2,
+            t0,
+        );
+
+        // Act -- round-trip through export / import.
+        let reg2 = registry();
+        reg2.import_entries(reg.export_entries());
+
+        // Assert -- the discriminator survives on both sides.
+        let verdict_of = |snap: &[LearnedRegistryEntry], sk: &str| {
+            snap.iter().find(|e| e.state_key == sk).unwrap().verdict
+        };
+        let snap = reg2.snapshot();
+        assert_eq!(verdict_of(&snap, "np"), Verdict::VerifiedWorking);
+        assert_eq!(
+            verdict_of(&snap, "nn"),
+            Verdict::LearnedBroken(FailurePhase::F2)
+        );
+    }
+
+    #[test]
+    fn admission_is_deterministic_over_same_observations_and_now() {
+        // R2 stage-2 purity: the same observation sequence replayed with the
+        // same `now` timestamps yields an identical registry state. Admission
+        // consults only its arguments plus `now` -- no internal clock -- so a
+        // shared `t0` drives both replays to a byte-identical snapshot.
+        let t0 = Instant::now();
+        let apply = |t0: Instant| {
+            let reg = registry();
+            reg.observe_positive("np", "web_search", "openai-compat", t0);
+            reg.observe(
+                "nn",
+                "structured_output",
+                "openai-compat",
+                SignalTier::Inferred,
+                FailurePhase::F3,
+                t0,
+            );
+            reg.observe(
+                "nn",
+                "structured_output",
+                "openai-compat",
+                SignalTier::Inferred,
+                FailurePhase::F3,
+                t0 + WINDOW / 2,
+            );
+            reg.observe(
+                "ns",
+                "computer_use",
+                "openai-compat",
+                SignalTier::SelfIdentifying,
+                FailurePhase::F1,
+                t0,
+            );
+            let mut snap = reg.snapshot();
+            snap.sort_by(|a, b| {
+                (a.state_key.clone(), a.feature_key.clone())
+                    .cmp(&(b.state_key.clone(), b.feature_key.clone()))
+            });
+            snap
+        };
+
+        // Identical timestamps -> identical entry state, field-for-field
+        // (the derived `PartialEq` covers verdict, tier, phase, source, and
+        // the monotonic instants alike).
+        assert_eq!(apply(t0), apply(t0));
     }
 }

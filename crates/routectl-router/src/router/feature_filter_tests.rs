@@ -650,6 +650,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
         ExportedEntry {
             state_key: "nick".into(),
             feature_key: probe_due_key.clone(),
+            verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
             observations: 1,
             first_seen: base,
@@ -663,6 +664,7 @@ fn multi_feature_scan_routes_away_and_captures_earlier_probe_admission() {
         ExportedEntry {
             state_key: "nick".into(),
             feature_key: acting_key,
+            verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
             observations: 1,
             first_seen: base,
@@ -756,6 +758,7 @@ fn acting_negative(
     crate::learned_capability::ExportedEntry {
         state_key: state_key.into(),
         feature_key: normalize_capability_key(feature, "openai-compat"),
+        verdict: crate::learned_capability::EntryVerdict::Negative,
         signal: SignalTier::SelfIdentifying,
         observations: 1,
         first_seen: base,

@@ -214,6 +214,7 @@ fn acting_negative(state_key: &str, feature_key: &str) -> ExportedEntry {
     ExportedEntry {
         state_key: state_key.into(),
         feature_key: feature_key.into(),
+        verdict: crate::learned_capability::EntryVerdict::Negative,
         signal: SignalTier::SelfIdentifying,
         observations: 1,
         first_seen: base,

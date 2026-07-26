@@ -1,10 +1,11 @@
 //! Consolidated within-target capability precedence matrix. One AAA test
 //! per rule of the settled chain
-//! `override hard-drop > force_supported mask > learned (F1/F2) > prior >
-//! unknown`, plus the never-empty two-pass invariants, the F2-never-strips
-//! guard, the same-chain-F1 F2 suppression, and demoted-target strip-key
-//! survival. Sibling sidecars pin adjacent slices; this module is the single
-//! place the whole precedence chain is asserted end to end.
+//! `override hard-drop > force_supported mask > learned (F1/F2) >
+//! verified-working > prior > unknown`, plus the never-empty two-pass
+//! invariants, the F2-never-strips guard, the same-chain-F1 F2 suppression,
+//! and demoted-target strip-key survival. Sibling sidecars pin adjacent
+//! slices; this module is the single place the whole precedence chain is
+//! asserted end to end.
 
 use super::*;
 
@@ -106,6 +107,13 @@ fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePh
         phase,
         Instant::now(),
     );
+}
+
+/// Seed a resident VerifiedWorking positive for `(nickname, feature)`.
+fn seed_verified(router: &Router, nickname: &str, feature: &str) {
+    router
+        .learned_capabilities
+        .observe_positive(nickname, feature, KIND, Instant::now());
 }
 
 fn req_with_tool(tool_type: &str) -> ChatRequest {
@@ -310,6 +318,41 @@ fn absent_prior_is_permissive_noop() {
 
     // Assert -- an absent prior leaves the feature open.
     assert_eq!(verdict, None);
+}
+
+// --- verified-working > prior ---
+
+#[test]
+fn verified_working_masks_catalog_prior() {
+    // Arrange -- `web_search` carries a `Some(false)` catalog prior, but a
+    // resident VerifiedWorking positive confirms it works. The positive
+    // outranks the stale catalog demotion.
+    let router = base_router("");
+    let target = target_with_priors(&router, "nick", &[("web_search", false)]);
+    seed_verified(&router, "nick", "web_search");
+
+    // Act
+    let mut admissions = Vec::new();
+    let mut strip_keys = Vec::new();
+    let verdict = router.unsupported_feature_for_target(
+        &target,
+        &["web_search".to_string()],
+        &mut admissions,
+        &mut strip_keys,
+    );
+
+    // Assert -- the verified positive masks the prior, so the feature stays
+    // open: no route-away, no strip, no probe. (The prior-false-alone case
+    // soft-tails; here the positive suppresses that demotion.)
+    assert_eq!(
+        verdict, None,
+        "a resident VerifiedWorking positive masks a Some(false) catalog prior",
+    );
+    assert!(
+        admissions.is_empty(),
+        "a verified positive claims no re-probe slot"
+    );
+    assert!(strip_keys.is_empty());
 }
 
 // --- never-empty two-pass ---

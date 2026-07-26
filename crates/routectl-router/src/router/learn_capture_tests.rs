@@ -662,6 +662,7 @@ fn seed_expired_negative(router: &Router, state_key: &str, feature: &str) {
         .import_entries(vec![crate::learned_capability::ExportedEntry {
             state_key: state_key.into(),
             feature_key: feature.into(),
+            verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
             observations: 1,
             first_seen: past,
@@ -1325,6 +1326,7 @@ fn seed_expired_phase_negative(router: &Router, feature: &str, phase: FailurePha
         .import_entries(vec![crate::learned_capability::ExportedEntry {
             state_key: "m1".into(),
             feature_key: feature.into(),
+            verdict: crate::learned_capability::EntryVerdict::Negative,
             signal: SignalTier::SelfIdentifying,
             observations: 1,
             first_seen: past,

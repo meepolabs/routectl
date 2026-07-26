@@ -416,22 +416,31 @@ impl Router {
                 *strip_keys = strip;
             }
             // Prior pass: the catalog capability prior is the lowest-
-            // precedence signal (override hard-drop > learned > prior >
-            // unknown), so it runs LAST and only speaks for a feature the
-            // learned pass left open. It is gated behind the SAME kill switch
-            // as the learned pass: a catalog prior is shipped vendor data that
-            // can be wrong or stale, so an operator hit by a bad `prior=false`
-            // needs the kill switch to neutralize it (one switch covers the
-            // whole capability-truth subsystem). `force_supported` masks a
-            // prior the same way it masks a learned negative. A `Some(false)`
-            // prior soft-tails the target (weaker evidence -> the prior tail);
-            // `None` / `Some(true)` are permissive no-ops. The prior never
-            // contributes a strip key -- a catalog assertion is not a
-            // strippable wire token -- but any strip key the learned pass set
-            // above SURVIVES this demotion.
+            // precedence signal (override hard-drop > learned >
+            // verified-working > prior > unknown), so it runs LAST and only
+            // speaks for a feature the higher tiers left open. It is gated
+            // behind the SAME kill switch as the learned pass: a catalog
+            // prior is shipped vendor data that can be wrong or stale, so an
+            // operator hit by a bad `prior=false` needs the kill switch to
+            // neutralize it (one switch covers the whole capability-truth
+            // subsystem). `force_supported` masks a prior the same way it
+            // masks a learned negative, and a resident acting VerifiedWorking
+            // positive likewise masks it -- a confirmed positive outranks a
+            // stale catalog demotion. A `Some(false)` prior soft-tails the
+            // target (weaker evidence -> the prior tail); `None` /
+            // `Some(true)` are permissive no-ops. The prior never contributes
+            // a strip key -- a catalog assertion is not a strippable wire
+            // token -- but any strip key the learned pass set above SURVIVES
+            // this demotion.
             for feature in features {
                 if learned_claimed.contains(&feature.as_str())
                     || self.override_forces_supported(target, feature, provider_kind)
+                    || self.learned_capabilities.is_verified_working(
+                        &target.state_key,
+                        feature,
+                        provider_kind,
+                        now,
+                    )
                 {
                     continue;
                 }
