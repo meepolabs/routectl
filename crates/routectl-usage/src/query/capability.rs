@@ -7,14 +7,15 @@
 const TOMBSTONE_VERDICT: &str = "tombstone";
 
 /// One `capability_events` row as read back for replay, carrying the
-/// implicit `rowid` (the ledger's insertion-order boundary key). Every
-/// column except `rowid` / `ts` is nullable in the schema, so the
-/// nullable-by-DDL columns surface as `Option` and the replayer parses the
-/// open-set tokens tolerantly. Plain data; the router maps these to its
-/// admission calls.
+/// `rowid` (the `id` primary key alias -- the ledger's insertion-order
+/// boundary key). Every column except `rowid` / `ts` is nullable in the
+/// schema, so the nullable-by-DDL columns surface as `Option` and the
+/// replayer parses the open-set tokens tolerantly. Plain data; the router
+/// maps these to its admission calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityEventRow {
-    /// The implicit SQLite rowid -- the ledger's insertion-order key.
+    /// The rowid (the `id` primary key alias) -- the ledger's
+    /// insertion-order key.
     pub rowid: i64,
     /// Capture time (epoch milliseconds).
     pub ts: i64,
@@ -97,8 +98,8 @@ pub fn read_capability_events_after(
 /// boot revision. A ledger with no tombstone yields `None`, which the
 /// boot path treats as "fail closed and write a fresh tombstone".
 pub fn latest_tombstone(conn: &rusqlite::Connection) -> rusqlite::Result<Option<TombstoneRow>> {
-    let mut stmt = conn.prepare(&latest_tombstone_sql())?;
-    let mut rows = stmt.query([])?;
+    let mut stmt = conn.prepare(LATEST_TOMBSTONE_SQL)?;
+    let mut rows = stmt.query(rusqlite::params![TOMBSTONE_VERDICT])?;
     match rows.next()? {
         Some(row) => Ok(Some(TombstoneRow {
             rowid: row.get(0)?,
@@ -109,17 +110,15 @@ pub fn latest_tombstone(conn: &rusqlite::Connection) -> rusqlite::Result<Option<
     }
 }
 
-/// Build the latest-tombstone query. Single-sources the tombstone verdict
-/// token from `capability_event` so the boundary read and the row
-/// constructor never drift.
-fn latest_tombstone_sql() -> String {
-    format!(
-        "SELECT rowid, catalog_version, overlay_revision \
-         FROM capability_events \
-         WHERE verdict = '{TOMBSTONE_VERDICT}' \
-         ORDER BY rowid DESC LIMIT 1"
-    )
-}
+/// The latest-tombstone query. The tombstone verdict token is bound as `?1`
+/// (see `TOMBSTONE_VERDICT`), matching the crate's `params!` convention
+/// everywhere else; single-sourcing that token keeps the boundary read and
+/// the row constructor from drifting.
+const LATEST_TOMBSTONE_SQL: &str = "\
+SELECT rowid, catalog_version, overlay_revision \
+FROM capability_events \
+WHERE verdict = ?1 \
+ORDER BY rowid DESC LIMIT 1";
 
 /// The bound read-after query. Column order matches `CapabilityEventRow`'s
 /// `get` positions above.

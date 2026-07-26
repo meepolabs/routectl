@@ -1358,9 +1358,10 @@ fn old_v12_db_migrates_to_v13_creating_capability_events_table() {
 }
 
 /// Pins the exact `capability_events` column set on a fresh DB. A full-bind
-/// INSERT naming every column fails to compile-at-SQL-level if a column is
-/// added, removed, or renamed, and `pragma_table_info` pins the order,
-/// names, and null-ability (only `ts` is NOT NULL). This is the
+/// INSERT naming every writable column fails to compile-at-SQL-level if a
+/// column is added, removed, or renamed, and `pragma_table_info` pins the
+/// order, names, and null-ability (only `ts` is NOT NULL; the `id` primary
+/// key is auto-assigned and reads back as nullable). This is the
 /// forever-contract guard the warm-rebuild replayer relies on.
 #[test]
 fn capability_events_column_set_is_pinned() {
@@ -1395,8 +1396,10 @@ fn capability_events_column_set_is_pinned() {
     assert_eq!(inserted, 1);
 
     // Assert: pragma_table_info pins the exact order, names, and
-    // null-ability. Only `ts` is NOT NULL.
+    // null-ability. `id` is the auto-assigned primary key (reads back
+    // nullable); only `ts` is NOT NULL.
     let expected: &[(&str, bool)] = &[
+        ("id", false),
         ("ts", true),
         ("lane_key", false),
         ("capability", false),

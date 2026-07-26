@@ -65,7 +65,8 @@ impl CapabilityEvent {
     /// marking the point past which the replayer trusts the ledger. It
     /// carries the tombstone verdict, empty lane / capability keys, and no
     /// phase / source / tier / evidence (a tombstone is a boundary marker,
-    /// not an observation). Its implicit rowid is the boundary key.
+    /// not an observation). Its `id` primary key (the rowid alias) is the
+    /// boundary key.
     pub fn tombstone(ts: i64, catalog_version: i64, overlay_revision: i64) -> Self {
         Self {
             ts,
@@ -109,9 +110,10 @@ pub fn insert_capability_event(
     )
 }
 
-/// The bound `INSERT`. Column order mirrors
-/// `schema::CREATE_CAPABILITY_EVENTS_TABLE`; `?1..?11` positions match the
-/// params list above.
+/// The bound `INSERT`. Names every writable column of
+/// `schema::CREATE_CAPABILITY_EVENTS_TABLE` (the `id` primary key is
+/// auto-assigned, so it is omitted); `?1..?11` positions match the params
+/// list above.
 const INSERT_SQL: &str = "\
 INSERT INTO capability_events (
     ts, lane_key, capability, verdict, phase, source, tier,
