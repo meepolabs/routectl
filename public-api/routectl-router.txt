@@ -2740,10 +2740,12 @@ pub mod routectl_router::router
 pub struct routectl_router::router::CapabilityLearnEvent
 pub routectl_router::router::CapabilityLearnEvent::capability_key: alloc::string::String
 pub routectl_router::router::CapabilityLearnEvent::observations: u32
+pub routectl_router::router::CapabilityLearnEvent::phase: routectl_core::capability::FailurePhase
 pub routectl_router::router::CapabilityLearnEvent::provider_kind: alloc::string::String
 pub routectl_router::router::CapabilityLearnEvent::remapped: bool
 pub routectl_router::router::CapabilityLearnEvent::request_features: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::router::CapabilityLearnEvent::signal_tier: routectl_core::capability::SignalTier
+pub routectl_router::router::CapabilityLearnEvent::source: routectl_core::capability::EvidenceSource
 pub routectl_router::router::CapabilityLearnEvent::state_key: alloc::string::String
 pub routectl_router::router::CapabilityLearnEvent::upstream_status: u16
 impl core::clone::Clone for routectl_router::router::CapabilityLearnEvent
@@ -4741,6 +4743,65 @@ impl<T> typenum::type_operators::Same for routectl_router::MigrationError
 pub type routectl_router::MigrationError::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MigrationError where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::MigrationError::into_shared(self) -> Shared
+pub enum routectl_router::ObservationDirection
+pub routectl_router::ObservationDirection::SuspectAbsence
+pub routectl_router::ObservationDirection::Verified
+impl core::clone::Clone for routectl_router::ObservationDirection
+pub fn routectl_router::ObservationDirection::clone(&self) -> routectl_router::ObservationDirection
+impl core::cmp::Eq for routectl_router::ObservationDirection
+impl core::cmp::PartialEq for routectl_router::ObservationDirection
+pub fn routectl_router::ObservationDirection::eq(&self, &routectl_router::ObservationDirection) -> bool
+impl core::fmt::Debug for routectl_router::ObservationDirection
+pub fn routectl_router::ObservationDirection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::ObservationDirection
+impl core::marker::StructuralPartialEq for routectl_router::ObservationDirection
+impl core::marker::Freeze for routectl_router::ObservationDirection
+impl core::marker::Send for routectl_router::ObservationDirection
+impl core::marker::Sync for routectl_router::ObservationDirection
+impl core::marker::Unpin for routectl_router::ObservationDirection
+impl core::marker::UnsafeUnpin for routectl_router::ObservationDirection
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::ObservationDirection
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::ObservationDirection
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::ObservationDirection where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::ObservationDirection::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::ObservationDirection where U: core::convert::From<T>
+pub fn routectl_router::ObservationDirection::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::ObservationDirection where U: core::convert::Into<T>
+pub type routectl_router::ObservationDirection::Error = core::convert::Infallible
+pub fn routectl_router::ObservationDirection::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::ObservationDirection where U: core::convert::TryFrom<T>
+pub type routectl_router::ObservationDirection::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::ObservationDirection::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::ObservationDirection where T: core::clone::Clone
+pub type routectl_router::ObservationDirection::Owned = T
+pub fn routectl_router::ObservationDirection::clone_into(&self, &mut T)
+pub fn routectl_router::ObservationDirection::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::ObservationDirection where T: core::clone::Clone
+pub fn routectl_router::ObservationDirection::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::ObservationDirection where T: 'static + ?core::marker::Sized
+pub fn routectl_router::ObservationDirection::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::ObservationDirection where T: ?core::marker::Sized
+pub fn routectl_router::ObservationDirection::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::ObservationDirection where T: ?core::marker::Sized
+pub fn routectl_router::ObservationDirection::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::ObservationDirection where T: core::clone::Clone
+pub unsafe fn routectl_router::ObservationDirection::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::ObservationDirection
+pub fn routectl_router::ObservationDirection::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::ObservationDirection where T: core::clone::Clone
+pub fn routectl_router::ObservationDirection::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::ObservationDirection
+impl<T> outref::AsOut<T> for routectl_router::ObservationDirection where T: core::marker::Copy
+pub fn routectl_router::ObservationDirection::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::ObservationDirection where T: ?core::marker::Sized
+pub fn routectl_router::ObservationDirection::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::ObservationDirection::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::ObservationDirection
+impl<T> tracing::instrument::WithSubscriber for routectl_router::ObservationDirection
+impl<T> typenum::type_operators::Same for routectl_router::ObservationDirection
+pub type routectl_router::ObservationDirection::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ObservationDirection where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::ObservationDirection::into_shared(self) -> Shared
 pub enum routectl_router::OverlayError
 pub routectl_router::OverlayError::Corrupt
 pub routectl_router::OverlayError::Corrupt::path: alloc::string::String
@@ -6628,6 +6689,64 @@ impl<T> typenum::type_operators::Same for routectl_router::CapabilityConfig
 pub type routectl_router::CapabilityConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CapabilityConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::CapabilityConfig::into_shared(self) -> Shared
+pub struct routectl_router::CapabilityObservation
+pub routectl_router::CapabilityObservation::capability_key: &'static str
+pub routectl_router::CapabilityObservation::direction: routectl_router::ObservationDirection
+pub routectl_router::CapabilityObservation::evidence_class: &'static str
+pub routectl_router::CapabilityObservation::tier: routectl_core::capability::SignalTier
+impl core::clone::Clone for routectl_router::CapabilityObservation
+pub fn routectl_router::CapabilityObservation::clone(&self) -> routectl_router::CapabilityObservation
+impl core::cmp::Eq for routectl_router::CapabilityObservation
+impl core::cmp::PartialEq for routectl_router::CapabilityObservation
+pub fn routectl_router::CapabilityObservation::eq(&self, &routectl_router::CapabilityObservation) -> bool
+impl core::fmt::Debug for routectl_router::CapabilityObservation
+pub fn routectl_router::CapabilityObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::CapabilityObservation
+impl core::marker::Freeze for routectl_router::CapabilityObservation
+impl core::marker::Send for routectl_router::CapabilityObservation
+impl core::marker::Sync for routectl_router::CapabilityObservation
+impl core::marker::Unpin for routectl_router::CapabilityObservation
+impl core::marker::UnsafeUnpin for routectl_router::CapabilityObservation
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CapabilityObservation
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CapabilityObservation
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CapabilityObservation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CapabilityObservation::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CapabilityObservation where U: core::convert::From<T>
+pub fn routectl_router::CapabilityObservation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CapabilityObservation where U: core::convert::Into<T>
+pub type routectl_router::CapabilityObservation::Error = core::convert::Infallible
+pub fn routectl_router::CapabilityObservation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CapabilityObservation where U: core::convert::TryFrom<T>
+pub type routectl_router::CapabilityObservation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CapabilityObservation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CapabilityObservation where T: core::clone::Clone
+pub type routectl_router::CapabilityObservation::Owned = T
+pub fn routectl_router::CapabilityObservation::clone_into(&self, &mut T)
+pub fn routectl_router::CapabilityObservation::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CapabilityObservation where T: core::clone::Clone
+pub fn routectl_router::CapabilityObservation::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CapabilityObservation where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CapabilityObservation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CapabilityObservation where T: ?core::marker::Sized
+pub fn routectl_router::CapabilityObservation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CapabilityObservation where T: ?core::marker::Sized
+pub fn routectl_router::CapabilityObservation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CapabilityObservation where T: core::clone::Clone
+pub unsafe fn routectl_router::CapabilityObservation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CapabilityObservation
+pub fn routectl_router::CapabilityObservation::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CapabilityObservation where T: core::clone::Clone
+pub fn routectl_router::CapabilityObservation::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CapabilityObservation
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CapabilityObservation where T: ?core::marker::Sized
+pub fn routectl_router::CapabilityObservation::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CapabilityObservation::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CapabilityObservation
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CapabilityObservation
+impl<T> typenum::type_operators::Same for routectl_router::CapabilityObservation
+pub type routectl_router::CapabilityObservation::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CapabilityObservation where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CapabilityObservation::into_shared(self) -> Shared
 pub struct routectl_router::CatalogImportState
 pub routectl_router::CatalogImportState::last_import_date: alloc::string::String
 pub routectl_router::CatalogImportState::per_family_counts: alloc::collections::btree::map::BTreeMap<alloc::string::String, usize>
@@ -7072,6 +7191,61 @@ impl<T> typenum::type_operators::Same for routectl_router::DeactivatedChange
 pub type routectl_router::DeactivatedChange::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::DeactivatedChange where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::DeactivatedChange::into_shared(self) -> Shared
+pub struct routectl_router::DetectorContext
+pub routectl_router::DetectorContext::cache_requested: bool
+pub routectl_router::DetectorContext::forced_web_search: bool
+pub routectl_router::DetectorContext::reasoning_requested: bool
+pub routectl_router::DetectorContext::requested_schema_required_keys: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::DetectorContext::strict_output_requested: bool
+impl core::clone::Clone for routectl_router::DetectorContext
+pub fn routectl_router::DetectorContext::clone(&self) -> routectl_router::DetectorContext
+impl core::default::Default for routectl_router::DetectorContext
+pub fn routectl_router::DetectorContext::default() -> routectl_router::DetectorContext
+impl core::fmt::Debug for routectl_router::DetectorContext
+pub fn routectl_router::DetectorContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::DetectorContext
+impl core::marker::Send for routectl_router::DetectorContext
+impl core::marker::Sync for routectl_router::DetectorContext
+impl core::marker::Unpin for routectl_router::DetectorContext
+impl core::marker::UnsafeUnpin for routectl_router::DetectorContext
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::DetectorContext
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::DetectorContext
+impl<T, U> core::convert::Into<U> for routectl_router::DetectorContext where U: core::convert::From<T>
+pub fn routectl_router::DetectorContext::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::DetectorContext where U: core::convert::Into<T>
+pub type routectl_router::DetectorContext::Error = core::convert::Infallible
+pub fn routectl_router::DetectorContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::DetectorContext where U: core::convert::TryFrom<T>
+pub type routectl_router::DetectorContext::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::DetectorContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::DetectorContext where T: core::clone::Clone
+pub type routectl_router::DetectorContext::Owned = T
+pub fn routectl_router::DetectorContext::clone_into(&self, &mut T)
+pub fn routectl_router::DetectorContext::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::DetectorContext where T: core::clone::Clone
+pub fn routectl_router::DetectorContext::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::DetectorContext where T: 'static + ?core::marker::Sized
+pub fn routectl_router::DetectorContext::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::DetectorContext where T: ?core::marker::Sized
+pub fn routectl_router::DetectorContext::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::DetectorContext where T: ?core::marker::Sized
+pub fn routectl_router::DetectorContext::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::DetectorContext where T: core::clone::Clone
+pub unsafe fn routectl_router::DetectorContext::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::DetectorContext
+pub fn routectl_router::DetectorContext::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::DetectorContext where T: core::clone::Clone
+pub fn routectl_router::DetectorContext::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::DetectorContext
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::DetectorContext where T: ?core::marker::Sized
+pub fn routectl_router::DetectorContext::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::DetectorContext::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::DetectorContext
+impl<T> tracing::instrument::WithSubscriber for routectl_router::DetectorContext
+impl<T> typenum::type_operators::Same for routectl_router::DetectorContext
+pub type routectl_router::DetectorContext::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::DetectorContext where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::DetectorContext::into_shared(self) -> Shared
 pub struct routectl_router::DiffRow
 pub routectl_router::DiffRow::candidate: routectl_router::OverlayCell
 pub routectl_router::DiffRow::cheaper_direction: bool
@@ -8009,8 +8183,11 @@ pub routectl_router::LearnedRegistryEntry::feature_key: alloc::string::String
 pub routectl_router::LearnedRegistryEntry::first_seen: std::time::Instant
 pub routectl_router::LearnedRegistryEntry::last_seen: std::time::Instant
 pub routectl_router::LearnedRegistryEntry::observations: u32
+pub routectl_router::LearnedRegistryEntry::phase: routectl_core::capability::FailurePhase
 pub routectl_router::LearnedRegistryEntry::signal_tier: routectl_core::capability::SignalTier
+pub routectl_router::LearnedRegistryEntry::source: routectl_core::capability::EvidenceSource
 pub routectl_router::LearnedRegistryEntry::state_key: alloc::string::String
+pub routectl_router::LearnedRegistryEntry::verdict: routectl_core::capability::Verdict
 impl core::clone::Clone for routectl_router::LearnedRegistryEntry
 pub fn routectl_router::LearnedRegistryEntry::clone(&self) -> routectl_router::LearnedRegistryEntry
 impl core::cmp::Eq for routectl_router::LearnedRegistryEntry
@@ -10567,6 +10744,7 @@ pub fn routectl_router::collect_config_validation(&routectl_router::config::Conf
 pub fn routectl_router::collect_near_lossless_marks(&routectl_core::schema::ChatRequest, usize, usize) -> routectl_router::NearLosslessMarks
 pub fn routectl_router::compute_activation(&[(&str, routectl_auth::oauth::store::LocalProbe)], &routectl_router::config::Config) -> routectl_router::ActivationState
 pub fn routectl_router::derive_effective_view(&routectl_router::config::Config, &routectl_router::CatalogOverlay) -> routectl_router::EffectiveView
+pub fn routectl_router::detect(&routectl_router::DetectorContext, &routectl_core::schema::ChatResponse) -> alloc::vec::Vec<routectl_router::CapabilityObservation>
 pub fn routectl_router::diff_activation(&routectl_router::ActivationState, &routectl_router::ActivationState) -> routectl_router::ActivationDelta
 pub fn routectl_router::diff_has_no_effective_change(&routectl_router::ImportDiff) -> bool
 pub fn routectl_router::diff_overlay(&routectl_router::CatalogOverlay, &routectl_router::ImportCandidate, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CatalogRow>) -> routectl_router::ImportDiff

@@ -106,6 +106,7 @@ fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::Export
     crate::learned_capability::ExportedEntry {
         state_key: state_key.into(),
         feature_key: "advisor".into(),
+        verdict: crate::learned_capability::EntryVerdict::Negative,
         signal: SignalTier::SelfIdentifying,
         observations: 1,
         first_seen: base,
