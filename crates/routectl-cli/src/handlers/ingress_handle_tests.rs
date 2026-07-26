@@ -1704,7 +1704,7 @@ async fn dispatch_err_with_attempts_maps_to_upstream_error() {
     let dispatched = router
         .complete_with_options(req.clone(), Default::default())
         .await;
-    capture.observe_meta(&dispatched.meta);
+    capture.observe_meta(&dispatched.meta, 0, 0);
     let err = dispatched
         .result
         .expect_err("unreachable provider must error");
@@ -1833,7 +1833,7 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
     let req = sample_request("a", false);
     let mut capture = rig.capture("openai", &req, "req-k");
     let dispatched = router.complete_with_options(req, Default::default()).await;
-    capture.observe_meta(&dispatched.meta);
+    capture.observe_meta(&dispatched.meta, 0, 0);
     let provider_kind = dispatched
         .meta
         .served_provider_kind
@@ -1864,7 +1864,7 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
     let dispatched2 = router2
         .complete_with_options(req2, Default::default())
         .await;
-    capture2.observe_meta(&dispatched2.meta);
+    capture2.observe_meta(&dispatched2.meta, 0, 0);
     capture2.record_k_sample(&router2, None);
 
     // Assert: a keyless request leaves the store empty.
@@ -1958,7 +1958,7 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
 
     let rig = CaptureRig::new();
     let mut capture = rig.capture("openai", &sample_request("a", true), "req-k-eos");
-    capture.observe_meta(&meta);
+    capture.observe_meta(&meta, 0, 0);
 
     let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
         Box::pin(futures::stream::iter(vec![Ok(streaming_text_chunk("hi"))]));
@@ -1996,7 +1996,7 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
     let (router_err, meta_err) = k_recording_router_and_meta().await;
     let rig_err = CaptureRig::new();
     let mut capture_err = rig_err.capture("openai", &sample_request("a", true), "req-k-err");
-    capture_err.observe_meta(&meta_err);
+    capture_err.observe_meta(&meta_err, 0, 0);
 
     let upstream_err: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
         Box::pin(futures::stream::iter(vec![

@@ -16,9 +16,10 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use routectl_core::Error;
+use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 use routectl_core::failure_class::classify;
-use routectl_router::DispatchMeta;
-use routectl_usage::{CapabilityLearnEvent, Outcome, UsageHandle, UsageRecord};
+use routectl_router::{DispatchMeta, ObservationDirection};
+use routectl_usage::{CapabilityEvent, Outcome, UsageHandle, UsageRecord};
 use serde_json::Value;
 
 /// Seed a `UsageRecord` draft from the request shape + identity, before
@@ -129,27 +130,6 @@ pub(crate) fn epoch_ms_now() -> i64 {
         .ok()
         .and_then(|d| i64::try_from(d.as_millis()).ok())
         .unwrap_or(0)
-}
-
-/// Ceiling on persisted request-feature entries per learn event. The set
-/// derives from arbitrary client tool-type strings, so bound the count
-/// before it reaches the ledger row -- a client must not be able to bloat
-/// a persisted row with an unbounded feature list.
-const MAX_REQUEST_FEATURES: usize = 16;
-
-/// Ceiling on each persisted request-feature string, in chars. Overlong
-/// entries are truncated (on a char boundary) before enqueue, for the same
-/// untrusted-input reason as the count cap.
-const MAX_REQUEST_FEATURE_LEN: usize = 128;
-
-/// Bound an untrusted request-feature set before it is persisted: cap the
-/// number of entries and truncate each overlong string on a char boundary.
-fn bound_request_features(features: &[String]) -> Vec<String> {
-    features
-        .iter()
-        .take(MAX_REQUEST_FEATURES)
-        .map(|f| f.chars().take(MAX_REQUEST_FEATURE_LEN).collect())
-        .collect()
 }
 
 /// Convert an epoch-millis timestamp (as stored on `UsageRecord::ts_start`)
@@ -352,7 +332,17 @@ impl UsageCapture {
     /// DB consumer and an operator tailing logs can still tell them apart
     /// from own-credential rows. An own-credential row leaves `extra`
     /// untouched (byte-for-byte unchanged).
-    pub(crate) fn observe_meta(&mut self, meta: &DispatchMeta) {
+    ///
+    /// `catalog_version` / `overlay_revision` are read from the `Router`
+    /// getters at the ingress boundary and stamped onto every drained
+    /// capability event so a warm rebuild can filter by the boundary revision;
+    /// the router's ride-along structs are NOT widened to carry them.
+    pub(crate) fn observe_meta(
+        &mut self,
+        meta: &DispatchMeta,
+        catalog_version: u32,
+        overlay_revision: u64,
+    ) {
         self.record.alias = meta.resolved_alias.clone();
         self.record.attempt_count = meta.attempt_count;
         self.record.fallback_count = meta.fallback_count;
@@ -389,30 +379,86 @@ impl UsageCapture {
         self.record.would_trim_recorder_version = meta.would_trim_recorder_version;
         self.record.would_trim_raw_marks = meta.would_trim_raw_marks.clone();
         self.record.would_trim_context_fraction = meta.would_trim_context_fraction;
-        self.drain_learn_events(meta);
+        self.drain_capability_events(meta, catalog_version, overlay_revision);
     }
 
-    /// Drain the dispatch's captured capability learn events into the usage
-    /// writer. Empty on the common (non-capability) path; each event maps
-    /// one-to-one to a `capability_learn_events` row. The tier is
-    /// stringified through the persisted `SignalTier::as_str` contract and
-    /// the derived feature set is carried through as the replay-verification
-    /// array (the writer serializes it to the JSON TEXT column). Best-effort
-    /// like every usage write: `try_send_learn_event` never blocks / awaits /
-    /// panics, drops on a full channel with its own counter, and applies the
-    /// same usage-enabled gate as request rows.
-    fn drain_learn_events(&self, meta: &DispatchMeta) {
+    /// Drain the dispatch's captured capability events into the usage writer
+    /// as unified `capability_events` rows -- the append-only ledger the
+    /// warm-rebuild replayer reads on boot. Empty on the common
+    /// (non-capability) path. The mapping, one enqueue per event:
+    ///
+    /// - each learned negative (`meta.learned_capabilities`) -> a `broken` row,
+    ///   phase (`f1`/`f2`) and tier from the event, no evidence class, no
+    ///   upstream token;
+    /// - each response-evidence observation (`meta.capability_observations`) ->
+    ///   a `verified` (positive) or `suspect` (F3 suspected-absence) row, phase
+    ///   `f3`, tier from the event, the pinned evidence-class token;
+    /// - each probe-settled clear (`meta.cleared_capabilities`) -> a `cleared`
+    ///   row, `live` source, no phase / tier / evidence.
+    ///
+    /// Every row rides the `live` source and is stamped with the boundary
+    /// `(catalog_version, overlay_revision)` read from the router getters at
+    /// the ingress boundary. Best-effort like every usage write:
+    /// `try_send_capability_event` never blocks / awaits / panics and drops on
+    /// a full channel with its own counter. NEVER carries a request body /
+    /// prompt / upstream text (log hygiene): only the normalized keys and the
+    /// closed-set tokens reach the row.
+    fn drain_capability_events(
+        &self,
+        meta: &DispatchMeta,
+        catalog_version: u32,
+        overlay_revision: u64,
+    ) {
+        let catalog_version = i64::from(catalog_version);
+        let overlay_revision = i64::try_from(overlay_revision).unwrap_or(i64::MAX);
+        let ts = epoch_ms_now();
         for ev in &meta.learned_capabilities {
-            self.usage.try_send_learn_event(CapabilityLearnEvent {
-                ts: epoch_ms_now(),
-                state_key: ev.state_key.clone(),
-                capability_key: ev.capability_key.clone(),
-                provider_kind: ev.provider_kind.clone(),
-                signal_tier: ev.signal_tier.as_str().to_string(),
-                observations: ev.observations,
-                upstream_status: ev.upstream_status,
-                remapped: ev.remapped,
-                request_features: bound_request_features(&ev.request_features),
+            self.usage.try_send_capability_event(CapabilityEvent {
+                ts,
+                lane_key: ev.state_key.clone(),
+                capability: ev.capability_key.clone(),
+                verdict: Verdict::LearnedBroken(ev.phase).as_str().to_string(),
+                phase: ev.phase.as_str().to_string(),
+                source: ev.source.as_str().to_string(),
+                tier: ev.signal_tier.as_str().to_string(),
+                evidence_class: None,
+                upstream_token: None,
+                catalog_version,
+                overlay_revision,
+            });
+        }
+        for ev in &meta.capability_observations {
+            let verdict = match ev.direction {
+                ObservationDirection::Verified => Verdict::VerifiedWorking,
+                ObservationDirection::SuspectAbsence => Verdict::SuspectIgnored,
+            };
+            self.usage.try_send_capability_event(CapabilityEvent {
+                ts,
+                lane_key: ev.state_key.clone(),
+                capability: ev.capability_key.clone(),
+                verdict: verdict.as_str().to_string(),
+                phase: FailurePhase::F3.as_str().to_string(),
+                source: ev.source.as_str().to_string(),
+                tier: ev.signal_tier.as_str().to_string(),
+                evidence_class: Some(ev.evidence_class.clone()),
+                upstream_token: None,
+                catalog_version,
+                overlay_revision,
+            });
+        }
+        for ev in &meta.cleared_capabilities {
+            self.usage.try_send_capability_event(CapabilityEvent {
+                ts,
+                lane_key: ev.state_key.clone(),
+                capability: ev.capability_key.clone(),
+                verdict: Verdict::Cleared.as_str().to_string(),
+                phase: String::new(),
+                source: EvidenceSource::Live.as_str().to_string(),
+                tier: String::new(),
+                evidence_class: None,
+                upstream_token: None,
+                catalog_version,
+                overlay_revision,
             });
         }
     }

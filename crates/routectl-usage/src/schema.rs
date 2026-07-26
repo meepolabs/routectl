@@ -189,11 +189,17 @@ pub const CREATE_TS_START_INDEX: &str =
 
 /// DDL for the `capability_learn_events` table (v9).
 ///
+/// DEPRECATED: superseded by the unified `capability_events` ledger
+/// (`CREATE_CAPABILITY_EVENTS_TABLE`). The request path no longer writes
+/// here -- learned negatives now land as `broken` rows in `capability_events`.
+/// The table and its DDL remain (no DROP migration) so existing rows survive
+/// and the writer path stays compilable; removal is a later change once no
+/// deployed DB carries rows only in this table.
+///
 /// One append-only row per confirmed learned-capability observation. This
 /// is NOT a request row: learn events are their own closed shape and must
 /// never share the `requests` table (whose rows are treated as requests by
-/// every reporting query). Nothing reads this table yet -- it is the
-/// forever-contract landing pad for the warm-rebuild replayer.
+/// every reporting query). Nothing reads this table.
 ///
 /// Columns mirror the row struct in `learn_event.rs` (the source of truth
 /// for the set). `capability_key` is the NORMALIZED capability key. `signal_tier`

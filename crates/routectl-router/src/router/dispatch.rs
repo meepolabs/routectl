@@ -362,8 +362,11 @@ impl Router {
                         // accounting keys off `DispatchMeta`, not this field.
                         resp.model = resolve_reported_model(target, &req.model);
                         // A 2xx proves the capability is not rejected: clear
-                        // any learned negative this dispatch re-probed.
-                        learned_probe_guard.settle_success();
+                        // any learned negative this dispatch re-probed, and
+                        // ride each clear out on the meta so the ledger records
+                        // it and a warm rebuild does not resurrect the negative.
+                        meta.cleared_capabilities
+                            .extend(learned_probe_guard.settle_success());
                         // Response-evidence observer: the success-arm mirror of
                         // `observe_for_learning`. Reads structural positive /
                         // suspected-absence evidence off the assembled response
@@ -980,8 +983,11 @@ impl Router {
                         // does not free a slot a later probe may hold.
                         probe_guard.disarm();
                         // A first chunk proves the capability is not rejected:
-                        // clear any learned negative this dispatch re-probed.
-                        learned_probe_guard.settle_success();
+                        // clear any learned negative this dispatch re-probed,
+                        // and ride each clear out on the meta so the ledger
+                        // records it and a warm rebuild does not resurrect it.
+                        meta.cleared_capabilities
+                            .extend(learned_probe_guard.settle_success());
                         // No response-evidence observation on the stream path:
                         // no assembled response exists here to read structural
                         // evidence from, so positive detection fails closed. A

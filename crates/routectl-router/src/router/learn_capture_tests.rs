@@ -1353,6 +1353,46 @@ fn armed_guard_for(router: &Router, feature: &str) -> LearnedProbeGuard {
 }
 
 #[test]
+fn settle_success_emits_one_cleared_event_per_held_probe() {
+    // A successful re-probe clears the resident negative in memory AND yields
+    // one cleared event per held probe so the caller can ride it out on the
+    // dispatch meta -- the only settlement arm that produces a clear.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    seed_expired_phase_negative(&router, "web_search", FailurePhase::F1);
+    let mut guard = armed_guard_for(&router, "web_search");
+
+    let cleared = guard.settle_success();
+
+    assert_eq!(cleared.len(), 1, "one cleared event per held probe");
+    assert_eq!(cleared[0].state_key, "m1");
+    assert_eq!(cleared[0].capability_key, "web_search");
+    assert_eq!(cleared[0].provider_kind, "anthropic-api");
+}
+
+#[test]
+fn same_capability_settle_emits_no_cleared_event() {
+    // A same-capability rejection refreshes the entry with backoff and drops it
+    // from the held set -- it clears nothing, so it produces no cleared event.
+    // A following settle_success then has no held probe left to clear either,
+    // pinning that a clear rides ONLY on a genuine success settlement.
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    seed_expired_phase_negative(&router, "web_search", FailurePhase::F1);
+    let mut guard = armed_guard_for(&router, "web_search");
+
+    let matched = guard.settle_same_capability("m1", "web_search", "anthropic-api");
+    assert!(
+        matched,
+        "the held probe matched the same-capability rejection"
+    );
+
+    let cleared = guard.settle_success();
+    assert!(
+        cleared.is_empty(),
+        "a same-capability settle leaves no probe to clear",
+    );
+}
+
+#[test]
 fn probe_settle_of_an_f1_negative_records_f1_seen() {
     // A re-probe that reconfirms a resident F1 negative is F1 evidence for the
     // capability in this attempt chain: the settle path must record F1Seen so a

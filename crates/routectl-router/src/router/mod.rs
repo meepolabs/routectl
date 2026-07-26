@@ -20,6 +20,7 @@ use crate::resolved::ResolvedModel;
 use crate::runtime_state::ProviderState;
 
 mod cache_plan;
+mod capability_cleared;
 mod capability_learn;
 mod capability_observe;
 mod chain;
@@ -31,6 +32,7 @@ mod overlays;
 mod runtime_gate;
 mod status;
 mod sticky;
+pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_learn::CapabilityLearnEvent;
 pub use capability_observe::CapabilityObserveEvent;
 #[cfg(test)]
@@ -700,6 +702,15 @@ pub struct DispatchMeta {
     /// acting observation so the usage-capture layer can persist them without
     /// the router depending on the ledger writer. Additive, defaults empty.
     pub capability_observations: Vec<CapabilityObserveEvent>,
+    /// Probe-settled clears captured on the terminal successful dispatch for
+    /// this request: a resident learned negative a successful re-probe cleared
+    /// in memory. Empty on the common path (no re-probe reached its target, or
+    /// the re-probe did not succeed); carries one event per cleared entry so
+    /// the usage-capture layer persists the clear and the warm-rebuild replayer
+    /// removes the same resident negative on boot rather than resurrecting it.
+    /// Collected ONLY at [`LearnedProbeGuard::settle_success`]. Additive,
+    /// defaults empty.
+    pub cleared_capabilities: Vec<CapabilityClearedEvent>,
 }
 
 impl DispatchMeta {
@@ -733,6 +744,7 @@ impl DispatchMeta {
             would_trim_context_fraction: None,
             learned_capabilities: Vec::new(),
             capability_observations: Vec::new(),
+            cleared_capabilities: Vec::new(),
         }
     }
 
