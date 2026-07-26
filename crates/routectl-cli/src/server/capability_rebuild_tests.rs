@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_router::Config;
-use routectl_usage::{CHANNEL_CAPACITY, UsageWriter, open};
+use routectl_usage::{CHANNEL_CAPACITY, UsageWriter, latest_tombstone, open};
 use rusqlite::params;
 use tempfile::TempDir;
 
@@ -354,33 +354,6 @@ async fn unreadable_ledger_leaves_registry_empty_and_warns() {
 
     drop(handle);
     writer.shutdown();
-}
-
-#[test]
-fn map_instant_clamps_future_and_ancient_and_maps_recent_past() {
-    let now = Instant::now();
-    let now_ms = 1_000_000i64;
-
-    // A future-dated row clamps to now (age saturates to zero, never
-    // underflowing the u64 duration).
-    assert_eq!(map_instant(now, now_ms, now_ms + 5_000), now);
-    // An extreme future timestamp cannot underflow the age computation either.
-    assert_eq!(map_instant(now, now_ms, i64::MAX), now);
-
-    // A recent past event maps to exactly now - age.
-    assert_eq!(
-        now.duration_since(map_instant(now, now_ms, now_ms - 3_000)),
-        Duration::from_secs(3),
-    );
-
-    // An ancient event (far older than any decay window) maps to a far-past
-    // instant -- already expired, so it lapses to a single re-probe rather
-    // than acting. The saturating age never panics the instant subtraction.
-    let ancient = map_instant(now, now_ms, i64::MIN);
-    assert!(
-        ancient < now,
-        "an ancient event maps to a past (already-expired) instant"
-    );
 }
 
 #[test]

@@ -666,7 +666,7 @@ pub(super) async fn handle_config_reload(
 /// clock source so both replay boundaries stamp the same wall-clock basis.
 fn enqueue_reload_tombstone(usage: &UsageHandle, catalog_version: u32, overlay_revision: u64) {
     let event = CapabilityEvent::tombstone(
-        super::capability_rebuild::epoch_ms_now(),
+        super::ledger_reader::epoch_ms_now(),
         i64::from(catalog_version),
         i64::try_from(overlay_revision).unwrap_or(i64::MAX),
     );

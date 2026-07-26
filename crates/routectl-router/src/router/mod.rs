@@ -7,6 +7,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+// The registry tempo now flows through `LearnedCapabilityRegistry::
+// from_capability_config`; `Duration` survives only for the router test
+// sidecars that build durations and reach it through `use super::*`.
+#[cfg(test)]
 use std::time::Duration;
 
 use futures::stream::BoxStream;
@@ -998,12 +1002,11 @@ impl Router {
         // Duration); the kill switch is deliberately NOT read here -- the
         // act / learn sites gate on it, so a disabled subsystem keeps the
         // registry resident but inert and a hot re-enable is instant.
-        let learned_capabilities =
-            Arc::new(crate::learned_capability::LearnedCapabilityRegistry::new(
-                Duration::from_hours(config.capability.decay_hours),
-                Duration::from_hours(config.capability.inferred_window_hours),
-                crate::learned_capability::DEFAULT_MAX_ENTRIES,
-            ));
+        let learned_capabilities = Arc::new(
+            crate::learned_capability::LearnedCapabilityRegistry::from_capability_config(
+                &config.capability,
+            ),
+        );
         let has_forwarded_provider = config
             .providers
             .values()

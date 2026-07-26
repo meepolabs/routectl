@@ -12,8 +12,9 @@ use crate::commands::capability_legacy::present_legacy_capability_keys;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 
 use super::gather::{
-    build_capability_inputs, derive_prior_cells, gather_context, gather_context_no_network,
-    gather_orphan_secrets, gather_secret_checks, sanitize_store_open_error,
+    build_capability_inputs, derive_prior_cells, gather_capability_matrix, gather_context,
+    gather_context_no_network, gather_orphan_secrets, gather_secret_checks,
+    sanitize_store_open_error,
 };
 use super::sections::{
     learned_line, legacy_nudge, secret_finding, section_auth, section_capability, section_config,
@@ -65,6 +66,7 @@ fn ctx(
         now_unix: 1_000,
         binary_version: "test",
         capability,
+        capability_matrix: CapabilityMatrixSource::Unavailable("no_data"),
     }
 }
 
@@ -1502,6 +1504,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
             Some(redact_config_load_error(&raw_load_error)),
             None,
         ),
+        capability_matrix: CapabilityMatrixSource::Unavailable("config_unavailable"),
     };
     let report = build_report(&context);
 
@@ -1572,6 +1575,16 @@ async fn gather_context_no_network_yields_no_probe_results() {
     assert!(
         context.probe_results.is_empty(),
         "the no-network gather must not populate probe results"
+    );
+    // The gather populates the capability matrix source. Under the hermetic
+    // XDG this run has no usage ledger, so the source is unavailable (cold)
+    // rather than a silent empty.
+    assert!(
+        matches!(
+            context.capability_matrix,
+            CapabilityMatrixSource::Unavailable(_)
+        ),
+        "a run with no ledger reports the matrix unavailable, never empty"
     );
 
     let report = build_report_no_network(&context);
@@ -1648,4 +1661,204 @@ async fn network_and_no_network_gather_agree_outside_probe() {
         from_network.findings, from_no_network.findings,
         "the shared gather body must yield identical non-probe findings on both entry points"
     );
+}
+
+/// The capability-matrix data path: availability as a first-class tri-state.
+/// Honest-`Empty` is reserved for a readable, revision-matched ledger with
+/// zero post-boundary rows; every unreadable / cold / foreign-boundary /
+/// unparseable-config case is `Unavailable` with a path-free class token.
+mod capability_matrix {
+    use super::*;
+    use routectl_router::CATALOG_VERSION;
+    use routectl_usage::open;
+    use rusqlite::params;
+    use tempfile::TempDir;
+
+    fn config_at(db_path: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.usage.db_path = db_path.to_path_buf();
+        config
+    }
+
+    fn seed_tombstone(conn: &rusqlite::Connection, ts: i64, cat: i64, ov: i64) {
+        conn.execute(
+            "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
+             tier, evidence_class, upstream_token, catalog_version, overlay_revision) \
+             VALUES (?1, '', '', 'tombstone', '', '', '', NULL, NULL, ?2, ?3)",
+            params![ts, cat, ov],
+        )
+        .expect("seed tombstone");
+    }
+
+    fn seed_broken(conn: &rusqlite::Connection, ts: i64, lane: &str, cap: &str, cat: i64, ov: i64) {
+        conn.execute(
+            "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
+             tier, evidence_class, upstream_token, catalog_version, overlay_revision) \
+             VALUES (?1, ?2, ?3, 'broken', 'f1', 'live', 'self-identifying', NULL, NULL, ?4, ?5)",
+            params![ts, lane, cap, cat, ov],
+        )
+        .expect("seed broken negative");
+    }
+
+    #[test]
+    fn config_parse_failure_is_unavailable_never_empty() {
+        // A config that would not parse: the db path and revision knobs are
+        // untrusted, so the matrix reports unavailable rather than an
+        // empty-from-default read.
+        let tmp = TempDir::new().expect("tempdir");
+        let config = config_at(&tmp.path().join("usage.db"));
+
+        let source = gather_capability_matrix(&config, true, 0);
+        assert!(
+            matches!(
+                source,
+                CapabilityMatrixSource::Unavailable("config_unavailable")
+            ),
+            "a config parse failure is unavailable, not empty"
+        );
+    }
+
+    #[test]
+    fn absent_ledger_is_unavailable_not_empty() {
+        // No ledger yet: there is no readable, matched source, so this is
+        // unavailable (a distinct signal from an honest zero-row empty).
+        let tmp = TempDir::new().expect("tempdir");
+        let config = config_at(&tmp.path().join("absent.db"));
+
+        let source = gather_capability_matrix(&config, false, 0);
+        assert!(
+            matches!(source, CapabilityMatrixSource::Unavailable("no_data")),
+            "an absent ledger is unavailable, never a silent empty"
+        );
+    }
+
+    #[test]
+    fn unreadable_ledger_is_unavailable_with_path_free_token() {
+        let tmp = TempDir::new().expect("tempdir");
+        let ledger = tmp.path().join("usage.db");
+        std::fs::write(&ledger, b"this is not a sqlite database").expect("write junk");
+        let config = config_at(&ledger);
+
+        let CapabilityMatrixSource::Unavailable(code) = gather_capability_matrix(&config, false, 0)
+        else {
+            panic!("an unreadable ledger must be unavailable");
+        };
+        assert!(
+            !code.contains('/') && !code.contains("usage.db"),
+            "the class token must be path-free: {code}"
+        );
+    }
+
+    #[test]
+    fn matched_zero_row_ledger_is_honest_empty() {
+        // Readable ledger, tombstone matching this run's revision, no
+        // post-boundary rows: the one case that is honestly empty.
+        let tmp = TempDir::new().expect("tempdir");
+        let ledger = tmp.path().join("usage.db");
+        let db = open(&ledger).expect("open ledger");
+        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        drop(db);
+        let config = config_at(&ledger);
+
+        assert!(
+            matches!(
+                gather_capability_matrix(&config, false, 0),
+                CapabilityMatrixSource::Empty
+            ),
+            "a readable, matched, zero-row ledger is honest-empty"
+        );
+    }
+
+    #[test]
+    fn foreign_revision_tombstone_is_unavailable() {
+        let tmp = TempDir::new().expect("tempdir");
+        let ledger = tmp.path().join("usage.db");
+        let db = open(&ledger).expect("open ledger");
+        // Tombstone stamped a different overlay revision than this run's.
+        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        drop(db);
+        let config = config_at(&ledger);
+
+        assert!(
+            matches!(
+                gather_capability_matrix(&config, false, 99),
+                CapabilityMatrixSource::Unavailable("revision_mismatch")
+            ),
+            "a foreign-revision tombstone is unavailable, not empty"
+        );
+    }
+
+    #[test]
+    fn matching_slice_replays_and_pins_one_age_anchor() {
+        // A matching tombstone plus a post-boundary negative stamped in the
+        // FUTURE: the entry replays, and the future-dated row clamps to the
+        // reader's single pinned `now` (age zero, never negative).
+        let tmp = TempDir::new().expect("tempdir");
+        let ledger = tmp.path().join("usage.db");
+        let db = open(&ledger).expect("open ledger");
+        let far_future = i64::MAX / 2;
+        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        seed_broken(
+            db.conn(),
+            far_future,
+            "gpt-nick",
+            "web_search",
+            i64::from(CATALOG_VERSION),
+            0,
+        );
+        drop(db);
+        let config = config_at(&ledger);
+
+        let CapabilityMatrixSource::Available {
+            entries,
+            now,
+            now_ms,
+        } = gather_capability_matrix(&config, false, 0)
+        else {
+            panic!("a matching tombstone with a post-boundary row must be Available");
+        };
+        assert!(
+            now_ms > 0,
+            "the pinned epoch-ms anchor is a real wall-clock reading"
+        );
+        let entry = entries
+            .iter()
+            .find(|e| e.state_key == "gpt-nick" && e.feature_key == "web_search")
+            .expect("the replayed negative is resident");
+        assert!(
+            entry.last_seen <= now,
+            "a future-dated row clamps to the pinned now (age never negative)"
+        );
+        assert_eq!(
+            now.duration_since(entry.last_seen),
+            std::time::Duration::ZERO,
+            "the age anchor is pinned once; a future-dated row maps to age zero"
+        );
+    }
+
+    #[test]
+    fn gather_leaves_db_byte_identical() {
+        let tmp = TempDir::new().expect("tempdir");
+        let ledger = tmp.path().join("usage.db");
+        let db = open(&ledger).expect("open ledger");
+        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        seed_broken(
+            db.conn(),
+            200,
+            "gpt-nick",
+            "web_search",
+            i64::from(CATALOG_VERSION),
+            0,
+        );
+        drop(db);
+        let before = std::fs::read(&ledger).expect("read ledger before");
+
+        let _ = gather_capability_matrix(&config_at(&ledger), false, 0);
+
+        let after = std::fs::read(&ledger).expect("read ledger after");
+        assert_eq!(
+            before, after,
+            "the read-only matrix gather must not mutate the usage db"
+        );
+    }
 }

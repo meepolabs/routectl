@@ -21,13 +21,14 @@ mod sections;
 mod tests;
 
 use std::path::Path;
+use std::time::Instant;
 
 use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    Config, DoctorPanels, DoctorReport, Finding, OverrideRow, Source, Status, WouldTrimPanel,
-    overall_exit,
+    Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry, OverrideRow, Source, Status,
+    WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -133,6 +134,12 @@ pub(crate) struct DoctorContext {
     /// section producer stays a pure mapping. The config layer and the
     /// catalog overlay degrade independently (see [`CapabilityInputs`]).
     capability: CapabilityInputs,
+    /// The learned-capability matrix source: a read-only one-shot ledger
+    /// replay for this run's revision, availability classified as a
+    /// first-class tri-state. Populated in the single gather pass and
+    /// consumed by the capability matrix panel renderer.
+    #[cfg_attr(not(test), allow(dead_code))]
+    capability_matrix: CapabilityMatrixSource,
 }
 
 /// Per-layer inputs the capability section maps to findings. The config
@@ -183,6 +190,35 @@ struct PriorCell {
     selector: String,
     source: Source,
     capabilities: Vec<(String, bool)>,
+}
+
+/// The read-only ledger-replay source the capability matrix panel renders
+/// from, with availability as a first-class tri-state. The matrix is
+/// honest-`Empty` ONLY when the ledger was readable, its tombstone matched
+/// this run's revision, and the post-boundary slice held zero rows. Every
+/// other outcome -- unreadable ledger, version-too-new, absent or foreign
+/// tombstone, a config that would not parse -- is `Unavailable` with a
+/// path-free class token, NEVER a silent empty: boot's fail-closed-to-empty
+/// is correct for serving but would mislead a diagnostic into reporting
+/// "nothing learned" when the truth is "could not read".
+#[cfg_attr(not(test), allow(dead_code))]
+enum CapabilityMatrixSource {
+    /// The ledger replayed at least one learned entry. `now` / `now_ms` are
+    /// the single pinned clock anchors the mapped instants were taken
+    /// against, so every derived cell age shares one skew-free basis.
+    Available {
+        entries: Vec<LearnedRegistryEntry>,
+        now: Instant,
+        now_ms: i64,
+    },
+    /// Readable ledger, matched tombstone, zero post-boundary rows: an honest,
+    /// non-degraded empty.
+    Empty,
+    /// The source could not be read at this run's revision; the token is a
+    /// path-free class (`config_unavailable` / `no_data` / `no_tombstone` /
+    /// `revision_mismatch` / `tombstone_read` / an open-error class such as
+    /// `version_too_new`).
+    Unavailable(&'static str),
 }
 
 /// Run the doctor aggregator against `config_path` and render the report.

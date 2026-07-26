@@ -10,7 +10,8 @@ use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CatalogOverlay, Config, EffectiveRow, OverrideRegistry, derive_effective_view, is_stale_today,
+    CATALOG_VERSION, CatalogOverlay, Config, EffectiveRow, LearnedCapabilityRegistry,
+    OverrideRegistry, derive_effective_view, is_stale_today, rebuild_capabilities_into,
 };
 
 use crate::commands::capability_legacy::present_legacy_capability_keys;
@@ -18,8 +19,12 @@ use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
 use crate::server::CompositeStore;
+use crate::server::ledger_reader::{BoundaryOutcome, LedgerCapabilityReader, classify_boundary};
 
-use super::{CapabilityConfig, CapabilityInputs, DoctorContext, PriorCell, PriorLayer};
+use super::{
+    CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, PriorCell,
+    PriorLayer,
+};
 
 /// The network doctor gather: the no-network context PLUS one upstream
 /// reachability pass. Building the whole context in exactly ONE place
@@ -63,7 +68,20 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
             .map(|e| redact_config_load_error(e))
     });
 
+    // The learned matrix needs this run's revision to match the ledger's
+    // replay boundary. The baked catalog version is fixed; the overlay
+    // revision comes from the same read-only overlay load the priors use
+    // (defaulting to zero when the overlay could not be read -- a foreign
+    // boundary then classifies as unavailable, never a silent empty).
+    let config_parse_failed = config_parse_error.is_some();
+    let overlay_revision = overlay_layer
+        .as_ref()
+        .ok()
+        .map_or(0, routectl_router::overlay_revision);
+
     let capability = build_capability_inputs(&config, config_parse_error, overlay_layer.ok());
+    let capability_matrix =
+        gather_capability_matrix(&config, config_parse_failed, overlay_revision);
 
     let (probes, seats, auth_store_error) = gather_auth().await;
     let secret_checks = gather_secret_checks(&config, &probes);
@@ -84,6 +102,52 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         now_unix: unix_now(),
         binary_version: env!("CARGO_PKG_VERSION"),
         capability,
+        capability_matrix,
+    }
+}
+
+/// Rebuild the learned-capability matrix read-only from the usage ledger for
+/// this run's revision, classifying availability as a first-class tri-state.
+///
+/// A config that would not parse yields `Unavailable("config_unavailable")`:
+/// the usage db path and the revision knobs cannot be trusted, so an
+/// empty-from-default read would misreport. Otherwise the replay boundary is
+/// resolved against this run's baked catalog version + overlay revision and
+/// either replayed into a bare, config-sized registry (`Available`, or honest
+/// `Empty` on a matched-but-zero-row slice) or reported `Unavailable` with a
+/// path-free class token. Read-only: the ledger is only ever opened
+/// read-only, so the db is byte-identical afterward.
+pub(super) fn gather_capability_matrix(
+    config: &Config,
+    config_parse_failed: bool,
+    overlay_revision: u64,
+) -> CapabilityMatrixSource {
+    if config_parse_failed {
+        return CapabilityMatrixSource::Unavailable("config_unavailable");
+    }
+
+    match classify_boundary(&config.usage.db_path, CATALOG_VERSION, overlay_revision) {
+        BoundaryOutcome::Replay(tombstone) => {
+            let reader = LedgerCapabilityReader::new(config.usage.db_path.clone(), tombstone);
+            let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
+            let _ = rebuild_capabilities_into(&reader, &registry);
+            let entries = registry.snapshot();
+            if entries.is_empty() {
+                CapabilityMatrixSource::Empty
+            } else {
+                CapabilityMatrixSource::Available {
+                    entries,
+                    now: reader.now(),
+                    now_ms: reader.now_ms(),
+                }
+            }
+        }
+        BoundaryOutcome::Cold => CapabilityMatrixSource::Unavailable("no_data"),
+        BoundaryOutcome::NoTombstone => CapabilityMatrixSource::Unavailable("no_tombstone"),
+        BoundaryOutcome::RevisionMismatch => {
+            CapabilityMatrixSource::Unavailable("revision_mismatch")
+        }
+        BoundaryOutcome::Unreadable(code) => CapabilityMatrixSource::Unavailable(code),
     }
 }
 
