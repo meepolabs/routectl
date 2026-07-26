@@ -18,6 +18,7 @@ pub mod capability_rebuild;
 mod config_load;
 pub mod file_watch;
 pub mod k_rebuild;
+pub mod ledger_reader;
 mod reload;
 pub mod request_id;
 mod router_build;

@@ -141,7 +141,7 @@ pub use k_estimator::{
     KSessionStore, KSessionWindow, LedgerBackedK, LedgerReader, LedgerSampleRow, Sample,
     ShadowOutcome, ShadowStore, rebuild_into,
 };
-pub use learned_capability::LearnedRegistryEntry;
+pub use learned_capability::{LearnedCapabilityRegistry, LearnedRegistryEntry};
 pub use override_registry::{
     OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,
     validate_capability_overrides,

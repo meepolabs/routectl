@@ -294,6 +294,19 @@ impl LearnedCapabilityRegistry {
         }
     }
 
+    /// Build the registry sized from the `[capability]` knobs: the decay and
+    /// inferred-observation windows from the configured hours, the resident
+    /// cap from [`DEFAULT_MAX_ENTRIES`]. Shared by the router constructor and
+    /// the doctor's one-shot read-only ledger rebuild so both size an
+    /// otherwise-bare registry identically.
+    pub fn from_capability_config(capability: &crate::config::CapabilityConfig) -> Self {
+        Self::new(
+            Duration::from_hours(capability.decay_hours),
+            Duration::from_hours(capability.inferred_window_hours),
+            DEFAULT_MAX_ENTRIES,
+        )
+    }
+
     /// Record one learn observation for `(state_key, feature_key)`.
     /// Callers are responsible for one observation per request per target
     /// (dedupe upstream); this method treats each call as a distinct

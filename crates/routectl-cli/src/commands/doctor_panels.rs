@@ -12,29 +12,12 @@ use routectl_router::{Config, WouldTrimPanel};
 use routectl_usage::{OpenError, WouldTrimSummary, open_readonly, would_trim_summary};
 
 use super::usage::{WindowFlag, human_count, window_bounds};
+use crate::server::ledger_reader::open_error_class;
 
 /// The calendar window the doctor panel summarizes. All-time gives the
 /// fullest cumulative signal for a one-shot diagnostic, so a day with no
 /// recorded traffic never blanks the panel.
 const DEFAULT_WINDOW: WindowFlag = WindowFlag::All;
-
-/// Path-free class token for an unexpected usage-DB open failure. Several
-/// `OpenError` variants embed the DB PATH in their Display, so the logging
-/// site on the unauthenticated status surface must never emit the Display --
-/// it logs this fixed variant class instead. A new variant is a compile error
-/// here, forcing a deliberate log-hygiene decision for any new failure mode.
-const fn open_error_class(err: &OpenError) -> &'static str {
-    match err {
-        OpenError::CreateDir { .. } => "create_dir",
-        OpenError::Open { .. } => "open",
-        OpenError::Pragma(_) => "pragma",
-        OpenError::Permissions { .. } => "permissions",
-        OpenError::Migrate(_) => "migrate",
-        OpenError::VersionTooNew { .. } => "version_too_new",
-        OpenError::NotWal { .. } => "not_wal",
-        OpenError::NoData { .. } | OpenError::VersionTooOld { .. } => "expected",
-    }
-}
 
 /// Compute the would-trim panel from the usage DB, read-only.
 ///
@@ -301,36 +284,6 @@ mod tests {
         for verdict in ["`met`", "`unmet`", "`cold`", "`unpriced`"] {
             assert!(docs.contains(verdict), "verdict {verdict} not documented");
         }
-    }
-
-    #[test]
-    fn open_error_class_is_path_free_for_every_variant() {
-        // Every class token is a fixed discriminant, never a path. The
-        // path-bearing variants (Display embeds the DB path) must still map to
-        // a clean token.
-        let cases = [
-            open_error_class(&OpenError::Open {
-                path: "/secret/usage.db".into(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            }),
-            open_error_class(&OpenError::CreateDir {
-                path: "/secret/dir".into(),
-                source: std::io::Error::other("x"),
-            }),
-        ];
-        for token in cases {
-            assert!(
-                !token.contains('/') && !token.contains("secret"),
-                "class token must be path-free: {token}"
-            );
-        }
-        assert_eq!(
-            open_error_class(&OpenError::Open {
-                path: "/secret/usage.db".into(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            }),
-            "open"
-        );
     }
 
     #[test]
