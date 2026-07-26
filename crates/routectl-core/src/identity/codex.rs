@@ -50,7 +50,7 @@ use std::sync::OnceLock;
 /// Codex CLI version routectl mimics on the wire. Update when
 /// upstream codex bumps `[workspace.package].version` past this on a
 /// stable release tag (`rust-vX.Y.Z`).
-pub const PINNED_CODEX_VERSION: &str = "0.136.0";
+pub const PINNED_CODEX_VERSION: &str = "0.145.0";
 
 /// `originator` header value for first-party codex CLI traffic.
 /// Mirrors codex's `DEFAULT_ORIGINATOR` in `default_client.rs:36`.

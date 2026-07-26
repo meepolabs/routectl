@@ -306,8 +306,8 @@ The `openai-responses` provider in `chatgpt-oauth` mode **pins the codex CLI cli
 
 **Pinned client version (source of truth)**:
 
-- Tag: `rust-v0.136.0` (most recent codex Rust release tag at adoption)
-- Commit: `d36a3ead3c896d0552207763ef483262bce9ac73`
+- Tag: `rust-v0.145.0` (most recent codex Rust release tag at adoption)
+- Commit: `1635de866c61d1b76e50b31928ee6d61482435a8`
 - Source: the `version` field on `codex-rs/cli/Cargo.toml` in the upstream codex repo (workspace `version = "0.0.0"` is the tip-of-tree dev placeholder; the tag pin above is what routectl encodes against)
 
 Keep this pin in sync with the codex CLI version routectl targets; treat it as locked.
