@@ -37,9 +37,10 @@ pub use cache_control::{
     OwnedBreakpoint, compute_frozen_floor, mutable_suffix_start, validate_source,
 };
 pub use capability::{
-    CACHE_HIT, COMPUTER_USE, EvidenceSource, FailurePhase, PROMPT_CACHING, SCHEMA_MISMATCH,
-    SCHEMA_PARSE, SEARCH_ABSENT_FORCED, SEARCH_BLOCKS, STRUCTURED_OUTPUT, SignalTier, THINKING,
-    THINKING_BLOCKS, Verdict, WEB_SEARCH, WELL_KNOWN_CAPABILITY_KEYS, normalize_capability_key,
+    CACHE_HIT, COMPUTER_USE, EVIDENCE_CLASSES, EvidenceSource, FailurePhase, PROMPT_CACHING,
+    SCHEMA_MISMATCH, SCHEMA_PARSE, SEARCH_ABSENT_FORCED, SEARCH_BLOCKS, STRUCTURED_OUTPUT,
+    SignalTier, THINKING, THINKING_BLOCKS, Verdict, WEB_SEARCH, WELL_KNOWN_CAPABILITY_KEYS,
+    is_known_evidence_class, normalize_capability_key,
 };
 pub use cloud_project::{CloudProjectCache, InMemoryProjectCache};
 pub use content_part::{ContentPart, KnownContentPart};

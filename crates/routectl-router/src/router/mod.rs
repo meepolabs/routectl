@@ -1167,6 +1167,35 @@ impl Router {
         self.overlay_revision = revision;
     }
 
+    /// Baked catalog table version this Router was built against. Read at
+    /// the boot warm-rebuild seam to stamp a fresh capability-event
+    /// tombstone with the current revision, and by the unified drain to
+    /// stamp each persisted event.
+    pub const fn catalog_version(&self) -> u32 {
+        self.catalog_version
+    }
+
+    /// Catalog-overlay revision this Router was built against (zero until
+    /// `note_overlay_revision` records it). Read alongside
+    /// [`Router::catalog_version`] at the same boundary.
+    pub const fn overlay_revision(&self) -> u64 {
+        self.overlay_revision
+    }
+
+    /// Replay a capability-event ledger slice into the private learned
+    /// registry during boot warm-rebuild. Delegates to
+    /// [`crate::capability_rebuild::rebuild_capabilities_into`] over the
+    /// registry this Router owns, so the registry stays encapsulated behind
+    /// the Router rather than being handed out. Best-effort and idempotent
+    /// against a fresh registry, mirroring the K-store warm rebuild; the
+    /// returned tally is for boot observability.
+    pub fn rebuild_learned_from_ledger(
+        &self,
+        reader: &dyn crate::capability_rebuild::CapabilityLedgerReader,
+    ) -> crate::capability_rebuild::CapabilityRebuildSummary {
+        crate::capability_rebuild::rebuild_capabilities_into(reader, &self.learned_capabilities)
+    }
+
     /// Carry the previous Router's learned-capability registry into this
     /// freshly-built Router during a hot-reload -- but ONLY when the
     /// catalog version AND the overlay revision are both unchanged.

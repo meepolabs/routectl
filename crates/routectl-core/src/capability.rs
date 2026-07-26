@@ -73,6 +73,25 @@ pub const CACHE_HIT: &str = "cache_hit";
 /// Positive-only. Forever contract -- see [`SCHEMA_PARSE`].
 pub const THINKING_BLOCKS: &str = "thinking_blocks";
 
+/// Every recognized evidence-class token. A warm-rebuild replayer checks
+/// membership through [`is_known_evidence_class`] to fail closed on a row
+/// carrying a class it does not recognize, rather than replaying it blind.
+pub const EVIDENCE_CLASSES: &[&str] = &[
+    SCHEMA_PARSE,
+    SCHEMA_MISMATCH,
+    SEARCH_BLOCKS,
+    SEARCH_ABSENT_FORCED,
+    CACHE_HIT,
+    THINKING_BLOCKS,
+];
+
+/// Whether `token` is a recognized evidence class. Open-set-tolerant:
+/// consumers use this to skip a row whose class is absent or unrecognized
+/// rather than panicking.
+pub fn is_known_evidence_class(token: &str) -> bool {
+    EVIDENCE_CLASSES.contains(&token)
+}
+
 /// Whether a learned negative came from a provider that names the
 /// unsupported capability outright, or from an inferred free-text match.
 ///
@@ -98,6 +117,18 @@ impl SignalTier {
         match self {
             Self::SelfIdentifying => "self-identifying",
             Self::Inferred => "inferred",
+        }
+    }
+
+    /// Open-set-tolerant parse of a persisted tier token. Unknown tokens
+    /// yield `None` -- never a panic, never a silent default -- so a warm
+    /// rebuild skips a row written by a newer tier vocabulary rather than
+    /// crashing.
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "self-identifying" => Some(Self::SelfIdentifying),
+            "inferred" => Some(Self::Inferred),
+            _ => None,
         }
     }
 }
@@ -203,6 +234,12 @@ pub enum Verdict {
     LearnedBroken(FailurePhase),
     /// A learned negative the operator chose to ignore.
     SuspectIgnored,
+    /// A previously learned negative that a successful re-probe settled.
+    /// A ledger-event token in the shared verdict vocabulary rather than a
+    /// resident read-model state: on warm rebuild it removes the resident
+    /// entry for its key, so a probe-settled negative does not resurrect
+    /// across a restart.
+    Cleared,
     /// No signal in either direction.
     Unknown,
 }
@@ -217,6 +254,7 @@ impl Verdict {
             Self::VerifiedWorking => "verified",
             Self::LearnedBroken(_) => "broken",
             Self::SuspectIgnored => "suspect",
+            Self::Cleared => "cleared",
             Self::Unknown => "unknown",
         }
     }
@@ -253,6 +291,7 @@ impl Verdict {
                 None => Self::Unknown,
             },
             "suspect" => Self::SuspectIgnored,
+            "cleared" => Self::Cleared,
             _ => Self::Unknown,
         }
     }
@@ -344,6 +383,17 @@ mod tests {
         assert_eq!(SEARCH_ABSENT_FORCED, "search_absent_forced");
         assert_eq!(CACHE_HIT, "cache_hit");
         assert_eq!(THINKING_BLOCKS, "thinking_blocks");
+    }
+
+    #[test]
+    fn is_known_evidence_class_recognizes_exactly_the_six_forever_tokens() {
+        for token in EVIDENCE_CLASSES {
+            assert!(is_known_evidence_class(token), "{token} must be recognized");
+        }
+        assert_eq!(EVIDENCE_CLASSES.len(), 6);
+        assert!(!is_known_evidence_class("bogus_class"));
+        assert!(!is_known_evidence_class(""));
+        assert!(!is_known_evidence_class("SCHEMA_PARSE"));
     }
 
     #[test]
@@ -605,6 +655,26 @@ mod tests {
     }
 
     #[test]
+    fn signal_tier_tokens_are_pinned() {
+        assert_eq!(SignalTier::SelfIdentifying.as_str(), "self-identifying");
+        assert_eq!(SignalTier::Inferred.as_str(), "inferred");
+    }
+
+    #[test]
+    fn signal_tier_round_trips_through_its_token() {
+        for tier in [SignalTier::SelfIdentifying, SignalTier::Inferred] {
+            assert_eq!(SignalTier::parse(tier.as_str()), Some(tier));
+        }
+    }
+
+    #[test]
+    fn signal_tier_parse_rejects_garbage_without_panic() {
+        assert_eq!(SignalTier::parse("structural"), None);
+        assert_eq!(SignalTier::parse("SELF-IDENTIFYING"), None);
+        assert_eq!(SignalTier::parse(""), None);
+    }
+
+    #[test]
     fn verdict_tokens_are_pinned() {
         assert_eq!(Verdict::Assumed(true).as_str(), "assumed");
         assert_eq!(Verdict::Assumed(false).as_str(), "assumed");
@@ -612,6 +682,7 @@ mod tests {
         assert_eq!(Verdict::LearnedBroken(FailurePhase::F1).as_str(), "broken");
         assert_eq!(Verdict::LearnedBroken(FailurePhase::F2).as_str(), "broken");
         assert_eq!(Verdict::SuspectIgnored.as_str(), "suspect");
+        assert_eq!(Verdict::Cleared.as_str(), "cleared");
         assert_eq!(Verdict::Unknown.as_str(), "unknown");
     }
 
@@ -643,6 +714,7 @@ mod tests {
             Verdict::from_parts("suspect", None, None),
             Verdict::SuspectIgnored
         );
+        assert_eq!(Verdict::from_parts("cleared", None, None), Verdict::Cleared);
         assert_eq!(Verdict::from_parts("unknown", None, None), Verdict::Unknown);
     }
 

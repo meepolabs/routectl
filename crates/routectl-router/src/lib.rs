@@ -13,6 +13,7 @@
 pub(crate) mod activation;
 pub(crate) mod capability_detect;
 pub(crate) mod capability_matcher;
+pub(crate) mod capability_rebuild;
 pub(crate) mod capability_strip;
 pub mod catalog;
 pub(crate) mod catalog_baked;
@@ -53,6 +54,10 @@ pub use activation::{
     DeactivatedChange, UnresolvedReason, compute_activation, diff as diff_activation,
 };
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
+pub use capability_rebuild::{
+    CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,
+    rebuild_capabilities_into,
+};
 pub use catalog::{
     BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
     baked_table_rows, is_cataloged_provider_kind, is_stale_today, lookup,
