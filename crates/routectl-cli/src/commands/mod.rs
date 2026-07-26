@@ -25,6 +25,7 @@ pub mod provider_env;
 pub mod rc;
 pub mod refresh;
 pub mod seat;
+pub mod staleness_hint;
 pub mod test;
 pub mod usage;
 pub mod whoami;
