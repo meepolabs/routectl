@@ -621,6 +621,24 @@ impl LearnedCapabilityRegistry {
         self.entries.read().is_empty()
     }
 
+    /// Remove the resident entry keyed by `(state_key, feature_key)`
+    /// outright, returning whether one was present. The keyed counterpart
+    /// to the `record_probe_outcome(Success)` clear: a warm rebuild replays
+    /// a persisted `cleared` settlement event through here so a
+    /// probe-settled negative does not resurrect across a restart. Unlike
+    /// `expire_keyed`, this drops the entry entirely rather than lapsing it
+    /// into a single re-probe -- the settlement already proved the target
+    /// works, so there is nothing to re-verify.
+    pub fn remove_keyed(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+    ) -> bool {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        self.entries.write().remove(&key).is_some()
+    }
+
     /// Build the map key, normalizing the raw capability key so an insert
     /// and a later lookup meet on identical strings.
     fn make_key(state_key: &str, feature_key_raw: &str, provider_kind: &str) -> RegistryKey {
