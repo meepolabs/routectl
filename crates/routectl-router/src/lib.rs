@@ -12,6 +12,7 @@
 
 pub(crate) mod activation;
 pub(crate) mod capability_detect;
+pub(crate) mod capability_display;
 pub(crate) mod capability_matcher;
 pub(crate) mod capability_rebuild;
 pub(crate) mod capability_strip;
@@ -54,6 +55,7 @@ pub use activation::{
     DeactivatedChange, UnresolvedReason, compute_activation, diff as diff_activation,
 };
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
+pub use capability_display::{DisplayVerdict, resolve_display_verdict};
 pub use capability_matcher::resolve_requested_capability;
 pub use capability_rebuild::{
     CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,
@@ -118,7 +120,8 @@ pub use context_trim::{
 };
 pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
 pub use doctor::{
-    DoctorPanels, DoctorReport, Finding, ProbeOutcome, Status, WouldTrimPanel, overall_exit,
+    CapabilityMatrixPanel, DoctorPanels, DoctorReport, Finding, MatrixAvailability, MatrixCell,
+    MatrixLane, ProbeOutcome, Status, WouldTrimPanel, overall_exit,
 };
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_creds_refs;

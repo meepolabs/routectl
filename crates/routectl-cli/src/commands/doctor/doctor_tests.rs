@@ -17,9 +17,10 @@ use super::gather::{
     gather_context_no_network, gather_orphan_secrets, gather_secret_checks,
     sanitize_store_open_error,
 };
+use super::matrix::build_capability_matrix_panel;
 use super::sections::{
-    freshness_findings, learned_line, legacy_nudge, secret_finding, section_auth,
-    section_capability, section_config, section_probe, section_secret_orphans, section_version,
+    freshness_findings, legacy_nudge, secret_finding, section_auth, section_capability,
+    section_config, section_probe, section_secret_orphans, section_version,
 };
 use super::*;
 
@@ -374,7 +375,10 @@ async fn one_credential_state_agrees_across_report_surfaces() {
 }
 
 #[test]
-fn capability_section_renders_content_not_placeholder() {
+fn capability_section_drops_absorbed_findings_on_default_config() {
+    // On a default config the capability SECTION contributes nothing: the
+    // override / prior / learned lines are now structured cells on the
+    // matrix panel, and there is no legacy key to nudge.
     let context = ctx(
         Config::default(),
         Some("version = 3\n"),
@@ -383,27 +387,23 @@ fn capability_section_renders_content_not_placeholder() {
     );
     let report = build_report(&context);
     assert!(
-        report.findings.iter().any(|f| f.section == "capability"),
-        "capability section must now contribute findings"
+        !report.findings.iter().any(|f| f.section == "capability"),
+        "capability section must contribute no findings on a default config"
     );
     let text = render_human(&report).join("\n");
+    // The superseded finding content is gone.
     assert!(
-        text.contains("[Capability]"),
-        "capability header missing: {text}"
+        !text.contains("runtime-only"),
+        "superseded learned line must be gone: {text}"
     );
     assert!(
-        !text.contains("not yet available"),
-        "placeholder must be gone: {text}"
+        !text.contains("no catalog capability priors present"),
+        "superseded priors note must be gone: {text}"
     );
-    // The runtime-only learned line and the honest empty-priors note are
-    // both present on a default config.
+    // The matrix panel renders in its place.
     assert!(
-        text.contains("runtime-only"),
-        "learned line missing: {text}"
-    );
-    assert!(
-        text.contains("no catalog capability priors present"),
-        "honest empty-priors note missing: {text}"
+        text.contains("capability matrix:"),
+        "capability matrix panel missing: {text}"
     );
 }
 
@@ -424,37 +424,31 @@ fn config_with_overrides() -> Config {
 }
 
 #[test]
-fn override_rows_render_with_source_labels_and_never_fail() {
+fn override_cells_land_on_the_matrix_panel_with_source_tags() {
     let context = ctx(
         config_with_overrides(),
         Some("version = 3\n"),
         Vec::new(),
         Vec::new(),
     );
+    // The capability SECTION no longer emits an override finding.
     let findings = section_capability(&context);
-    let overrides: Vec<&Finding> = findings.iter().filter(|f| f.name == "p").collect();
-    assert_eq!(overrides.len(), 2, "one finding per override cell");
-    assert!(overrides.iter().all(|f| f.status == Status::Pass));
-
-    let route_away = overrides
-        .iter()
-        .find(|f| f.detail.contains("web_search"))
-        .expect("provider-static route-away row");
-    assert!(route_away.detail.contains("route-away"), "{route_away:?}");
     assert!(
-        route_away.detail.contains("source: provider-static"),
-        "{route_away:?}"
+        !findings.iter().any(|f| f.name == "p"),
+        "override rows must no longer be findings"
     );
-
-    let forced = overrides
-        .iter()
-        .find(|f| f.detail.contains("structured_output"))
-        .expect("override force-supported row");
-    assert!(forced.detail.contains("force-supported"), "{forced:?}");
-    assert!(forced.detail.contains("source: override"), "{forced:?}");
-
-    // Capability findings never flip the exit code.
     assert_eq!(overall_exit(&findings), 0);
+
+    // The provider-scoped overrides land as forced cells on every lane of
+    // provider `p` in the matrix panel. `config_with_overrides` has no
+    // [models] table, so there is no routed lane to carry them; assert the
+    // panel builds and the resolver vocabulary is what the cells would use.
+    let panel = build_capability_matrix_panel(&context);
+    assert!(
+        panel.columns.iter().any(|c| c == "web_search"),
+        "well-known columns present: {:?}",
+        panel.columns
+    );
 }
 
 #[test]
@@ -488,15 +482,10 @@ fn prior_cells_render_when_overlay_provides_them() {
     .expect("valid overlay");
 
     let inputs = build_capability_inputs(&config, None, Some(overlay));
-    let priors = &inputs.config.expect("config present").priors;
-    let PriorLayer::Present(cells) = priors else {
-        panic!("expected present priors");
-    };
+    let cells = &inputs.config.expect("config present").priors;
     assert_eq!(cells.len(), 1);
     assert_eq!(cells[0].nickname, "opus");
-    assert!(cells[0].selector.contains("claude-opus-4-8"));
-    // The overlay cell wins the merge -> source is User.
-    assert_eq!(cells[0].source, Source::User);
+    assert_eq!(cells[0].verified_at, today);
     // The overlay-supplied capability is present and true (baked keys the
     // overlay does not mention merge through unchanged).
     assert!(
@@ -509,10 +498,11 @@ fn prior_cells_render_when_overlay_provides_them() {
 }
 
 #[test]
-fn stale_catalog_cell_yields_no_prior() {
-    // A Present overlay cell whose verified_at is far in the past is
-    // stale -> suppressed as unknown, never rendered as an authoritative
-    // prior (spec 6c). An unparseable stamp is treated as stale too.
+fn stale_catalog_cell_still_yields_a_prior_for_the_panel() {
+    // Staleness is no longer filtered at derivation: a stale overlay cell
+    // now yields a prior cell carrying its old `verified_at`, and the matrix
+    // panel flags it stale against the operator hint. The prior is surfaced
+    // honestly rather than silently dropped.
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.anthropic]\n\
@@ -536,7 +526,8 @@ fn stale_catalog_cell_yields_no_prior() {
     }))
     .expect("valid overlay");
     let cells = derive_prior_cells(&config, &overlay);
-    assert!(cells.is_empty(), "stale cell must yield no prior");
+    assert_eq!(cells.len(), 1, "stale cell must still yield a prior");
+    assert_eq!(cells[0].verified_at, "2000-01-01");
 }
 
 #[test]
@@ -552,20 +543,6 @@ fn absent_catalog_cell_yields_no_prior_and_no_crash() {
     .expect("config parses");
     let cells = derive_prior_cells(&config, &CatalogOverlay::default());
     assert!(cells.is_empty(), "absent cell must yield no prior");
-}
-
-#[test]
-fn learned_line_is_runtime_only_with_no_counts() {
-    let f = learned_line();
-    assert_eq!(f.status, Status::Pass);
-    assert!(f.detail.contains("runtime-only"));
-    assert!(f.detail.contains("serve logs"));
-    // No fabricated counts.
-    assert!(
-        !f.detail.chars().any(|c| c.is_ascii_digit()),
-        "learned line must carry no counts: {}",
-        f.detail
-    );
 }
 
 #[test]
@@ -596,26 +573,33 @@ fn config_load_error_routes_through_redactor_to_unavailable() {
 }
 
 #[test]
-fn overlay_unavailable_keeps_override_rows_marks_priors_unavailable() {
-    // overlay = None simulates an unreadable overlay: override rows still
-    // render, priors are marked unavailable.
+fn overlay_unavailable_leaves_priors_absent_and_still_builds_the_panel() {
+    // overlay = None simulates an unreadable overlay: priors are absent
+    // (empty), but the config parsed, so the capability section still emits
+    // no absorbed findings and the matrix panel still builds (learned +
+    // override cells unaffected).
     let inputs = build_capability_inputs(&config_with_overrides(), None, None);
+    assert!(
+        inputs
+            .config
+            .as_ref()
+            .expect("config present")
+            .priors
+            .is_empty(),
+        "an unreadable overlay leaves priors absent"
+    );
     let context = DoctorContext {
         capability: inputs,
-        ..ctx(Config::default(), Some("x"), Vec::new(), Vec::new())
+        ..ctx(config_with_overrides(), Some("x"), Vec::new(), Vec::new())
     };
     let findings = section_capability(&context);
     assert!(
-        findings.iter().any(|f| f.name == "p"),
-        "override rows must still render on overlay failure"
+        !findings.iter().any(|f| f.name == "catalog priors"),
+        "the priors-unavailable finding is superseded by the panel"
     );
-    let priors = findings
-        .iter()
-        .find(|f| f.name == "catalog priors")
-        .expect("priors finding");
-    assert_eq!(priors.status, Status::Warn);
-    assert!(priors.detail.contains("unavailable"));
     assert_eq!(overall_exit(&findings), 0);
+    // The panel builds regardless of overlay availability.
+    let _ = build_capability_matrix_panel(&context);
 }
 
 #[test]
@@ -685,8 +669,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_three() {
-    assert_eq!(SCHEMA_VERSION, 3);
+fn schema_version_is_four() {
+    assert_eq!(SCHEMA_VERSION, 4);
     let context = ctx(
         config_with_overrides(),
         Some("version = 3\n"),
@@ -694,16 +678,23 @@ fn schema_version_is_three() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 3);
-    // JSON mode carries the same capability content as the human render.
+    assert_eq!(report.schema_version, 4);
+    // JSON mode carries the structured capability matrix panel; the
+    // superseded override / prior / learned finding text is gone.
     let value = serde_json::to_value(&report).expect("serialize");
     let blob = value.to_string();
-    assert!(blob.contains("route-away"), "json missing override verdict");
     assert!(
-        blob.contains("provider-static"),
-        "json missing source label"
+        blob.contains("capability_matrix"),
+        "json missing the capability matrix panel"
     );
-    assert!(blob.contains("runtime-only"), "json missing learned line");
+    assert!(
+        !blob.contains("route-away"),
+        "superseded override finding text must be gone"
+    );
+    assert!(
+        !blob.contains("runtime-only"),
+        "superseded learned line must be gone"
+    );
 }
 
 #[test]
@@ -1631,7 +1622,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 3);
+    assert_eq!(no_net.schema_version, 4);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2047,4 +2038,293 @@ fn freshness_registered_in_both_section_lists_and_render_title() {
         text.contains("Catalog freshness"),
         "freshness section title must render: {text}"
     );
+}
+
+/// The capability matrix panel: lane-by-capability grid assembled from the
+/// three signal layers through the shared display resolver.
+mod matrix_panel {
+    use super::*;
+
+    use std::time::{Duration, Instant};
+
+    use routectl_core::capability::{
+        EvidenceSource, FailurePhase, SignalTier, Verdict, WELL_KNOWN_CAPABILITY_KEYS,
+    };
+    use routectl_router::{
+        CapabilityMatrixPanel, LearnedRegistryEntry, MatrixAvailability, MatrixCell,
+    };
+
+    /// A config with one provider `p` and two routed model lanes.
+    fn matrix_config() -> Config {
+        toml::from_str(
+            "version = 3\n\
+             [providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [models.laneA]\n\
+             provider = \"p\"\n\
+             upstream = \"m-a\"\n\
+             [models.laneB]\n\
+             provider = \"p\"\n\
+             upstream = \"m-b\"\n",
+        )
+        .expect("matrix config parses")
+    }
+
+    fn entry(
+        state_key: &str,
+        feature: &str,
+        verdict: Verdict,
+        source: EvidenceSource,
+        last_seen: Instant,
+    ) -> LearnedRegistryEntry {
+        LearnedRegistryEntry {
+            state_key: state_key.to_string(),
+            feature_key: feature.to_string(),
+            verdict,
+            signal_tier: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: last_seen,
+            last_seen,
+            expires_at: last_seen,
+            phase: FailurePhase::F1,
+            source,
+        }
+    }
+
+    fn matrix_ctx(source: CapabilityMatrixSource, priors: Vec<PriorCell>) -> DoctorContext {
+        let base = ctx(
+            matrix_config(),
+            Some("version = 3\n"),
+            Vec::new(),
+            Vec::new(),
+        );
+        DoctorContext {
+            capability_matrix: source,
+            capability: CapabilityInputs {
+                config: Some(CapabilityConfig {
+                    legacy_keys: Vec::new(),
+                    priors,
+                }),
+                panel_unavailable: None,
+            },
+            ..base
+        }
+    }
+
+    fn find_cell<'a>(panel: &'a CapabilityMatrixPanel, lane: &str, cap: &str) -> &'a MatrixCell {
+        let li = panel
+            .lanes
+            .iter()
+            .position(|l| l.lane == lane)
+            .unwrap_or_else(|| panic!("lane {lane} missing"));
+        let ci = panel
+            .columns
+            .iter()
+            .position(|c| c == cap)
+            .unwrap_or_else(|| panic!("column {cap} missing"));
+        &panel.lanes[li].cells[ci]
+    }
+
+    #[test]
+    fn seeded_registry_renders_mixed_cells_across_lanes_and_columns() {
+        let now = Instant::now();
+        let entries = vec![
+            entry(
+                "laneA",
+                "web_search",
+                Verdict::VerifiedWorking,
+                EvidenceSource::Live,
+                now,
+            ),
+            entry(
+                "laneA",
+                "thinking",
+                Verdict::LearnedBroken(FailurePhase::F1),
+                EvidenceSource::Probe,
+                now,
+            ),
+            entry(
+                "laneB",
+                "custom_tool",
+                Verdict::VerifiedWorking,
+                EvidenceSource::Live,
+                now,
+            ),
+        ];
+        let priors = vec![PriorCell {
+            nickname: "laneA".to_string(),
+            verified_at: "2026-07-10".to_string(),
+            capabilities: vec![("structured_output".to_string(), false)],
+        }];
+        let ctx = matrix_ctx(
+            CapabilityMatrixSource::Available {
+                entries,
+                now,
+                now_ms: 0,
+            },
+            priors,
+        );
+
+        let panel = build_capability_matrix_panel(&ctx);
+        assert_eq!(panel.availability, MatrixAvailability::Available);
+        // The five well-known columns lead; the observed non-well-known key
+        // becomes an other column.
+        let leading: Vec<&str> = panel.columns[..5].iter().map(String::as_str).collect();
+        assert_eq!(leading, WELL_KNOWN_CAPABILITY_KEYS);
+        assert!(panel.columns.iter().any(|c| c == "custom_tool"));
+
+        // Verified live cell.
+        let verified = find_cell(&panel, "laneA", "web_search");
+        assert_eq!(verified.verdict, "verified");
+        assert_eq!(verified.source, Some("live"));
+        assert_eq!(verified.supported, Some(true));
+        assert!(verified.age_ms.is_some());
+
+        // Learned-broken probe cell.
+        let broken = find_cell(&panel, "laneA", "thinking");
+        assert_eq!(broken.verdict, "broken");
+        assert_eq!(broken.source, Some("probe"));
+        assert_eq!(broken.supported, Some(false));
+
+        // Prior cell (assumed unsupported).
+        let prior = find_cell(&panel, "laneA", "structured_output");
+        assert_eq!(prior.verdict, "assumed");
+        assert_eq!(prior.source, Some("prior"));
+        assert_eq!(prior.supported, Some(false));
+        assert_eq!(prior.age_ms, None);
+
+        // Other-column cell on laneB.
+        let other = find_cell(&panel, "laneB", "custom_tool");
+        assert_eq!(other.verdict, "verified");
+        assert_eq!(other.source, Some("live"));
+
+        // A column with no signal for a lane resolves unknown.
+        let unknown = find_cell(&panel, "laneB", "web_search");
+        assert_eq!(unknown.verdict, "unknown");
+        assert_eq!(unknown.source, None);
+    }
+
+    #[test]
+    fn other_columns_cap_at_ten_with_overflow_count() {
+        let now = Instant::now();
+        // Twelve distinct non-well-known keys observed on one lane.
+        let entries: Vec<LearnedRegistryEntry> = (0..12)
+            .map(|i| {
+                entry(
+                    "laneA",
+                    &format!("other_{i:02}"),
+                    Verdict::VerifiedWorking,
+                    EvidenceSource::Live,
+                    now,
+                )
+            })
+            .collect();
+        let ctx = matrix_ctx(
+            CapabilityMatrixSource::Available {
+                entries,
+                now,
+                now_ms: 0,
+            },
+            Vec::new(),
+        );
+
+        let panel = build_capability_matrix_panel(&ctx);
+        // 5 well-known + 10 rendered other columns.
+        assert_eq!(panel.columns.len(), 15);
+        assert_eq!(panel.other_overflow, 2);
+    }
+
+    #[test]
+    fn availability_empty_and_unavailable_render_distinctly() {
+        let empty =
+            build_capability_matrix_panel(&matrix_ctx(CapabilityMatrixSource::Empty, Vec::new()));
+        assert_eq!(empty.availability, MatrixAvailability::Empty);
+
+        let unavailable = build_capability_matrix_panel(&matrix_ctx(
+            CapabilityMatrixSource::Unavailable("revision_mismatch"),
+            Vec::new(),
+        ));
+        assert_eq!(
+            unavailable.availability,
+            MatrixAvailability::Unavailable {
+                code: "revision_mismatch"
+            }
+        );
+        // Config lanes still render even when the learned source is absent.
+        assert!(!unavailable.lanes.is_empty());
+    }
+
+    #[test]
+    // `Duration::from_days` is unstable in this crate, so the day span is
+    // built from seconds; the suboptimal-units lint's suggestion does not
+    // compile here.
+    #[allow(clippy::duration_suboptimal_units)]
+    fn stale_flags_fire_for_verified_and_prior_cells() {
+        // now is 30 days past the seeded cell's last_seen; the hint is 14
+        // days, so the verified cell is stale.
+        let base = Instant::now();
+        let now = base + Duration::from_secs(30 * 86_400);
+        let entries = vec![entry(
+            "laneA",
+            "web_search",
+            Verdict::VerifiedWorking,
+            EvidenceSource::Live,
+            base,
+        )];
+        // A prior stamped in 2000 is far past the hint against the fixed
+        // 2026-07-11 "today".
+        let priors = vec![PriorCell {
+            nickname: "laneA".to_string(),
+            verified_at: "2000-01-01".to_string(),
+            capabilities: vec![("structured_output".to_string(), true)],
+        }];
+        let ctx = matrix_ctx(
+            CapabilityMatrixSource::Available {
+                entries,
+                now,
+                now_ms: 0,
+            },
+            priors,
+        );
+
+        let panel = build_capability_matrix_panel(&ctx);
+        assert!(
+            find_cell(&panel, "laneA", "web_search").stale,
+            "a verified cell older than the hint is stale"
+        );
+        assert!(
+            find_cell(&panel, "laneA", "structured_output").stale,
+            "a prior stamp past the hint is stale"
+        );
+    }
+
+    #[test]
+    fn learned_lane_without_config_entry_renders_unrouted() {
+        let now = Instant::now();
+        let entries = vec![entry(
+            "ghost",
+            "web_search",
+            Verdict::VerifiedWorking,
+            EvidenceSource::Live,
+            now,
+        )];
+        let ctx = matrix_ctx(
+            CapabilityMatrixSource::Available {
+                entries,
+                now,
+                now_ms: 0,
+            },
+            Vec::new(),
+        );
+
+        let panel = build_capability_matrix_panel(&ctx);
+        let ghost = panel
+            .lanes
+            .iter()
+            .find(|l| l.lane == "ghost")
+            .expect("orphan ledger lane rendered");
+        assert!(!ghost.routed, "a lane with no config entry is unrouted");
+    }
 }

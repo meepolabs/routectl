@@ -10,9 +10,9 @@ use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
-    CATALOG_VERSION, CatalogOverlay, Config, EffectiveRow, LearnedCapabilityRegistry,
-    OverrideRegistry, Source, catalog_import_state_default_path, derive_effective_view,
-    is_stale_today, load_last_import, rebuild_capabilities_into, today_epoch_day,
+    CATALOG_VERSION, CatalogOverlay, Config, EffectiveRow, LearnedCapabilityRegistry, Source,
+    catalog_import_state_default_path, derive_effective_view, load_last_import,
+    rebuild_capabilities_into, today_epoch_day,
 };
 
 use crate::commands::capability_legacy::present_legacy_capability_keys;
@@ -24,7 +24,7 @@ use crate::server::ledger_reader::{BoundaryOutcome, LedgerCapabilityReader, clas
 
 use super::{
     CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, FreshnessInputs,
-    PriorCell, PriorLayer,
+    PriorCell,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -168,9 +168,10 @@ pub(super) fn gather_capability_matrix(
 
 /// Build the capability section's per-layer inputs. A config parse error
 /// (already redacted) yields the "panel unavailable" state -- NOT an
-/// empty-from-default-config view. Otherwise the override rows and legacy
-/// keys come from the parsed config, and the prior cells from the overlay
-/// (or unavailable when the overlay could not be read).
+/// empty-from-default-config view. Otherwise the legacy keys come from the
+/// parsed config and the prior cells from the overlay (empty when the
+/// overlay could not be read -- priors are then absent, while the matrix's
+/// learned and override cells still render).
 pub(super) fn build_capability_inputs(
     config: &Config,
     config_parse_error: Option<String>,
@@ -183,16 +184,13 @@ pub(super) fn build_capability_inputs(
         };
     }
 
-    let override_rows = OverrideRegistry::build(config).snapshot();
     let legacy_keys = present_legacy_capability_keys(config);
-    let priors = match overlay {
-        Some(overlay) => PriorLayer::Present(derive_prior_cells(config, &overlay)),
-        None => PriorLayer::Unavailable,
-    };
+    let priors = overlay
+        .map(|overlay| derive_prior_cells(config, &overlay))
+        .unwrap_or_default();
 
     CapabilityInputs {
         config: Some(CapabilityConfig {
-            override_rows,
             legacy_keys,
             priors,
         }),
@@ -201,34 +199,31 @@ pub(super) fn build_capability_inputs(
 }
 
 /// Derive the catalog/overlay capability prior cells: one per `[models.X]`
-/// entry whose resolved catalog row is `Present`, is NOT stale, AND carries
-/// capability data. A `Missing` / `Disabled` cell (absent or explicitly
-/// disabled), a stale cell (its `verified_at` older than the catalog
-/// staleness horizon, or unparseable), or a row with no capability keys all
-/// yield NO prior -- the conservative "unknown" baseline, never a fabricated
-/// or falsely-unsupported row. Staleness uses the live clock, matching this
-/// one-shot tool's fresh-process reads.
+/// entry whose resolved catalog row is `Present` AND carries capability
+/// data, retaining its `verified_at` stamp. A `Missing` / `Disabled` cell or
+/// a row with no capability keys yields NO prior -- the conservative
+/// "unknown" baseline, never a fabricated row. Staleness is NOT filtered
+/// here: the matrix panel flags a stale prior against the operator staleness
+/// hint (via [`is_stale_days`]), so a stale-but-present stamp is surfaced
+/// honestly rather than silently dropped.
 pub(super) fn derive_prior_cells(config: &Config, overlay: &CatalogOverlay) -> Vec<PriorCell> {
     derive_effective_view(config, overlay)
         .models
         .into_iter()
         .filter_map(|cell| {
             let EffectiveRow::Present {
-                row,
-                source,
-                verified_at,
+                row, verified_at, ..
             } = cell.row
             else {
                 return None;
             };
-            if is_stale_today(&verified_at) || row.capabilities.is_empty() {
+            if row.capabilities.is_empty() {
                 return None;
             }
             let capabilities = row.capabilities.into_iter().collect();
             Some(PriorCell {
                 nickname: cell.nickname,
-                selector: format!("{}/{}", cell.provider_kind, cell.upstream),
-                source,
+                verified_at,
                 capabilities,
             })
         })

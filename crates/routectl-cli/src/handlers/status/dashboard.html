@@ -925,7 +925,7 @@
     // co-versioning note in the document head: same-binary, so a mismatch
     // should never occur in practice; the check is a graceful-degrade
     // guard, not version negotiation.
-    var EXPECTED = { usage: 2, health: 4, config: 1, doctor: 3 };
+    var EXPECTED = { usage: 2, health: 4, config: 1, doctor: 4 };
     var PANELS = ['usage', 'health', 'config', 'doctor'];
     var WINDOWS = ['today', 'week', 'month', 'all'];
 
@@ -2501,29 +2501,6 @@
       return 3;
     }
 
-    // The detail cell for a finding. The "catalog priors" Pass row carries a
-    // "; "-joined list of model cells (each `nickname (selector) [source]:
-    // caps`, so the "]:" marker is present on a model line but not on the two
-    // prose variants -- "no priors present" / "unavailable"). A model list --
-    // even a single line -- renders one-per-line behind a default-collapsed
-    // expander (data floor: reachable, not dominant); every other finding
-    // renders its detail as plain wrapping text.
-    function findingDetailCell(f) {
-      if (f.name === 'catalog priors' && typeof f.detail === 'string' && f.detail.indexOf(']:') >= 0) {
-        var parts = f.detail.split('; ');
-        var list = document.createElement('div');
-        list.className = 'stacklist';
-        parts.forEach(function (p) {
-          var line = document.createElement('div');
-          line.textContent = p;
-          list.appendChild(line);
-        });
-        var noun = parts.length === 1 ? ' catalog prior' : ' catalog priors';
-        return buildExpander(parts.length + noun, list);
-      }
-      return f.detail;
-    }
-
     function buildDoctor(d) {
       var c = document.createElement('div');
       var report = d.report || {};
@@ -2550,7 +2527,7 @@
         ]);
         findings.forEach(function (f) {
           trow(ft, [f.section, f.name, tokLabeled('status', 'status', f.status),
-            findingDetailCell(f), f.remediation]);
+            f.detail, f.remediation]);
         });
         c.appendChild(ft.t);
       }

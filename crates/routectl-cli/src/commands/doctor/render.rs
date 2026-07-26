@@ -2,7 +2,7 @@
 
 use routectl_router::{DoctorReport, Finding, Status};
 
-use crate::commands::doctor_panels::render_would_trim_panel;
+use crate::commands::doctor_panels::{render_capability_matrix_panel, render_would_trim_panel};
 
 use super::SECTIONS;
 
@@ -15,6 +15,12 @@ pub(super) fn render_human(report: &DoctorReport) -> Vec<String> {
             .filter(|f| f.section == *key)
             .collect();
         render_section(key, &section_findings, &mut out);
+        out.push(String::new());
+    }
+    if let Some(panel) = &report.panels.capability_matrix {
+        for line in render_capability_matrix_panel(panel).lines() {
+            out.push(line.to_string());
+        }
         out.push(String::new());
     }
     if let Some(panel) = &report.panels.would_trim {
