@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -217,6 +217,46 @@ CREATE TABLE IF NOT EXISTS capability_learn_events (
     remapped         INTEGER NOT NULL,
     request_features TEXT    NOT NULL
 )";
+
+/// DDL for the `capability_events` table (v13).
+///
+/// One append-only row per capability admission event -- the forever
+/// contract the warm-rebuild replayer reads on boot. Distinct from the
+/// legacy `capability_learn_events` landing pad: this table is the
+/// unified ledger across learned negatives, verified/suspect observations,
+/// probe-settled clears, and reload/boot tombstones.
+///
+/// `ts` is epoch-millis. `lane_key` / `capability` are the NORMALIZED keys
+/// (a tombstone row carries them empty). `verdict` / `phase` / `source` /
+/// `tier` are open-set tokens the replayer parses tolerantly. `tier` is
+/// persisted so live-vs-rebuild equivalence can distinguish
+/// self-identifying from inferred negatives. `evidence_class` is nullable:
+/// it carries the pinned observation tokens and is NULL for rows that have
+/// none. `upstream_token` is nullable, forensic / display only -- never
+/// consulted by admission or replay (the negative ride-along carries the
+/// normalized capability, not the raw wire token). `catalog_version` /
+/// `overlay_revision` stamp the boundary revision a row was written under,
+/// so replay can filter defensively and a tombstone can mark the boundary.
+/// NEVER a body / message / prompt column (log hygiene).
+pub const CREATE_CAPABILITY_EVENTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS capability_events (
+    ts               INTEGER NOT NULL,
+    lane_key         TEXT,
+    capability       TEXT,
+    verdict          TEXT,
+    phase            TEXT,
+    source           TEXT,
+    tier             TEXT,
+    evidence_class   TEXT,
+    upstream_token   TEXT,
+    catalog_version  INTEGER,
+    overlay_revision INTEGER
+)";
+
+/// Index over `capability_events.ts` for time-range scans (the dominant
+/// query shape for the hygiene prune and the ts-ordered rebuild replay).
+pub const CREATE_CAPABILITY_EVENTS_TS_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_capability_events_ts ON capability_events (ts)";
 
 /// DDL for the `meta` key/value table. Holds the DB creation timestamp
 /// and a human-readable copy of the schema version. Survives migrations.

@@ -1,7 +1,10 @@
 use super::*;
 use crate::migrate::migrate_to_current;
 use crate::record::UsageRecord;
-use crate::schema::{META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION};
+use crate::schema::{
+    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS,
+    META_SCHEMA_VERSION, SCHEMA_VERSION,
+};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -52,7 +55,9 @@ fn fresh_open_sets_version_tables_index_and_wal() {
     assert!(table_exists(db.conn(), "requests"));
     assert!(table_exists(db.conn(), "meta"));
     assert!(table_exists(db.conn(), "capability_learn_events"));
+    assert!(table_exists(db.conn(), "capability_events"));
     assert!(index_exists(db.conn(), "idx_requests_ts_start"));
+    assert!(index_exists(db.conn(), "idx_capability_events_ts"));
     assert_eq!(journal_mode(db.conn()).to_lowercase(), "wal");
 }
 
@@ -1263,6 +1268,170 @@ fn open_readonly_on_unmigrated_v11_db_fails_closed() {
         matches!(result, Err(OpenError::VersionTooOld { found: 11, supported }) if supported == SCHEMA_VERSION),
         "un-migrated v11 DB must fail closed as VersionTooOld"
     );
+}
+
+/// An older v12-shaped DB (no `capability_events` table) migrates to v13:
+/// the table + its `ts` index are created, `user_version` becomes 13, any
+/// pre-existing `requests` row survives untouched, the legacy
+/// `capability_learn_events` landing pad and its row are left intact, and a
+/// second migrate pass is a no-op. Seeds the FULL v12 object set so the
+/// create-table migration path runs against a real v12 shape.
+#[test]
+fn old_v12_db_migrates_to_v13_creating_capability_events_table() {
+    // Arrange: a v12-shaped DB carrying the full object set -- requests (+ its
+    // ts index), the legacy capability_learn_events landing pad with a row,
+    // and meta -- but no capability_events.
+    let (_dir, path) = temp_db_path();
+    let conn = Connection::open(&path).expect("raw open");
+    conn.execute_batch(&format!(
+        "CREATE TABLE requests (
+            ts_start INTEGER NOT NULL,
+            ts_end INTEGER NOT NULL,
+            request_id TEXT NOT NULL UNIQUE,
+            ingress_dialect TEXT NOT NULL,
+            requested_model TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            stream INTEGER NOT NULL,
+            outcome TEXT NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            tool_count INTEGER NOT NULL,
+            msg_count INTEGER NOT NULL,
+            attempt_count INTEGER NOT NULL,
+            fallback_count INTEGER NOT NULL,
+            resolved_class TEXT
+        );
+        {create_ts_index};
+        {create_learn_events};
+        CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+        INSERT INTO meta (key, value) VALUES ('schema_version', '12');
+        INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+            requested_model, alias, stream, outcome, latency_ms, tool_count, \
+            msg_count, attempt_count, fallback_count) \
+            VALUES (1, 2, 'v12-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0);
+        INSERT INTO capability_learn_events (ts, state_key, capability_key, \
+            provider_kind, signal_tier, observations, upstream_status, \
+            remapped, request_features) \
+            VALUES (3, 'nn', 'web_search', 'openai-compat', 'inferred', 2, 400, 0, '[\"web_search\"]');
+        PRAGMA user_version = 12;",
+        create_ts_index = CREATE_TS_START_INDEX,
+        create_learn_events = CREATE_CAPABILITY_LEARN_EVENTS_TABLE,
+    ))
+    .expect("build v12 db");
+    assert_eq!(user_version(&conn), 12);
+    assert!(!table_exists(&conn, "capability_events"));
+    assert!(table_exists(&conn, "capability_learn_events"));
+
+    // Act
+    let version = migrate_to_current(&conn, 0).expect("migrate v12->v13");
+
+    // Assert: landed at v13, the new table + index exist, the old request
+    // row survived, and meta tracks the new version.
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(user_version(&conn), SCHEMA_VERSION);
+    assert!(table_exists(&conn, "capability_events"));
+    assert!(index_exists(&conn, "idx_capability_events_ts"));
+    let survivor: String = conn
+        .query_row("SELECT request_id FROM requests", [], |r| r.get(0))
+        .expect("request row survives");
+    assert_eq!(survivor, "v12-row");
+    // The legacy landing pad and its row are left untouched by the v13 step.
+    assert!(table_exists(&conn, "capability_learn_events"));
+    let legacy_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM capability_learn_events", [], |r| {
+            r.get(0)
+        })
+        .expect("legacy row count");
+    assert_eq!(legacy_rows, 1);
+    let meta_version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("meta schema_version");
+    assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+
+    // Idempotent: re-running the ladder is a no-op.
+    let again = migrate_to_current(&conn, 0).expect("re-run migrate");
+    assert_eq!(again, SCHEMA_VERSION);
+    assert!(table_exists(&conn, "capability_events"));
+}
+
+/// Pins the exact `capability_events` column set on a fresh DB. A full-bind
+/// INSERT naming every column fails to compile-at-SQL-level if a column is
+/// added, removed, or renamed, and `pragma_table_info` pins the order,
+/// names, and null-ability (only `ts` is NOT NULL). This is the
+/// forever-contract guard the warm-rebuild replayer relies on.
+#[test]
+fn capability_events_column_set_is_pinned() {
+    // Arrange
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+
+    // Act: a full-bind INSERT naming every column in order. A drifted
+    // column set makes this statement fail to prepare.
+    let inserted = db
+        .conn()
+        .execute(
+            "INSERT INTO capability_events (ts, lane_key, capability, verdict, \
+             phase, source, tier, evidence_class, upstream_token, \
+             catalog_version, overlay_revision) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                1_i64,
+                "lane",
+                "web_search",
+                "broken",
+                "f1",
+                "live",
+                "inferred",
+                Option::<String>::None,
+                Option::<String>::None,
+                7_i64,
+                3_i64,
+            ],
+        )
+        .expect("full-bind insert pins the column set");
+    assert_eq!(inserted, 1);
+
+    // Assert: pragma_table_info pins the exact order, names, and
+    // null-ability. Only `ts` is NOT NULL.
+    let expected: &[(&str, bool)] = &[
+        ("ts", true),
+        ("lane_key", false),
+        ("capability", false),
+        ("verdict", false),
+        ("phase", false),
+        ("source", false),
+        ("tier", false),
+        ("evidence_class", false),
+        ("upstream_token", false),
+        ("catalog_version", false),
+        ("overlay_revision", false),
+    ];
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT name, \"notnull\" FROM pragma_table_info('capability_events')")
+        .expect("prepare table_info");
+    let rows: Vec<(String, i64)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        expected.len(),
+        "capability_events column count drifted"
+    );
+    for ((actual_name, actual_notnull), (exp_name, exp_notnull)) in rows.iter().zip(expected.iter())
+    {
+        assert_eq!(actual_name, exp_name, "column name/order mismatch");
+        assert_eq!(
+            *actual_notnull == 1,
+            *exp_notnull,
+            "null-ability mismatch for column {actual_name}"
+        );
+    }
 }
 
 #[test]
