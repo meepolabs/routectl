@@ -671,6 +671,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         Cmd::Doctor { json } => {
             let path = resolve_config_path(cli.config.as_deref());
+            if let Ok(loaded) = load_config_with_overlay(cli.config.as_deref()) {
+                emit_staleness_hint_for(&loaded, json);
+            }
             std::process::exit(commands::doctor::run(&path, json).await);
         }
         Cmd::Probe {
@@ -712,15 +715,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ConfigCmd::Show { effective } => {
+                let loaded = load_config_with_overlay(cli.config.as_deref())?;
+                emit_staleness_hint_for(&loaded, false);
                 let result = if effective {
-                    let loaded = load_config_with_overlay(cli.config.as_deref())?;
                     commands::config_effective::show_effective(
                         &loaded.config,
                         &loaded.catalog_overlay,
                     )
                 } else {
-                    let config = load_config(cli.config.as_deref())?;
-                    commands::config::show(&config)
+                    commands::config::show(&loaded.config)
                 };
                 if let Err(e) = result {
                     eprintln!("error: {e}");
@@ -919,6 +922,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Catalog { action } => match action {
             CatalogCmd::List => {
                 let loaded = load_config_with_overlay(cli.config.as_deref())?;
+                emit_staleness_hint_for(&loaded, false);
                 if let Err(e) = commands::catalog::list(&loaded.catalog_overlay) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -1026,6 +1030,37 @@ fn load_config_with_overlay(
 ) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
     let path = resolve_config_path(explicit);
     Ok(server::load_effective_config(&path)?)
+}
+
+/// Emit the catalog-overlay staleness hint for a loaded config, reading the
+/// real emission gates (stderr terminal-ness, `CI`, the
+/// `ROUTECTL_NO_STALENESS_HINT` kill switch) and the freshest overlay stamp.
+/// The pure gate logic lives in [`commands::staleness_hint`]; this seam only
+/// binds it to the live environment. `is_json` is the calling verb's JSON
+/// posture -- the hint never rides a machine-readable stream.
+fn emit_staleness_hint_for(loaded: &server::LoadedConfig, is_json: bool) {
+    use std::io::IsTerminal as _;
+
+    let Some(verified_at) = commands::staleness_hint::freshest_verified_at(&loaded.catalog_overlay)
+    else {
+        return;
+    };
+    let threshold_days =
+        i64::try_from(loaded.config.capability.staleness_hint_days).unwrap_or(i64::MAX);
+    let is_tty = std::io::stderr().is_terminal();
+    let is_ci = std::env::var_os("CI").is_some();
+    let kill_switch = std::env::var_os("ROUTECTL_NO_STALENESS_HINT").is_some();
+    let mut err = std::io::stderr().lock();
+    commands::staleness_hint::emit_staleness_hint(
+        &mut err,
+        &verified_at,
+        threshold_days,
+        routectl_router::today_epoch_day(),
+        is_tty,
+        is_ci,
+        kill_switch,
+        is_json,
+    );
 }
 
 /// Cold-start config load that PARSES and migrates but SKIPS the fail-fast
