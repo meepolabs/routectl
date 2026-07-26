@@ -30,6 +30,7 @@ use crate::context_trim::{
 use crate::cost_gate::break_even_k;
 
 use super::cache_plan::{AutoCacheRequestPlan, CacheInjection};
+use super::capability_learn::LearnDedupeKey;
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
@@ -121,7 +122,7 @@ impl Router {
         // (state_key, feature): the error arm fires per attempt, so this
         // set stops a same-request retry from manufacturing a second
         // observation. See `observe_for_learning`.
-        let mut learn_dedupe: HashSet<(String, String)> = HashSet::new();
+        let mut learn_dedupe: HashSet<LearnDedupeKey> = HashSet::new();
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -741,7 +742,7 @@ impl Router {
         // (state_key, feature): the error arm fires per attempt, so this
         // set stops a same-request retry from manufacturing a second
         // observation. See `observe_for_learning`.
-        let mut learn_dedupe: HashSet<(String, String)> = HashSet::new();
+        let mut learn_dedupe: HashSet<LearnDedupeKey> = HashSet::new();
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();

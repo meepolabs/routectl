@@ -53,6 +53,13 @@ use crate::feature_keys::strip_date_suffix;
 /// capability, so the resolver reads `/error/param` instead.
 const OPENAI_COMPAT_KIND: &str = "openai-compat";
 
+/// The native AWS Bedrock provider `kind` string. On a generic `BadRequest`
+/// this family reports the rejected field in a FLAT `{"__type","message"}`
+/// envelope, not the nested `/error/message` shape the inferred arm reads --
+/// so it gets its own top-level reader and an anchored-template extraction
+/// path rather than the whole-phrase table.
+const BEDROCK_KIND: &str = "bedrock";
+
 /// Closed-set translation of an openai-compat `error.param` WIRE param name
 /// onto the canonical request-capability key the request side derives and
 /// the act side looks up. openai names the offending field by its wire key
@@ -131,6 +138,7 @@ pub fn resolve_requested_capability(
         FailureClass::FeatureUnsupported { capability } => {
             resolve_self_identifying(provider_kind, err, capability)
         }
+        FailureClass::BadRequest if provider_kind == BEDROCK_KIND => match_bedrock_validation(err),
         FailureClass::BadRequest => match_inferred(provider_kind, err),
         _ => None,
     }
@@ -263,10 +271,132 @@ pub fn upstream_param(err: &Error) -> Option<String> {
     upstream_error_field(err, "param").filter(|param| is_safe_param_token(param))
 }
 
+/// The `__type` discriminant an AWS Bedrock request-validation 400 carries,
+/// namespace-stripped as the lift lands it on
+/// [`Error::Upstream::upstream_type`]. Used only for drift observability at
+/// the learn site (a rejection whose lifted type is this yet matched no
+/// template is visible wording drift), never to attribute a capability.
+const BEDROCK_VALIDATION_EXCEPTION_TYPE: &str = "ValidationException";
+
+/// Anchored-template extractions for a Bedrock `ValidationException`
+/// message. Each entry is a `(prefix, suffix)` literal template with
+/// exactly ONE extracted token between the anchors; the whole (trimmed)
+/// message must equal `prefix + token + suffix`, so wording drift, an extra
+/// sentence, or a missing anchor all fail closed. The extracted token must
+/// pass [`is_safe_param_token`], normalize via [`normalize_capability_key`],
+/// and hit [`BEDROCK_TOKEN_TRANSLATIONS`].
+///
+/// Ships EMPTY (precision over recall): until a real captured envelope pins
+/// the exact wording, every Bedrock `BadRequest` yields `None`. Provisional
+/// shapes live in test data only.
+const BEDROCK_VALIDATION_TEMPLATES: &[(&str, &str)] = &[];
+
+/// Closed-set translation of a normalized Bedrock validation token onto the
+/// canonical request-capability key the request side derives and the act
+/// side looks up (the [`OPENAI_PARAM_TRANSLATIONS`] pattern). A token
+/// outside this set yields `None` (no-learn), keeping the set closed.
+///
+/// Ships EMPTY alongside the template table.
+const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[];
+
+/// The Bedrock `BadRequest` arm: read the flat validation message, then run
+/// the anchored-template extraction pipeline. With the shipped-empty tables
+/// this always yields `None`.
+fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier)> {
+    let message = bedrock_validation_message(err)?;
+    extract_bedrock_capability(
+        &message,
+        BEDROCK_VALIDATION_TEMPLATES,
+        BEDROCK_TOKEN_TRANSLATIONS,
+    )
+}
+
+/// Run the anchored-template pipeline over a trimmed validation `message`:
+/// the first template whose anchors bracket the message extracts its single
+/// token; the token must be token-shaped ASCII ([`is_safe_param_token`]) or
+/// the match fails closed; the normalized token must resolve through the
+/// closed `translations` set to a canonical capability. Split from the table
+/// consts so tests can drive the engine with provisional shapes without
+/// touching the shipped-empty production tables.
+fn extract_bedrock_capability(
+    message: &str,
+    templates: &[(&str, &str)],
+    translations: &[(&str, &str)],
+) -> Option<(FeatureKey, SignalTier)> {
+    let needle = message.trim();
+    let token = templates
+        .iter()
+        .find_map(|&(prefix, suffix)| extract_anchored_token(needle, prefix, suffix))?;
+    if !is_safe_param_token(token) {
+        return None;
+    }
+    let normalized = normalize_capability_key(token, BEDROCK_KIND);
+    let capability = translations
+        .iter()
+        .find_map(|&(surface, canonical)| (normalized == surface).then_some(canonical))?;
+    Some((capability.to_string(), SignalTier::SelfIdentifying))
+}
+
+/// Extract the single token an anchored template brackets: the whole message
+/// must start with `prefix` and end with `suffix`, and the token is exactly
+/// what remains between them. A message that does not carry both anchors
+/// yields `None` (no fuzzy `contains`).
+fn extract_anchored_token<'a>(message: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    message.strip_prefix(prefix)?.strip_suffix(suffix)
+}
+
+/// Read a top-level string field from a FLAT AWS error envelope
+/// (`{"__type","message"}`) on an [`Error::Upstream`] body, bounded by the
+/// module's [`MAX_ERROR_BODY_BYTES`] cap. Distinct from
+/// [`upstream_error_field`], which reads the NESTED `/error/<field>` shape
+/// and returns `None` on this flat body. Any non-upstream variant, an
+/// over-cap body, a non-JSON body, a missing field, or a non-string value
+/// yields `None`.
+fn bedrock_flat_field(err: &Error, field: &str) -> Option<String> {
+    let Error::Upstream { body, .. } = err else {
+        return None;
+    };
+    if body.len() > MAX_ERROR_BODY_BYTES {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value.get(field)?.as_str().map(str::to_string)
+}
+
+/// The flat Bedrock validation `message`, or `None` when the body is not a
+/// flat envelope (e.g. the nested `/error/message` shape).
+fn bedrock_validation_message(err: &Error) -> Option<String> {
+    bedrock_flat_field(err, "message")
+}
+
+/// True when `err` carries a Bedrock `ValidationException`, read from the
+/// lifted, namespace-stripped [`Error::Upstream::upstream_type`] rather than
+/// re-parsed from the raw body. The native lane emits the namespaced wire
+/// form (`com.amazon.coral.validate#ValidationException`) in the body but
+/// lifts the bare `ValidationException` onto `upstream_type`; matching the
+/// lifted token is what makes this predicate fire on real production input
+/// (a raw-body match on the bare name is dead against the namespaced shape).
+/// The learn site uses it to bump a drift counter when the matcher
+/// attributed no capability yet the rejection WAS a validation fault -- so
+/// wording drift is visible instead of silently reintroducing repeat 400s.
+pub fn is_bedrock_validation_exception(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Upstream {
+            upstream_type: Some(t),
+            ..
+        } if t == BEDROCK_VALIDATION_EXCEPTION_TYPE
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::resolve_requested_capability;
     use super::upstream_param;
+    use super::{
+        BEDROCK_VALIDATION_EXCEPTION_TYPE, MAX_ERROR_BODY_BYTES, MAX_PARAM_TOKEN_LEN,
+        bedrock_validation_message, extract_bedrock_capability, is_bedrock_validation_exception,
+    };
     use routectl_core::capability::SignalTier;
     use routectl_core::error::Error;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify};
@@ -720,6 +850,220 @@ mod tests {
                 upstream_param(&err),
                 None,
                 "param {param:?} must be dropped"
+            );
+        }
+    }
+
+    // --- Bedrock validation arm: flat reader + anchored-template engine ---
+
+    /// Provisional synthetic shapes for the anchored-template engine. The
+    /// PRODUCTION tables ship empty; these drive the engine in isolation and
+    /// are replaced by sanitized captured envelopes once real capture lands.
+    const BEDROCK_PROVISIONAL_FIXTURE: &str =
+        include_str!("../tests/fixtures/bedrock_validation_provisional.json");
+
+    fn provisional_fixture() -> serde_json::Value {
+        serde_json::from_str(BEDROCK_PROVISIONAL_FIXTURE).expect("valid provisional fixture json")
+    }
+
+    fn provisional_pairs<'a>(
+        fixture: &'a serde_json::Value,
+        array: &str,
+        a: &str,
+        b: &str,
+    ) -> Vec<(&'a str, &'a str)> {
+        fixture[array]
+            .as_array()
+            .expect("fixture array")
+            .iter()
+            .map(|row| {
+                (
+                    row[a].as_str().expect("fixture field a"),
+                    row[b].as_str().expect("fixture field b"),
+                )
+            })
+            .collect()
+    }
+
+    /// A flat AWS Bedrock `ValidationException` envelope carrying `message`.
+    fn flat_validation_body(message: &str) -> String {
+        serde_json::json!({ "__type": "ValidationException", "message": message }).to_string()
+    }
+
+    #[test]
+    fn bedrock_provisional_template_matches_and_translates() {
+        // The engine, driven with a provisional template + translation,
+        // extracts the single anchored token, normalizes it, and maps it
+        // through the closed set to a canonical capability at
+        // SelfIdentifying tier.
+        let fx = provisional_fixture();
+        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let message = fx["matched"]["message"].as_str().expect("matched message");
+        let expected = fx["matched"]["capability"]
+            .as_str()
+            .expect("matched capability");
+
+        let got = extract_bedrock_capability(message, &templates, &translations);
+
+        assert_eq!(
+            got,
+            Some((expected.to_string(), SignalTier::SelfIdentifying))
+        );
+    }
+
+    #[test]
+    fn bedrock_engine_fails_closed_on_drift_and_untranslated_tokens() {
+        // Wording drift, an extra sentence, a missing anchor, an
+        // untranslated (closed-set-miss) token, and a whitespace-bearing
+        // (unsafe) token all yield None -- no fuzzy match, no verdict.
+        let fx = provisional_fixture();
+        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        for key in [
+            "wording_drift",
+            "extra_sentence",
+            "missing_seam",
+            "untranslated_token",
+            "whitespace_token",
+        ] {
+            let message = fx["fail_closed_messages"][key]
+                .as_str()
+                .expect("fail-closed message");
+            assert_eq!(
+                extract_bedrock_capability(message, &templates, &translations),
+                None,
+                "case {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn bedrock_engine_fails_closed_on_oversized_token() {
+        // A structurally-anchored match whose extracted token exceeds the
+        // token-shape length cap fails closed rather than surfacing a blob.
+        let fx = provisional_fixture();
+        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let (prefix, suffix) = templates[0];
+        let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_PARAM_TOKEN_LEN + 1));
+
+        assert_eq!(
+            extract_bedrock_capability(&oversized, &templates, &translations),
+            None
+        );
+    }
+
+    #[test]
+    fn bedrock_empty_production_tables_yield_none() {
+        // The shipped-empty template + translation tables mean every bedrock
+        // BadRequest -- even a well-formed flat ValidationException whose
+        // wording a provisional template would match -- yields None.
+        let body =
+            flat_validation_body("The parameter response_schema is not supported for this model.");
+        let got = resolve_requested_capability(
+            "bedrock",
+            &upstream(400, &body, None, None),
+            &cf(FailureClass::BadRequest),
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn bedrock_flat_reader_reads_message_and_predicate_uses_lifted_type() {
+        // The flat reader pulls `message` from the body; the
+        // validation-exception predicate reads the lifted, namespace-stripped
+        // `upstream_type` (what the native lane lands from the namespaced wire
+        // form), not the raw body.
+        let body = flat_validation_body("some rejection");
+        let err = upstream(400, &body, Some(BEDROCK_VALIDATION_EXCEPTION_TYPE), None);
+        assert_eq!(
+            bedrock_validation_message(&err).as_deref(),
+            Some("some rejection")
+        );
+        assert!(is_bedrock_validation_exception(&err));
+    }
+
+    #[test]
+    fn bedrock_validation_predicate_matches_lifted_token_not_raw_body() {
+        // The namespaced wire form in the body is NOT matched by the
+        // predicate: only the lifted, stripped `upstream_type` fires it. This
+        // is the drift fix -- a raw-body match on the bare name was dead on
+        // real namespaced production input.
+        let namespaced =
+            r#"{"__type":"com.amazon.coral.validate#ValidationException","message":"x"}"#;
+        assert!(
+            !is_bedrock_validation_exception(&upstream(400, namespaced, None, None)),
+            "no lifted type -> predicate stays false even though the body names it"
+        );
+        assert!(
+            is_bedrock_validation_exception(&upstream(
+                400,
+                namespaced,
+                Some("ValidationException"),
+                None
+            )),
+            "the native-lane lift of the stripped token fires the predicate"
+        );
+    }
+
+    #[test]
+    fn bedrock_flat_reader_returns_none_on_nested_envelope() {
+        // The nested `/error/message` shape (anthropic/openai) is NOT the
+        // flat AWS envelope: the top-level reader finds no `message` /
+        // `__type`, and the full resolver's bedrock arm yields None.
+        let body = r#"{"error":{"type":"invalid_request_error","message":"nested"}}"#;
+        let err = upstream(400, body, None, None);
+        assert_eq!(bedrock_validation_message(&err), None);
+        assert!(!is_bedrock_validation_exception(&err));
+        assert_eq!(
+            resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+            None
+        );
+    }
+
+    #[test]
+    fn bedrock_over_cap_body_is_not_parsed() {
+        // A flat envelope over the parse ceiling is never JSON-parsed by the
+        // message reader.
+        let padding = "x".repeat(MAX_ERROR_BODY_BYTES + 1);
+        let body = flat_validation_body(&padding);
+        assert!(
+            body.len() > MAX_ERROR_BODY_BYTES,
+            "sanity: body exceeds cap"
+        );
+        let err = upstream(400, &body, None, None);
+        assert_eq!(bedrock_validation_message(&err), None);
+    }
+
+    #[test]
+    fn bedrock_non_upstream_error_yields_none() {
+        // Only Error::Upstream carries a body to parse.
+        let err = Error::Streaming("connection reset".into());
+        assert_eq!(bedrock_validation_message(&err), None);
+        assert!(!is_bedrock_validation_exception(&err));
+        assert_eq!(
+            resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+            None
+        );
+    }
+
+    #[test]
+    fn flat_validation_on_non_bedrock_kind_yields_none() {
+        // The flat-envelope + anchored-template path is bedrock-only; a flat
+        // ValidationException on another kind takes that kind's arm (the
+        // inferred whole-phrase table, which has no such phrase) -> None.
+        let body =
+            flat_validation_body("The parameter response_schema is not supported for this model.");
+        for kind in ["openai-compat", "anthropic-api", "gemini"] {
+            assert_eq!(
+                resolve_requested_capability(
+                    kind,
+                    &upstream(400, &body, None, None),
+                    &cf(FailureClass::BadRequest),
+                ),
+                None,
+                "kind {kind}"
             );
         }
     }

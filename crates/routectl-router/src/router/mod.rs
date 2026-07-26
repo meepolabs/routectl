@@ -248,6 +248,13 @@ struct RouterMetrics {
     /// but upstream still rejected it. Bumped once per request per
     /// `(state_key, feature)` by the learn path when it suppresses the learn.
     mask_suppressed_total: AtomicU64,
+    /// Flat Bedrock `ValidationException` 400s the capability matcher could
+    /// not attribute to any anchored-template capability. A rising count
+    /// means the AWS validation wording drifted (or a new rejection shape
+    /// appeared) and the template table needs a captured-envelope refresh --
+    /// visible drift instead of silently reintroduced repeat 400s. Bumped
+    /// once per request per target by the learn path.
+    bedrock_validation_unmatched_total: AtomicU64,
 }
 
 impl RouterMetrics {
@@ -296,6 +303,11 @@ impl RouterMetrics {
 
     fn incr_mask_suppressed(&self) {
         self.mask_suppressed_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn incr_bedrock_validation_unmatched(&self) {
+        self.bedrock_validation_unmatched_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read the cumulative unknown-upstream-classification count.
@@ -367,6 +379,14 @@ impl RouterMetrics {
     #[cfg(test)]
     fn mask_suppressed_total(&self) -> u64 {
         self.mask_suppressed_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative unmatched-Bedrock-validation count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(all(test, feature = "bedrock"))]
+    fn bedrock_validation_unmatched_total(&self) -> u64 {
+        self.bedrock_validation_unmatched_total
+            .load(Ordering::Relaxed)
     }
 }
 

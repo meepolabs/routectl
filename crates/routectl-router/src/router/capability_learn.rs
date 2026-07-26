@@ -10,6 +10,32 @@ use routectl_core::{ChatRequest, Error};
 use super::{DispatchMeta, DispatchTarget, LearnedProbeGuard, Router};
 use crate::capability_matcher::resolve_requested_capability;
 
+/// The native AWS Bedrock provider `kind` string; the only kind whose flat
+/// `ValidationException` envelope the drift observer inspects.
+const BEDROCK_PROVIDER_KIND: &str = "bedrock";
+
+/// Per-request dedupe key for the learn path. The capability arm dedupes on
+/// `(state_key, feature_key)`; the Bedrock-validation drift signal dedupes on
+/// `state_key` alone. Distinct enum variants keep the two namespaces disjoint
+/// by TYPE rather than by a whitespace-bearing sentinel string, so a drift
+/// key can never collide with a token-shaped capability key regardless of
+/// what an upstream names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) enum LearnDedupeKey {
+    /// One capability observation per `(target, capability)` per request.
+    Capability {
+        /// Breaker state key of the rejecting target.
+        state_key: String,
+        /// Normalized capability key the rejection named.
+        feature_key: String,
+    },
+    /// One Bedrock validation-drift signal per target per request.
+    BedrockDrift {
+        /// Breaker state key of the rejecting target.
+        state_key: String,
+    },
+}
+
 /// A single learned-capability observation captured on a dispatch error
 /// arm, riding out on [`DispatchMeta`] to the usage-capture layer. The
 /// router does not depend on the ledger writer, so learn events travel
@@ -136,7 +162,7 @@ impl Router {
     /// actually carried -- a misbehaving upstream naming an off-request
     /// param never plants a routing entry.
     ///
-    /// `dedupe` carries one entry per `(state_key, feature_key)` for the
+    /// `dedupe` carries one [`LearnDedupeKey`] per deduped signal for the
     /// life of a single request: the error arm fires per attempt, so a
     /// same-request retry (or a per-target re-entry) must never manufacture
     /// a second observation and falsely confirm an inferred signal.
@@ -149,7 +175,7 @@ impl Router {
         target: &DispatchTarget,
         is_forwarded: bool,
         req: &ChatRequest,
-        dedupe: &mut HashSet<(String, String)>,
+        dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
         probe_guard: &mut LearnedProbeGuard,
     ) {
@@ -172,6 +198,7 @@ impl Router {
             return;
         };
         let Some((feature_key, tier)) = resolve_requested_capability(provider_kind, err, cf) else {
+            self.observe_bedrock_validation_drift(provider_kind, err, target, dedupe);
             return;
         };
         if feature_key == crate::class_policy::OPERATOR_REMAP_CAPABILITY {
@@ -209,7 +236,10 @@ impl Router {
         // per request (deduped) with a dedicated counter. Capability TOKEN and
         // state_key only -- never a request body.
         if self.override_forces_supported(target, &feature_key, provider_kind) {
-            if dedupe.insert((state_key.clone(), feature_key.clone())) {
+            if dedupe.insert(LearnDedupeKey::Capability {
+                state_key: state_key.clone(),
+                feature_key: feature_key.clone(),
+            }) {
                 self.metrics.incr_mask_suppressed();
                 tracing::warn!(
                     event = "suppression",
@@ -227,12 +257,18 @@ impl Router {
         // this arm again does not re-observe the entry the probe refreshed.
         if probe_guard.settle_same_capability(&state_key, &feature_key, provider_kind) {
             self.metrics.incr_probe_failures();
-            dedupe.insert((state_key, feature_key));
+            dedupe.insert(LearnDedupeKey::Capability {
+                state_key,
+                feature_key,
+            });
             return;
         }
         // One observation per request per (state_key, feature): a retry or
         // per-target re-entry that hits this arm again is dropped here.
-        if !dedupe.insert((state_key.clone(), feature_key.clone())) {
+        if !dedupe.insert(LearnDedupeKey::Capability {
+            state_key: state_key.clone(),
+            feature_key: feature_key.clone(),
+        }) {
             return;
         }
 
@@ -299,6 +335,41 @@ impl Router {
                 request_features,
             });
         }
+    }
+
+    /// Drift observability for the Bedrock validation matcher. When the
+    /// shared resolver attributed no capability yet the rejection IS a flat
+    /// Bedrock `ValidationException`, the anchored-template table missed a
+    /// real 400: emit a structured WARN and bump a dedicated counter so
+    /// wording drift is visible instead of silently reintroducing repeat
+    /// rejections. Deduped to once per request per target; only a
+    /// capability-token-free signal (state_key + provider_kind) reaches the
+    /// log -- never a request body or the upstream message text.
+    fn observe_bedrock_validation_drift(
+        &self,
+        provider_kind: &str,
+        err: &Error,
+        target: &DispatchTarget,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+    ) {
+        if provider_kind != BEDROCK_PROVIDER_KIND {
+            return;
+        }
+        if !crate::capability_matcher::is_bedrock_validation_exception(err) {
+            return;
+        }
+        if !dedupe.insert(LearnDedupeKey::BedrockDrift {
+            state_key: target.state_key.clone(),
+        }) {
+            return;
+        }
+        self.metrics.incr_bedrock_validation_unmatched();
+        tracing::warn!(
+            event = "bedrock_validation_unmatched",
+            state_key = %target.state_key,
+            provider_kind,
+            "bedrock validation rejection matched no capability template",
+        );
     }
 }
 
