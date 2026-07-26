@@ -309,7 +309,7 @@
     },
     "CapabilityConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window), and each per-field `#[serde(default)]`\nkeeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets.\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.\n\n`overrides` is the operator capability-override map. It nests under\nthis existing `[capability]` parent as `[capability.overrides]` -- no\nnew top-level Config section is introduced, so the config-classify\ncoverage in routectl-cli stays exhaustive.",
+      "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window, 14d staleness hint), and each per-field\n`#[serde(default)]` keeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets. `staleness_hint_days` sets the\nage past which a verified capability reads as stale in diagnostics\n(display-only; not wired into the act path).\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.\n\n`overrides` is the operator capability-override map. It nests under\nthis existing `[capability]` parent as `[capability.overrides]` -- no\nnew top-level Config section is introduced, so the config-classify\ncoverage in routectl-cli stays exhaustive.",
       "properties": {
         "decay_hours": {
           "default": 48,
@@ -337,6 +337,13 @@
           "default": {},
           "description": "Operator capability overrides, keyed by two-tier target spec:\n`\"provider_name\"` applies to every model on that provider, and\n`\"provider_name:nickname\"` targets a single model. An omitted\n`[capability.overrides]` table yields an empty map. The\ncapability-value namespace is open -- values are not validated\nagainst any known-capability list here.",
           "type": "object"
+        },
+        "staleness_hint_days": {
+          "default": 14,
+          "description": "Days past which a verified capability stamp reads as stale in\ndiagnostics. Display-only -- surfaced in doctor / CLI hints, never\nwired into router construction or the act path. Default 14.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -1953,7 +1960,8 @@
         "decay_hours": 48,
         "enabled": true,
         "inferred_window_hours": 1,
-        "overrides": {}
+        "overrides": {},
+        "staleness_hint_days": 14
       },
       "description": "Operator-facing `[capability]` block. Kill switch plus tempo knobs\nfor the learned-capability subsystem. A missing block keeps all\ndefaults: enabled, a 48h decay window, a 1h inferred-signal window.\nThe table is deliberately top-level (not nested under `[server]`)\nso a later override layer can nest per-target overrides under the\nsame parent."
     },

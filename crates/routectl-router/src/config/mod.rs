@@ -269,4 +269,5 @@ initial_backoff_ms = 250
 enabled               = true
 decay_hours           = 48
 inferred_window_hours = 1
+staleness_hint_days   = 14
 "#;
