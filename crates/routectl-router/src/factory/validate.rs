@@ -999,7 +999,7 @@ pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
 }
 
 /// Reject a present-but-empty required credential ref inside a
-/// [`BedrockCredsConfig`]. The config-check secret-ref parse walk skips
+/// [`crate::config::BedrockCredsConfig`]. The config-check secret-ref parse walk skips
 /// empty ref slots (an empty string is not a parseable secret URI), so
 /// without this check an operator typo like `key_ref = ""` on a required
 /// slot would pass config validation and only surface as a confusing
@@ -1059,7 +1059,7 @@ fn validate_bedrock_creds(name: &str, creds: &crate::config::BedrockCredsConfig)
 }
 
 /// Reject a present-but-empty required Bedrock credential ref wherever a
-/// [`BedrockCredsConfig`] appears: the native Bedrock lane (`creds`) and
+/// [`crate::config::BedrockCredsConfig`] appears: the native Bedrock lane (`creds`) and
 /// all three `bedrock_mantle` lanes (`bedrock_mantle.creds` on
 /// `anthropic-api` / `openai-compat` / `openai-responses`). One shared
 /// per-descriptor check, so the four lanes cannot drift. Runs on every
