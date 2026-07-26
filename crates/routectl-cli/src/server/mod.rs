@@ -14,6 +14,7 @@ use routectl_router::{ActivationState, Router};
 use routectl_usage::UsageHandle;
 
 pub mod auth;
+pub mod capability_rebuild;
 mod config_load;
 pub mod file_watch;
 pub mod k_rebuild;
