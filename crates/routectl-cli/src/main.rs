@@ -34,6 +34,19 @@ fn provider_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(routectl_auth::oauth::known_provider_ids())
 }
 
+/// Build a clap value-parser that accepts exactly the four v1 capability
+/// keys the probe can exercise. Driven by `ProbeCapability::ALL` so the
+/// accepted `--only` tokens stay in lockstep with the probe's capability
+/// set: an unknown token is rejected by clap with the valid set listed in
+/// the error.
+fn capability_value_parser() -> PossibleValuesParser {
+    PossibleValuesParser::new(
+        commands::probe::capabilities::ProbeCapability::ALL
+            .iter()
+            .map(|cap| cap.capability_key()),
+    )
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "routectl",
@@ -122,6 +135,41 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Actively probe a scoped model's true capabilities by dispatching a
+    /// small, bounded set of canary calls straight at the provider (never
+    /// through the router or a serving handler) and settling the learned-
+    /// capability ledger from the structural evidence. Prints a cost estimate
+    /// and asks for confirmation before any call unless `--yes` is given; the
+    /// estimate prints either way. Scope the probe to exactly one target with
+    /// `--alias` (a model nickname) or `--provider` (a configured provider).
+    #[command(group(
+        clap::ArgGroup::new("probe_target")
+            .args(["alias", "provider"])
+            .required(true),
+    ))]
+    Probe {
+        /// Run the capability probe. Currently the only probe mode.
+        #[arg(long, required = true)]
+        capabilities: bool,
+        /// Target a `[models.X]` nickname (resolves both the provider and the
+        /// upstream model id the canaries hit).
+        #[arg(long)]
+        alias: Option<String>,
+        /// Target a `[providers.X]` key (model id resolved from the single
+        /// selectable model referencing it).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Restrict the probe to a comma-separated subset of the four
+        /// capabilities; omit to probe all of them.
+        #[arg(long, value_delimiter = ',', value_parser = capability_value_parser())]
+        only: Vec<String>,
+        /// Skip the confirmation prompt. The cost estimate still prints.
+        #[arg(long)]
+        yes: bool,
+        /// Emit the report as JSON (schema UNSTABLE) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot completion against an alias key or model nickname.
     Test {
         /// Alias key (`[aliases]` entry) or model nickname (`[models.X]` table key).
@@ -162,6 +210,13 @@ enum Cmd {
         /// its alias, captured with no secret prompt.
         #[arg(long)]
         forwarded: bool,
+        /// After each provider is configured, run a capability probe against
+        /// it without prompting. Conflicts with `--no-probe`.
+        #[arg(long, conflicts_with = "no_probe")]
+        probe: bool,
+        /// Suppress the post-configuration capability-probe offer entirely.
+        #[arg(long = "no-probe")]
+        no_probe: bool,
     },
     /// Add or overwrite a provider entry in `config.toml`, routed through
     /// the same atomic, re-validated write path as `config set`. The secret
@@ -384,6 +439,14 @@ enum ProviderCmd {
         /// Skip the high-consequence confirmation prompt.
         #[arg(long)]
         yes: bool,
+        /// After a successful add, run a capability probe against the new
+        /// provider without prompting (only when a model already routes to
+        /// it). Conflicts with `--no-probe`.
+        #[arg(long, conflicts_with = "no_probe")]
+        probe: bool,
+        /// Suppress the post-add capability-probe offer entirely.
+        #[arg(long = "no-probe")]
+        no_probe: bool,
     },
     /// Probe configured providers for reachability without billing a model
     /// call. Read-only: never refreshes a token or mutates config/creds.
@@ -610,6 +673,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let path = resolve_config_path(cli.config.as_deref());
             std::process::exit(commands::doctor::run(&path, json).await);
         }
+        Cmd::Probe {
+            capabilities: _,
+            alias,
+            provider,
+            only,
+            yes,
+            json,
+        } => {
+            let config_path = resolve_config_path(cli.config.as_deref());
+            std::process::exit(
+                commands::probe::capabilities::run(&config_path, provider, alias, &only, yes, json)
+                    .await,
+            );
+        }
         Cmd::Test { target, prompt } => {
             let config = load_config(cli.config.as_deref())?;
             if let Err(e) = commands::test::run(config, &target, &prompt).await {
@@ -704,13 +781,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             yes,
             default_model,
             forwarded,
+            probe,
+            no_probe,
         } => {
             let config_path = resolve_config_path(cli.config.as_deref());
+            let probe = probe_choice(probe, no_probe);
             let args = commands::init::InitArgs {
                 scaffold,
                 yes,
                 default_model,
                 forwarded,
+                probe,
             };
             if let Err(e) = commands::init::run(&config_path, args).await {
                 eprintln!("error: {e}");
@@ -728,8 +809,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 credential_source,
                 overwrite,
                 yes,
+                probe,
+                no_probe,
             } => {
                 let config_path = resolve_config_path(cli.config.as_deref());
+                let probe = probe_choice(probe, no_probe);
                 let args = commands::provider_add::ProviderAddArgs {
                     kind,
                     name,
@@ -740,6 +824,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     credential_source,
                     overwrite,
                     yes,
+                    probe,
                 };
                 if let Err(e) = commands::provider_add::run(&config_path, args).await {
                     eprintln!("error: {e}");
@@ -974,6 +1059,21 @@ fn resolve_config_path(explicit: Option<&std::path::Path>) -> PathBuf {
     base.join("routectl").join("config.toml")
 }
 
+/// Fold the mutually-exclusive `--probe` / `--no-probe` flag pair into the
+/// tri-state the post-add probe offer consumes: `Some(true)` dispatches
+/// without prompting, `Some(false)` suppresses the offer, and `None` (neither
+/// flag) leaves it interactive. `--probe` and `--no-probe` conflict at the
+/// clap layer, so both true never reaches here.
+const fn probe_choice(probe: bool, no_probe: bool) -> Option<bool> {
+    if no_probe {
+        Some(false)
+    } else if probe {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,6 +1213,7 @@ mod tests {
                 yes: true,
                 forwarded: true,
                 default_model: Some(_),
+                ..
             }
         ));
     }

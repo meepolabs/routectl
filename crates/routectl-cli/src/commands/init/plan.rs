@@ -27,6 +27,9 @@ pub struct WizardAnswers {
     pub model_ids: BTreeMap<String, String>,
     pub default_route: Option<String>,
     pub yes: bool,
+    /// The operator's `--probe`/`--no-probe` choice, threaded onto every
+    /// [`ProviderAddArgs`] the plan emits so the post-add offer honors it.
+    pub probe: Option<bool>,
 }
 
 /// The fully-resolved plan the orchestrator executes: one [`ProviderAddArgs`]
@@ -86,7 +89,7 @@ pub fn build_plan(
         used_nicks.insert(nick.clone());
         nick_by_provider.insert(offer.provider_name.clone(), nick.clone());
 
-        provider_args.push(provider_args_for(offer));
+        provider_args.push(provider_args_for(offer, answers.probe));
         models.push(ModelWiring {
             nick,
             provider: offer.provider_name.clone(),
@@ -166,8 +169,9 @@ fn nick_taken(candidate: &str, provider: &str, existing: &Config, used: &BTreeSe
 /// Map one selected offer to the `provider add` args that add it. The oauth
 /// sentinel and the env credential var are the only source-specific pieces;
 /// every arg carries `yes: true` because init owns the one wizard-level ack
-/// and calls `provider add` with its confirm bypassed.
-fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
+/// and calls `provider add` with its confirm bypassed. `probe` is the
+/// operator's post-add probe choice, threaded through unchanged.
+fn provider_args_for(offer: &Offer, probe: Option<bool>) -> ProviderAddArgs {
     let (credential_source, api_key_env) = match offer.source {
         OfferSource::Forwarded => (Some("forwarded".to_string()), None),
         OfferSource::Oauth => (None, None),
@@ -186,6 +190,7 @@ fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
         credential_source,
         overwrite: false,
         yes: true,
+        probe,
     }
 }
 
@@ -222,6 +227,7 @@ mod tests {
             model_ids: model_ids(ids),
             default_route: default.map(str::to_string),
             yes: false,
+            probe: None,
         }
     }
 
@@ -508,6 +514,7 @@ mod tests {
             assert_eq!(x.credential_source, y.credential_source);
             assert_eq!(x.overwrite, y.overwrite);
             assert_eq!(x.yes, y.yes);
+            assert_eq!(x.probe, y.probe);
         }
         assert_eq!(first.models, second.models);
         assert_eq!(first.default_alias, second.default_alias);

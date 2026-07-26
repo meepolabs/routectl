@@ -78,6 +78,10 @@ pub struct ProviderAddArgs {
     pub credential_source: Option<String>,
     pub overwrite: bool,
     pub yes: bool,
+    /// Post-write capability-probe offer: `None` asks interactively after the
+    /// cost line, `Some(true)` (`--probe`) dispatches without prompting, and
+    /// `Some(false)` (`--no-probe`) suppresses the offer entirely.
+    pub probe: Option<bool>,
 }
 
 /// The interactive / side-effecting seams `provider add` touches OUTSIDE
@@ -97,6 +101,11 @@ pub trait AddIo: Send + Sync {
     fn confirm_env_offer(&self, var: &str) -> bool;
     /// Prompt for the API key without echoing it (interactive path).
     fn prompt_hidden(&self, provider_name: &str) -> Result<String>;
+    /// After a successful add, confirm running a one-shot capability probe
+    /// against the just-added provider (defaults to no). Consulted only when
+    /// neither `--probe` nor `--no-probe` was given, and only after the cost
+    /// line has been printed.
+    fn confirm_probe(&self) -> bool;
     /// Run the oauth login flow for `provider`, persisting its tokens.
     async fn login(&self, provider: &str) -> Result<()>;
 }
@@ -136,6 +145,17 @@ impl AddIo for RealAddIo {
     fn prompt_hidden(&self, provider_name: &str) -> Result<String> {
         rpassword::prompt_password(format!("API key for provider `{provider_name}`: "))
             .map_err(|e| Error::Config(format!("failed to read the API key prompt: {e}")))
+    }
+
+    fn confirm_probe(&self) -> bool {
+        use std::io::Write as _;
+        print!("run a capability probe against this provider now? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            return false;
+        }
+        matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
     }
 
     async fn login(&self, provider: &str) -> Result<()> {
@@ -324,5 +344,34 @@ pub async fn run_with_io(
     );
 
     println!("added provider `{name}` ({kind}).");
+    maybe_offer_probe(config_path, name, args.probe, io).await;
     Ok(AddResult::Written)
+}
+
+/// Offer a scoped capability probe after a successful add. `--probe` dispatches
+/// without prompting, `--no-probe` suppresses the offer entirely, and the
+/// interactive default asks `io.confirm_probe` after the cost line is printed.
+/// The offer runs strictly AFTER the config commit + secret put, and the probe
+/// writes only to the capability ledger, so it can never roll back the add. A
+/// provider with no single routable model yet resolves to no lane and the
+/// offer is silently skipped (`probe::capabilities::offer_scoped_probe`).
+async fn maybe_offer_probe(
+    config_path: &Path,
+    provider: &str,
+    probe: Option<bool>,
+    io: &dyn AddIo,
+) {
+    if probe == Some(false) {
+        return;
+    }
+    let force = probe == Some(true);
+    // Box the heavy probe future so it lives on the heap rather than inline in
+    // `run_with_io`'s future -- otherwise every caller's future inherits the
+    // dispatch machinery's size (build provider, ledger, canary loop).
+    Box::pin(crate::commands::probe::capabilities::offer_scoped_probe(
+        config_path,
+        provider,
+        |_estimate| force || io.confirm_probe(),
+    ))
+    .await;
 }

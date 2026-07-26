@@ -109,6 +109,9 @@ impl AddIo for StubIo {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         Ok(self.prompt_value.clone())
     }
+    fn confirm_probe(&self) -> bool {
+        false
+    }
     async fn login(&self, provider: &str) -> Result<()> {
         provision_login_token(provider);
         Ok(())
@@ -167,6 +170,7 @@ fn base_args(kind: &str, name: &str) -> ProviderAddArgs {
         credential_source: None,
         overwrite: false,
         yes: true,
+        probe: Some(false),
     }
 }
 
