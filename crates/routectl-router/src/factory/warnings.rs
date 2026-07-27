@@ -130,3 +130,56 @@ pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
 
     warnings
 }
+
+/// Advisory (never fatal) load-time check on the codex identity surface:
+/// warn when a chatgpt-oauth openai-responses provider overrides the
+/// `version` or `user-agent` identity header via `header_extras` with a
+/// value that diverges from the derived codex identity. The override still
+/// WINS (the merge order is unchanged and settled) -- this only surfaces
+/// that the operator is emitting a fingerprint other than the one routectl
+/// derives, which the chatgpt.com backend may flag. A matching or absent
+/// override is silent.
+///
+/// The comparison is against the identity routectl WOULD derive from the
+/// resolved `codex_version` (config-level, independent of whether the
+/// process-global identity has been installed yet), so it fires the same
+/// way on the `config check` path as on the serve boot path.
+pub fn codex_identity_warnings(config: &crate::config::Config) -> Vec<String> {
+    #[cfg(feature = "openai-responses")]
+    {
+        use routectl_core::identity::codex::{CodexIdentity, PINNED_CODEX_VERSION};
+
+        let effective_version = super::validate::resolved_codex_version(config)
+            .unwrap_or_else(|| PINNED_CODEX_VERSION.to_string());
+        let identity = CodexIdentity::new(&effective_version);
+
+        let mut warnings = Vec::new();
+        for (provider_name, entry) in &config.providers {
+            if !entry.is_chatgpt_oauth_responses() {
+                continue;
+            }
+            for (key, value) in entry.header_extras() {
+                match key.to_ascii_lowercase().as_str() {
+                    "version" if value != identity.version() => warnings.push(format!(
+                        "[providers.{provider_name}.header_extras] version = \"{value}\" overrides \
+                         the derived codex identity version \"{}\"; the override wins but emits a \
+                         fingerprint routectl did not derive",
+                        identity.version(),
+                    )),
+                    "user-agent" if value != identity.user_agent() => warnings.push(format!(
+                        "[providers.{provider_name}.header_extras] user-agent overrides the \
+                         derived codex User-Agent; the override wins but emits a fingerprint \
+                         routectl did not derive"
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        warnings
+    }
+    #[cfg(not(feature = "openai-responses"))]
+    {
+        let _ = config;
+        Vec::new()
+    }
+}

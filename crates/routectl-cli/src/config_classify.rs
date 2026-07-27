@@ -101,6 +101,29 @@ pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'s
         out.push("mitm");
     }
 
+    // codex_version is stamped into a process-global identity set ONCE at
+    // boot (routectl-core identity/codex.rs), so a hot reload cannot flip
+    // it -- classify it restart-required to make that set-once contract
+    // honest. Diffed per provider across the union of keys; a value
+    // appearing, disappearing, or changing on any entry counts.
+    let mut codex_keys: BTreeSet<&str> = BTreeSet::new();
+    codex_keys.extend(prev.providers.keys().map(String::as_str));
+    codex_keys.extend(next.providers.keys().map(String::as_str));
+    let codex_changed = codex_keys.into_iter().any(|key| {
+        let prev_v = prev
+            .providers
+            .get(key)
+            .and_then(ProviderEntry::codex_version);
+        let next_v = next
+            .providers
+            .get(key)
+            .and_then(ProviderEntry::codex_version);
+        prev_v != next_v
+    });
+    if codex_changed {
+        out.push("providers.codex_version");
+    }
+
     out
 }
 
@@ -285,6 +308,49 @@ mod tests {
         });
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(changes.contains(&"mitm"), "got {changes:?}");
+    }
+
+    /// `codex_version` is stamped into the process-global codex identity
+    /// once at boot, so a hot reload cannot flip it -- classify it
+    /// restart-required. A no-op when neither side sets it; flagged when a
+    /// value appears, changes, or disappears.
+    #[test]
+    fn collect_restart_required_flags_codex_version() {
+        use routectl_router::ProviderEntry;
+
+        // Baseline: no codex_version on either side -> not flagged.
+        let mut prev = Config::default();
+        prev.providers.insert(
+            "codex".into(),
+            ProviderEntry::openai_responses("oauth://codex"),
+        );
+        let mut next = prev.clone();
+        assert!(
+            !collect_restart_required_changes(&prev, &next).contains(&"providers.codex_version")
+        );
+
+        // Value appears -> flagged.
+        next.providers.insert(
+            "codex".into(),
+            ProviderEntry::openai_responses("oauth://codex")
+                .with_openai_responses_codex_version("0.200.0"),
+        );
+        assert!(
+            collect_restart_required_changes(&prev, &next).contains(&"providers.codex_version"),
+            "a newly-set codex_version must be restart-required"
+        );
+
+        // Value changes -> flagged.
+        prev = next.clone();
+        next.providers.insert(
+            "codex".into(),
+            ProviderEntry::openai_responses("oauth://codex")
+                .with_openai_responses_codex_version("0.201.0"),
+        );
+        assert!(
+            collect_restart_required_changes(&prev, &next).contains(&"providers.codex_version"),
+            "a changed codex_version must be restart-required"
+        );
     }
 
     #[test]

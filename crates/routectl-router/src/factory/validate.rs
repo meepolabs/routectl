@@ -1208,6 +1208,86 @@ fn validate_base_urls(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Explicit upper bound on an operator-supplied `codex_version`. Real
+/// codex CLI versions are short (`X.Y.Z` plus at most a pre-release
+/// suffix); a value past this is a fat-finger or an injection attempt and
+/// fails fast rather than reaching the wire.
+const CODEX_VERSION_MAX_LEN: usize = 64;
+
+/// Validate every `codex_version` knob across the provider table. Two
+/// hard-fail conditions: a syntactically illegal value (empty, too long,
+/// or carrying a byte that is not printable ASCII -- whitespace, control,
+/// and non-ASCII are all rejected, and the value is never sanitized), and
+/// two providers setting DIFFERENT values (the codex identity is
+/// process-global, so a silent winner is forbidden -- the error names both
+/// providers). Providers that omit the knob inherit the resolved value.
+pub fn validate_codex_version(config: &Config) -> Result<()> {
+    use routectl_core::Error;
+
+    let mut seen: Option<(&str, &str)> = None;
+    for (name, entry) in &config.providers {
+        let Some(version) = entry.codex_version() else {
+            continue;
+        };
+        validate_codex_version_syntax(name, version)?;
+        match seen {
+            None => seen = Some((name.as_str(), version)),
+            Some((prev_name, prev_version)) if prev_version != version => {
+                return Err(Error::Config(format!(
+                    "providers `{prev_name}` and `{name}` set different codex_version values \
+                     (`{prev_version}` vs `{version}`); the codex identity is process-global, so \
+                     every openai-responses provider that sets codex_version must agree on one \
+                     value"
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_codex_version_syntax(provider_name: &str, version: &str) -> Result<()> {
+    use routectl_core::Error;
+
+    if version.is_empty() {
+        return Err(Error::Config(format!(
+            "provider `{provider_name}`: codex_version is empty; omit the field to use the \
+             pinned default or set a non-empty version"
+        )));
+    }
+    if version.len() > CODEX_VERSION_MAX_LEN {
+        return Err(Error::Config(format!(
+            "provider `{provider_name}`: codex_version is {} bytes; the maximum is \
+             {CODEX_VERSION_MAX_LEN}",
+            version.len()
+        )));
+    }
+    // Printable ASCII only (0x21..=0x7e): excludes space, tab, control
+    // bytes, DEL, and every non-ASCII byte. The value is stamped verbatim
+    // into an HTTP header and the User-Agent, so anything outside this set
+    // is either header-illegal or a fingerprint the operator did not
+    // intend.
+    if let Some(bad) = version.bytes().find(|b| !(0x21..=0x7e).contains(b)) {
+        return Err(Error::Config(format!(
+            "provider `{provider_name}`: codex_version contains an illegal byte {bad:#04x}; \
+             only printable ASCII (no whitespace or control characters) is allowed"
+        )));
+    }
+    Ok(())
+}
+
+/// The single `codex_version` value configured across the provider table,
+/// or `None` when no provider sets one (the caller falls back to the
+/// pinned default). Assumes [`validate_codex_version`] has already
+/// rejected divergent values, so returning the first configured value is
+/// authoritative.
+pub fn resolved_codex_version(config: &Config) -> Option<String> {
+    config
+        .providers
+        .values()
+        .find_map(|entry| entry.codex_version().map(str::to_owned))
+}
+
 /// Collected outcome of the shared config-validation suite:
 /// `errors` are hard-fail conditions, `warnings` are advisory.
 ///
@@ -1301,8 +1381,12 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = validate_base_urls(config) {
         errors.push(bare_validation_message(e));
     }
+    if let Err(e) = validate_codex_version(config) {
+        errors.push(bare_validation_message(e));
+    }
 
-    let warnings = class_policy_warnings(config);
+    let mut warnings = class_policy_warnings(config);
+    warnings.extend(super::warnings::codex_identity_warnings(config));
 
     ConfigValidation { errors, warnings }
 }

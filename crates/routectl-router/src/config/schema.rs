@@ -1369,6 +1369,14 @@ pub enum ProviderEntry {
         /// `routectl/<version> codex-cli`.
         #[serde(default)]
         user_agent: Option<String>,
+        /// Codex CLI version this provider claims on the wire, threaded
+        /// into the derived User-Agent and the `version` identity header
+        /// (chatgpt-oauth surface). None -> the pinned default. The codex
+        /// identity is process-global, so every openai-responses provider
+        /// that sets this must agree on one value (validation rejects
+        /// divergence). RESTART-REQUIRED: a hot reload cannot flip it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_version: Option<String>,
         /// Operator override for this entry's prompt-cache capability.
         /// `None` -> use the conservative per-kind default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1642,6 +1650,33 @@ impl ProviderEntry {
         }
     }
 
+    /// The operator-set `codex_version` for this entry, or `None` when
+    /// unset or the variant carries no such knob (only `OpenaiResponses`
+    /// does). The resolved codex identity is derived from this across the
+    /// whole config; see `factory::resolved_codex_version`.
+    pub fn codex_version(&self) -> Option<&str> {
+        match self {
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses { codex_version, .. } => codex_version.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// `true` iff this entry is an `OpenaiResponses` provider on the
+    /// `chatgpt-oauth` surface -- the only shape that emits the codex
+    /// identity fingerprint, so the only one the codex-identity
+    /// header-override warning applies to.
+    #[cfg(feature = "openai-responses")]
+    pub const fn is_chatgpt_oauth_responses(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenaiResponses {
+                auth_kind: OpenaiResponsesAuthKind::ChatgptOauth,
+                ..
+            }
+        )
+    }
+
     /// `Some(base_url)` iff this entry is an `AnthropicApi` variant with
     /// `credential_source == Forwarded`, `None` otherwise. The single
     /// place that recognizes "this is the forwarded provider" so
@@ -1906,6 +1941,7 @@ impl ProviderEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
+            codex_version: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
@@ -1998,6 +2034,19 @@ impl ProviderEntry {
             Self::OpenaiResponses { auth_kind, .. } => *auth_kind = kind,
             _ => panic!(
                 "ProviderEntry::with_openai_responses_auth_kind only applies to openai-responses"
+            ),
+        }
+        self
+    }
+
+    /// Set the `codex_version` on an `OpenaiResponses` entry. Panics on
+    /// other variants -- the field is OpenaiResponses-only.
+    #[cfg(feature = "openai-responses")]
+    pub fn with_openai_responses_codex_version(mut self, version: impl Into<String>) -> Self {
+        match &mut self {
+            Self::OpenaiResponses { codex_version, .. } => *codex_version = Some(version.into()),
+            _ => panic!(
+                "ProviderEntry::with_openai_responses_codex_version only applies to openai-responses"
             ),
         }
         self

@@ -1222,6 +1222,13 @@
               "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
               "type": "object"
             },
+            "codex_version": {
+              "description": "Codex CLI version this provider claims on the wire, threaded\ninto the derived User-Agent and the `version` identity header\n(chatgpt-oauth surface). None -> the pinned default. The codex\nidentity is process-global, so every openai-responses provider\nthat sets this must agree on one value (validation rejects\ndivergence). RESTART-REQUIRED: a hot reload cannot flip it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "header_extras": {
               "additionalProperties": {
                 "type": "string"

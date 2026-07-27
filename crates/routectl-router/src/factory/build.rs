@@ -130,6 +130,37 @@ pub async fn build_provider_with_options(
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
 ) -> Result<Arc<dyn Provider>> {
+    // Defensive: a caller building a single provider directly (e.g.
+    // `provider probe`) bypasses `build_resolved_models`, which is where the
+    // codex identity is normally installed. Resolve it from THIS entry's
+    // own codex_version so a probed responses provider still egresses the
+    // configured fingerprint. No-op on the build_resolved_models path (the
+    // identity is already installed there) since the OnceLock is set-once.
+    //
+    // `provider probe` / `doctor` load config through the unvalidated path,
+    // which never runs `validate_codex_version`, so an illegal value can
+    // reach here. Re-run the syntax check and reject-to-default (never
+    // sanitize) rather than let a header-illegal byte panic the derived UA
+    // downstream.
+    #[cfg(feature = "openai-responses")]
+    if let Some(version) = entry.codex_version() {
+        use routectl_core::identity::codex::{CodexIdentity, PINNED_CODEX_VERSION, set_resolved};
+        match super::validate::validate_codex_version_syntax(name, version) {
+            Ok(()) => {
+                set_resolved(CodexIdentity::new(version));
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    provider = %name,
+                    reason = %reason,
+                    codex_version = %PINNED_CODEX_VERSION,
+                    "invalid codex_version; falling back to the pinned codex identity",
+                );
+                set_resolved(CodexIdentity::new(PINNED_CODEX_VERSION));
+            }
+        }
+    }
+
     #[cfg(feature = "bedrock")]
     {
         build_provider_inner(name, entry, secrets, opts, None, None).await
@@ -444,6 +475,10 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
+            // Resolved into the process-global codex identity by the
+            // router builder before any provider is constructed, not
+            // per-provider here.
+            codex_version: _,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
@@ -1060,6 +1095,57 @@ async fn resolve_responses_account_id(
     }
 }
 
+/// Install the process-global codex identity from the config's resolved
+/// `codex_version` (or the pinned default when none is set), unless it is
+/// already installed. Emits a structured INFO per chatgpt-oauth
+/// openai-responses provider naming the effective version and its source.
+/// Idempotent: the underlying `OnceLock` is set-once, so a hot reload
+/// re-running the factory does not re-install (codex_version is
+/// restart-required).
+fn install_resolved_codex_identity(config: &Config) {
+    use routectl_core::identity::codex::{CodexIdentity, PINNED_CODEX_VERSION, set_resolved};
+
+    let configured = super::resolved_codex_version(config);
+    let effective = configured
+        .clone()
+        .unwrap_or_else(|| PINNED_CODEX_VERSION.to_string());
+    let installed = set_resolved(CodexIdentity::new(&effective));
+
+    #[cfg(feature = "openai-responses")]
+    {
+        use routectl_core::identity::codex::resolved_identity;
+
+        let source = if configured.is_some() {
+            "configured"
+        } else {
+            "pinned"
+        };
+        if installed {
+            for (name, entry) in &config.providers {
+                if entry.is_chatgpt_oauth_responses() {
+                    tracing::info!(
+                        provider = %name,
+                        codex_version = %effective,
+                        source,
+                        "codex identity resolved"
+                    );
+                }
+            }
+        } else if effective != resolved_identity().version() {
+            // A hot reload changed codex_version but the set-once identity
+            // still serves the boot value: report the pending change instead
+            // of falsely logging the new version as active.
+            tracing::warn!(
+                configured = %effective,
+                active = %resolved_identity().version(),
+                "codex_version changed but requires a daemon restart to take effect",
+            );
+        }
+    }
+    #[cfg(not(feature = "openai-responses"))]
+    let _ = installed;
+}
+
 /// Build the per-nickname `ResolvedModel` table from a `Config`. Walks
 /// `[models]` once, building one `Arc<dyn Provider>` per non-Bedrock
 /// `[providers.X]` (cached across models referencing the same provider)
@@ -1081,6 +1167,18 @@ pub async fn build_resolved_models(
 ) -> Result<(BTreeMap<String, Arc<ResolvedModel>>, Vec<(String, String)>)> {
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     let mut failed: Vec<(String, String)> = Vec::new();
+
+    // Install the process-global codex identity ONCE, before constructing
+    // any provider (the openai-responses egress and the OAuth refresh
+    // client read it via `resolved_identity()`). This is the shared factory
+    // provider-loop boundary every construction path routes through, so the
+    // configured version reaches the wire regardless of caller (serve,
+    // reload, `routectl test`, doctor). Validation has already rejected
+    // divergent values; codex_version is restart-required, so the set-once
+    // contract holds across reloads. A structured INFO per chatgpt-oauth
+    // provider names the effective version and its source.
+    install_resolved_codex_identity(config);
+
     // Cache for non-Bedrock providers: name -> Arc.
     let mut provider_cache: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::new();
     // Per-provider failed flag so we don't try to rebuild on every
