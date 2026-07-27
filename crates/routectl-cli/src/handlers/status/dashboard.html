@@ -589,8 +589,8 @@
       margin-bottom: var(--sp-3);
     }
 
-    /* Default-collapsed disclosure for list-shaped detail (doctor
-       reachability full list + catalog priors). Native <details>, no JS. */
+    /* Default-collapsed disclosure for list-shaped detail (e.g. doctor
+       reachability full list). Native <details>, no JS. */
     details { margin-bottom: var(--sp-3); }
     details > summary {
       cursor: pointer;
@@ -1901,7 +1901,7 @@
 
     // A native default-collapsed disclosure: a summary line plus arbitrary
     // content. No JS state and no mutation affordance -- used for list-shaped
-    // detail (doctor reachability full list, catalog priors) that must stay
+    // detail (e.g. the doctor reachability full list) that must stay
     // reachable (data floor) without dominating the panel.
     function buildExpander(summaryText, contentNode) {
       var det = document.createElement('details');
