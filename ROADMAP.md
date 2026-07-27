@@ -96,7 +96,9 @@ aging-out on the openai-responses path, and operator-side
 - SSO / LDAP / OIDC / SAML auth -- use a sidecar proxy.
 - Multi-tenancy, per-user routing, persistent server state -- fork
   if needed.
-- Web UI / config editor (CLI-only by design).
+- Config-editing / interactive admin web UI -- the read-only status
+  dashboard (GET / and the /status JSON family) is deliberate; all
+  mutation stays config.toml + CLI.
 - Caching layer (use an HTTP cache proxy).
 - Atropos / RL trajectory hooks (different product space).
 - Compliance certifications (SOC 2, HIPAA, audit logging).
