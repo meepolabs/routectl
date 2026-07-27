@@ -302,15 +302,19 @@ reasoning_dialect = "openai"
 
 ### chatgpt-oauth (`openai-responses` provider, `chatgpt.com/backend-api/codex` surface)
 
-The `openai-responses` provider in `chatgpt-oauth` mode **pins the codex CLI client header contract**. The chatgpt.com backend requires requests to the Codex / ChatGPT-Pro responses API to match that contract: the User-Agent literal, the `originator` value, the per-process identity headers, and the OAuth refresh client's own header set must all match what the codex CLI sends. If any of these values drift, the upstream may reject requests or require re-authentication -- this is a client-compatibility constraint, not a recoverable build error.
+The `openai-responses` provider in `chatgpt-oauth` mode **mimics the codex CLI client header contract**. The chatgpt.com backend requires requests to the Codex / ChatGPT-Pro responses API to match that contract: the User-Agent literal, the `originator` value, the per-process identity headers, and the OAuth refresh client's own header set must all match what the codex CLI sends. If any of these values drift, the upstream may reject requests or require re-authentication -- this is a client-compatibility constraint, not a recoverable build error.
 
-**Pinned client version (source of truth)**:
+**Client version -- pinned default, operator-overridable**:
+
+The codex CLI version routectl claims on the wire has a pinned default baked into the build (the source of truth below), and an operator override that changes it WITHOUT a rebuild via the `codex_version` knob (see [CONFIGURATION.md](CONFIGURATION.md#codex_version-client-identity-override)). The knob only sets the version segment; the derivation of the User-Agent and the `version` identity header from it is single-sourced, so egress and the OAuth refresh client can never diverge from each other. The default stays authoritative when the knob is omitted; the override exists so an operator can track a newer upstream codex release the moment it lands rather than waiting for a routectl release.
+
+Pinned default (source of truth for the baked-in version):
 
 - Tag: `rust-v0.145.0` (most recent codex Rust release tag at adoption)
 - Commit: `1635de866c61d1b76e50b31928ee6d61482435a8`
 - Source: the `version` field on `codex-rs/cli/Cargo.toml` in the upstream codex repo (workspace `version = "0.0.0"` is the tip-of-tree dev placeholder; the tag pin above is what routectl encodes against)
 
-Keep this pin in sync with the codex CLI version routectl targets; treat it as locked.
+Keep this pin in sync with the codex CLI version routectl targets by default; `codex_version` is the per-deployment escape hatch, not a replacement for bumping the pin when the target moves.
 
 **Headers that MUST stay in lockstep with codex** (any deviation breaks the client-compatibility contract):
 
