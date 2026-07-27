@@ -2328,3 +2328,301 @@ mod matrix_panel {
         assert!(!ghost.routed, "a lane with no config entry is unrouted");
     }
 }
+
+/// Cross-surface: a real seeded usage ledger, gathered through the read-only
+/// matrix path, resolves against the parsed config's overrides and priors and
+/// renders coherently on BOTH the human battery and the `--json` panel. Where
+/// the sibling `matrix_panel` mod injects a synthetic source and asserts
+/// struct fields, this pins the whole seam -- seed -> gather -> build ->
+/// render -- across both output surfaces at once.
+mod seeded_matrix_surfaces {
+    use super::*;
+
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use routectl_router::CATALOG_VERSION;
+    use routectl_usage::{CapabilityEvent, insert_capability_event, open};
+    use serde_json::Value;
+    use tempfile::TempDir;
+
+    /// Current epoch milliseconds, so seeded rows sit just behind the reader's
+    /// pinned `now` and their ages stay small (never stale-flagged).
+    fn now_ms() -> i64 {
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis(),
+        )
+        .expect("epoch ms fits i64")
+    }
+
+    /// A config with one openai-compat provider, two routed lanes, and a
+    /// provider-scoped override, its usage DB pointed at `db`. `literal:` is
+    /// accepted by the parser (rejected only at resolve time, which this
+    /// read-only path never reaches).
+    fn config_at(db: &Path) -> Config {
+        let mut config: Config = toml::from_str(
+            "version = 3\n\
+             [providers.p]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [models.laneA]\n\
+             provider = \"p\"\n\
+             upstream = \"m-a\"\n\
+             [models.laneB]\n\
+             provider = \"p\"\n\
+             upstream = \"m-b\"\n\
+             [capability.overrides.p]\n\
+             force_supported = [\"prompt_caching\"]\n",
+        )
+        .expect("seeded matrix config parses");
+        config.usage.db_path = db.to_path_buf();
+        config
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn event(
+        ts: i64,
+        lane: &str,
+        cap: &str,
+        verdict: &str,
+        phase: &str,
+        source: &str,
+        tier: &str,
+        evidence: Option<&str>,
+    ) -> CapabilityEvent {
+        CapabilityEvent {
+            ts,
+            lane_key: lane.to_string(),
+            capability: cap.to_string(),
+            verdict: verdict.to_string(),
+            phase: phase.to_string(),
+            source: source.to_string(),
+            tier: tier.to_string(),
+            evidence_class: evidence.map(str::to_string),
+            upstream_token: None,
+            catalog_version: i64::from(CATALOG_VERSION),
+            overlay_revision: 0,
+        }
+    }
+
+    /// The `[lane][cap]` cell of the serialized matrix panel, resolved through
+    /// the panel's own `columns` ordering.
+    fn json_cell<'a>(panel: &'a Value, lane: &str, cap: &str) -> &'a Value {
+        let columns = panel["columns"].as_array().expect("columns array");
+        let ci = columns
+            .iter()
+            .position(|c| c == cap)
+            .unwrap_or_else(|| panic!("column {cap} missing"));
+        let lanes = panel["lanes"].as_array().expect("lanes array");
+        let lane_obj = lanes
+            .iter()
+            .find(|l| l["lane"] == lane)
+            .unwrap_or_else(|| panic!("lane {lane} missing"));
+        &lane_obj["cells"][ci]
+    }
+
+    #[test]
+    fn seeded_ledger_matrix_renders_mixed_verdicts_in_human_and_json() {
+        // Arrange: a matched tombstone plus three post-boundary events at a
+        // recent instant -- a verified live positive, a probe negative, and a
+        // live negative on `prompt_caching` that the override will overrule.
+        let tmp = TempDir::new().expect("tempdir");
+        let ledger = tmp.path().join("usage.db");
+        let db = open(&ledger).expect("open ledger");
+        let ts = now_ms();
+        let cat = i64::from(CATALOG_VERSION);
+        let insert = |e: &CapabilityEvent| {
+            insert_capability_event(db.conn(), e).expect("insert capability event");
+        };
+        insert(&CapabilityEvent::tombstone(ts, cat, 0));
+        insert(&event(
+            ts,
+            "laneA",
+            "web_search",
+            "verified",
+            "f3",
+            "live",
+            "self-identifying",
+            Some("schema_parse"),
+        ));
+        insert(&event(
+            ts,
+            "laneA",
+            "computer_use",
+            "broken",
+            "f1",
+            "probe",
+            "self-identifying",
+            None,
+        ));
+        insert(&event(
+            ts,
+            "laneA",
+            "prompt_caching",
+            "broken",
+            "f1",
+            "live",
+            "self-identifying",
+            None,
+        ));
+        drop(db);
+
+        let config = config_at(&ledger);
+
+        // Act 1: the real read-only gather replays the seeded ledger.
+        let source = gather_capability_matrix(&config, false, 0);
+        assert!(
+            matches!(source, CapabilityMatrixSource::Available { .. }),
+            "a matched tombstone with post-boundary rows must be Available"
+        );
+
+        // A fresh catalog prior for laneB, so the fifth verdict (assumed via
+        // the prior layer) is present alongside the learned/override cells.
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let context = DoctorContext {
+            capability_matrix: source,
+            capability: CapabilityInputs {
+                config: Some(CapabilityConfig {
+                    legacy_keys: Vec::new(),
+                    priors: vec![PriorCell {
+                        nickname: "laneB".to_string(),
+                        verified_at: today,
+                        capabilities: vec![("structured_output".to_string(), false)],
+                    }],
+                }),
+                panel_unavailable: None,
+            },
+            ..ctx(config, Some("version = 3\n"), Vec::new(), Vec::new())
+        };
+
+        // Act 2: build the report and both render surfaces.
+        let report = build_report(&context);
+        let human = render_human(&report).join("\n");
+        let json = serde_json::to_value(&report).expect("report serializes");
+
+        // Assert (human): the replayed state line plus the compact
+        // `verdict[source]` tokens for every learned / override / prior cell.
+        assert!(
+            human.contains("capability matrix:") && human.contains("learned registry replayed"),
+            "human render must carry the replayed matrix state line: {human}"
+        );
+        for token in [
+            "verified[live]",
+            "broken[probe]",
+            "forced_supported[override]",
+            "assumed[prior]",
+        ] {
+            assert!(
+                human.contains(token),
+                "human matrix must render the {token} cell: {human}"
+            );
+        }
+
+        // Assert (json): the panel is Available and every cell carries its
+        // verdict, source, polarity, and age -- an override cell wins over the
+        // seeded negative, and a no-signal cell resolves to a sourceless
+        // unknown.
+        let panel = &json["panels"]["capability_matrix"];
+        assert_eq!(panel["availability"]["state"], Value::from("available"));
+
+        let verified = json_cell(panel, "laneA", "web_search");
+        assert_eq!(verified["verdict"], Value::from("verified"));
+        assert_eq!(verified["source"], Value::from("live"));
+        assert_eq!(verified["supported"], Value::from(true));
+        assert!(
+            verified["age_ms"].is_i64(),
+            "a live cell carries a concrete age: {verified}"
+        );
+        assert_eq!(verified["stale"], Value::from(false));
+
+        let broken = json_cell(panel, "laneA", "computer_use");
+        assert_eq!(broken["verdict"], Value::from("broken"));
+        assert_eq!(broken["source"], Value::from("probe"));
+        assert_eq!(broken["supported"], Value::from(false));
+
+        // Override-won: the operator override overrules the seeded live
+        // negative for the same cell.
+        let overridden = json_cell(panel, "laneA", "prompt_caching");
+        assert_eq!(overridden["verdict"], Value::from("forced_supported"));
+        assert_eq!(overridden["source"], Value::from("override"));
+        assert!(
+            overridden["age_ms"].is_null(),
+            "an override cell carries no learned age: {overridden}"
+        );
+
+        let prior = json_cell(panel, "laneB", "structured_output");
+        assert_eq!(prior["verdict"], Value::from("assumed"));
+        assert_eq!(prior["source"], Value::from("prior"));
+        assert_eq!(prior["supported"], Value::from(false));
+        assert!(
+            prior["age_ms"].is_null(),
+            "a prior cell has no age: {prior}"
+        );
+
+        let unknown = json_cell(panel, "laneB", "web_search");
+        assert_eq!(unknown["verdict"], Value::from("unknown"));
+        assert!(
+            unknown["source"].is_null() && unknown["supported"].is_null(),
+            "a no-signal cell is a sourceless unknown: {unknown}"
+        );
+    }
+
+    #[test]
+    fn empty_and_unavailable_matrix_render_distinctly_in_human_and_json() {
+        // A readable-but-empty source and an unreadable one must never render
+        // the same: the empty state is an honest "no learned rows", the
+        // unavailable state names its path-free class code -- on BOTH surfaces.
+        let ledger = Path::new("/nonexistent/usage.db");
+
+        let empty = build_report(&DoctorContext {
+            capability_matrix: CapabilityMatrixSource::Empty,
+            ..ctx(
+                config_at(ledger),
+                Some("version = 3\n"),
+                Vec::new(),
+                Vec::new(),
+            )
+        });
+        let unavailable = build_report(&DoctorContext {
+            capability_matrix: CapabilityMatrixSource::Unavailable("revision_mismatch"),
+            ..ctx(
+                config_at(ledger),
+                Some("version = 3\n"),
+                Vec::new(),
+                Vec::new(),
+            )
+        });
+
+        let empty_human = render_human(&empty).join("\n");
+        let unavailable_human = render_human(&unavailable).join("\n");
+        assert!(
+            empty_human.contains("learned registry empty (no learned rows)"),
+            "empty state line missing: {empty_human}"
+        );
+        assert!(
+            unavailable_human.contains("learned registry unavailable (revision_mismatch)"),
+            "unavailable state line missing its code: {unavailable_human}"
+        );
+        assert!(
+            !empty_human.contains("unavailable"),
+            "an honest empty must never claim to be unavailable: {empty_human}"
+        );
+
+        let empty_avail = serde_json::to_value(&empty).expect("serialize")["panels"]
+            ["capability_matrix"]["availability"]
+            .clone();
+        let unavailable_avail = serde_json::to_value(&unavailable).expect("serialize")["panels"]
+            ["capability_matrix"]["availability"]
+            .clone();
+        assert_eq!(empty_avail["state"], Value::from("empty"));
+        assert!(
+            empty_avail.get("code").is_none(),
+            "an empty source carries no class code: {empty_avail}"
+        );
+        assert_eq!(unavailable_avail["state"], Value::from("unavailable"));
+        assert_eq!(unavailable_avail["code"], Value::from("revision_mismatch"));
+    }
+}

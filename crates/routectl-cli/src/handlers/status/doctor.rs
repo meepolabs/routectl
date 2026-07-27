@@ -290,4 +290,46 @@ mod tests {
             );
         }
     }
+
+    /// The `/status/doctor` panel embeds the no-network doctor report, which
+    /// carries the catalog-freshness section. The freshness rows must surface
+    /// on this JSON surface exactly as they do on the CLI `doctor` output --
+    /// the baked-catalog row is present unconditionally (no overlay, no import
+    /// needed), so a status consumer sees the same catalog-freshness signal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn doctor_panel_embeds_catalog_freshness_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, b"version = 3\n").unwrap();
+
+        let state = state_with_config(Some(config_path));
+        let app = super::super::status_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/status/doctor")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let findings = json["data"]["report"]["findings"]
+            .as_array()
+            .expect("findings array");
+        assert!(
+            findings.iter().any(|f| f["section"] == "freshness"),
+            "status doctor panel must embed the catalog-freshness section"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| { f["section"] == "freshness" && f["name"] == "baked catalog" }),
+            "the baked-catalog freshness row must be present unconditionally"
+        );
+    }
 }

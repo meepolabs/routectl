@@ -208,11 +208,105 @@ pub fn routectl_core::cache_control::mutable_suffix_start(&routectl_core::schema
 pub fn routectl_core::cache_control::validate(&[routectl_core::cache_control::Breakpoint<'_>]) -> routectl_core::error::Result<()>
 pub fn routectl_core::cache_control::validate_source<S: routectl_core::cache_control::CacheBreakpointSource>(&S) -> routectl_core::error::Result<()>
 pub mod routectl_core::capability
+pub enum routectl_core::capability::EvidenceSource
+pub routectl_core::capability::EvidenceSource::Live
+pub routectl_core::capability::EvidenceSource::Probe
+impl routectl_core::capability::EvidenceSource
+pub const fn routectl_core::capability::EvidenceSource::as_str(self) -> &'static str
+pub fn routectl_core::capability::EvidenceSource::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::clone(&self) -> routectl_core::capability::EvidenceSource
+impl core::cmp::Eq for routectl_core::capability::EvidenceSource
+impl core::cmp::PartialEq for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::eq(&self, &routectl_core::capability::EvidenceSource) -> bool
+impl core::fmt::Debug for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::capability::EvidenceSource
+impl core::marker::StructuralPartialEq for routectl_core::capability::EvidenceSource
+impl core::marker::Freeze for routectl_core::capability::EvidenceSource
+impl core::marker::Send for routectl_core::capability::EvidenceSource
+impl core::marker::Sync for routectl_core::capability::EvidenceSource
+impl core::marker::Unpin for routectl_core::capability::EvidenceSource
+impl core::marker::UnsafeUnpin for routectl_core::capability::EvidenceSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::capability::EvidenceSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::capability::EvidenceSource
+impl<T, U> core::convert::Into<U> for routectl_core::capability::EvidenceSource where U: core::convert::From<T>
+pub fn routectl_core::capability::EvidenceSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::capability::EvidenceSource where U: core::convert::Into<T>
+pub type routectl_core::capability::EvidenceSource::Error = core::convert::Infallible
+pub fn routectl_core::capability::EvidenceSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::capability::EvidenceSource where U: core::convert::TryFrom<T>
+pub type routectl_core::capability::EvidenceSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::capability::EvidenceSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::capability::EvidenceSource where T: core::clone::Clone
+pub type routectl_core::capability::EvidenceSource::Owned = T
+pub fn routectl_core::capability::EvidenceSource::clone_into(&self, &mut T)
+pub fn routectl_core::capability::EvidenceSource::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::capability::EvidenceSource where T: 'static + ?core::marker::Sized
+pub fn routectl_core::capability::EvidenceSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::capability::EvidenceSource where T: ?core::marker::Sized
+pub fn routectl_core::capability::EvidenceSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::capability::EvidenceSource where T: ?core::marker::Sized
+pub fn routectl_core::capability::EvidenceSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::capability::EvidenceSource where T: core::clone::Clone
+pub unsafe fn routectl_core::capability::EvidenceSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::capability::EvidenceSource
+impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::EvidenceSource
+pub enum routectl_core::capability::FailurePhase
+pub routectl_core::capability::FailurePhase::F1
+pub routectl_core::capability::FailurePhase::F2
+pub routectl_core::capability::FailurePhase::F3
+impl routectl_core::capability::FailurePhase
+pub const fn routectl_core::capability::FailurePhase::as_str(self) -> &'static str
+pub fn routectl_core::capability::FailurePhase::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::clone(&self) -> routectl_core::capability::FailurePhase
+impl core::cmp::Eq for routectl_core::capability::FailurePhase
+impl core::cmp::PartialEq for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::eq(&self, &routectl_core::capability::FailurePhase) -> bool
+impl core::fmt::Debug for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::capability::FailurePhase
+impl core::marker::StructuralPartialEq for routectl_core::capability::FailurePhase
+impl core::marker::Freeze for routectl_core::capability::FailurePhase
+impl core::marker::Send for routectl_core::capability::FailurePhase
+impl core::marker::Sync for routectl_core::capability::FailurePhase
+impl core::marker::Unpin for routectl_core::capability::FailurePhase
+impl core::marker::UnsafeUnpin for routectl_core::capability::FailurePhase
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::capability::FailurePhase
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::capability::FailurePhase
+impl<T, U> core::convert::Into<U> for routectl_core::capability::FailurePhase where U: core::convert::From<T>
+pub fn routectl_core::capability::FailurePhase::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::capability::FailurePhase where U: core::convert::Into<T>
+pub type routectl_core::capability::FailurePhase::Error = core::convert::Infallible
+pub fn routectl_core::capability::FailurePhase::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::capability::FailurePhase where U: core::convert::TryFrom<T>
+pub type routectl_core::capability::FailurePhase::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::capability::FailurePhase::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::capability::FailurePhase where T: core::clone::Clone
+pub type routectl_core::capability::FailurePhase::Owned = T
+pub fn routectl_core::capability::FailurePhase::clone_into(&self, &mut T)
+pub fn routectl_core::capability::FailurePhase::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::capability::FailurePhase where T: 'static + ?core::marker::Sized
+pub fn routectl_core::capability::FailurePhase::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::capability::FailurePhase where T: ?core::marker::Sized
+pub fn routectl_core::capability::FailurePhase::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::capability::FailurePhase where T: ?core::marker::Sized
+pub fn routectl_core::capability::FailurePhase::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::capability::FailurePhase where T: core::clone::Clone
+pub unsafe fn routectl_core::capability::FailurePhase::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::capability::FailurePhase
+impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::FailurePhase
 pub enum routectl_core::capability::SignalTier
 pub routectl_core::capability::SignalTier::Inferred
 pub routectl_core::capability::SignalTier::SelfIdentifying
 impl routectl_core::capability::SignalTier
 pub const fn routectl_core::capability::SignalTier::as_str(self) -> &'static str
+pub fn routectl_core::capability::SignalTier::parse(&str) -> core::option::Option<Self>
 impl core::clone::Clone for routectl_core::capability::SignalTier
 pub fn routectl_core::capability::SignalTier::clone(&self) -> routectl_core::capability::SignalTier
 impl core::cmp::Eq for routectl_core::capability::SignalTier
@@ -253,10 +347,71 @@ impl<T> core::convert::From<T> for routectl_core::capability::SignalTier
 pub fn routectl_core::capability::SignalTier::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::capability::SignalTier
 impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::SignalTier
+pub enum routectl_core::capability::Verdict
+pub routectl_core::capability::Verdict::Assumed(bool)
+pub routectl_core::capability::Verdict::Cleared
+pub routectl_core::capability::Verdict::LearnedBroken(routectl_core::capability::FailurePhase)
+pub routectl_core::capability::Verdict::SuspectIgnored
+pub routectl_core::capability::Verdict::Unknown
+pub routectl_core::capability::Verdict::VerifiedWorking
+impl routectl_core::capability::Verdict
+pub const fn routectl_core::capability::Verdict::as_str(self) -> &'static str
+pub const fn routectl_core::capability::Verdict::broken_phase(self) -> core::option::Option<routectl_core::capability::FailurePhase>
+pub fn routectl_core::capability::Verdict::from_parts(&str, core::option::Option<routectl_core::capability::FailurePhase>, core::option::Option<bool>) -> Self
+impl core::clone::Clone for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::clone(&self) -> routectl_core::capability::Verdict
+impl core::cmp::Eq for routectl_core::capability::Verdict
+impl core::cmp::PartialEq for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::eq(&self, &routectl_core::capability::Verdict) -> bool
+impl core::fmt::Debug for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::capability::Verdict
+impl core::marker::StructuralPartialEq for routectl_core::capability::Verdict
+impl core::marker::Freeze for routectl_core::capability::Verdict
+impl core::marker::Send for routectl_core::capability::Verdict
+impl core::marker::Sync for routectl_core::capability::Verdict
+impl core::marker::Unpin for routectl_core::capability::Verdict
+impl core::marker::UnsafeUnpin for routectl_core::capability::Verdict
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::capability::Verdict
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::capability::Verdict
+impl<T, U> core::convert::Into<U> for routectl_core::capability::Verdict where U: core::convert::From<T>
+pub fn routectl_core::capability::Verdict::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::capability::Verdict where U: core::convert::Into<T>
+pub type routectl_core::capability::Verdict::Error = core::convert::Infallible
+pub fn routectl_core::capability::Verdict::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::capability::Verdict where U: core::convert::TryFrom<T>
+pub type routectl_core::capability::Verdict::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::capability::Verdict::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::capability::Verdict where T: core::clone::Clone
+pub type routectl_core::capability::Verdict::Owned = T
+pub fn routectl_core::capability::Verdict::clone_into(&self, &mut T)
+pub fn routectl_core::capability::Verdict::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::capability::Verdict where T: 'static + ?core::marker::Sized
+pub fn routectl_core::capability::Verdict::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::capability::Verdict where T: ?core::marker::Sized
+pub fn routectl_core::capability::Verdict::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::capability::Verdict where T: ?core::marker::Sized
+pub fn routectl_core::capability::Verdict::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::capability::Verdict where T: core::clone::Clone
+pub unsafe fn routectl_core::capability::Verdict::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::capability::Verdict
+impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::Verdict
+pub const routectl_core::capability::CACHE_HIT: &str
 pub const routectl_core::capability::COMPUTER_USE: &str
+pub const routectl_core::capability::EVIDENCE_CLASSES: &[&str]
+pub const routectl_core::capability::PROMPT_CACHING: &str
+pub const routectl_core::capability::SCHEMA_MISMATCH: &str
+pub const routectl_core::capability::SCHEMA_PARSE: &str
+pub const routectl_core::capability::SEARCH_ABSENT_FORCED: &str
+pub const routectl_core::capability::SEARCH_BLOCKS: &str
 pub const routectl_core::capability::STRUCTURED_OUTPUT: &str
+pub const routectl_core::capability::THINKING: &str
+pub const routectl_core::capability::THINKING_BLOCKS: &str
 pub const routectl_core::capability::WEB_SEARCH: &str
 pub const routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS: &[&str]
+pub fn routectl_core::capability::is_known_evidence_class(&str) -> bool
 pub fn routectl_core::capability::normalize_capability_key(&str, &str) -> alloc::string::String
 pub mod routectl_core::content_part
 pub enum routectl_core::content_part::ContentPart
@@ -2386,6 +2541,99 @@ impl<T> core::convert::From<T> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::error::Error
 impl<T> tracing::instrument::WithSubscriber for routectl_core::error::Error
+pub enum routectl_core::EvidenceSource
+pub routectl_core::EvidenceSource::Live
+pub routectl_core::EvidenceSource::Probe
+impl routectl_core::capability::EvidenceSource
+pub const fn routectl_core::capability::EvidenceSource::as_str(self) -> &'static str
+pub fn routectl_core::capability::EvidenceSource::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::clone(&self) -> routectl_core::capability::EvidenceSource
+impl core::cmp::Eq for routectl_core::capability::EvidenceSource
+impl core::cmp::PartialEq for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::eq(&self, &routectl_core::capability::EvidenceSource) -> bool
+impl core::fmt::Debug for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::capability::EvidenceSource
+impl core::marker::StructuralPartialEq for routectl_core::capability::EvidenceSource
+impl core::marker::Freeze for routectl_core::capability::EvidenceSource
+impl core::marker::Send for routectl_core::capability::EvidenceSource
+impl core::marker::Sync for routectl_core::capability::EvidenceSource
+impl core::marker::Unpin for routectl_core::capability::EvidenceSource
+impl core::marker::UnsafeUnpin for routectl_core::capability::EvidenceSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::capability::EvidenceSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::capability::EvidenceSource
+impl<T, U> core::convert::Into<U> for routectl_core::capability::EvidenceSource where U: core::convert::From<T>
+pub fn routectl_core::capability::EvidenceSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::capability::EvidenceSource where U: core::convert::Into<T>
+pub type routectl_core::capability::EvidenceSource::Error = core::convert::Infallible
+pub fn routectl_core::capability::EvidenceSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::capability::EvidenceSource where U: core::convert::TryFrom<T>
+pub type routectl_core::capability::EvidenceSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::capability::EvidenceSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::capability::EvidenceSource where T: core::clone::Clone
+pub type routectl_core::capability::EvidenceSource::Owned = T
+pub fn routectl_core::capability::EvidenceSource::clone_into(&self, &mut T)
+pub fn routectl_core::capability::EvidenceSource::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::capability::EvidenceSource where T: 'static + ?core::marker::Sized
+pub fn routectl_core::capability::EvidenceSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::capability::EvidenceSource where T: ?core::marker::Sized
+pub fn routectl_core::capability::EvidenceSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::capability::EvidenceSource where T: ?core::marker::Sized
+pub fn routectl_core::capability::EvidenceSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::capability::EvidenceSource where T: core::clone::Clone
+pub unsafe fn routectl_core::capability::EvidenceSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::capability::EvidenceSource
+pub fn routectl_core::capability::EvidenceSource::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::capability::EvidenceSource
+impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::EvidenceSource
+pub enum routectl_core::FailurePhase
+pub routectl_core::FailurePhase::F1
+pub routectl_core::FailurePhase::F2
+pub routectl_core::FailurePhase::F3
+impl routectl_core::capability::FailurePhase
+pub const fn routectl_core::capability::FailurePhase::as_str(self) -> &'static str
+pub fn routectl_core::capability::FailurePhase::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::clone(&self) -> routectl_core::capability::FailurePhase
+impl core::cmp::Eq for routectl_core::capability::FailurePhase
+impl core::cmp::PartialEq for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::eq(&self, &routectl_core::capability::FailurePhase) -> bool
+impl core::fmt::Debug for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::capability::FailurePhase
+impl core::marker::StructuralPartialEq for routectl_core::capability::FailurePhase
+impl core::marker::Freeze for routectl_core::capability::FailurePhase
+impl core::marker::Send for routectl_core::capability::FailurePhase
+impl core::marker::Sync for routectl_core::capability::FailurePhase
+impl core::marker::Unpin for routectl_core::capability::FailurePhase
+impl core::marker::UnsafeUnpin for routectl_core::capability::FailurePhase
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::capability::FailurePhase
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::capability::FailurePhase
+impl<T, U> core::convert::Into<U> for routectl_core::capability::FailurePhase where U: core::convert::From<T>
+pub fn routectl_core::capability::FailurePhase::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::capability::FailurePhase where U: core::convert::Into<T>
+pub type routectl_core::capability::FailurePhase::Error = core::convert::Infallible
+pub fn routectl_core::capability::FailurePhase::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::capability::FailurePhase where U: core::convert::TryFrom<T>
+pub type routectl_core::capability::FailurePhase::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::capability::FailurePhase::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::capability::FailurePhase where T: core::clone::Clone
+pub type routectl_core::capability::FailurePhase::Owned = T
+pub fn routectl_core::capability::FailurePhase::clone_into(&self, &mut T)
+pub fn routectl_core::capability::FailurePhase::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::capability::FailurePhase where T: 'static + ?core::marker::Sized
+pub fn routectl_core::capability::FailurePhase::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::capability::FailurePhase where T: ?core::marker::Sized
+pub fn routectl_core::capability::FailurePhase::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::capability::FailurePhase where T: ?core::marker::Sized
+pub fn routectl_core::capability::FailurePhase::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::capability::FailurePhase where T: core::clone::Clone
+pub unsafe fn routectl_core::capability::FailurePhase::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::capability::FailurePhase
+pub fn routectl_core::capability::FailurePhase::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::capability::FailurePhase
+impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::FailurePhase
 pub enum routectl_core::KnownContentPart
 pub routectl_core::KnownContentPart::Document
 pub routectl_core::KnownContentPart::Document::cache_control: core::option::Option<routectl_core::cache_control::CacheControl>
@@ -2785,6 +3033,7 @@ pub routectl_core::SignalTier::Inferred
 pub routectl_core::SignalTier::SelfIdentifying
 impl routectl_core::capability::SignalTier
 pub const fn routectl_core::capability::SignalTier::as_str(self) -> &'static str
+pub fn routectl_core::capability::SignalTier::parse(&str) -> core::option::Option<Self>
 impl core::clone::Clone for routectl_core::capability::SignalTier
 pub fn routectl_core::capability::SignalTier::clone(&self) -> routectl_core::capability::SignalTier
 impl core::cmp::Eq for routectl_core::capability::SignalTier
@@ -2916,6 +3165,57 @@ pub fn routectl_core::tool_def::ToolDef::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::tool_def::ToolDef where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::tool_def::ToolDef
 impl<T> tracing::instrument::WithSubscriber for routectl_core::tool_def::ToolDef
+pub enum routectl_core::Verdict
+pub routectl_core::Verdict::Assumed(bool)
+pub routectl_core::Verdict::Cleared
+pub routectl_core::Verdict::LearnedBroken(routectl_core::capability::FailurePhase)
+pub routectl_core::Verdict::SuspectIgnored
+pub routectl_core::Verdict::Unknown
+pub routectl_core::Verdict::VerifiedWorking
+impl routectl_core::capability::Verdict
+pub const fn routectl_core::capability::Verdict::as_str(self) -> &'static str
+pub const fn routectl_core::capability::Verdict::broken_phase(self) -> core::option::Option<routectl_core::capability::FailurePhase>
+pub fn routectl_core::capability::Verdict::from_parts(&str, core::option::Option<routectl_core::capability::FailurePhase>, core::option::Option<bool>) -> Self
+impl core::clone::Clone for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::clone(&self) -> routectl_core::capability::Verdict
+impl core::cmp::Eq for routectl_core::capability::Verdict
+impl core::cmp::PartialEq for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::eq(&self, &routectl_core::capability::Verdict) -> bool
+impl core::fmt::Debug for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::capability::Verdict
+impl core::marker::StructuralPartialEq for routectl_core::capability::Verdict
+impl core::marker::Freeze for routectl_core::capability::Verdict
+impl core::marker::Send for routectl_core::capability::Verdict
+impl core::marker::Sync for routectl_core::capability::Verdict
+impl core::marker::Unpin for routectl_core::capability::Verdict
+impl core::marker::UnsafeUnpin for routectl_core::capability::Verdict
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::capability::Verdict
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::capability::Verdict
+impl<T, U> core::convert::Into<U> for routectl_core::capability::Verdict where U: core::convert::From<T>
+pub fn routectl_core::capability::Verdict::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::capability::Verdict where U: core::convert::Into<T>
+pub type routectl_core::capability::Verdict::Error = core::convert::Infallible
+pub fn routectl_core::capability::Verdict::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::capability::Verdict where U: core::convert::TryFrom<T>
+pub type routectl_core::capability::Verdict::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::capability::Verdict::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::capability::Verdict where T: core::clone::Clone
+pub type routectl_core::capability::Verdict::Owned = T
+pub fn routectl_core::capability::Verdict::clone_into(&self, &mut T)
+pub fn routectl_core::capability::Verdict::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::capability::Verdict where T: 'static + ?core::marker::Sized
+pub fn routectl_core::capability::Verdict::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::capability::Verdict where T: ?core::marker::Sized
+pub fn routectl_core::capability::Verdict::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::capability::Verdict where T: ?core::marker::Sized
+pub fn routectl_core::capability::Verdict::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::capability::Verdict where T: core::clone::Clone
+pub unsafe fn routectl_core::capability::Verdict::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::capability::Verdict
+pub fn routectl_core::capability::Verdict::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::capability::Verdict
+impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::Verdict
 #[non_exhaustive] pub enum routectl_core::VolatileConfidence
 pub routectl_core::VolatileConfidence::High
 pub routectl_core::VolatileConfidence::Low
@@ -4334,14 +4634,23 @@ impl<T> core::convert::From<T> for routectl_core::VolatileReport
 pub fn routectl_core::VolatileReport::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::VolatileReport
 impl<T> tracing::instrument::WithSubscriber for routectl_core::VolatileReport
+pub const routectl_core::CACHE_HIT: &str
 pub const routectl_core::COMPUTER_USE: &str
+pub const routectl_core::EVIDENCE_CLASSES: &[&str]
 pub const routectl_core::HDR_MSG_EGRESS: &str
 pub const routectl_core::HDR_MSG_INGRESS: &str
 pub const routectl_core::HDR_MSG_OUTGOING: &str
 pub const routectl_core::HDR_MSG_UPSTREAM: &str
 pub const routectl_core::MAX_LOG_BODY_EXCERPT: usize
 pub const routectl_core::MAX_TRACE_BODY_BYTES: usize
+pub const routectl_core::PROMPT_CACHING: &str
+pub const routectl_core::SCHEMA_MISMATCH: &str
+pub const routectl_core::SCHEMA_PARSE: &str
+pub const routectl_core::SEARCH_ABSENT_FORCED: &str
+pub const routectl_core::SEARCH_BLOCKS: &str
 pub const routectl_core::STRUCTURED_OUTPUT: &str
+pub const routectl_core::THINKING: &str
+pub const routectl_core::THINKING_BLOCKS: &str
 pub const routectl_core::WEB_SEARCH: &str
 pub const routectl_core::WELL_KNOWN_CAPABILITY_KEYS: &[&str]
 pub trait routectl_core::CacheBreakpointSource
@@ -4380,6 +4689,7 @@ pub fn routectl_core::headers_to_json<'a>(impl core::iter::traits::collect::Into
 pub fn routectl_core::init_log_overrides(core::option::Option<bool>, core::option::Option<usize>, core::option::Option<bool>)
 pub fn routectl_core::is_canonical_request_key(&str) -> bool
 pub fn routectl_core::is_json_error_envelope(&str) -> bool
+pub fn routectl_core::is_known_evidence_class(&str) -> bool
 pub fn routectl_core::minify_json_whitespace(&str) -> core::option::Option<alloc::string::String>
 pub fn routectl_core::mutable_suffix_start(&routectl_core::schema::ChatRequest) -> core::option::Option<usize>
 pub fn routectl_core::normalize_capability_key(&str, &str) -> alloc::string::String
