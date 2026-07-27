@@ -1491,6 +1491,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::CacheCapability::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::config::CacheConfig
 pub routectl_router::config::CacheConfig::auto_emit_top_level_breakpoint: bool
+pub routectl_router::config::CacheConfig::normalize_tools: bool
 impl core::clone::Clone for routectl_router::CacheConfig
 pub fn routectl_router::CacheConfig::clone(&self) -> routectl_router::CacheConfig
 impl core::cmp::Eq for routectl_router::CacheConfig
@@ -6469,16 +6470,18 @@ pub fn routectl_router::BedrockMantleConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::BuildOptions
 pub routectl_router::BuildOptions::bedrock_allowed_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::BuildOptions::bedrock_allowed_body_fields: alloc::vec::Vec<alloc::string::String>
+pub routectl_router::BuildOptions::normalize_tools: bool
 pub routectl_router::BuildOptions::strict_translation: bool
 impl routectl_router::BuildOptions
 pub fn routectl_router::BuildOptions::new() -> Self
 pub fn routectl_router::BuildOptions::with_bedrock_allowed_betas(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub fn routectl_router::BuildOptions::with_bedrock_allowed_body_fields(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub const fn routectl_router::BuildOptions::with_normalize_tools(self, bool) -> Self
 pub const fn routectl_router::BuildOptions::with_strict_translation(self, bool) -> Self
 impl core::clone::Clone for routectl_router::BuildOptions
 pub fn routectl_router::BuildOptions::clone(&self) -> routectl_router::BuildOptions
 impl core::default::Default for routectl_router::BuildOptions
-pub fn routectl_router::BuildOptions::default() -> routectl_router::BuildOptions
+pub fn routectl_router::BuildOptions::default() -> Self
 impl core::fmt::Debug for routectl_router::BuildOptions
 pub fn routectl_router::BuildOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for routectl_router::BuildOptions
@@ -6598,6 +6601,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::CacheCapability::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::CacheConfig
 pub routectl_router::CacheConfig::auto_emit_top_level_breakpoint: bool
+pub routectl_router::CacheConfig::normalize_tools: bool
 impl core::clone::Clone for routectl_router::CacheConfig
 pub fn routectl_router::CacheConfig::clone(&self) -> routectl_router::CacheConfig
 impl core::cmp::Eq for routectl_router::CacheConfig

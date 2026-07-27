@@ -1031,6 +1031,9 @@ fn default_config_byte_identical_to_base_transforms() {
     relocate_client_system(&mut via_base, false);
     mint_metadata_user_id(&mut via_base, &id);
     let _ = normalize_tool_names_to_mcp(&mut via_base);
+    // The default config also canonicalizes tool order on the non-CC branch;
+    // the base sequence must include the same sort to stay byte-identical.
+    super::tool_sort::sort_custom_tools_by_name(&mut via_base);
 
     // Assert: byte-identical serialized output.
     assert_eq!(
@@ -1044,9 +1047,10 @@ fn default_config_byte_identical_to_base_transforms() {
         format!("{SYSTEM_REMINDER_OPEN}\ncustom system prompt\n{SYSTEM_REMINDER_CLOSE}")
     );
     // And the BROADENED normalization applied: the mcp_ subcase doubled
-    // its prefix AND the bare name gained the mcp__ prefix.
-    assert_eq!(via_config["tools"][0]["name"], "mcp__linear_get_issue");
-    assert_eq!(via_config["tools"][1]["name"], "mcp__Bash");
+    // its prefix AND the bare name gained the mcp__ prefix. The tool-array
+    // sort reorders them by (post-normalization) name: mcp__Bash < mcp__linear.
+    assert_eq!(via_config["tools"][0]["name"], "mcp__Bash");
+    assert_eq!(via_config["tools"][1]["name"], "mcp__linear_get_issue");
 }
 
 /// Companion guard for the GENUINE-CC path (is_non_cc=false): with a
@@ -1290,4 +1294,98 @@ fn sensitive_words_obfuscation_carries_no_reverse() {
         result.tool_reverse.is_empty(),
         "sensitive-word obfuscation must not add reverse entries"
     );
+}
+
+// -- tool-array canonicalization (normalize_tools) ---------------------
+
+fn tool_names(body: &serde_json::Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn non_cc_default_sorts_tools_by_name() {
+    // Fire lane: non-CC + default config (normalize_tools on) + all unique
+    // named custom tools -> stable sort by post-normalization name.
+    let id = identity();
+    let req = ChatRequest::default();
+    let mut body = json!({
+        "tools": [{"name": "zebra"}, {"name": "alpha"}, {"name": "mango"}]
+    });
+    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+    assert_eq!(
+        tool_names(&body),
+        vec!["mcp__alpha", "mcp__mango", "mcp__zebra"]
+    );
+}
+
+#[test]
+fn genuine_cc_leaves_tool_order_untouched() {
+    // is_non_cc = false: the sort never runs, so order is whatever the
+    // tool-name normalization leaves (verbatim client order).
+    let id = identity();
+    let req = ChatRequest::default();
+    let mut body = json!({
+        "tools": [{"name": "zebra"}, {"name": "alpha"}]
+    });
+    cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default());
+    assert_eq!(tool_names(&body), vec!["mcp__zebra", "mcp__alpha"]);
+}
+
+#[test]
+fn knob_off_leaves_tool_order_untouched() {
+    // normalize_tools = false: even on the non-CC branch the sort stands down.
+    let id = identity();
+    let req = ChatRequest::default();
+    let cfg = CloakConfig {
+        normalize_tools: false,
+        ..CloakConfig::default()
+    };
+    let mut body = json!({
+        "tools": [{"name": "zebra"}, {"name": "alpha"}]
+    });
+    cloak_oauth_egress(&mut body, &req, &id, true, &cfg);
+    assert_eq!(tool_names(&body), vec!["mcp__zebra", "mcp__alpha"]);
+}
+
+#[test]
+fn non_cc_opaque_tool_stands_down_sort() {
+    // A builtin (Other-shaped) tool present stands the whole sort down; the
+    // non-builtin names still normalize but keep verbatim order.
+    let id = identity();
+    let req = ChatRequest::default();
+    let mut body = json!({
+        "tools": [
+            {"name": "zebra"},
+            {"type": "web_search_20250901", "name": "search"},
+            {"name": "alpha"}
+        ]
+    });
+    cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+    // Builtins skip name normalization; the two customs are normalized but
+    // NOT reordered (stand-down).
+    assert_eq!(
+        tool_names(&body),
+        vec!["mcp__zebra", "search", "mcp__alpha"]
+    );
+}
+
+#[test]
+fn non_cc_cloak_is_idempotent_over_tool_sort() {
+    // Running the full cloak twice yields the same bytes (the sort orders
+    // the final wire names, so a second pass re-sorts to the same order).
+    let id = identity();
+    let req = ChatRequest::default();
+    let template = json!({
+        "tools": [{"name": "delta"}, {"name": "mcp_beta"}, {"name": "charlie"}]
+    });
+    let mut once = template.clone();
+    cloak_oauth_egress(&mut once, &req, &id, true, &CloakConfig::default());
+    let mut twice = once.clone();
+    cloak_oauth_egress(&mut twice, &req, &id, true, &CloakConfig::default());
+    assert_eq!(once, twice);
 }

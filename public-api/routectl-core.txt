@@ -2803,6 +2803,54 @@ impl<T> core::convert::From<T> for routectl_core::OpaqueSseEvent
 pub fn routectl_core::OpaqueSseEvent::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::OpaqueSseEvent
 impl<T> tracing::instrument::WithSubscriber for routectl_core::OpaqueSseEvent
+#[non_exhaustive] pub enum routectl_core::PrefixComponent
+pub routectl_core::PrefixComponent::Messages
+pub routectl_core::PrefixComponent::System
+pub routectl_core::PrefixComponent::Tools
+impl routectl_core::PrefixComponent
+pub const fn routectl_core::PrefixComponent::as_str(self) -> &'static str
+impl core::clone::Clone for routectl_core::PrefixComponent
+pub fn routectl_core::PrefixComponent::clone(&self) -> routectl_core::PrefixComponent
+impl core::cmp::Eq for routectl_core::PrefixComponent
+impl core::cmp::PartialEq for routectl_core::PrefixComponent
+pub fn routectl_core::PrefixComponent::eq(&self, &routectl_core::PrefixComponent) -> bool
+impl core::fmt::Debug for routectl_core::PrefixComponent
+pub fn routectl_core::PrefixComponent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::PrefixComponent
+pub fn routectl_core::PrefixComponent::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for routectl_core::PrefixComponent
+impl core::marker::StructuralPartialEq for routectl_core::PrefixComponent
+impl core::marker::Freeze for routectl_core::PrefixComponent
+impl core::marker::Send for routectl_core::PrefixComponent
+impl core::marker::Sync for routectl_core::PrefixComponent
+impl core::marker::Unpin for routectl_core::PrefixComponent
+impl core::marker::UnsafeUnpin for routectl_core::PrefixComponent
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::PrefixComponent
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::PrefixComponent
+impl<T, U> core::convert::Into<U> for routectl_core::PrefixComponent where U: core::convert::From<T>
+pub fn routectl_core::PrefixComponent::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::PrefixComponent where U: core::convert::Into<T>
+pub type routectl_core::PrefixComponent::Error = core::convert::Infallible
+pub fn routectl_core::PrefixComponent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::PrefixComponent where U: core::convert::TryFrom<T>
+pub type routectl_core::PrefixComponent::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::PrefixComponent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::PrefixComponent where T: core::clone::Clone
+pub type routectl_core::PrefixComponent::Owned = T
+pub fn routectl_core::PrefixComponent::clone_into(&self, &mut T)
+pub fn routectl_core::PrefixComponent::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::PrefixComponent where T: 'static + ?core::marker::Sized
+pub fn routectl_core::PrefixComponent::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::PrefixComponent where T: ?core::marker::Sized
+pub fn routectl_core::PrefixComponent::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::PrefixComponent where T: ?core::marker::Sized
+pub fn routectl_core::PrefixComponent::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::PrefixComponent where T: core::clone::Clone
+pub unsafe fn routectl_core::PrefixComponent::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::PrefixComponent
+pub fn routectl_core::PrefixComponent::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::PrefixComponent
+impl<T> tracing::instrument::WithSubscriber for routectl_core::PrefixComponent
 #[non_exhaustive] pub enum routectl_core::ProbeOutcome
 pub routectl_core::ProbeOutcome::AuthFailed(alloc::string::String)
 pub routectl_core::ProbeOutcome::IndeterminateHttp
@@ -3266,6 +3314,8 @@ pub routectl_core::VolatileKind::HexBlob
 pub routectl_core::VolatileKind::Jwt
 pub routectl_core::VolatileKind::Timestamp
 pub routectl_core::VolatileKind::Uuid
+impl routectl_core::VolatileKind
+pub const fn routectl_core::VolatileKind::as_str(self) -> &'static str
 impl core::clone::Clone for routectl_core::VolatileKind
 pub fn routectl_core::VolatileKind::clone(&self) -> routectl_core::VolatileKind
 impl core::cmp::Eq for routectl_core::VolatileKind
@@ -3273,6 +3323,8 @@ impl core::cmp::PartialEq for routectl_core::VolatileKind
 pub fn routectl_core::VolatileKind::eq(&self, &routectl_core::VolatileKind) -> bool
 impl core::fmt::Debug for routectl_core::VolatileKind
 pub fn routectl_core::VolatileKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for routectl_core::VolatileKind
+pub fn routectl_core::VolatileKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
 impl core::marker::Copy for routectl_core::VolatileKind
 impl core::marker::StructuralPartialEq for routectl_core::VolatileKind
 impl core::marker::Freeze for routectl_core::VolatileKind
@@ -3480,6 +3532,84 @@ pub fn routectl_core::schema::CacheCreation::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::schema::CacheCreation where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::schema::CacheCreation
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::CacheCreation
+#[non_exhaustive] pub struct routectl_core::CallerPrefixAdvisory
+impl routectl_core::CallerPrefixAdvisory
+pub fn routectl_core::CallerPrefixAdvisory::findings(&self) -> &[routectl_core::CallerPrefixFinding]
+impl core::clone::Clone for routectl_core::CallerPrefixAdvisory
+pub fn routectl_core::CallerPrefixAdvisory::clone(&self) -> routectl_core::CallerPrefixAdvisory
+impl core::fmt::Debug for routectl_core::CallerPrefixAdvisory
+pub fn routectl_core::CallerPrefixAdvisory::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::CallerPrefixAdvisory
+impl core::marker::Send for routectl_core::CallerPrefixAdvisory
+impl core::marker::Sync for routectl_core::CallerPrefixAdvisory
+impl core::marker::Unpin for routectl_core::CallerPrefixAdvisory
+impl core::marker::UnsafeUnpin for routectl_core::CallerPrefixAdvisory
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::CallerPrefixAdvisory
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::CallerPrefixAdvisory
+impl<T, U> core::convert::Into<U> for routectl_core::CallerPrefixAdvisory where U: core::convert::From<T>
+pub fn routectl_core::CallerPrefixAdvisory::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::CallerPrefixAdvisory where U: core::convert::Into<T>
+pub type routectl_core::CallerPrefixAdvisory::Error = core::convert::Infallible
+pub fn routectl_core::CallerPrefixAdvisory::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::CallerPrefixAdvisory where U: core::convert::TryFrom<T>
+pub type routectl_core::CallerPrefixAdvisory::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::CallerPrefixAdvisory::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::CallerPrefixAdvisory where T: core::clone::Clone
+pub type routectl_core::CallerPrefixAdvisory::Owned = T
+pub fn routectl_core::CallerPrefixAdvisory::clone_into(&self, &mut T)
+pub fn routectl_core::CallerPrefixAdvisory::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::CallerPrefixAdvisory where T: 'static + ?core::marker::Sized
+pub fn routectl_core::CallerPrefixAdvisory::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::CallerPrefixAdvisory where T: ?core::marker::Sized
+pub fn routectl_core::CallerPrefixAdvisory::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::CallerPrefixAdvisory where T: ?core::marker::Sized
+pub fn routectl_core::CallerPrefixAdvisory::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::CallerPrefixAdvisory where T: core::clone::Clone
+pub unsafe fn routectl_core::CallerPrefixAdvisory::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::CallerPrefixAdvisory
+pub fn routectl_core::CallerPrefixAdvisory::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::CallerPrefixAdvisory
+impl<T> tracing::instrument::WithSubscriber for routectl_core::CallerPrefixAdvisory
+#[non_exhaustive] pub struct routectl_core::CallerPrefixFinding
+impl routectl_core::CallerPrefixFinding
+pub const fn routectl_core::CallerPrefixFinding::breakpoint_position(&self) -> routectl_core::cache_control::BreakpointPosition
+pub const fn routectl_core::CallerPrefixFinding::component(&self) -> routectl_core::PrefixComponent
+pub const fn routectl_core::CallerPrefixFinding::kind(&self) -> routectl_core::VolatileKind
+impl core::clone::Clone for routectl_core::CallerPrefixFinding
+pub fn routectl_core::CallerPrefixFinding::clone(&self) -> routectl_core::CallerPrefixFinding
+impl core::fmt::Debug for routectl_core::CallerPrefixFinding
+pub fn routectl_core::CallerPrefixFinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::CallerPrefixFinding
+impl core::marker::Send for routectl_core::CallerPrefixFinding
+impl core::marker::Sync for routectl_core::CallerPrefixFinding
+impl core::marker::Unpin for routectl_core::CallerPrefixFinding
+impl core::marker::UnsafeUnpin for routectl_core::CallerPrefixFinding
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::CallerPrefixFinding
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::CallerPrefixFinding
+impl<T, U> core::convert::Into<U> for routectl_core::CallerPrefixFinding where U: core::convert::From<T>
+pub fn routectl_core::CallerPrefixFinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::CallerPrefixFinding where U: core::convert::Into<T>
+pub type routectl_core::CallerPrefixFinding::Error = core::convert::Infallible
+pub fn routectl_core::CallerPrefixFinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::CallerPrefixFinding where U: core::convert::TryFrom<T>
+pub type routectl_core::CallerPrefixFinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::CallerPrefixFinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::CallerPrefixFinding where T: core::clone::Clone
+pub type routectl_core::CallerPrefixFinding::Owned = T
+pub fn routectl_core::CallerPrefixFinding::clone_into(&self, &mut T)
+pub fn routectl_core::CallerPrefixFinding::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::CallerPrefixFinding where T: 'static + ?core::marker::Sized
+pub fn routectl_core::CallerPrefixFinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::CallerPrefixFinding where T: ?core::marker::Sized
+pub fn routectl_core::CallerPrefixFinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::CallerPrefixFinding where T: ?core::marker::Sized
+pub fn routectl_core::CallerPrefixFinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::CallerPrefixFinding where T: core::clone::Clone
+pub unsafe fn routectl_core::CallerPrefixFinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::CallerPrefixFinding
+pub fn routectl_core::CallerPrefixFinding::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::CallerPrefixFinding
+impl<T> tracing::instrument::WithSubscriber for routectl_core::CallerPrefixFinding
 pub struct routectl_core::ChatChunk
 pub routectl_core::ChatChunk::choices: alloc::vec::Vec<routectl_core::schema::ChunkChoice>
 pub routectl_core::ChatChunk::id: alloc::string::String
@@ -4701,6 +4831,7 @@ pub fn routectl_core::sanitize_for_log(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body_with_byte_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body_with_cap(&str, usize) -> alloc::string::String
+pub fn routectl_core::scan_caller_prefix_advisory(&routectl_core::schema::ChatRequest) -> routectl_core::CallerPrefixAdvisory
 pub fn routectl_core::scan_volatile(&routectl_core::schema::ChatRequest) -> routectl_core::VolatileReport
 pub fn routectl_core::trace_body_cap() -> usize
 pub fn routectl_core::trace_egress_body(&str, &serde_json::value::Value)

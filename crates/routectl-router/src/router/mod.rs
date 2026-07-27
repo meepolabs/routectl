@@ -4,7 +4,7 @@
 //! with exponential backoff. Per-provider runtime gates (RPM bucket,
 //! circuit breaker) skip unhealthy providers in the chain.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 // The registry tempo now flows through `LearnedCapabilityRegistry::
@@ -15,7 +15,10 @@ use std::time::Duration;
 
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
-use routectl_core::{ChatChunk, ChatResponse, Provider, Result, failure_class::FailureClass};
+use routectl_core::{
+    ChatChunk, ChatResponse, PrefixComponent, Provider, Result, VolatileKind,
+    failure_class::FailureClass,
+};
 use serde_json::Value;
 
 use crate::config::{AliasValue, Config, HistoryReasoning, ReasoningDialect};
@@ -198,6 +201,16 @@ pub struct Router {
     /// forwarded-mode CAPTURE gate (`forwarded_capture_armed` in
     /// routectl-cli), replacing the removed `[mitm] credential_source` read.
     has_forwarded_provider: bool,
+    /// Edge-trigger dedup for the `cache_volatile_in_caller_prefix` advisory
+    /// WARN. Keyed by (structural component, volatile kind); a key admits at
+    /// most one WARN per process. Bounded by construction (3 components x the
+    /// fixed set of high-precision kinds, so <= a dozen entries -- no eviction
+    /// needed) and deliberately per-process rather than per-session: a
+    /// per-session set grows with sessions and would need the bounded-store
+    /// machinery `shadow_store` carries, which is disproportionate for a
+    /// warn-only diagnostic. Reset on a Router rebuild (re-warns once after a
+    /// hot-reload), benign like the `round_robin` reset.
+    volatile_prefix_warned: Mutex<HashSet<(PrefixComponent, VolatileKind)>>,
 }
 
 /// Lock-free router-side observability counters.
@@ -1029,6 +1042,7 @@ impl Router {
             overlay_revision: 0,
             metrics: RouterMetrics::default(),
             has_forwarded_provider,
+            volatile_prefix_warned: Mutex::new(HashSet::new()),
         }
     }
 

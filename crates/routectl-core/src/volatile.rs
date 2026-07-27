@@ -34,7 +34,9 @@
 //! - tool `input_schema` -- schemas are structurally stable but routinely
 //!   embed example values (ids, dates) that would false-positive.
 
-use crate::schema::ChatRequest;
+use crate::cache_control::{BreakpointPosition, compute_frozen_floor};
+use crate::content_part::{ContentPart, KnownContentPart};
+use crate::schema::{ChatRequest, Message, MessageContent};
 use crate::system_content::SystemContent;
 use crate::tool_def::ToolDef;
 
@@ -54,7 +56,7 @@ pub enum VolatileConfidence {
 
 /// Which high-precision volatile pattern matched. Recorded only for HIGH
 /// matches so callers and logs can see what tripped the veto.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VolatileKind {
     /// A UUID token.
@@ -65,6 +67,18 @@ pub enum VolatileKind {
     Jwt,
     /// A long hexadecimal blob (e.g. a hash or nonce).
     HexBlob,
+}
+
+impl VolatileKind {
+    /// Stable, log-safe token naming this kind. Carries no raw value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Uuid => "uuid",
+            Self::Timestamp => "timestamp",
+            Self::Jwt => "jwt",
+            Self::HexBlob => "hex_blob",
+        }
+    }
 }
 
 /// Result of scanning a request's stable prefix. Constructor-only: build it
@@ -112,6 +126,275 @@ pub fn scan_volatile(req: &ChatRequest) -> VolatileReport {
     }
 
     acc.into_report()
+}
+
+/// Which structural component of the caller-cached prefix a WARN-tier
+/// advisory finding sits in. Ordered by cache-prefix position (tools first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PrefixComponent {
+    /// Tool definitions (name + description).
+    Tools,
+    /// System prompt text.
+    System,
+    /// Leading message text inside the caller-cached region.
+    Messages,
+}
+
+impl PrefixComponent {
+    /// Stable, log-safe token naming this component.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tools => "tools",
+            Self::System => "system",
+            Self::Messages => "messages",
+        }
+    }
+}
+
+/// One WARN-tier advisory finding: a high-precision volatile token sits in a
+/// component of the region the CALLER marked cacheable. Carries only the
+/// structural facts (never the raw value): which component, which kind, and
+/// the caller's final breakpoint position.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CallerPrefixFinding {
+    component: PrefixComponent,
+    kind: VolatileKind,
+    breakpoint_position: BreakpointPosition,
+}
+
+impl CallerPrefixFinding {
+    /// The structural component the volatile token was found in.
+    pub const fn component(&self) -> PrefixComponent {
+        self.component
+    }
+
+    /// The high-precision volatile kind that matched.
+    pub const fn kind(&self) -> VolatileKind {
+        self.kind
+    }
+
+    /// The caller's final (deepest) cache breakpoint position, which bounds
+    /// the scanned region.
+    pub const fn breakpoint_position(&self) -> BreakpointPosition {
+        self.breakpoint_position
+    }
+}
+
+/// Result of the advisory pass over the caller-cached prefix. Constructor-
+/// only: build it through `scan_caller_prefix_advisory`, read it through
+/// `findings`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CallerPrefixAdvisory {
+    findings: Vec<CallerPrefixFinding>,
+}
+
+impl CallerPrefixAdvisory {
+    /// The advisory findings, one per (component, high-precision kind) in
+    /// first-seen order. Empty when the caller supplied no breakpoints or no
+    /// high-precision volatile token sits in the cached region.
+    pub fn findings(&self) -> &[CallerPrefixFinding] {
+        &self.findings
+    }
+}
+
+/// WARN-tier, READ-ONLY advisory pass over the region the CALLER marked
+/// cacheable: content at or before the caller's final `cache_control`
+/// breakpoint (tools, system, and leading messages up to that marker).
+///
+/// This is DISTINCT from `scan_volatile`, which drives the auto-emit veto
+/// over routectl's own always-stable prefix (system + tools only) and whose
+/// scope is deliberately fixed. This pass is advisory-only: it never vetoes,
+/// never mutates, and fires ONLY when the caller supplied at least one
+/// breakpoint (auto-emitted breakpoints are routectl's own and are exempt --
+/// callers compute this off the ORIGINAL request, before any auto-emit
+/// injection).
+///
+/// Only the high-precision whole-token detectors (UUID, RFC3339 timestamp,
+/// JWT, long hex blob) surface a finding; counter-shaped LOW signals are not
+/// reported, so a WARN never trips on prose or example ids.
+///
+/// PURE: borrows `req` read-only, returns an owned advisory, mutates nothing.
+#[must_use]
+pub fn scan_caller_prefix_advisory(req: &ChatRequest) -> CallerPrefixAdvisory {
+    let floor = compute_frozen_floor(req);
+    // The deepest caller breakpoint bounds the cached region. `positions` is
+    // in cache-prefix order (tools -> system -> messages -> top-level), so
+    // its last entry is the deepest. Empty means no caller breakpoint.
+    let Some(&final_pos) = floor.positions().last() else {
+        return CallerPrefixAdvisory {
+            findings: Vec::new(),
+        };
+    };
+
+    let mut findings = Vec::new();
+
+    // Tools are the frontmost prefix element. If the deepest marker IS a tool
+    // marker, only tools up to and including it are cached; a deeper marker
+    // (system/messages/top-level) caches the whole tools array.
+    if let Some(tools) = &req.tools {
+        let take = if final_pos == BreakpointPosition::Tools {
+            last_marked_tool(tools).map_or(0, |i| i + 1)
+        } else {
+            tools.len()
+        };
+        let mut acc = Accumulator::new();
+        for tool in tools.iter().take(take) {
+            scan_tool(tool, &mut acc);
+        }
+        push_findings(PrefixComponent::Tools, &acc, final_pos, &mut findings);
+    }
+
+    // System sits after tools: cached only when the deepest marker reaches
+    // System or deeper. A System-position marker caps the scan at the last
+    // marked block (a per-block marker requires the Blocks form); a deeper
+    // marker caches the whole system prefix.
+    if final_pos >= BreakpointPosition::System {
+        let mut acc = Accumulator::new();
+        match req.system.as_ref() {
+            Some(SystemContent::Blocks(blocks)) => {
+                let take = if final_pos == BreakpointPosition::System {
+                    last_marked_system_block(blocks).map_or(0, |i| i + 1)
+                } else {
+                    blocks.len()
+                };
+                for b in blocks.iter().take(take) {
+                    scan_text(&b.text, &mut acc);
+                }
+            }
+            // Flat system text carries no per-block marker, so it can only be
+            // cached by a deeper (messages/top-level) marker, never a
+            // System-position one.
+            Some(SystemContent::Text(s)) if final_pos > BreakpointPosition::System => {
+                scan_text(s, &mut acc);
+            }
+            _ => {}
+        }
+        push_findings(PrefixComponent::System, &acc, final_pos, &mut findings);
+    }
+
+    // Messages sit after system: cached only when the deepest marker reaches
+    // Messages or a top-level marker. A top-level marker freezes the whole
+    // message list; a Messages-position marker caches every message before the
+    // last marked one in full, plus that message up to and including its last
+    // marked part -- content after the marker is uncached and unscanned.
+    if final_pos >= BreakpointPosition::Messages {
+        let mut acc = Accumulator::new();
+        if final_pos == BreakpointPosition::TopLevel {
+            for m in &*req.messages {
+                scan_message_all_text(m, &mut acc);
+            }
+        } else if let Some(last) = last_marked_message(req) {
+            for m in req.messages.iter().take(last) {
+                scan_message_all_text(m, &mut acc);
+            }
+            scan_message_up_to_last_marker(&req.messages[last], &mut acc);
+        }
+        push_findings(PrefixComponent::Messages, &acc, final_pos, &mut findings);
+    }
+
+    CallerPrefixAdvisory { findings }
+}
+
+/// Index of the last tool carrying a caller `cache_control` marker.
+fn last_marked_tool(tools: &[ToolDef]) -> Option<usize> {
+    tools
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.cache_control().is_some())
+        .map(|(i, _)| i)
+        .next_back()
+}
+
+/// Index of the last system block carrying a caller `cache_control` marker.
+fn last_marked_system_block(blocks: &[crate::system_content::SystemBlock]) -> Option<usize> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.cache_control.is_some())
+        .map(|(i, _)| i)
+        .next_back()
+}
+
+/// Index of the last message carrying a caller `cache_control` marker.
+fn last_marked_message(req: &ChatRequest) -> Option<usize> {
+    req.messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| message_has_caller_marker(m))
+        .map(|(i, _)| i)
+        .next_back()
+}
+
+/// Whether any content part of `m` carries a caller `cache_control` marker.
+fn message_has_caller_marker(m: &Message) -> bool {
+    match &m.content {
+        MessageContent::Parts(parts) => parts.iter().any(|p| p.cache_control().is_some()),
+        MessageContent::Text(_) | MessageContent::Null => false,
+    }
+}
+
+/// Scan every text surface of a fully-cached message (flat text and `text`
+/// blocks). Structured payloads (tool inputs/results, images, documents) are
+/// intentionally not scanned: like schemas, they routinely carry example
+/// ids/dates that would false-positive.
+fn scan_message_all_text(m: &Message, acc: &mut Accumulator) {
+    match &m.content {
+        MessageContent::Text(s) => scan_text(s, acc),
+        MessageContent::Parts(parts) => {
+            for p in parts {
+                scan_part_text(p, acc);
+            }
+        }
+        MessageContent::Null => {}
+    }
+}
+
+/// Scan a partially-cached message: text of every part up to AND INCLUDING the
+/// last part carrying a caller marker. Parts after that marker are outside the
+/// cached region.
+fn scan_message_up_to_last_marker(m: &Message, acc: &mut Accumulator) {
+    if let MessageContent::Parts(parts) = &m.content {
+        let last = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.cache_control().is_some())
+            .map(|(i, _)| i)
+            .next_back();
+        if let Some(last) = last {
+            for p in parts.iter().take(last + 1) {
+                scan_part_text(p, acc);
+            }
+        }
+    }
+}
+
+/// Scan the text of a single content part (only `text` blocks carry scannable
+/// prose).
+fn scan_part_text(p: &ContentPart, acc: &mut Accumulator) {
+    if let ContentPart::Known(KnownContentPart::Text { text, .. }) = p {
+        scan_text(text, acc);
+    }
+}
+
+/// Record one advisory finding per HIGH-precision kind the accumulator saw
+/// (its `kinds` set holds only HIGH matches, first-seen deduplicated). LOW
+/// signals leave `kinds` empty and produce no finding.
+fn push_findings(
+    component: PrefixComponent,
+    acc: &Accumulator,
+    breakpoint_position: BreakpointPosition,
+    findings: &mut Vec<CallerPrefixFinding>,
+) {
+    for &kind in &acc.kinds {
+        findings.push(CallerPrefixFinding {
+            component,
+            kind,
+            breakpoint_position,
+        });
+    }
 }
 
 /// Collects the worst tier seen and the set of HIGH kinds in first-seen
@@ -796,5 +1079,263 @@ mod tests {
         let report = scan_volatile(&req_with_system("ts 2026-06-18T14:30:00 here"));
         assert!(!report.is_high_confidence_veto());
         assert_eq!(report.confidence(), VolatileConfidence::None);
+    }
+
+    // -- caller-prefix advisory pass ---------------------------------------
+
+    use crate::cache_control::CacheControl;
+    use crate::content_part::{ContentPart, KnownContentPart};
+
+    fn part_text(text: &str, cc: Option<CacheControl>) -> ContentPart {
+        ContentPart::Known(KnownContentPart::Text {
+            text: text.into(),
+            citations: None,
+            cache_control: cc,
+        })
+    }
+
+    fn user_msg(parts: Vec<ContentPart>) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Parts(parts),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            refusal: None,
+        }
+    }
+
+    const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn advisory_no_caller_breakpoints_is_empty() {
+        // An auto-emit-only request (zero caller breakpoints) never warns,
+        // even with a volatile token sitting in the system prefix.
+        let req = req_with_system(&format!("Session {UUID} active."));
+        let advisory = scan_caller_prefix_advisory(&req);
+        assert!(advisory.findings().is_empty());
+    }
+
+    #[test]
+    fn advisory_warns_on_volatile_before_message_breakpoint() {
+        // Two messages: the first carries a volatile uuid AND the caller's
+        // cache_control marker, so it sits inside the cached region.
+        let req = ChatRequest {
+            model: "test-model".into(),
+            messages: vec![
+                user_msg(vec![part_text(
+                    &format!("context {UUID}"),
+                    Some(CacheControl::ephemeral_5m()),
+                )]),
+                user_msg(vec![part_text("later turn", None)]),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        let findings = advisory.findings();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].component(), PrefixComponent::Messages);
+        assert_eq!(findings[0].kind(), VolatileKind::Uuid);
+        assert_eq!(
+            findings[0].breakpoint_position(),
+            crate::cache_control::BreakpointPosition::Messages
+        );
+    }
+
+    #[test]
+    fn advisory_does_not_warn_on_volatile_after_the_breakpoint() {
+        // The marker sits on message 0; the volatile uuid is in message 1,
+        // AFTER the cached region, so it must not warn.
+        let req = ChatRequest {
+            model: "test-model".into(),
+            messages: vec![
+                user_msg(vec![part_text(
+                    "stable header",
+                    Some(CacheControl::ephemeral_5m()),
+                )]),
+                user_msg(vec![part_text(&format!("fresh {UUID}"), None)]),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        assert!(advisory.findings().is_empty());
+    }
+
+    #[test]
+    fn advisory_top_level_marker_scans_all_messages() {
+        // A top-level caller marker freezes the whole prefix, so a volatile
+        // token in any message warns.
+        let req = ChatRequest {
+            model: "test-model".into(),
+            messages: vec![
+                user_msg(vec![part_text("stable header", None)]),
+                user_msg(vec![part_text(&format!("fresh {UUID}"), None)]),
+            ]
+            .into(),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        let findings = advisory.findings();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].component(), PrefixComponent::Messages);
+        assert_eq!(findings[0].kind(), VolatileKind::Uuid);
+    }
+
+    #[test]
+    fn advisory_warns_on_system_when_system_breakpoint_present() {
+        // A system-block caller marker caches tools + system; a volatile
+        // token in the system prefix warns.
+        let req = ChatRequest {
+            model: "test-model".into(),
+            system: Some(SystemContent::Blocks(vec![SystemBlock {
+                kind: "text".into(),
+                text: format!("run at 2026-06-18T14:30:00Z ({UUID})"),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+                citations: None,
+            }])),
+            messages: vec![user_msg(vec![part_text("hi", None)])].into(),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        let kinds: Vec<_> = advisory.findings().iter().map(|f| f.kind()).collect();
+        assert!(
+            advisory
+                .findings()
+                .iter()
+                .all(|f| f.component() == PrefixComponent::System)
+        );
+        assert!(kinds.contains(&VolatileKind::Uuid));
+        assert!(kinds.contains(&VolatileKind::Timestamp));
+    }
+
+    #[test]
+    fn advisory_tools_only_breakpoint_does_not_scan_system() {
+        // A tools-only caller marker caches tools but NOT system; a volatile
+        // token that lives only in system must not warn.
+        let req = ChatRequest {
+            model: "test-model".into(),
+            system: Some(SystemContent::Text(format!("session {UUID}"))),
+            tools: Some(vec![ToolDef::Custom(CustomTool {
+                name: "calc".into(),
+                description: Some("adds numbers".into()),
+                input_schema: json!({"type": "object"}),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            })]),
+            messages: vec![user_msg(vec![part_text("hi", None)])].into(),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        assert!(advisory.findings().is_empty());
+    }
+
+    #[test]
+    fn advisory_does_not_warn_on_part_after_marker_in_marked_message() {
+        // Within the marked message, the marker sits on part 0; a volatile
+        // token in part 1 (after the marker) is outside the cached region.
+        let req = ChatRequest {
+            model: "test-model".into(),
+            messages: vec![user_msg(vec![
+                part_text("stable header", Some(CacheControl::ephemeral_5m())),
+                part_text(&format!("fresh {UUID}"), None),
+            ])]
+            .into(),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        assert!(advisory.findings().is_empty());
+    }
+
+    #[test]
+    fn advisory_warns_on_part_at_or_before_marker_in_marked_message() {
+        // The marker sits on part 1; the volatile token in part 0 is at-or-
+        // before it, inside the cached region.
+        let req = ChatRequest {
+            model: "test-model".into(),
+            messages: vec![user_msg(vec![
+                part_text(&format!("context {UUID}"), None),
+                part_text("stable tail", Some(CacheControl::ephemeral_5m())),
+            ])]
+            .into(),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        let findings = advisory.findings();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].component(), PrefixComponent::Messages);
+        assert_eq!(findings[0].kind(), VolatileKind::Uuid);
+    }
+
+    #[test]
+    fn advisory_does_not_warn_on_tool_after_the_marked_tool() {
+        // The deepest (and only) marker is on tool 0; a volatile token in
+        // tool 1 is after it and outside the cached region.
+        let marked = ToolDef::Custom(CustomTool {
+            name: "calc".into(),
+            description: Some("adds numbers".into()),
+            input_schema: json!({"type": "object"}),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        });
+        let later = ToolDef::Custom(CustomTool {
+            name: "lookup".into(),
+            description: Some(format!("fetch {UUID}")),
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        });
+        let req = ChatRequest {
+            model: "test-model".into(),
+            tools: Some(vec![marked, later]),
+            messages: vec![user_msg(vec![part_text("hi", None)])].into(),
+            ..Default::default()
+        };
+
+        let advisory = scan_caller_prefix_advisory(&req);
+        assert!(advisory.findings().is_empty());
+    }
+
+    #[test]
+    fn advisory_does_not_mutate_request() -> Result<(), Box<dyn std::error::Error>> {
+        let req = ChatRequest {
+            model: "test-model".into(),
+            system: Some(SystemContent::Blocks(vec![SystemBlock {
+                kind: "text".into(),
+                text: format!("run {UUID}"),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+                citations: None,
+            }])),
+            messages: vec![user_msg(vec![part_text(
+                &format!("more {UUID}"),
+                Some(CacheControl::ephemeral_5m()),
+            )])]
+            .into(),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req)?;
+
+        let _ = scan_caller_prefix_advisory(&req);
+
+        let after = serde_json::to_value(&req)?;
+        assert_eq!(before, after);
+        Ok(())
     }
 }

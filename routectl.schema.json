@@ -219,6 +219,11 @@
           "default": true,
           "description": "Master switch for dispatch-path auto-emission of a top-level\n`cache_control` ephemeral_5m breakpoint. Default on.",
           "type": "boolean"
+        },
+        "normalize_tools": {
+          "default": true,
+          "description": "Master switch for the anthropic-cloak tool-array canonicalization: an\nall-or-nothing stable sort of `tools[]` by name on the non-CC egress,\nso a client that shuffles tool order request-to-request presents a\nstable cache prefix. Default on. A two-way door: turning it off\nrestores verbatim tool order.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1942,7 +1947,8 @@
     "cache": {
       "$ref": "#/$defs/CacheConfig",
       "default": {
-        "auto_emit_top_level_breakpoint": true
+        "auto_emit_top_level_breakpoint": true,
+        "normalize_tools": true
       },
       "description": "Operator-facing `[cache]` block. Controls the dispatch-path\nauto-emission of a top-level Anthropic `cache_control` breakpoint.\nA missing block keeps the default: auto-emit enabled."
     },

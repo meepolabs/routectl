@@ -54,7 +54,7 @@ pub async fn build_provider(
 
 /// Server-wide options that influence per-provider construction.
 /// Defaults are equivalent to the legacy `build_provider` behavior.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BuildOptions {
     /// When `true`, providers reject requests carrying canonical-only
@@ -62,6 +62,11 @@ pub struct BuildOptions {
     /// egress receiving an Anthropic `cache_control` block). Default
     /// `false` -- warn-and-drop. Set from `[server] strict_translation`.
     pub strict_translation: bool,
+    /// Anthropic-cloak tool-array canonicalization switch, sourced from
+    /// `[cache] normalize_tools`. Threaded into each anthropic provider's
+    /// `CloakConfig` at build time (the same global-to-provider channel
+    /// `strict_translation` uses). Default `true`.
+    pub normalize_tools: bool,
     /// Bedrock-accepted `anthropic_beta` flags. Sourced from
     /// `[bedrock] allowed_betas` TOML and applied to every Bedrock
     /// provider. routectl ships no const default; AWS schema drift is
@@ -74,6 +79,17 @@ pub struct BuildOptions {
     pub bedrock_allowed_body_fields: Vec<String>,
 }
 
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            strict_translation: false,
+            normalize_tools: true,
+            bedrock_allowed_betas: Vec::new(),
+            bedrock_allowed_body_fields: Vec::new(),
+        }
+    }
+}
+
 impl BuildOptions {
     /// Build options with every field at its default.
     pub fn new() -> Self {
@@ -83,6 +99,12 @@ impl BuildOptions {
     /// Set the strict-translation posture.
     pub const fn with_strict_translation(mut self, strict: bool) -> Self {
         self.strict_translation = strict;
+        self
+    }
+
+    /// Set the anthropic-cloak tool-array canonicalization switch.
+    pub const fn with_normalize_tools(mut self, normalize: bool) -> Self {
+        self.normalize_tools = normalize;
         self
     }
 
@@ -324,7 +346,7 @@ async fn build_provider_inner(
                         *max_thinking_entry_bytes,
                     ),
                     session_id: None,
-                    cloak: cloak.clone(),
+                    cloak: cloak_with_normalize(cloak, opts.normalize_tools),
                     use_forwarded_bearer: false,
                     mantle: Some(MantleAuth {
                         region: m.region.clone(),
@@ -405,7 +427,7 @@ async fn build_provider_inner(
                     *max_thinking_entry_bytes,
                 ),
                 session_id,
-                cloak: cloak.clone(),
+                cloak: cloak_with_normalize(cloak, opts.normalize_tools),
                 use_forwarded_bearer: is_forwarded,
 
                 #[cfg(feature = "bedrock")]
@@ -1360,6 +1382,20 @@ pub fn apply_catalog_overlay(
             (nickname, stamped)
         })
         .collect()
+}
+
+/// Clone a provider entry's `CloakConfig` and stamp the global
+/// `[cache] normalize_tools` switch onto it. `normalize_tools` is not an
+/// operator-facing `[cloak]` key (it is `#[serde(skip)]` on `CloakConfig`);
+/// it reaches the cloak seam only through this build-time stamp, so the
+/// single operator control stays under `[cache]`.
+fn cloak_with_normalize(
+    cloak: &routectl_providers::anthropic_api::CloakConfig,
+    normalize_tools: bool,
+) -> routectl_providers::anthropic_api::CloakConfig {
+    let mut c = cloak.clone();
+    c.normalize_tools = normalize_tools;
+    c
 }
 
 /// Reject `http://` (cleartext) base_urls at build time so an

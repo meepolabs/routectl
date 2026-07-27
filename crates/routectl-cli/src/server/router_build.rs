@@ -110,6 +110,7 @@ pub async fn build_router_from_config_with_overlay(
 
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
+        .with_normalize_tools(config.cache.normalize_tools)
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
         .with_bedrock_allowed_body_fields(config.bedrock.allowed_body_fields.clone());
 

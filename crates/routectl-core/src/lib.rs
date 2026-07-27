@@ -73,7 +73,10 @@ pub use system_content::{SystemBlock, SystemContent};
 pub use token_source::{StaticToken, TokenSource};
 pub use tool_def::{CustomTool, ToolDef};
 pub use upstream_meta::{AnthropicUnifiedQuota, UpstreamMeta};
-pub use volatile::{VolatileConfidence, VolatileKind, VolatileReport, scan_volatile};
+pub use volatile::{
+    CallerPrefixAdvisory, CallerPrefixFinding, PrefixComponent, VolatileConfidence, VolatileKind,
+    VolatileReport, scan_caller_prefix_advisory, scan_volatile,
+};
 
 /// Cross-crate cap on `body_excerpt` fields in upstream-error tracing
 /// logs. Sized to fit a typical AWS IAM error body (User ARN + action +

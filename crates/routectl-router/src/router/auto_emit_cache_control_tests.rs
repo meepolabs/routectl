@@ -101,6 +101,7 @@ fn rig(
     let mut config = Config {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: global_enabled,
+            normalize_tools: true,
         },
         // Zero backoff keeps the multi-attempt test fast.
         retry: RetryPolicy {
@@ -617,6 +618,7 @@ fn rig_with_cache_pricing_override(
     let mut config = Config {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: true,
+            normalize_tools: true,
         },
         cache_pricing,
         ..Config::default()
@@ -1134,6 +1136,7 @@ fn rig_with_overlay(
     let mut config = Config {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: true,
+            normalize_tools: true,
         },
         retry: RetryPolicy {
             initial_backoff_ms: 0,

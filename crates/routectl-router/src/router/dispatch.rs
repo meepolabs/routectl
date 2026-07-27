@@ -17,7 +17,7 @@ use routectl_core::{
     cache_control::{MAX_BREAKPOINTS, validate_source},
     context_reduction::{ReductionOutcome, apply_json_minify},
     failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
-    sanitize_for_log,
+    sanitize_for_log, scan_caller_prefix_advisory,
 };
 use serde_json::Value;
 
@@ -49,6 +49,31 @@ use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, 
 const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
 
 impl Router {
+    /// Advisory-only WARN when the region the CALLER marked cacheable carries
+    /// per-request-volatile content (fresh ids/timestamps): such a prefix
+    /// writes a fresh cache entry every request that is never re-read. Reads
+    /// the ORIGINAL request (caller breakpoints only; auto-emit is routectl's
+    /// own and exempt), mutates nothing, and never logs a raw value -- only
+    /// the structural component, volatile kind, and breakpoint position.
+    /// Edge-triggered: at most one WARN per process per (component, kind).
+    fn warn_volatile_in_caller_prefix(&self, req: &ChatRequest) {
+        let advisory = scan_caller_prefix_advisory(req);
+        if advisory.findings().is_empty() {
+            return;
+        }
+        let mut warned = self.volatile_prefix_warned.lock();
+        for finding in advisory.findings() {
+            if warned.insert((finding.component(), finding.kind())) {
+                tracing::warn!(
+                    component = finding.component().as_str(),
+                    volatile_kind = finding.kind().as_str(),
+                    breakpoint_position = ?finding.breakpoint_position(),
+                    "cache_volatile_in_caller_prefix",
+                );
+            }
+        }
+    }
+
     /// Complete a non-streaming request with default options, returning
     /// only the dispatch result.
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
@@ -117,6 +142,9 @@ impl Router {
         // not vary by target.
         let auto_cache_plan =
             AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
+        if auto_cache_plan.has_caller_breakpoints {
+            self.warn_volatile_in_caller_prefix(&req);
+        }
         let mut last_err: Option<Error> = None;
         // One learned-capability observation per request per
         // (state_key, feature): the error arm fires per attempt, so this
@@ -748,6 +776,9 @@ impl Router {
         // targets so the decision never drifts.
         let auto_cache_plan =
             AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
+        if auto_cache_plan.has_caller_breakpoints {
+            self.warn_volatile_in_caller_prefix(&req);
+        }
         let mut last_err: Option<Error> = None;
         // One learned-capability observation per request per
         // (state_key, feature): the error arm fires per attempt, so this
