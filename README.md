@@ -408,7 +408,7 @@ See [`docs/TESTED_MODELS.md`](docs/TESTED_MODELS.md) for the verified model matr
 ## Out of scope
 
 - Multi-user auth, TLS, persistent token store. Use a real proxy.
-- Web UI / dashboard. CLI-only by design.
+- Config-editing / interactive admin web UI. The read-only status dashboard (GET / and the /status JSON family) is deliberate; all mutation stays config.toml + CLI.
 - Caching layer. Use a proxy if you want this.
 - Cost-aware routing (overlap with [LMSYS RouteLLM](https://github.com/lm-sys/RouteLLM); different product).
 
