@@ -2718,6 +2718,51 @@ for routectl to derive the UUID from. `env://`, `file://`, and
 `literal:` refs all work for both fields. routectl never refreshes a
 static bearer; rotation is the operator's job.
 
+### `codex_version` (client-identity override)
+
+The ChatGPT backend rejects a session whose HTTP client identity drifts
+from what a real codex CLI install emits, so routectl mimics a specific
+codex CLI version on the wire. That version is baked into the binary (a
+pinned default that ships current); `codex_version` overrides it without
+rebuilding, so an operator can track a newer upstream codex release the
+moment it lands rather than waiting for a routectl release.
+
+```toml
+[providers.codex]
+kind          = "openai-responses"
+auth_kind     = "chatgpt-oauth"
+api_key_ref   = "oauth://codex"
+# codex_version = "0.145.0"   # default: the version pinned into this build
+```
+
+- **Default is the pinned version.** Omit the knob and routectl uses its
+  baked-in default (the codex CLI version this build was cut against). The
+  knob is only for tracking a version newer than the pin.
+- **One derivation point.** The value flows into every codex fingerprint
+  surface together -- the outbound `User-Agent`, the `version` identity
+  header, and the OAuth token-refresh `User-Agent` -- so they can never
+  drift from each other.
+- **Restart-required.** `codex_version` is classified restart-required:
+  a hot config reload does NOT change the running process's identity. The
+  reload logs a "requires a daemon restart to take effect" warning and
+  keeps serving the boot value until the daemon restarts.
+- **Divergent values are an error.** If two `openai-responses` providers
+  set DIFFERENT `codex_version` values, config load fails fast -- the
+  process claims one codex identity, so a silent winner is forbidden.
+  Providers that omit the knob inherit the resolved value.
+- **Used verbatim, never sanitized** -- a transformed value is a different
+  fingerprint than the operator asked for. The value must be bounded,
+  header-legal ASCII with no whitespace or control bytes. An illegal value
+  fails config validation and the serve / `routectl test` load aborts with a
+  precise error (it is never silently sanitized). Only the unvalidated
+  diagnostic path (`provider probe` / `doctor`, which skips config
+  validation) degrades a stray illegal value to the pinned default with a
+  warning rather than crashing the diagnostic.
+- Overriding `version` or `user-agent` through `header_extras` still wins
+  the merge, but doing so on a chatgpt-oauth provider with a value that
+  diverges from the derived identity logs a warning -- prefer
+  `codex_version` to keep the fingerprint coherent.
+
 ## xAI (Grok) provider
 
 routectl can route to xAI's OpenAI-compatible API (`https://api.x.ai/v1`) using

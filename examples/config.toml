@@ -74,6 +74,8 @@ kind           = "openai-responses"
 auth_kind      = "chatgpt-oauth"
 api_key_ref    = "file://<local-path>"
 account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
+# codex_version = "0.145.0"   # override the pinned codex CLI version on the
+                              # wire without a rebuild; restart-required.
 
 # AWS Bedrock with the default credential chain (env -> profile ->
 # SSO -> IRSA -> IMDS). Region applies to every model on this provider.
