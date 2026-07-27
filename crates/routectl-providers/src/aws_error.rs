@@ -118,6 +118,7 @@ fn strip_aws_namespace(raw: &str) -> String {
 /// `{"message":"x","error":{"message":"<large>"}}` -- which would otherwise
 /// pass the top-level-`message` check yet smuggle a large nested body into
 /// the raw stored envelope -- stays on the short excerpt.
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
 pub fn is_carryable_flat_envelope(body: &str, max_bytes: usize) -> bool {
     if body.len() > max_bytes {
         return false;
