@@ -1,6 +1,7 @@
 //! Non-fatal config warnings.
 
 use super::validate::{class_token, is_health_status};
+use crate::class_policy::ConfigFailureClass;
 use crate::config::ProviderEntry;
 
 /// Returns `true` when `entry` is `ProviderEntry::AnthropicApi { context_management: true, .. }`.
@@ -62,7 +63,7 @@ pub(super) fn warn_context_management_needs_preserve(
 /// hard-rejects on. Each finding here is a config smell the operator
 /// probably didn't intend, not a misconfiguration the loader must refuse.
 ///
-/// Two checks, each producing zero or more warning lines:
+/// Three checks, each producing zero or more warning lines:
 ///
 ///   - A `class_overrides` remap whose SOURCE status is a health signal
 ///     (`is_health_status`: 408, 429, or any 500..=599). Since
@@ -74,6 +75,13 @@ pub(super) fn warn_context_management_needs_preserve(
 ///   - An empty `[retry.classes.<c>]` block (both `retry` and `fallback`
 ///     leaves `None`). Parses fine and does nothing; almost always a
 ///     leftover the operator forgot to fill in or clear out.
+///
+///   - `[retry.classes.bad-request] fallback = false`. Valid config
+///     (the override works as written), but the baked `bad-request`
+///     fallback is what walks a capability-filter rejection to a capable
+///     target: turning it off also turns off structured-output rescue,
+///     so a request needing a capability the target lacks hard-fails
+///     instead of falling over.
 ///
 /// Call once per process startup (or `routectl config check`) alongside
 /// `validate_class_policy`; unlike that function, warnings never fail
@@ -102,6 +110,22 @@ pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
                 class_token(*class),
             ));
         }
+    }
+
+    if config
+        .retry
+        .classes
+        .get(&ConfigFailureClass::BadRequest)
+        .and_then(|policy| policy.fallback)
+        == Some(false)
+    {
+        warnings.push(
+            "[retry.classes.bad-request] fallback = false: disabling bad-request fallback \
+             also disables capability-filter structured-output rescue -- a request needing \
+             a capability the target lacks will hard-fail instead of walking to a capable \
+             target"
+                .to_string(),
+        );
     }
 
     warnings
