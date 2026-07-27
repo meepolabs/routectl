@@ -176,23 +176,81 @@ pub fn is_json_error_envelope(body_text: &str) -> bool {
         .is_some()
 }
 
-/// Variant of [`sanitize_upstream_body`] that takes an explicit
-/// character cap. Used by [`debug_upstream_error_body`] for the 4 KB
-/// debug-level full-body log so a JSON validation error with field
-/// detail isn't truncated by the 512-char excerpt cap.
-pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
+/// Collapse an HTML error page to a short byte-count marker. Returns
+/// `Some` only when the (trimmed) body opens like markup -- a misconfigured
+/// base_url landing on a CDN / marketing 404 page -- so multi-KB markup
+/// never lands in an error envelope or a log field. The byte count reflects
+/// the ORIGINAL (untrimmed) body. Shared by the char-cap and byte-cap
+/// sanitizers so both collapse HTML identically.
+fn html_error_marker(body: &str) -> Option<String> {
     let trimmed = body.trim();
     let looks_like_html =
         trimmed.starts_with('<') || trimmed.to_ascii_lowercase().contains("<!doctype");
-    if looks_like_html {
-        return format!("<html error page, {} bytes>", body.len());
+    looks_like_html.then(|| format!("<html error page, {} bytes>", body.len()))
+}
+
+/// Largest char-boundary index `<= cap` in `s`. Walks back from `cap` (or
+/// the string end, whichever is smaller) to the previous UTF-8 char
+/// boundary so a BYTE-count truncation never splits a multi-byte sequence.
+/// Hand-rolled because `str::floor_char_boundary` is still unstable.
+fn floor_char_boundary(s: &str, cap: usize) -> usize {
+    let mut end = cap.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
     }
+    end
+}
+
+/// Variant of [`sanitize_upstream_body`] that takes an explicit
+/// CHARACTER cap. Used by [`debug_upstream_error_body`] for the 4 KB
+/// debug-level full-body log so a JSON validation error with field
+/// detail isn't truncated by the 512-char excerpt cap.
+///
+/// The cap counts CHARS, not bytes: this is a display / log excerpt where
+/// char-count is the intended unit (the 512-char excerpt reads the same
+/// whether or not the content is multi-byte). A caller that needs a hard
+/// BYTE ceiling (e.g. a body re-parsed downstream, bounded by
+/// [`crate::MAX_ERROR_BODY_BYTES`]) must use
+/// [`sanitize_upstream_body_with_byte_cap`] instead -- char-count
+/// truncation of multi-byte input can emit up to `4 * cap` bytes.
+pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
+    if let Some(marker) = html_error_marker(body) {
+        return marker;
+    }
+    let trimmed = body.trim();
     if trimmed.len() <= cap {
         return trimmed.to_string();
     }
     let mut s = trimmed.chars().take(cap).collect::<String>();
     s.push_str("... [truncated]");
     s
+}
+
+/// Variant of [`sanitize_upstream_body_with_cap`] whose `cap` is a hard
+/// TOTAL BYTE ceiling: the ENTIRE returned string (excerpt plus any
+/// truncation marker) never exceeds `cap` bytes, and the truncation always
+/// lands on a UTF-8 char boundary so the output stays valid UTF-8. Unlike
+/// the char-cap sibling, `4 * cap`-byte blowups on all-multi-byte input
+/// cannot happen -- so this is the variant used where the resulting body is
+/// bounded by a byte ceiling and re-parsed downstream (the request-fault
+/// envelope carried at [`crate::MAX_ERROR_BODY_BYTES`]). Callers relying on
+/// a strict transport / storage budget get exactly `cap` bytes at most
+/// (assuming `cap >= "... [truncated]".len()`; smaller caps are degenerate
+/// and unused here).
+pub fn sanitize_upstream_body_with_byte_cap(body: &str, cap: usize) -> String {
+    if let Some(marker) = html_error_marker(body) {
+        return marker;
+    }
+    let trimmed = body.trim();
+    if trimmed.len() <= cap {
+        return trimmed.to_string();
+    }
+    const MARKER: &str = "... [truncated]";
+    // Reserve room for the marker so excerpt + marker together stay within
+    // `cap`, not `cap + MARKER.len()`.
+    let budget = cap.saturating_sub(MARKER.len());
+    let end = floor_char_boundary(trimmed, budget);
+    format!("{}{MARKER}", &trimmed[..end])
 }
 
 /// Cap on the full upstream error body emitted at `tracing::debug!`.
@@ -229,10 +287,7 @@ pub const MAX_TRACE_BODY_BYTES: usize = 16 * 1024;
 fn truncate_json_for_log(body: &serde_json::Value, cap: usize) -> String {
     let s = serde_json::to_string(body).unwrap_or_default();
     if s.len() > cap {
-        let mut end = cap;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = floor_char_boundary(&s, cap);
         format!("{}... [truncated at {cap} bytes]", &s[..end])
     } else {
         s

@@ -167,6 +167,48 @@ fn upstream_body_with_cap_respects_explicit_limit() {
     assert!(got.starts_with("<html error page"));
 }
 
+/// The byte-cap variant truncates on a UTF-8 char boundary so all-multi-byte
+/// input cannot blow past the byte ceiling. A char-count cap would emit up to
+/// `4 * cap` bytes for 4-byte-char input; the byte cap keeps the TOTAL output
+/// (excerpt plus marker) at or under `cap` bytes and always valid UTF-8.
+/// `\u{1F600}` is a 4-byte UTF-8 sequence (written as an escape to keep the
+/// source ASCII-only).
+#[test]
+fn upstream_body_byte_cap_truncates_on_char_boundary() {
+    use super::sanitize_upstream_body_with_byte_cap;
+    const MARKER: &str = "... [truncated]";
+    let cap = crate::MAX_ERROR_BODY_BYTES;
+
+    // Well ABOVE the byte boundary: 20000 * 4 = 80000 bytes for a 64 KB cap.
+    let over = "\u{1F600}".repeat(20_000);
+    assert!(over.len() > cap, "sanity: input exceeds the byte cap");
+    let got = sanitize_upstream_body_with_byte_cap(&over, cap);
+    assert!(
+        got.ends_with(MARKER),
+        "oversized input must carry the marker"
+    );
+    // The TOTAL output (excerpt + marker) is a strict byte ceiling.
+    assert!(
+        got.len() <= cap,
+        "byte-cap total output {} exceeded the {cap}-byte ceiling",
+        got.len()
+    );
+    // Slicing a &str on a non-boundary would have panicked; reaching here and
+    // round-tripping the bytes confirms the output is valid UTF-8.
+    assert_eq!(
+        String::from_utf8(got.clone().into_bytes()).unwrap(),
+        got,
+        "byte-cap output must be valid UTF-8"
+    );
+
+    // Exactly AT the byte boundary passes through whole (no marker): 16384 * 4
+    // = 65536 bytes == cap.
+    let at = "\u{1F600}".repeat(cap / 4);
+    assert_eq!(at.len(), cap, "sanity: input is exactly at the byte cap");
+    let got_at = sanitize_upstream_body_with_byte_cap(&at, cap);
+    assert_eq!(got_at, at, "an at-cap body must pass through unchanged");
+}
+
 // -----------------------------------------------------------------
 // Redaction tests (ROUTECTL_LOG_REDACT_PROMPTS=1)
 // -----------------------------------------------------------------

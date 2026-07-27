@@ -1159,14 +1159,44 @@ fn sanitize_upstream_for_client(status: u16, body: &str) -> String {
 /// bodies or JSON without a top-level `error` object carrying one of
 /// those string fields, so the caller falls back to a status-only
 /// message rather than leaking sibling keys or the raw body.
+///
+/// The extracted detail is length-bounded ([`MAX_UPSTREAM_DETAIL_CHARS`])
+/// before it reaches the client: a legitimate upstream classifier is short,
+/// but a non-AWS nested `{"error":{"message":...}}` envelope (a reverse
+/// proxy or custom endpoint) could otherwise reflect an oversized message
+/// verbatim. This is the client-facing sink counterpart to the
+/// provider-side cap on what a request-fault body may carry raw.
 fn upstream_error_detail(body: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(body).ok()?;
     let err_obj = parsed.get("error")?;
-    err_obj
+    let detail = err_obj
         .get("message")
         .and_then(Value::as_str)
-        .or_else(|| err_obj.get("type").and_then(Value::as_str))
-        .map(str::to_string)
+        .or_else(|| err_obj.get("type").and_then(Value::as_str))?;
+    Some(bound_upstream_detail(detail))
+}
+
+/// Upper bound on the upstream-authored detail surfaced verbatim in a
+/// client-facing message. A legitimate upstream `error.message` /
+/// `error.type` is far shorter; this only bounds an abusive or proxied
+/// envelope so a nested non-AWS shape can never reflect a large body to the
+/// caller.
+const MAX_UPSTREAM_DETAIL_CHARS: usize = routectl_core::MAX_LOG_BODY_EXCERPT;
+
+/// Truncate an upstream-authored detail to [`MAX_UPSTREAM_DETAIL_CHARS`]
+/// chars, appending a `... [truncated]` marker when it ran longer. Char-based
+/// truncation keeps the output valid UTF-8; the marker is a fixed short
+/// suffix so the client message stays bounded regardless of input size.
+fn bound_upstream_detail(detail: &str) -> String {
+    if detail.chars().count() <= MAX_UPSTREAM_DETAIL_CHARS {
+        return detail.to_string();
+    }
+    let mut bounded = detail
+        .chars()
+        .take(MAX_UPSTREAM_DETAIL_CHARS)
+        .collect::<String>();
+    bounded.push_str("... [truncated]");
+    bounded
 }
 
 fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {

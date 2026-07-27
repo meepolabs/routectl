@@ -600,6 +600,34 @@ fn sanitize_upstream_for_client_status_only_for_json_without_error_object() {
     );
 }
 
+#[test]
+fn sanitize_upstream_for_client_bounds_oversized_nested_message() {
+    // A reverse proxy or custom endpoint fronting the Bedrock lane can return
+    // a NESTED `{"error":{"message":"<huge>"}}` 400. Even if such a body
+    // reaches the ingress sink intact, the extracted detail is length-bounded
+    // so an oversized upstream message can never be reflected verbatim to the
+    // caller.
+    let long_message = "leak_".repeat(4_000); // ~20 KB, well past any cap
+    let nested = serde_json::json!({ "error": { "message": long_message } }).to_string();
+
+    let out = sanitize_upstream_for_client(400, &nested);
+
+    assert!(out.contains("400"), "status present: {out:?}");
+    assert!(
+        out.len() <= routectl_core::MAX_LOG_BODY_EXCERPT + 64,
+        "client message must stay bounded, got {} bytes",
+        out.len()
+    );
+    assert!(
+        out.ends_with("... [truncated]"),
+        "an oversized nested message must carry the truncation marker: {out:?}"
+    );
+    assert!(
+        !out.contains(&"leak_".repeat(200)),
+        "the oversized upstream message must not be reflected verbatim"
+    );
+}
+
 #[tokio::test]
 async fn map_error_surfaces_anthropic_thinking_block_message_to_client() {
     // Arrange: the exact production 400 shape Anthropic returns when a

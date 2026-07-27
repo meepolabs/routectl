@@ -5,6 +5,8 @@
 //! boundary maps each variant to a status and a client-safe body while
 //! keeping operator detail in logs.
 
+use std::fmt;
+
 use thiserror::Error;
 
 /// Convenience alias defaulting the error type to [`enum@Error`].
@@ -14,7 +16,13 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// failures, upstream/provider failures, and unexpected runtime faults.
 /// The HTTP boundary maps each variant to a status and a client-safe
 /// body; operator detail stays in logs.
-#[derive(Debug, Error)]
+///
+/// `Debug` is hand-written (not derived) so the [`Error::Upstream`] `body`
+/// -- which can now carry a request-fault envelope up to
+/// [`crate::MAX_ERROR_BODY_BYTES`] -- renders as a bounded excerpt with a
+/// length marker rather than in full. Every `?e` log sink across all lanes
+/// is bounded from one place; see the [`fmt::Debug`] impl below.
+#[derive(Error)]
 pub enum Error {
     /// An upstream provider returned an HTTP error. Carries the operator
     /// detail plus structured classifiers (`retry_after`, `upstream_type`,
@@ -126,6 +134,75 @@ pub enum Error {
     /// A JSON serialization or deserialization failure.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// Hand-written `Debug` for [`enum@Error`]. Identical to the derived form
+/// for every variant and every field EXCEPT [`Error::Upstream`]'s `body`:
+/// that renders as a `body_excerpt` (capped at [`crate::MAX_LOG_BODY_EXCERPT`]
+/// chars) plus a `body_len` total-byte marker, so a request-fault envelope
+/// carried up to [`crate::MAX_ERROR_BODY_BYTES`] cannot flood a `?e` log
+/// sink (retry / fallback / stream-fallback WARN lines) at full size. Only
+/// the Debug rendering is bounded; consumers that read the `body` FIELD
+/// directly (the capability matcher) still see it in full.
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Upstream {
+                provider,
+                status,
+                body,
+                retry_after,
+                upstream_type,
+                upstream_code,
+            } => f
+                .debug_struct("Upstream")
+                .field("provider", provider)
+                .field("status", status)
+                .field("body_excerpt", &body_debug_excerpt(body))
+                .field("body_len", &body.len())
+                .field("retry_after", retry_after)
+                .field("upstream_type", upstream_type)
+                .field("upstream_code", upstream_code)
+                .finish(),
+            Self::NormalizeRequest(a, b) => {
+                f.debug_tuple("NormalizeRequest").field(a).field(b).finish()
+            }
+            Self::NormalizeResponse(a, b) => f
+                .debug_tuple("NormalizeResponse")
+                .field(a)
+                .field(b)
+                .finish(),
+            Self::UnknownProvider(s) => f.debug_tuple("UnknownProvider").field(s).finish(),
+            Self::UnknownAlias(s) => f.debug_tuple("UnknownAlias").field(s).finish(),
+            Self::Auth(s) => f.debug_tuple("Auth").field(s).finish(),
+            Self::Config(s) => f.debug_tuple("Config").field(s).finish(),
+            Self::Internal(s) => f.debug_tuple("Internal").field(s).finish(),
+            Self::Validation(s) => f.debug_tuple("Validation").field(s).finish(),
+            Self::Streaming(s) => f.debug_tuple("Streaming").field(s).finish(),
+            Self::NotImplemented(a, b) => {
+                f.debug_tuple("NotImplemented").field(a).field(b).finish()
+            }
+            Self::Io(e) => f.debug_tuple("Io").field(e).finish(),
+            Self::Json(e) => f.debug_tuple("Json").field(e).finish(),
+        }
+    }
+}
+
+/// Render an [`Error::Upstream`] `body` for `Debug`: the first
+/// [`crate::MAX_LOG_BODY_EXCERPT`] chars, with a `... [truncated]` marker
+/// when the body ran longer. Char-count truncation is fine here (the
+/// excerpt is bounded to `MAX_LOG_BODY_EXCERPT` chars, a few KB at most);
+/// the accompanying `body_len` field carries the true byte length.
+fn body_debug_excerpt(body: &str) -> String {
+    if body.chars().count() <= crate::MAX_LOG_BODY_EXCERPT {
+        return body.to_string();
+    }
+    let mut excerpt = body
+        .chars()
+        .take(crate::MAX_LOG_BODY_EXCERPT)
+        .collect::<String>();
+    excerpt.push_str("... [truncated]");
+    excerpt
 }
 
 // Convenience constructors used widely by provider impls.
@@ -244,5 +321,66 @@ mod tests {
             }
             other => panic!("expected Error::Upstream, got {other:?}"),
         }
+    }
+
+    /// `Debug` for `Error::Upstream` renders the body as a bounded excerpt
+    /// plus a `body_len` marker, so a request-fault envelope carried up to
+    /// `MAX_ERROR_BODY_BYTES` cannot flood a `?e` WARN sink at full size.
+    #[test]
+    fn upstream_debug_bounds_oversized_body() {
+        let body_len = crate::MAX_LOG_BODY_EXCERPT * 8;
+        let body = "z".repeat(body_len);
+        let err = Error::upstream("prov", 400, body);
+
+        let rendered = format!("{err:?}");
+
+        // The rendered Debug string is bounded: it never carries the full
+        // oversized body (the excerpt + marker + field names are far under it).
+        assert!(
+            rendered.len() < body_len,
+            "Debug output must be bounded, got {} for a {body_len}-byte body",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains("body_excerpt"),
+            "Debug must render a bounded body_excerpt field, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("... [truncated]"),
+            "an oversized body must carry the truncation marker, got: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("body_len: {body_len}")),
+            "Debug must carry the true total body length marker, got: {rendered}"
+        );
+    }
+
+    /// A short body renders in full (no marker) and other fields keep their
+    /// derived Debug shape.
+    #[test]
+    fn upstream_debug_short_body_renders_in_full() {
+        let err = Error::upstream_full(
+            "prov",
+            429,
+            "rate limited",
+            Some(Duration::from_secs(5)),
+            Some("rate_limit_exceeded".to_string()),
+            None,
+        );
+
+        let rendered = format!("{err:?}");
+
+        assert!(rendered.contains("body_excerpt: \"rate limited\""));
+        assert!(!rendered.contains("... [truncated]"));
+        assert!(rendered.contains("body_len: 12"));
+        assert!(rendered.contains("upstream_type: Some(\"rate_limit_exceeded\")"));
+        assert!(rendered.contains("retry_after: Some("));
+    }
+
+    /// Non-`Upstream` variants keep the derived Debug shape (tuple form).
+    #[test]
+    fn non_upstream_variant_debug_unchanged() {
+        let err = Error::Validation("bad field".to_string());
+        assert_eq!(format!("{err:?}"), "Validation(\"bad field\")");
     }
 }

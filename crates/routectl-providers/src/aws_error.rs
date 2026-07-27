@@ -91,6 +91,51 @@ fn strip_aws_namespace(raw: &str) -> String {
         .to_string()
 }
 
+/// Whether a request-fault (400/422) body may be carried RAW (byte-capped)
+/// into [`routectl_core::Error::Upstream`]'s `body` for the capability
+/// matcher to re-parse, versus collapsed to the short sanitized excerpt.
+///
+/// True ONLY for the flat AWS envelope shape the matcher reads -- a
+/// top-level `__type` (via [`lift_aws_error_tokens`]) and/or a top-level
+/// string `message` -- AND when the whole body is within `max_bytes`. Any
+/// other 400/422 shape returns false: a NESTED `{"error":{"message":...}}`
+/// body (a reverse proxy or custom endpoint fronting Bedrock), an HTML
+/// page, or plain text has no top-level `message` / `__type`, so it stays
+/// on the short excerpt and the widened body cap can never reflect an
+/// arbitrary large or nested-shaped body up to the caller via the ingress
+/// `error.message` reader.
+///
+/// The `max_bytes` gate bounds BOTH the JSON parse this performs on the
+/// routing path (the matcher's own cap prevents a large parse; this
+/// mirrors it) AND the carried `message` -- which is a substring of the
+/// body and so is itself bounded once the body is. Reuses
+/// [`lift_aws_error_tokens`] for the `__type` detection rather than
+/// hand-rolling a second envelope parser.
+///
+/// A genuine flat AWS error envelope carries only SCALAR top-level fields
+/// (`__type` / `code` / `message` strings). Any container-valued top-level
+/// field is rejected, so a wrapper such as
+/// `{"message":"x","error":{"message":"<large>"}}` -- which would otherwise
+/// pass the top-level-`message` check yet smuggle a large nested body into
+/// the raw stored envelope -- stays on the short excerpt.
+pub fn is_carryable_flat_envelope(body: &str, max_bytes: usize) -> bool {
+    if body.len() > max_bytes {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if obj.values().any(|v| v.is_object() || v.is_array()) {
+        return false;
+    }
+    let has_message = obj.get("message").and_then(Value::as_str).is_some();
+    let (upstream_type, _) = lift_aws_error_tokens(Some(&value));
+    upstream_type.is_some() || has_message
+}
+
 /// Shared 403-vs-other classification for an AWS/Bedrock upstream error.
 /// Both the client-facing message ([`classify_client_error_message`]) and
 /// the structured log line derive from this single source so the two
@@ -498,5 +543,93 @@ mod tests {
             msg.len(),
             oversized
         );
+    }
+
+    /// A flat AWS envelope with a top-level `__type` and/or `message`, within
+    /// the byte ceiling, is carryable -- the shape the capability matcher
+    /// re-parses.
+    #[test]
+    fn carryable_accepts_flat_aws_envelope() {
+        let with_both =
+            r#"{"__type":"com.amazon.coral.validate#ValidationException","message":"bad field"}"#;
+        assert!(is_carryable_flat_envelope(
+            with_both,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+        // Top-level message alone (no __type) still counts as the flat shape.
+        let message_only = r#"{"message":"bad field"}"#;
+        assert!(is_carryable_flat_envelope(
+            message_only,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+        // __type alone (a tokenless throttle-style body) still counts.
+        let type_only = r#"{"__type":"com.amazonaws.bedrock#ThrottlingException"}"#;
+        assert!(is_carryable_flat_envelope(
+            type_only,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+    }
+
+    /// A NESTED `{"error":{"message":...}}` envelope (proxy / custom endpoint),
+    /// an HTML page, plain text, and a non-object body are all NOT carryable:
+    /// they have no top-level `message` / `__type`, so they keep the short
+    /// excerpt and cannot reflect a large body to the caller.
+    #[test]
+    fn carryable_rejects_non_flat_shapes() {
+        let nested = r#"{"error":{"message":"leaked detail"}}"#;
+        assert!(!is_carryable_flat_envelope(
+            nested,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+        let html = "<!DOCTYPE html><html>error</html>";
+        assert!(!is_carryable_flat_envelope(
+            html,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+        let plain = "gateway timeout";
+        assert!(!is_carryable_flat_envelope(
+            plain,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+        let array = r#"["message","__type"]"#;
+        assert!(!is_carryable_flat_envelope(
+            array,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+    }
+
+    /// A wrapper carrying a top-level string `message` AND a container-valued
+    /// field (a nested `error` object smuggling a large body) is NOT
+    /// carryable: only genuinely flat scalar-field envelopes pass, so the
+    /// top-level-`message` check cannot be tricked into storing a large
+    /// nested body raw.
+    #[test]
+    fn carryable_rejects_wrapper_with_container_field() {
+        let wrapper = r#"{"message":"x","error":{"message":"large nested body"}}"#;
+        assert!(!is_carryable_flat_envelope(
+            wrapper,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+        // A flat envelope whose `message` is itself an OBJECT (not a string)
+        // is likewise rejected.
+        let object_message = r#"{"__type":"ValidationException","message":{"detail":"x"}}"#;
+        assert!(!is_carryable_flat_envelope(
+            object_message,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
+    }
+
+    /// A flat envelope whose whole body runs past the byte ceiling is NOT
+    /// carryable: the ceiling bounds both the routing-path parse and the
+    /// carried message (a substring of the body).
+    #[test]
+    fn carryable_rejects_over_ceiling_body() {
+        let oversized = "x".repeat(routectl_core::MAX_ERROR_BODY_BYTES);
+        let body = format!(r#"{{"__type":"ValidationException","message":"{oversized}"}}"#);
+        assert!(body.len() > routectl_core::MAX_ERROR_BODY_BYTES);
+        assert!(!is_carryable_flat_envelope(
+            &body,
+            routectl_core::MAX_ERROR_BODY_BYTES
+        ));
     }
 }

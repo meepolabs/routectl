@@ -1021,6 +1021,7 @@ pub fn routectl_core::log_safe::redact_prompts_in(&serde_json::value::Value) -> 
 pub fn routectl_core::log_safe::sanitize_detail_for_log(&str) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_for_log(&str) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_upstream_body(&str) -> alloc::string::String
+pub fn routectl_core::log_safe::sanitize_upstream_body_with_byte_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_upstream_body_with_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::log_safe::trace_body_cap() -> usize
 pub fn routectl_core::log_safe::trace_egress_body(&str, &serde_json::value::Value)
@@ -4641,6 +4642,7 @@ pub const routectl_core::HDR_MSG_EGRESS: &str
 pub const routectl_core::HDR_MSG_INGRESS: &str
 pub const routectl_core::HDR_MSG_OUTGOING: &str
 pub const routectl_core::HDR_MSG_UPSTREAM: &str
+pub const routectl_core::MAX_ERROR_BODY_BYTES: usize
 pub const routectl_core::MAX_LOG_BODY_EXCERPT: usize
 pub const routectl_core::MAX_TRACE_BODY_BYTES: usize
 pub const routectl_core::PROMPT_CACHING: &str
@@ -4697,6 +4699,7 @@ pub fn routectl_core::redact_prompts_in(&serde_json::value::Value) -> serde_json
 pub fn routectl_core::sanitize_detail_for_log(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_for_log(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body(&str) -> alloc::string::String
+pub fn routectl_core::sanitize_upstream_body_with_byte_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::sanitize_upstream_body_with_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::scan_volatile(&routectl_core::schema::ChatRequest) -> routectl_core::VolatileReport
 pub fn routectl_core::trace_body_cap() -> usize
