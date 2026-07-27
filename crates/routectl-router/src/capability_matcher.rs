@@ -359,8 +359,11 @@ fn extract_feature_naming_capability(
 /// Guards BOTH the self-identifying `error.param` read and the inferred
 /// `error.message` read: a malicious upstream must not be able to force
 /// repeated large-JSON parses on the routing path; a body over this cap is
-/// not parsed and yields `None`.
-const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+/// not parsed and yields `None`. Bound to the shared core constant the
+/// request-fault producers cap their stored body at, so the producer and
+/// this consumer cannot drift and truncate a real envelope into unparseable
+/// JSON.
+const MAX_ERROR_BODY_BYTES: usize = routectl_core::MAX_ERROR_BODY_BYTES;
 
 /// Extract `error.<field>` (a string) from an [`Error::Upstream`] body.
 /// Shared by the self-identifying `param` read and the inferred `message`
@@ -1226,6 +1229,30 @@ mod tests {
         );
         let err = upstream(400, &body, None, None);
         assert_eq!(bedrock_validation_message(&err), None);
+    }
+
+    #[test]
+    fn bedrock_flat_reader_reads_message_over_log_excerpt() {
+        // A validation message longer than the log excerpt cap but within the
+        // matcher ceiling is read intact: the flat reader is bounded by
+        // MAX_ERROR_BODY_BYTES, not the shorter log excerpt the producer once
+        // capped the body at, so a verbose real envelope still reaches the
+        // matcher.
+        let long_message = "reject_".repeat(200);
+        assert!(
+            long_message.len() > routectl_core::MAX_LOG_BODY_EXCERPT,
+            "sanity: message exceeds the log excerpt cap"
+        );
+        let body = flat_validation_body(&long_message);
+        assert!(
+            body.len() <= MAX_ERROR_BODY_BYTES,
+            "sanity: body is within the parse ceiling"
+        );
+        let err = upstream(400, &body, Some(BEDROCK_VALIDATION_EXCEPTION_TYPE), None);
+        assert_eq!(
+            bedrock_validation_message(&err).as_deref(),
+            Some(long_message.as_str())
+        );
     }
 
     #[test]

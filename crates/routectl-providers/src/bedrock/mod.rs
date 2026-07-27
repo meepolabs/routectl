@@ -739,6 +739,16 @@ fn map_success_body(provider_id: &str, status: u16, bytes: &[u8], hit_cap: bool)
     serde_json::from_slice(bytes).map_err(|e| Error::upstream(provider_id, status, e.to_string()))
 }
 
+/// Bedrock upstream statuses whose flat AWS envelope is a request fault the
+/// capability matcher re-parses to attribute a rejected capability. These
+/// carry a `ValidationException` (never a 403 `AccessDenied`), so the body
+/// names a rejected request field, not a principal ARN / account id /
+/// resource ARN -- safe to carry raw (sanitized, capped at the matcher's
+/// shared ceiling) rather than collapsed to a short log excerpt.
+const fn is_request_fault_status(status: u16) -> bool {
+    matches!(status, 400 | 422)
+}
+
 /// Build the CLIENT-facing message from an error body prefix.
 ///
 /// When the body was truncated at the cap (`hit_cap`), the raw prefix is
@@ -746,12 +756,35 @@ fn map_success_body(provider_id: &str, status: u16, bytes: &[u8], hit_cap: bool)
 /// action survives (a 403 whose action passes the strict shape check);
 /// every other truncated body collapses to the fixed cap-exceeded message.
 /// An intact body classifies exactly as before.
+///
+/// A request-fault (400/422) envelope is carried raw (sanitized, byte-capped
+/// at the shared [`routectl_core::MAX_ERROR_BODY_BYTES`] ceiling) rather than
+/// the short log excerpt -- but ONLY when it is the flat AWS envelope shape
+/// the capability matcher re-parses (a top-level `__type` and/or `message`,
+/// via [`crate::aws_error::is_carryable_flat_envelope`]). The matcher reads
+/// the flat AWS `ValidationException` JSON, and the 512-char log excerpt
+/// truncates a verbose envelope into invalid JSON that silently defeats the
+/// match. Any OTHER 400/422 shape (a nested `{"error":{"message":...}}` from
+/// a proxy or custom endpoint, an HTML page, plain text) keeps the prior
+/// 512-char sanitized excerpt, so the widened cap cannot newly reflect an
+/// arbitrary large or nested-shaped body up to the caller via the ingress
+/// `error.message` reader. The log-rendering path
+/// ([`log_bedrock_upstream_error`]) keeps its own 512-char excerpt
+/// independently, so the operator log surface is unchanged. A 403 stays
+/// scrubbed on the `Other`/`AccessDenied` split below.
 fn map_error_message(status: u16, prefix: &str, hit_cap: bool) -> String {
     if hit_cap {
         match classify_bedrock_error(status, prefix) {
             BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
             BedrockErrorClass::Other => crate::http_client::body_cap_exceeded_message(),
         }
+    } else if is_request_fault_status(status)
+        && crate::aws_error::is_carryable_flat_envelope(prefix, routectl_core::MAX_ERROR_BODY_BYTES)
+    {
+        routectl_core::sanitize_upstream_body_with_byte_cap(
+            prefix,
+            routectl_core::MAX_ERROR_BODY_BYTES,
+        )
     } else {
         classify_client_error_message(status, prefix)
     }
@@ -1285,6 +1318,120 @@ mod tests {
             }
             other => panic!("expected Error::Upstream, got {other:?}"),
         }
+    }
+
+    /// A ValidationException envelope whose message exceeds the log excerpt
+    /// (`MAX_LOG_BODY_EXCERPT`) but fits the shared matcher ceiling reaches
+    /// the stored `Error.body` as intact JSON with the full message. The old
+    /// 512-char log excerpt truncated a verbose envelope into unparseable
+    /// JSON and silently defeated the capability matcher.
+    #[test]
+    fn native_lane_400_validation_over_log_excerpt_carries_intact_json() {
+        let long_message = format!(
+            "Malformed input request: {} is not permitted, please reformat",
+            "extraneous_key_".repeat(50)
+        );
+        assert!(
+            long_message.len() > routectl_core::MAX_LOG_BODY_EXCERPT,
+            "sanity: message must exceed the log excerpt cap"
+        );
+        let fixture = serde_json::json!({
+            "__type": "com.amazon.coral.validate#ValidationException",
+            "message": long_message,
+        })
+        .to_string();
+        let (upstream_type, upstream_code) = lift_error_tokens(&fixture);
+        let err = build_client_error(
+            "bedrock-invoke",
+            400,
+            None,
+            &fixture,
+            false,
+            upstream_type,
+            upstream_code,
+        );
+        let Error::Upstream { status, body, .. } = err else {
+            panic!("expected Error::Upstream");
+        };
+        assert_eq!(status, 400);
+        assert!(
+            body.len() > routectl_core::MAX_LOG_BODY_EXCERPT,
+            "the matcher's source body must survive past the log excerpt cap"
+        );
+        let parsed: Value =
+            serde_json::from_str(&body).expect("stored request-fault body must be intact JSON");
+        assert_eq!(
+            parsed.get("message").and_then(Value::as_str),
+            Some(long_message.as_str()),
+            "the full validation message must reach the matcher intact"
+        );
+    }
+
+    /// The request-fault path raises the body cap to the matcher ceiling, it
+    /// does not remove it: a flat ValidationException whose body runs PAST
+    /// `MAX_ERROR_BODY_BYTES` is NOT carried raw -- it collapses to the short
+    /// sanitized log excerpt, so the widened cap has a hard ceiling and a
+    /// hostile upstream cannot force a 64 KB+ body onto the stored `Error`.
+    #[test]
+    fn native_lane_400_validation_over_matcher_ceiling_collapses_to_excerpt() {
+        const MARKER_LEN: usize = "... [truncated]".len();
+        let oversized_message = "x".repeat(routectl_core::MAX_ERROR_BODY_BYTES * 2);
+        let fixture = serde_json::json!({
+            "__type": "com.amazon.coral.validate#ValidationException",
+            "message": oversized_message,
+        })
+        .to_string();
+        assert!(
+            fixture.len() > routectl_core::MAX_ERROR_BODY_BYTES,
+            "sanity: body must exceed the matcher ceiling"
+        );
+        let err = build_client_error("bedrock-invoke", 400, None, &fixture, false, None, None);
+        let Error::Upstream { body, .. } = err else {
+            panic!("expected Error::Upstream");
+        };
+        // An over-ceiling body is not carryable, so it falls back to the
+        // bounded 512-char log excerpt rather than a 64 KB raw body.
+        assert!(
+            body.len() <= routectl_core::MAX_LOG_BODY_EXCERPT + MARKER_LEN,
+            "an over-ceiling body must collapse to the short excerpt, got {}",
+            body.len()
+        );
+    }
+
+    /// A NESTED `{"error":{"message":...}}` 400 envelope (a reverse proxy or
+    /// custom endpoint fronting Bedrock, NOT the flat AWS shape) is NOT carried
+    /// raw even below the matcher ceiling: it keeps the bounded 512-char
+    /// excerpt, so the widened cap cannot reflect a large nested-shaped message
+    /// up to the caller via the ingress `error.message` reader.
+    #[test]
+    fn native_lane_400_nested_error_envelope_stays_on_excerpt() {
+        const MARKER_LEN: usize = "... [truncated]".len();
+        let long_message = "leak_".repeat(400);
+        assert!(
+            long_message.len() > routectl_core::MAX_LOG_BODY_EXCERPT,
+            "sanity: nested message exceeds the log excerpt cap"
+        );
+        let fixture = serde_json::json!({
+            "error": { "message": long_message },
+        })
+        .to_string();
+        assert!(
+            fixture.len() <= routectl_core::MAX_ERROR_BODY_BYTES,
+            "sanity: body is within the matcher ceiling (isolates the shape gate)"
+        );
+        let err = build_client_error("bedrock-invoke", 400, None, &fixture, false, None, None);
+        let Error::Upstream { body, .. } = err else {
+            panic!("expected Error::Upstream");
+        };
+        assert!(
+            body.len() <= routectl_core::MAX_LOG_BODY_EXCERPT + MARKER_LEN,
+            "a nested-shaped body must collapse to the short excerpt, got {}",
+            body.len()
+        );
+        assert!(
+            !body.contains(&long_message),
+            "the oversized nested message must never survive into the stored body"
+        );
     }
 
     /// A cap trip collapses the body to the fixed cap message (the truncated

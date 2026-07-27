@@ -53,10 +53,10 @@ pub use log_safe::{
     StructuralSummary, debug_upstream_error_body, extract_upstream_message, header_trace_enabled,
     headers_to_json, init_log_overrides, is_json_error_envelope, redact_prompts_in,
     sanitize_detail_for_log, sanitize_for_log, sanitize_upstream_body,
-    sanitize_upstream_body_with_cap, trace_body_cap, trace_egress_body, trace_egress_headers,
-    trace_ingress_body, trace_ingress_headers, trace_outgoing_body, trace_outgoing_headers,
-    trace_stream_summary, trace_structural_summary, trace_upstream_response_headers,
-    trace_upstream_success_body, wrap_stream_with_summary,
+    sanitize_upstream_body_with_byte_cap, sanitize_upstream_body_with_cap, trace_body_cap,
+    trace_egress_body, trace_egress_headers, trace_ingress_body, trace_ingress_headers,
+    trace_outgoing_body, trace_outgoing_headers, trace_stream_summary, trace_structural_summary,
+    trace_upstream_response_headers, trace_upstream_success_body, wrap_stream_with_summary,
 };
 pub use provider::{ProbeOutcome, Provider};
 pub use reasoning_dialect::{
@@ -82,3 +82,16 @@ pub use volatile::{VolatileConfidence, VolatileKind, VolatileReport, scan_volati
 /// operators see consistent excerpt lengths across `body_excerpt=...`
 /// fields when grepping logs.
 pub const MAX_LOG_BODY_EXCERPT: usize = 512;
+
+/// Shared producer/consumer ceiling on an upstream request-fault error
+/// body that the capability matcher re-parses as JSON to extract the
+/// rejected field. A request-fault (400/422) provider stores the raw
+/// envelope in `Error::Upstream.body` UP TO this cap, and the matcher
+/// parses `body` only when it is within the SAME cap -- so the two ends
+/// cannot drift and truncate a real envelope into invalid JSON. Distinct
+/// from [`MAX_LOG_BODY_EXCERPT`], which bounds the shorter, always-capped
+/// excerpt rendered into logs; the log excerpt stays 512 even where the
+/// matcher's source body grows to this ceiling. Sized to admit a verbose
+/// validation envelope while bounding the JSON a hostile upstream can
+/// force the routing path to parse.
+pub const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
