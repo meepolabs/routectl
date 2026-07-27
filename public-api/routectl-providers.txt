@@ -1865,6 +1865,7 @@ pub routectl_providers::openai_responses::OpenAiResponsesConfig::auth_kind: rout
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::base_url: alloc::string::String
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::header_extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::id: alloc::string::String
+pub routectl_providers::openai_responses::OpenAiResponsesConfig::installation_id: core::option::Option<alloc::string::String>
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::mantle: core::option::Option<routectl_providers::mantle::MantleAuth>
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::session_id: core::option::Option<alloc::string::String>
 pub routectl_providers::openai_responses::OpenAiResponsesConfig::user_agent: core::option::Option<alloc::string::String>

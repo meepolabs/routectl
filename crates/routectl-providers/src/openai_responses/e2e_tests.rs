@@ -23,6 +23,7 @@ fn make_provider(base_url: &str) -> OpenAiResponsesProvider {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: None,
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -648,6 +649,7 @@ fn api_key_provider(base_url: &str) -> OpenAiResponsesProvider {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: None,
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -729,6 +731,7 @@ async fn probe_chatgpt_oauth_is_unsupported_with_zero_token_calls() {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: None,
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -784,6 +787,7 @@ mod mantle_wire {
             header_extras: Vec::new(),
             user_agent: None,
             session_id: None,
+            installation_id: None,
             mantle: Some(MantleAuth {
                 region: "us-west-2".into(),
                 creds: resolved,
