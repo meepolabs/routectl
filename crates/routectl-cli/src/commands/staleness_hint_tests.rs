@@ -112,6 +112,32 @@ fn emit_suppressed_by_kill_switch() {
 }
 
 #[test]
+fn hint_fires_only_when_all_four_gates_align() {
+    // The seam is a conjunction of four gates over a stale stamp: it fires
+    // only when stderr is a TTY, the run is not CI, the kill switch is unset,
+    // and output is not JSON. The per-gate tests above pin each suppression in
+    // isolation; this exercises all four TOGETHER across the full truth table,
+    // so no combination other than the all-aligned one can ever emit. The
+    // stamp is stale (EPOCH_STAMP against today 100, threshold 14) throughout,
+    // isolating the gate conjunction from the age check.
+    for is_tty in [false, true] {
+        for is_ci in [false, true] {
+            for kill_switch in [false, true] {
+                for is_json in [false, true] {
+                    let fired = !capture(is_tty, is_ci, kill_switch, is_json).is_empty();
+                    let want = is_tty && !is_ci && !kill_switch && !is_json;
+                    assert_eq!(
+                        fired, want,
+                        "gates tty={is_tty} ci={is_ci} kill={kill_switch} json={is_json}: \
+                         fired={fired} but expected {want}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn emit_stays_silent_when_the_stamp_is_fresh() {
     let mut sink: Vec<u8> = Vec::new();
     emit_staleness_hint(

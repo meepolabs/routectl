@@ -91,6 +91,30 @@ default = \"sonnet\"
 /// credential and the config's `oauth://` ref must name the same id.
 const OAUTH_PROVIDER: &str = "anthropic";
 
+/// A config with two routed lanes on a single openai-compat provider (pointed
+/// at a closed loopback port so its probe refuses instantly) plus a
+/// provider-scoped override. Seeds the doctor capability matrix with two
+/// lanes to pivot and an override layer that overrules a learned negative.
+const CAPABILITY_CONFIG: &str = "\
+version = 3
+
+[providers.local]
+kind = \"openai-compat\"
+base_url = \"http://127.0.0.1:1\"
+api_key_ref = \"__API_KEY_REF__\"
+
+[models.laneA]
+provider = \"local\"
+upstream = \"m-a\"
+
+[models.laneB]
+provider = \"local\"
+upstream = \"m-b\"
+
+[capability.overrides.local]
+force_supported = [\"prompt_caching\"]
+";
+
 struct CmdResult {
     code: i32,
     stdout: String,
@@ -219,6 +243,74 @@ fn seed_usage_db(xdg: &Path) -> PathBuf {
     // Opening migrates a fresh file to the current schema, then the handle is
     // dropped so the writer connection is closed before the snapshot is taken.
     let db = routectl_usage::open(&path).expect("create + migrate usage db");
+    drop(db);
+    path
+}
+
+/// Seed the usage ledger with a matched boot tombstone plus three
+/// post-boundary capability events across two lanes: a verified live
+/// positive, a probe negative, and a live negative the config override
+/// overrules. Stamped at the current instant and the baked catalog version /
+/// overlay revision 0, so the doctor's read-only replay resolves the boundary
+/// and admits every row. Mirrors the persistence lifecycle suite's seeding.
+fn seed_capability_ledger(xdg: &Path) -> PathBuf {
+    let dir = routectl_dir(xdg);
+    std::fs::create_dir_all(&dir).expect("create routectl config dir");
+    let path = dir.join("usage.db");
+    let db = routectl_usage::open(&path).expect("create + migrate usage db");
+    let cat = i64::from(routectl_router::CATALOG_VERSION);
+    let ts = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .expect("epoch ms fits i64");
+
+    let event = |lane: &str, cap: &str, verdict: &str, phase: &str, source: &str, evidence| {
+        routectl_usage::CapabilityEvent {
+            ts,
+            lane_key: lane.to_string(),
+            capability: cap.to_string(),
+            verdict: verdict.to_string(),
+            phase: phase.to_string(),
+            source: source.to_string(),
+            tier: "self-identifying".to_string(),
+            evidence_class: evidence,
+            upstream_token: None,
+            catalog_version: cat,
+            overlay_revision: 0,
+        }
+    };
+    let insert = |e: &routectl_usage::CapabilityEvent| {
+        routectl_usage::insert_capability_event(db.conn(), e).expect("insert capability event");
+    };
+
+    insert(&routectl_usage::CapabilityEvent::tombstone(ts, cat, 0));
+    insert(&event(
+        "laneA",
+        "web_search",
+        "verified",
+        "f3",
+        "live",
+        Some("schema_parse".to_string()),
+    ));
+    insert(&event(
+        "laneA",
+        "computer_use",
+        "broken",
+        "f1",
+        "probe",
+        None,
+    ));
+    insert(&event(
+        "laneA",
+        "prompt_caching",
+        "broken",
+        "f1",
+        "live",
+        None,
+    ));
     drop(db);
     path
 }
@@ -485,6 +577,94 @@ fn doctor_json_is_valid_and_carries_schema_version() {
             .is_some_and(serde_json::Value::is_array),
         "doctor --json must carry a findings array:\n{}",
         run.context()
+    );
+}
+
+// ---------------------------------------------------------------------
+// The doctor binary surfaces the read-only capability-matrix panel AND the
+// catalog-freshness rows in BOTH renders, driven by a real seeded ledger.
+// The unit modules pin the panel/section shapes; this pins that the wired
+// binary loads the config, resolves the boundary from the seeded overlay
+// revision, replays the ledger, and emits both on stdout.
+// ---------------------------------------------------------------------
+
+#[test]
+fn doctor_binary_renders_seeded_capability_matrix_and_freshness() {
+    let xdg = tempfile::tempdir().unwrap();
+    seed_overlay(xdg.path());
+    seed_capability_ledger(xdg.path());
+    let config = write_config(xdg.path(), CAPABILITY_CONFIG);
+
+    // Human render: the replayed matrix state line, the seeded verdict tokens
+    // (an override cell overruling the seeded negative), and the freshness
+    // section with its always-present baked-catalog row.
+    let human = run_bounded(xdg.path(), &config, &["doctor"]);
+    assert!(
+        human.stdout.contains("capability matrix:")
+            && human.stdout.contains("learned registry replayed"),
+        "doctor human render must carry the replayed matrix panel:\n{}",
+        human.context()
+    );
+    for token in [
+        "verified[live]",
+        "broken[probe]",
+        "forced_supported[override]",
+    ] {
+        assert!(
+            human.stdout.contains(token),
+            "doctor human matrix must render {token}:\n{}",
+            human.context()
+        );
+    }
+    assert!(
+        human.stdout.contains("Catalog freshness") && human.stdout.contains("baked catalog v"),
+        "doctor human render must carry the catalog-freshness rows:\n{}",
+        human.context()
+    );
+
+    // JSON render: the panel is Available with the seeded cells, and the
+    // findings carry the freshness section.
+    let json = run_bounded(xdg.path(), &config, &["doctor", "--json"]);
+    let value = parse_json(&json);
+
+    let panel = &value["panels"]["capability_matrix"];
+    assert_eq!(
+        panel["availability"]["state"],
+        serde_json::json!("available"),
+        "seeded ledger must drive an Available matrix:\n{}",
+        json.context()
+    );
+    let cell = |lane: &str, cap: &str| -> serde_json::Value {
+        let columns = panel["columns"].as_array().expect("columns array");
+        let ci = columns
+            .iter()
+            .position(|c| c == cap)
+            .unwrap_or_else(|| panic!("column {cap} missing"));
+        let lanes = panel["lanes"].as_array().expect("lanes array");
+        let lane_obj = lanes
+            .iter()
+            .find(|l| l["lane"] == serde_json::json!(lane))
+            .unwrap_or_else(|| panic!("lane {lane} missing"));
+        lane_obj["cells"][ci].clone()
+    };
+    let verified = cell("laneA", "web_search");
+    assert_eq!(verified["verdict"], serde_json::json!("verified"));
+    assert_eq!(verified["source"], serde_json::json!("live"));
+    let overridden = cell("laneA", "prompt_caching");
+    assert_eq!(
+        overridden["verdict"],
+        serde_json::json!("forced_supported"),
+        "the override must overrule the seeded live negative: {overridden}"
+    );
+    assert_eq!(overridden["source"], serde_json::json!("override"));
+
+    let findings = value["findings"].as_array().expect("findings array");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["section"] == serde_json::json!("freshness")),
+        "doctor --json findings must carry the catalog-freshness section:\n{}",
+        json.context()
     );
 }
 
