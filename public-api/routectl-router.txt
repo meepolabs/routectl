@@ -1054,6 +1054,7 @@ pub routectl_router::config::ProviderEntry::OpenaiResponses::auto_emit_top_level
 pub routectl_router::config::ProviderEntry::OpenaiResponses::base_url: core::option::Option<alloc::string::String>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::cache_capability: core::option::Option<routectl_router::CacheCapability>
+pub routectl_router::config::ProviderEntry::OpenaiResponses::codex_version: core::option::Option<alloc::string::String>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::payload_extras: core::option::Option<serde_json::value::Value>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::reduction_enabled: core::option::Option<bool>
@@ -1065,9 +1066,11 @@ pub fn routectl_router::ProviderEntry::anthropic_beta_floor(&self) -> &[alloc::s
 pub fn routectl_router::ProviderEntry::api_key_ref(&self) -> core::option::Option<&str>
 pub const fn routectl_router::ProviderEntry::auto_emit_top_level_breakpoint(&self) -> core::option::Option<bool>
 pub fn routectl_router::ProviderEntry::cache_capability(&self) -> routectl_router::CacheCapability
+pub fn routectl_router::ProviderEntry::codex_version(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::forwarded_base_url(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::gemini(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_router::ProviderEntry::header_extras(&self) -> &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub const fn routectl_router::ProviderEntry::is_chatgpt_oauth_responses(&self) -> bool
 pub const fn routectl_router::ProviderEntry::kind_str(&self) -> &'static str
 pub fn routectl_router::ProviderEntry::openai_compat(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::openai_responses(impl core::convert::Into<alloc::string::String>) -> Self
@@ -1087,6 +1090,7 @@ pub fn routectl_router::ProviderEntry::with_header_extras(self, alloc::collectio
 pub fn routectl_router::ProviderEntry::with_max_thinking_entry_bytes(self, core::option::Option<u32>) -> Self
 pub fn routectl_router::ProviderEntry::with_openai_responses_auth_kind(self, routectl_providers::openai_responses::AuthKind) -> Self
 pub fn routectl_router::ProviderEntry::with_openai_responses_base_url(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_router::ProviderEntry::with_openai_responses_codex_version(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::with_payload_extras(self, serde_json::value::Value) -> Self
 pub fn routectl_router::ProviderEntry::with_runtime(self, routectl_router::ProviderRuntimePolicy) -> Self
 impl core::clone::Clone for routectl_router::ProviderEntry
@@ -5409,6 +5413,7 @@ pub routectl_router::ProviderEntry::OpenaiResponses::auto_emit_top_level_breakpo
 pub routectl_router::ProviderEntry::OpenaiResponses::base_url: core::option::Option<alloc::string::String>
 pub routectl_router::ProviderEntry::OpenaiResponses::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
 pub routectl_router::ProviderEntry::OpenaiResponses::cache_capability: core::option::Option<routectl_router::CacheCapability>
+pub routectl_router::ProviderEntry::OpenaiResponses::codex_version: core::option::Option<alloc::string::String>
 pub routectl_router::ProviderEntry::OpenaiResponses::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::ProviderEntry::OpenaiResponses::payload_extras: core::option::Option<serde_json::value::Value>
 pub routectl_router::ProviderEntry::OpenaiResponses::reduction_enabled: core::option::Option<bool>
@@ -5420,9 +5425,11 @@ pub fn routectl_router::ProviderEntry::anthropic_beta_floor(&self) -> &[alloc::s
 pub fn routectl_router::ProviderEntry::api_key_ref(&self) -> core::option::Option<&str>
 pub const fn routectl_router::ProviderEntry::auto_emit_top_level_breakpoint(&self) -> core::option::Option<bool>
 pub fn routectl_router::ProviderEntry::cache_capability(&self) -> routectl_router::CacheCapability
+pub fn routectl_router::ProviderEntry::codex_version(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::forwarded_base_url(&self) -> core::option::Option<&str>
 pub fn routectl_router::ProviderEntry::gemini(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_router::ProviderEntry::header_extras(&self) -> &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub const fn routectl_router::ProviderEntry::is_chatgpt_oauth_responses(&self) -> bool
 pub const fn routectl_router::ProviderEntry::kind_str(&self) -> &'static str
 pub fn routectl_router::ProviderEntry::openai_compat(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::openai_responses(impl core::convert::Into<alloc::string::String>) -> Self
@@ -5442,6 +5449,7 @@ pub fn routectl_router::ProviderEntry::with_header_extras(self, alloc::collectio
 pub fn routectl_router::ProviderEntry::with_max_thinking_entry_bytes(self, core::option::Option<u32>) -> Self
 pub fn routectl_router::ProviderEntry::with_openai_responses_auth_kind(self, routectl_providers::openai_responses::AuthKind) -> Self
 pub fn routectl_router::ProviderEntry::with_openai_responses_base_url(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn routectl_router::ProviderEntry::with_openai_responses_codex_version(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::with_payload_extras(self, serde_json::value::Value) -> Self
 pub fn routectl_router::ProviderEntry::with_runtime(self, routectl_router::ProviderRuntimePolicy) -> Self
 impl core::clone::Clone for routectl_router::ProviderEntry
@@ -11415,6 +11423,7 @@ pub fn routectl_router::catalog_state_selector_key(&str, &str) -> alloc::string:
 pub fn routectl_router::check_drift_and_persist_state(&[(alloc::string::String, alloc::string::String)], &routectl_router::CatalogOverlay, &std::path::Path)
 pub fn routectl_router::class_policy_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
 pub const fn routectl_router::classify_field(routectl_router::ImpactField) -> routectl_router::ImpactClass
+pub fn routectl_router::codex_identity_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::collect_config_validation(&routectl_router::config::Config) -> routectl_router::ConfigValidation
 pub fn routectl_router::collect_near_lossless_marks(&routectl_core::schema::ChatRequest, usize, usize) -> routectl_router::NearLosslessMarks
 pub fn routectl_router::compute_activation(&[(&str, routectl_auth::oauth::store::LocalProbe)], &routectl_router::config::Config) -> routectl_router::ActivationState
@@ -11456,6 +11465,7 @@ pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::Capabili
 pub fn routectl_router::rebuild_into(&dyn routectl_router::LedgerReader, &routectl_router::KSessionStore, std::time::SystemTime, usize)
 pub const fn routectl_router::resolve_display_verdict(core::option::Option<(routectl_router::OverrideVerdict, routectl_router::OverrideProvenance)>, core::option::Option<(routectl_core::capability::Verdict, routectl_core::capability::EvidenceSource)>, core::option::Option<bool>) -> routectl_router::DisplayVerdict
 pub fn routectl_router::resolve_requested_capability(&str, &routectl_core::error::Error, &routectl_core::failure_class::ClassifiedFailure) -> core::option::Option<(alloc::string::String, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase)>
+pub fn routectl_router::resolved_codex_version(&routectl_router::config::Config) -> core::option::Option<alloc::string::String>
 pub fn routectl_router::save_catalog_overlay(&std::path::Path, u64, alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<routectl_router::OverlayCell>>) -> core::result::Result<routectl_router::CatalogOverlay, routectl_router::OverlayError>
 pub fn routectl_router::shrink_guard(&routectl_router::ShrinkCounts, &routectl_router::ShrinkCounts) -> routectl_router::ShrinkVerdict
 pub const fn routectl_router::stale_after_days() -> i64
@@ -11468,6 +11478,7 @@ pub fn routectl_router::validate_bedrock_global_config(&routectl_router::config:
 pub fn routectl_router::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::validate_capability_overrides(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::validate_class_policy(&routectl_router::config::Config) -> routectl_core::error::Result<()>
+pub fn routectl_router::validate_codex_version(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_config_path(&str) -> core::result::Result<routectl_router::PathShape, routectl_router::PathError>
 pub fn routectl_router::validate_mitm_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_overrides(&alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>) -> core::result::Result<(), alloc::string::String>

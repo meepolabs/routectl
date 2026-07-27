@@ -25,11 +25,12 @@
 //!
 //!   `codex_cli_rs/<X.Y.Z> (<os_type> <os_version>; <arch>) <terminal_token>`
 //!
-//! - `<X.Y.Z>` is `PINNED_CODEX_VERSION`, the codex CLI version routectl
-//!   currently mimics. Bump this whenever the upstream codex CLI's
-//!   `[workspace.package].version` rolls forward; client-identity drift
-//!   detection is "current vs stale" so a stale literal here will start
-//!   getting flagged again.
+//! - `<X.Y.Z>` is the resolved codex version: the operator's
+//!   `codex_version` knob when set, otherwise `PINNED_CODEX_VERSION`, the
+//!   codex CLI version routectl mimics by default. Bump that constant
+//!   whenever the upstream codex CLI's `[workspace.package].version`
+//!   rolls forward; client-identity drift detection is "current vs
+//!   stale" so a stale default will start getting flagged again.
 //! - `<os_type>` mirrors `os_info::OsType`'s display values: "Linux",
 //!   "Mac OS", "Windows".
 //! - `<os_version>` is the kernel release on Linux (`uname -r`-shape),
@@ -68,22 +69,104 @@ pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";
 /// default; the upstream rejects mismatched residency.
 pub const RESIDENCY_HEADER_VALUE: &str = "us";
 
-/// Returns the codex-style `User-Agent` string. Computed once per
-/// process; subsequent calls return a borrowed reference into a
-/// `OnceLock`.
+/// `version` identity header name. The value tracks the resolved codex
+/// version (operator `codex_version` knob, falling back to
+/// `PINNED_CODEX_VERSION`).
+pub const VERSION_HEADER_NAME: &str = "version";
+
+/// The codex client HTTP identity for this process: the version routectl
+/// claims on the wire plus every fingerprint piece derived from it. The
+/// User-Agent and the `version` identity header are derived HERE and
+/// nowhere else -- a single derivation point so the egress and the OAuth
+/// refresh client cannot drift from each other or from what a real codex
+/// CLI install would emit.
 ///
-/// Shape: `codex_cli_rs/<X.Y.Z> (<os_type> <os_version>; <arch>) <terminal_token>`.
-pub fn codex_user_agent() -> &'static str {
-    static UA: OnceLock<String> = OnceLock::new();
-    UA.get_or_init(build_codex_user_agent).as_str()
+/// UA shape: `codex_cli_rs/<version> (<os_type> <os_version>; <arch>) <terminal_token>`.
+#[derive(Debug, Clone)]
+pub struct CodexIdentity {
+    version: String,
+    user_agent: String,
 }
 
-fn build_codex_user_agent() -> String {
+impl CodexIdentity {
+    /// Derive an identity from a codex version string. The version is
+    /// used verbatim (never sanitized -- a transformed value is a
+    /// different fingerprint than the operator asked for); callers that
+    /// accept operator input validate the syntax before constructing.
+    pub fn new(version: impl Into<String>) -> Self {
+        let version = version.into();
+        let user_agent = build_codex_user_agent_for(&version);
+        Self {
+            version,
+            user_agent,
+        }
+    }
+
+    /// The codex version claimed on the wire.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The derived codex-style `User-Agent`.
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
+    /// The compiled identity-header defaults: the two version-independent
+    /// client defaults plus the `version` header keyed to this identity's
+    /// version. Consumed by the openai-responses egress.
+    pub fn identity_headers(&self) -> [(&'static str, &str); 3] {
+        [
+            (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),
+            (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),
+            (VERSION_HEADER_NAME, &self.version),
+        ]
+    }
+}
+
+impl Default for CodexIdentity {
+    fn default() -> Self {
+        Self::new(PINNED_CODEX_VERSION)
+    }
+}
+
+/// Process-global resolved codex identity. Set ONCE by the factory
+/// before any provider is constructed; read by the egress + the OAuth
+/// refresh client through the thin wrappers below. `codex_version` is a
+/// restart-required config knob, so a hot reload cannot flip it -- the
+/// set-once contract here is honest rather than a trap.
+static RESOLVED: OnceLock<CodexIdentity> = OnceLock::new();
+
+/// Install the process-global resolved codex identity. Returns `true`
+/// when this call performed the install, `false` when an identity was
+/// already resolved (a later reload, or a `resolved_identity()` call that
+/// raced ahead and seeded the pinned default). The caller logs the
+/// effective identity only on a `true` return.
+pub fn set_resolved(identity: CodexIdentity) -> bool {
+    RESOLVED.set(identity).is_ok()
+}
+
+/// The process-global resolved codex identity. Falls back to the pinned
+/// default until the factory installs a configured value, so a
+/// zero-config process (and every test that never calls `set_resolved`)
+/// emits the pinned fingerprint -- byte-identical to the pre-knob build.
+pub fn resolved_identity() -> &'static CodexIdentity {
+    RESOLVED.get_or_init(CodexIdentity::default)
+}
+
+/// Returns the resolved codex-style `User-Agent` string.
+///
+/// Shape: `codex_cli_rs/<version> (<os_type> <os_version>; <arch>) <terminal_token>`.
+pub fn codex_user_agent() -> &'static str {
+    resolved_identity().user_agent()
+}
+
+fn build_codex_user_agent_for(version: &str) -> String {
     let os_type = os_type();
     let os_ver = os_version();
     let arch = std::env::consts::ARCH;
     let term = terminal_token();
-    format!("{CODEX_ORIGINATOR}/{PINNED_CODEX_VERSION} ({os_type} {os_ver}; {arch}) {term}")
+    format!("{CODEX_ORIGINATOR}/{version} ({os_type} {os_ver}; {arch}) {term}")
 }
 
 /// Display-name mapping that mirrors `os_info::OsType` for the three
@@ -190,8 +273,8 @@ pub const fn codex_default_headers() -> [(&'static str, &'static str); 2] {
 
 /// Compiled codex identity-header defaults for the openai-responses
 /// ChatgptOauth path: the two client-level defaults plus the `version`
-/// header keyed to `PINNED_CODEX_VERSION`. These ship with routectl and
-/// fire by default so a zero-config operator (auth_kind + api_key_ref
+/// header keyed to the resolved codex identity. These ship with routectl
+/// and fire by default so a zero-config operator (auth_kind + api_key_ref
 /// only) emits a full codex fingerprint without hand-listing every
 /// header in `header_extras`. An operator `header_extras` entry for any
 /// of these keys OVERRIDES the default (the egress build_headers loop
@@ -199,14 +282,14 @@ pub const fn codex_default_headers() -> [(&'static str, &'static str); 2] {
 /// x-client-request-id / x-codex-window-id) are NOT defaults -- they are
 /// generated per request and always win.
 ///
-/// `version` tracks `PINNED_CODEX_VERSION`; bump that constant each
-/// release so the wire identity stays current (the chatgpt.com backend
-/// flags stale identities).
-pub const fn default_identity_headers() -> [(&'static str, &'static str); 3] {
+/// The `version` value comes from [`resolved_identity`]: the operator's
+/// `codex_version` knob when set, else `PINNED_CODEX_VERSION`.
+pub fn default_identity_headers() -> [(&'static str, &'static str); 3] {
+    let identity = resolved_identity();
     [
         (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),
         (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),
-        ("version", PINNED_CODEX_VERSION),
+        (VERSION_HEADER_NAME, identity.version()),
     ]
 }
 
@@ -264,5 +347,56 @@ mod tests {
         assert_eq!(lookup(ORIGINATOR_HEADER_NAME), Some(CODEX_ORIGINATOR));
         assert_eq!(lookup(RESIDENCY_HEADER_NAME), Some(RESIDENCY_HEADER_VALUE));
         assert_eq!(lookup("version"), Some(PINNED_CODEX_VERSION));
+    }
+
+    #[test]
+    fn default_identity_is_pinned_version() {
+        let id = CodexIdentity::default();
+        assert_eq!(id.version(), PINNED_CODEX_VERSION);
+        assert!(
+            id.user_agent()
+                .starts_with(&format!("{CODEX_ORIGINATOR}/{PINNED_CODEX_VERSION}")),
+            "default UA must carry the pinned version: {}",
+            id.user_agent(),
+        );
+    }
+
+    /// One custom version flows into the UA AND the version identity
+    /// header together -- the single-derivation-point guarantee. Tested at
+    /// the struct level (not via the process-global) so the assertion does
+    /// not fight other tests over the set-once `RESOLVED` slot.
+    #[test]
+    fn custom_version_reaches_user_agent_and_version_header_together() {
+        let id = CodexIdentity::new("9.9.9-test");
+        assert_eq!(id.version(), "9.9.9-test");
+        assert!(
+            id.user_agent()
+                .starts_with(&format!("{CODEX_ORIGINATOR}/9.9.9-test ")),
+            "custom version must appear in the UA: {}",
+            id.user_agent(),
+        );
+        let version_header = id
+            .identity_headers()
+            .iter()
+            .find_map(|(n, v)| (*n == VERSION_HEADER_NAME).then_some(*v))
+            .map(str::to_owned);
+        assert_eq!(version_header.as_deref(), Some("9.9.9-test"));
+    }
+
+    /// The custom UA differs from the pinned default only in the version
+    /// segment: the host-derived tail (os / arch / terminal) is identical.
+    #[test]
+    fn custom_version_only_changes_the_version_segment() {
+        let pinned = CodexIdentity::default();
+        let custom = CodexIdentity::new("9.9.9-test");
+        let pinned_tail = pinned
+            .user_agent()
+            .strip_prefix(&format!("{CODEX_ORIGINATOR}/{PINNED_CODEX_VERSION}"))
+            .expect("pinned UA carries the pinned prefix");
+        let custom_tail = custom
+            .user_agent()
+            .strip_prefix(&format!("{CODEX_ORIGINATOR}/9.9.9-test"))
+            .expect("custom UA carries the custom prefix");
+        assert_eq!(pinned_tail, custom_tail);
     }
 }

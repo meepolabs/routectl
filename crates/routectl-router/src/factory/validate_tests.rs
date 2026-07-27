@@ -2318,3 +2318,171 @@ bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
         );
     }
 }
+
+#[cfg(all(test, feature = "openai-responses"))]
+mod codex_version_validation_tests {
+    //! Tests for `validate_codex_version` (conflict + syntax rejects) and
+    //! `codex_identity_warnings` (divergent identity-header override).
+
+    use super::{collect_config_validation, resolved_codex_version, validate_codex_version};
+    use crate::codex_identity_warnings;
+    use crate::config::Config;
+
+    fn parse(toml_text: &str) -> Config {
+        toml::from_str(toml_text).expect("fixture must parse")
+    }
+
+    #[test]
+    fn absent_knob_resolves_to_none_and_passes() {
+        let config = parse(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://ACCT\"\n",
+        );
+        assert_eq!(resolved_codex_version(&config), None);
+        assert!(validate_codex_version(&config).is_ok());
+    }
+
+    #[test]
+    fn single_configured_value_resolves_and_passes() {
+        let config = parse(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://ACCT\"\n\
+             codex_version = \"0.200.0\"\n",
+        );
+        assert_eq!(resolved_codex_version(&config).as_deref(), Some("0.200.0"));
+        assert!(validate_codex_version(&config).is_ok());
+    }
+
+    #[test]
+    fn matching_values_across_providers_pass() {
+        let config = parse(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+             [providers.b]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex2\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://B\"\ncodex_version = \"0.200.0\"\n",
+        );
+        assert!(validate_codex_version(&config).is_ok());
+    }
+
+    #[test]
+    fn divergent_values_error_naming_both_providers() {
+        let config = parse(
+            "[providers.alpha]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+             [providers.beta]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex2\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://B\"\ncodex_version = \"0.201.0\"\n",
+        );
+        let err = validate_codex_version(&config).expect_err("divergent versions must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("alpha"),
+            "error must name first provider: {msg}"
+        );
+        assert!(
+            msg.contains("beta"),
+            "error must name second provider: {msg}"
+        );
+        // Reaches the central suite too.
+        assert!(
+            collect_config_validation(&config)
+                .errors
+                .iter()
+                .any(|e| e.contains("alpha") && e.contains("beta")),
+            "collect_config_validation must surface the conflict"
+        );
+    }
+
+    fn config_with_version(version: &str) -> Config {
+        parse(&format!(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"{version}\"\n"
+        ))
+    }
+
+    #[test]
+    fn empty_version_rejected() {
+        let err = validate_codex_version(&config_with_version("")).expect_err("empty rejected");
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn too_long_version_rejected() {
+        let long = "1".repeat(65);
+        let err =
+            validate_codex_version(&config_with_version(&long)).expect_err("over-long rejected");
+        assert!(err.to_string().contains("maximum"), "{err}");
+    }
+
+    #[test]
+    fn whitespace_version_rejected() {
+        let err = validate_codex_version(&config_with_version("0.200 0"))
+            .expect_err("whitespace rejected");
+        assert!(err.to_string().contains("illegal byte"), "{err}");
+    }
+
+    #[test]
+    fn non_ascii_version_rejected() {
+        // A non-ASCII byte in the version is header-illegal and not the
+        // fingerprint the operator asked for.
+        let err = validate_codex_version(&config_with_version("0.200.\u{00e9}"))
+            .expect_err("non-ascii rejected");
+        assert!(err.to_string().contains("illegal byte"), "{err}");
+    }
+
+    #[test]
+    fn divergent_version_header_override_warns() {
+        // A chatgpt-oauth provider overriding `version` in header_extras
+        // with a value diverging from the derived identity warns (but the
+        // override still wins -- the warning is advisory).
+        let config = parse(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+             [providers.a.header_extras]\nversion = \"0.999.0\"\n",
+        );
+        let warnings = codex_identity_warnings(&config);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("version") && w.contains("0.999.0")),
+            "divergent version override must warn: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn matching_version_header_override_does_not_warn() {
+        let config = parse(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+             [providers.a.header_extras]\nversion = \"0.200.0\"\n",
+        );
+        assert!(
+            codex_identity_warnings(&config).is_empty(),
+            "a matching override must not warn"
+        );
+    }
+
+    #[test]
+    fn header_override_on_api_key_surface_does_not_warn() {
+        // The version override warning is scoped to the chatgpt-oauth
+        // surface -- an api-key responses provider emits no codex
+        // fingerprint, so a `version` header there is not an identity
+        // override.
+        let config = parse(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"env://KEY\"\n\
+             auth_kind = \"api-key\"\n[providers.a.header_extras]\nversion = \"0.999.0\"\n",
+        );
+        assert!(
+            codex_identity_warnings(&config).is_empty(),
+            "api-key surface must not warn on a version header"
+        );
+    }
+
+    #[test]
+    fn absent_override_does_not_warn() {
+        let config = parse(
+            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
+             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n",
+        );
+        assert!(codex_identity_warnings(&config).is_empty());
+    }
+}

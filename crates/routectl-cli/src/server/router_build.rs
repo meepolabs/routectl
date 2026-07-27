@@ -74,6 +74,18 @@ pub async fn build_router_from_config_with_overlay(
         tracing::warn!(warning = %warning, "class policy warning");
     }
 
+    // Reject divergent per-provider codex_version values (the codex
+    // identity is process-global, so a silent winner is forbidden) and
+    // syntactically illegal versions. Runs in the cheap pre-parse gate too;
+    // repeated here because this builder is reachable without that gate
+    // (tests, direct Config construction). The process-global identity
+    // itself is installed inside `build_resolved_models` -- the shared
+    // factory boundary every provider-construction path routes through.
+    routectl_router::validate_codex_version(&config)?;
+    for warning in routectl_router::codex_identity_warnings(&config) {
+        tracing::warn!(warning = %warning, "codex identity warning");
+    }
+
     // Reject malformed `[registry]` glob keys at startup so query-time
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;

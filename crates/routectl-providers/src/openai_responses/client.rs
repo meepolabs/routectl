@@ -258,7 +258,7 @@ impl OpenAiResponsesProvider {
         // header_extras loop below OVERRIDES any matching key. ApiKey /
         // BedrockMantle get no defaults (no codex fingerprint).
         if self.cfg.auth_kind == AuthKind::ChatgptOauth {
-            for (k, v) in default_codex_identity_headers() {
+            for (k, v) in routectl_core::identity::codex::default_identity_headers() {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
             // Stable per-credential id minted at login; ties requests to
@@ -314,31 +314,6 @@ impl OpenAiResponsesProvider {
         }
         Ok(rb)
     }
-}
-
-/// Compiled codex identity-header defaults for the ChatgptOauth path.
-/// These ship with routectl and fire by default so a zero-config
-/// operator (auth_kind + api_key_ref only) emits a full codex
-/// fingerprint without hand-listing every header in `header_extras`.
-/// An operator `header_extras` entry for any of these keys OVERRIDES
-/// the default (the build_headers loop inserts after these). The
-/// per-request UUIDs (thread-id / x-client-request-id /
-/// x-codex-window-id) are NOT defaults -- they are generated per
-/// request and always win.
-///
-/// `version` tracks `PINNED_CODEX_VERSION`; bump that constant each
-/// release so the wire fingerprint stays current (the chatgpt.com risk
-/// system flags stale fingerprints).
-const fn default_codex_identity_headers() -> [(&'static str, &'static str); 3] {
-    use routectl_core::identity::codex::{
-        CODEX_ORIGINATOR, ORIGINATOR_HEADER_NAME, PINNED_CODEX_VERSION, RESIDENCY_HEADER_NAME,
-        RESIDENCY_HEADER_VALUE,
-    };
-    [
-        (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),
-        (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),
-        ("version", PINNED_CODEX_VERSION),
-    ]
 }
 
 /// Persist the Cloudflare cookie jar on provider teardown so the next
