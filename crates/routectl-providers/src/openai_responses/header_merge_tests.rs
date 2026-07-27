@@ -14,6 +14,7 @@ fn oauth_provider_with_extras(extras: Vec<(String, String)>) -> OpenAiResponsesP
         header_extras: extras,
         user_agent: None,
         session_id: None,
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -32,6 +33,7 @@ fn oauth_provider_with_session(session_id: Option<String>) -> OpenAiResponsesPro
         header_extras: Vec::new(),
         user_agent: None,
         session_id,
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -109,6 +111,7 @@ fn api_key_header_extras_not_blocked_by_fingerprint_filter() {
         header_extras: vec![("version".to_string(), "custom-1.0".to_string())],
         user_agent: None,
         session_id: None,
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -299,6 +302,7 @@ fn api_key_path_stamps_no_session_header() {
         header_extras: Vec::new(),
         user_agent: None,
         session_id: Some("session-stable-123".into()),
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -333,6 +337,7 @@ fn api_key_path_omits_generated_identity_headers() {
         header_extras: vec![("originator".to_string(), "codex_cli_rs".to_string())],
         user_agent: None,
         session_id: None,
+        installation_id: None,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -348,12 +353,174 @@ fn api_key_path_omits_generated_identity_headers() {
     // api-key path. (The originator header_extra DOES pass through --
     // that is the normal merge -- but the generated identity trio
     // must not be auto-injected here.)
-    for absent in ["thread-id", "x-client-request-id", "x-codex-window-id"] {
+    for absent in [
+        "thread-id",
+        "x-client-request-id",
+        "x-codex-window-id",
+        "x-codex-installation-id",
+    ] {
         assert!(
             header_vals(&request, absent).is_empty(),
             "{absent:?} must NOT be injected on the api-key path",
         );
     }
+}
+
+/// Build a ChatgptOauth provider carrying an optional `installation_id`,
+/// with empty `header_extras`. Used by the installation-id stamp tests.
+fn oauth_provider_with_installation(installation_id: Option<String>) -> OpenAiResponsesProvider {
+    let cfg = OpenAiResponsesConfig {
+        id: "openai-responses:hm-install".into(),
+        auth: Arc::new(StaticToken::new("test-jwt")) as Arc<dyn TokenSource>,
+        account_id: Some("acct-uuid".into()),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        auth_kind: AuthKind::ChatgptOauth,
+        header_extras: Vec::new(),
+        user_agent: None,
+        session_id: None,
+        installation_id,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
+    };
+    OpenAiResponsesProvider::new(cfg)
+}
+
+/// A ChatgptOauth provider carrying an installation_id stamps it as the
+/// `x-codex-installation-id` header, stable across requests.
+#[test]
+fn installation_id_stamped_on_chatgpt_oauth_path() {
+    // Arrange
+    let provider = oauth_provider_with_installation(Some("install-stable-abc".into()));
+
+    // Act
+    let req_a = provider
+        .build_headers(
+            provider.client.post("https://chatgpt.test/responses"),
+            &base_req(),
+            "test-jwt",
+        )
+        .expect("build_headers ok")
+        .build()
+        .expect("build");
+    let req_b = provider
+        .build_headers(
+            provider.client.post("https://chatgpt.test/responses"),
+            &base_req(),
+            "test-jwt",
+        )
+        .expect("build_headers ok")
+        .build()
+        .expect("build");
+
+    // Assert: single-valued and identical across requests.
+    let iid_a = header_vals(&req_a, "x-codex-installation-id");
+    let iid_b = header_vals(&req_b, "x-codex-installation-id");
+    assert_eq!(iid_a, vec!["install-stable-abc".to_string()]);
+    assert_eq!(
+        iid_a, iid_b,
+        "installation-id must be stable across requests on one provider",
+    );
+}
+
+/// A provider with `installation_id == None` stamps no
+/// `x-codex-installation-id` header.
+#[test]
+fn no_installation_id_stamps_no_header() {
+    // Arrange
+    let provider = oauth_provider_with_installation(None);
+    let rb = provider.client.post("https://chatgpt.test/responses");
+
+    // Act
+    let request = provider
+        .build_headers(rb, &base_req(), "test-jwt")
+        .expect("build_headers ok")
+        .build()
+        .expect("build");
+
+    // Assert
+    assert!(
+        header_vals(&request, "x-codex-installation-id").is_empty(),
+        "installation_id None must not stamp an x-codex-installation-id header",
+    );
+}
+
+/// The ApiKey (non-ChatgptOauth) path stamps no
+/// `x-codex-installation-id` header, even when an installation_id is
+/// somehow set on the config.
+#[test]
+fn api_key_path_stamps_no_installation_header() {
+    // Arrange: ApiKey config carrying an installation_id (which would be
+    // None in practice -- the factory only resolves it for ChatgptOauth
+    // -- but proves the path gate, not just the value).
+    let cfg = OpenAiResponsesConfig {
+        id: "openai-responses:hm-apikey-install".into(),
+        auth: Arc::new(StaticToken::new("sk-test")) as Arc<dyn TokenSource>,
+        account_id: None,
+        base_url: "https://api.openai.com/v1".into(),
+        auth_kind: AuthKind::ApiKey,
+        header_extras: Vec::new(),
+        user_agent: None,
+        session_id: None,
+        installation_id: Some("install-stable-abc".into()),
+        #[cfg(feature = "bedrock")]
+        mantle: None,
+    };
+    let provider = OpenAiResponsesProvider::new(cfg);
+    let rb = provider.client.post("https://api.openai.com/v1/responses");
+
+    // Act
+    let request = provider
+        .build_headers(rb, &base_req(), "sk-test")
+        .expect("build_headers ok")
+        .build()
+        .expect("build");
+
+    // Assert
+    assert!(
+        header_vals(&request, "x-codex-installation-id").is_empty(),
+        "ApiKey path must not stamp an x-codex-installation-id header",
+    );
+}
+
+/// An operator `header_extras` entry for `x-codex-installation-id`
+/// OVERRIDES the factory-resolved default: the wire shows the operator
+/// value, and only once (insert replaces, not appends).
+#[test]
+fn header_extras_overrides_installation_id() {
+    // Arrange: ChatgptOauth provider with both a resolved installation_id
+    // and an operator override for the same header.
+    let cfg = OpenAiResponsesConfig {
+        id: "openai-responses:hm-install-override".into(),
+        auth: Arc::new(StaticToken::new("test-jwt")) as Arc<dyn TokenSource>,
+        account_id: Some("acct-uuid".into()),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        auth_kind: AuthKind::ChatgptOauth,
+        header_extras: vec![(
+            "x-codex-installation-id".to_string(),
+            "operator-install".to_string(),
+        )],
+        user_agent: None,
+        session_id: None,
+        installation_id: Some("factory-install".into()),
+        #[cfg(feature = "bedrock")]
+        mantle: None,
+    };
+    let provider = OpenAiResponsesProvider::new(cfg);
+    let rb = provider.client.post("https://chatgpt.test/responses");
+
+    // Act
+    let request = provider
+        .build_headers(rb, &base_req(), "test-jwt")
+        .expect("build_headers ok")
+        .build()
+        .expect("build");
+
+    // Assert: the operator's value wins; the factory default is gone.
+    assert_eq!(
+        header_vals(&request, "x-codex-installation-id"),
+        vec!["operator-install".to_string()],
+        "operator header_extras must override the factory installation-id",
+    );
 }
 
 /// With empty `header_extras`, the compiled codex identity defaults

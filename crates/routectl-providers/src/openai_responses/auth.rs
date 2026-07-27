@@ -123,6 +123,7 @@ mod tests {
             header_extras: Vec::new(),
             user_agent: None,
             session_id: None,
+            installation_id: None,
             #[cfg(feature = "bedrock")]
             mantle: None,
         }

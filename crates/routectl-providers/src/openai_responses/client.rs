@@ -54,6 +54,14 @@ pub struct OpenAiResponsesConfig {
     /// providers or a credential that has none -- in every such case
     /// `build_headers` stamps no `session-id` header.
     pub session_id: Option<String>,
+    /// Persistent per-installation id (UUIDv4), stamped as the
+    /// `x-codex-installation-id` header on the ChatgptOauth surface.
+    /// `Some` when the factory resolved (adopted or minted) the id from
+    /// the config-dir file; `None` for ApiKey / BedrockMantle providers
+    /// or when the file could not be read/created -- in every such case
+    /// `build_headers` stamps no `x-codex-installation-id` header. Value
+    /// never logged.
+    pub installation_id: Option<String>,
     /// Bedrock mantle authentication. `Some` selects the mantle lane
     /// (SigV4/bearer signing under the `bedrock-mantle` scope, no bearer
     /// `Authorization` from the provider, a no-redirect client, and no
@@ -81,7 +89,10 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("user_agent", &self.user_agent)
             // Presence only: the session_id ties requests to one logical
             // session; treat it as sensitive so its value never enters logs.
-            .field("session_id", &self.session_id.is_some());
+            .field("session_id", &self.session_id.is_some())
+            // Presence only: the installation-id is a stable machine
+            // fingerprint; keep its value out of logs.
+            .field("installation_id", &self.installation_id.is_some());
         // Mantle lane presence + its own redacting Debug (region + auth
         // shape only, never credential material).
         #[cfg(feature = "bedrock")]
@@ -111,6 +122,7 @@ impl OpenAiResponsesConfig {
             header_extras: Vec::new(),
             user_agent: None,
             session_id: None,
+            installation_id: None,
             #[cfg(feature = "bedrock")]
             mantle: None,
         }
@@ -268,6 +280,19 @@ impl OpenAiResponsesProvider {
             // carries none. Value never logged.
             if let Some(sid) = &self.cfg.session_id {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, "session-id", sid);
+            }
+            // Persistent per-installation id, resolved once by the factory.
+            // Inserted in the defaults phase (before the header_extras loop)
+            // so an operator `header_extras` entry for
+            // `x-codex-installation-id` still wins, and omitted when the
+            // factory could not resolve one. Value never logged.
+            if let Some(iid) = &self.cfg.installation_id {
+                crate::http_client::insert_header(
+                    &mut header_map,
+                    &self.cfg.id,
+                    "x-codex-installation-id",
+                    iid,
+                );
             }
         }
 

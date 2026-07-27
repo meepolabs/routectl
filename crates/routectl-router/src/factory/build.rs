@@ -571,6 +571,15 @@ async fn build_provider_inner(
             } else {
                 None
             };
+            // Resolve the persistent per-installation id for the
+            // ChatgptOauth surface only (adopt an existing file, mint one
+            // otherwise; a read/write failure yields None + a WARN, never a
+            // build failure). ApiKey / BedrockMantle get None.
+            let installation_id = if *auth_kind == OpenaiResponsesAuthKind::ChatgptOauth {
+                super::installation_id::resolve_installation_id()
+            } else {
+                None
+            };
             let resolved_base_url = base_url
                 .clone()
                 .unwrap_or_else(|| default_responses_base(*auth_kind));
@@ -586,6 +595,7 @@ async fn build_provider_inner(
                 .collect();
             cfg.user_agent = user_agent.clone();
             cfg.session_id = session_id;
+            cfg.installation_id = installation_id;
             Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
         }
         #[cfg(feature = "bedrock")]

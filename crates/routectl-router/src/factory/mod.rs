@@ -1,6 +1,8 @@
 //! Provider factory root + re-exports.
 
 mod build;
+#[cfg(feature = "openai-responses")]
+mod installation_id;
 mod validate;
 mod warnings;
 
