@@ -146,8 +146,72 @@ mod class_policy_validation_tests {
             "clean config must produce no warnings"
         );
     }
-}
 
+    #[test]
+    fn warns_when_bad_request_fallback_is_disabled() {
+        // Arrange: [retry.classes.bad-request] fallback = false. Valid
+        // config, but it turns off the fallback walk that rescues a
+        // capability-filter rejection onto a capable target.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::BadRequest,
+            ClassPolicy {
+                retry: None,
+                fallback: Some(false),
+            },
+        );
+
+        // Act + Assert: config stays valid, but a warning fires naming
+        // the structured-output rescue consequence.
+        validate_class_policy(&cfg).expect("disabling bad-request fallback is valid config");
+        let warnings = class_policy_warnings(&cfg);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("bad-request") && w.contains("structured-output rescue")),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_bad_request_fallback_warning_on_default_config() {
+        // Arrange: default config -- no [retry.classes] overlay at all.
+        let cfg = Config::default();
+
+        // Act + Assert
+        let warnings = class_policy_warnings(&cfg);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("structured-output rescue")),
+            "default config must not warn about bad-request fallback: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_bad_request_fallback_warning_when_a_different_class_disables_fallback() {
+        // Arrange: [retry.classes.auth] fallback = false. Disabling a
+        // DIFFERENT class's fallback must not trip the bad-request-only
+        // structured-output-rescue warning.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::Auth,
+            ClassPolicy {
+                retry: None,
+                fallback: Some(false),
+            },
+        );
+
+        // Act + Assert
+        let warnings = class_policy_warnings(&cfg);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("structured-output rescue")),
+            "disabling auth fallback must not warn about bad-request rescue: {warnings:?}"
+        );
+    }
+}
 #[cfg(test)]
 mod base_url_validation_tests {
     use super::validate_base_url_scheme;

@@ -918,6 +918,13 @@ above verbatim. Within a present block, an absent leaf (`retry` or
 `ClassPolicy`'s two leaves are independently optional, so setting
 `retry` does not force an implicit `fallback` value.
 
+Setting `[retry.classes.bad-request] fallback = false` is valid but
+flagged by an advisory warning (`class_policy_warnings`, never fails
+the load): the baked `bad-request` fallback is what walks a
+capability-filter rejection to a capable target, so turning it off also
+disables structured-output rescue -- a request needing a capability the
+target lacks then hard-fails instead of falling over.
+
 `feature-unsupported` is RESERVED: `[retry.classes.feature-unsupported]`,
 even empty, is rejected at config load (`validate_class_policy`,
 `crates/routectl-router/src/factory.rs`). The baked row above already
