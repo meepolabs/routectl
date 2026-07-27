@@ -93,6 +93,7 @@ fn rig(
     let mut config = Config {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: auto_cache,
+            normalize_tools: true,
         },
         reduction: ReductionConfig {
             enabled: reduction_enabled,
@@ -417,6 +418,7 @@ fn two_entry_chain_rig() -> (Router, Captured, Captured) {
     let mut config = Config {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: false,
+            normalize_tools: true,
         },
         reduction: ReductionConfig { enabled: true },
         retry: RetryPolicy {

@@ -423,13 +423,14 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_providers::anthropic_api::AnthropicApiProvider::into_shared(self) -> Shared
 pub struct routectl_providers::anthropic_api::CloakConfig
 pub routectl_providers::anthropic_api::CloakConfig::mode: routectl_providers::anthropic_api::CloakMode
+pub routectl_providers::anthropic_api::CloakConfig::normalize_tools: bool
 pub routectl_providers::anthropic_api::CloakConfig::sensitive_words: alloc::vec::Vec<alloc::string::String>
 pub routectl_providers::anthropic_api::CloakConfig::strict_mode: bool
 pub routectl_providers::anthropic_api::CloakConfig::tool_rename: alloc::vec::Vec<routectl_providers::anthropic_api::ToolRename>
 impl core::clone::Clone for routectl_providers::anthropic_api::CloakConfig
 pub fn routectl_providers::anthropic_api::CloakConfig::clone(&self) -> routectl_providers::anthropic_api::CloakConfig
 impl core::default::Default for routectl_providers::anthropic_api::CloakConfig
-pub fn routectl_providers::anthropic_api::CloakConfig::default() -> routectl_providers::anthropic_api::CloakConfig
+pub fn routectl_providers::anthropic_api::CloakConfig::default() -> Self
 impl core::fmt::Debug for routectl_providers::anthropic_api::CloakConfig
 pub fn routectl_providers::anthropic_api::CloakConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl schemars::JsonSchema for routectl_providers::anthropic_api::CloakConfig

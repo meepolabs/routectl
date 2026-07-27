@@ -29,11 +29,13 @@ mod billing;
 mod identity;
 mod obfuscate;
 mod tool_rename;
+mod tool_sort;
 
 use billing::strip_billing_block;
 use identity::{mint_metadata_user_id, relocate_client_system};
 use obfuscate::obfuscate_sensitive_words;
 use tool_rename::{apply_tool_rename, normalize_tool_names_to_mcp};
+use tool_sort::sort_custom_tools_by_name;
 
 #[cfg(test)]
 use billing::BILLING_PREFIX;
@@ -90,7 +92,7 @@ pub struct ToolRename {
 /// derived `Debug` would leak them through a future `dbg!(&cfg.cloak)` or
 /// `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and
 /// `AnthropicApiConfig` both Debug-format this, so the impl is mandatory.
-#[derive(Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CloakConfig {
     /// Cloak mode. Default `Auto` (original heuristic).
@@ -112,6 +114,30 @@ pub struct CloakConfig {
     /// Words to obfuscate (zero-width-space insertion) in system blocks
     /// and message text. Default empty (no obfuscation).
     pub sensitive_words: Vec<String>,
+    /// Tool-array canonicalization switch. NOT an operator-facing `[cloak]`
+    /// key: it is `#[serde(skip)]` so it never appears in the config schema,
+    /// and is stamped programmatically from the global `[cache]
+    /// normalize_tools` switch by the router factory. Default `true`.
+    #[serde(skip, default = "default_true_bool")]
+    pub normalize_tools: bool,
+}
+
+/// Field default for `CloakConfig::normalize_tools` on deserialize (the
+/// field is serde-skipped, so this is the value a parsed config lands with).
+const fn default_true_bool() -> bool {
+    true
+}
+
+impl Default for CloakConfig {
+    fn default() -> Self {
+        Self {
+            mode: CloakMode::default(),
+            strict_mode: false,
+            tool_rename: Vec::new(),
+            sensitive_words: Vec::new(),
+            normalize_tools: true,
+        }
+    }
 }
 
 impl std::fmt::Debug for CloakConfig {
@@ -124,6 +150,7 @@ impl std::fmt::Debug for CloakConfig {
             .field("strict_mode", &self.strict_mode)
             .field("tool_rename_count", &self.tool_rename.len())
             .field("sensitive_words_count", &self.sensitive_words.len())
+            .field("normalize_tools", &self.normalize_tools)
             .finish()
     }
 }
@@ -212,6 +239,17 @@ pub fn cloak_oauth_egress(
     let mut tool_reverse = normalize_tool_names_to_mcp(body);
     apply_tool_rename(body, &config.tool_rename, &mut tool_reverse);
     obfuscate_sensitive_words(body, &config.sensitive_words);
+    // Tool-array canonicalization: stable-sort `tools[]` by name so a non-CC
+    // client that shuffles tool order request-to-request presents a stable
+    // cache prefix. Gated on the SAME `is_non_cc` branch the identity rewrite
+    // uses (never looser) plus the operator kill switch. Runs LAST so it
+    // orders the FINAL wire names -- ordering the pre-normalization names
+    // would not be idempotent (a second cloak pass sorts the mcp__-prefixed
+    // names and could reorder differently). All-or-nothing: any opaque tool,
+    // missing name, or duplicate name stands the whole sort down.
+    if is_non_cc && config.normalize_tools {
+        sort_custom_tools_by_name(body);
+    }
     CloakResult { tool_reverse }
 }
 

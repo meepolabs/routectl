@@ -33,12 +33,20 @@ pub struct CacheConfig {
     /// `cache_control` ephemeral_5m breakpoint. Default on.
     #[serde(default = "default_true")]
     pub auto_emit_top_level_breakpoint: bool,
+    /// Master switch for the anthropic-cloak tool-array canonicalization: an
+    /// all-or-nothing stable sort of `tools[]` by name on the non-CC egress,
+    /// so a client that shuffles tool order request-to-request presents a
+    /// stable cache prefix. Default on. A two-way door: turning it off
+    /// restores verbatim tool order.
+    #[serde(default = "default_true")]
+    pub normalize_tools: bool,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             auto_emit_top_level_breakpoint: true,
+            normalize_tools: true,
         }
     }
 }
