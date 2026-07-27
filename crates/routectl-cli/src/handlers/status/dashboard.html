@@ -530,10 +530,10 @@
       background: var(--pill-neutral-bg);
       color: var(--pill-neutral-fg);
     }
-    .circuit-closed, .reach-reachable, .status-Pass, .src-user {
+    .circuit-closed, .reach-reachable, .status-Pass, .learned-verified, .src-user {
       background: var(--pill-ok-bg); color: var(--pill-ok-fg);
     }
-    .circuit-open, .reach-degraded, .status-Fail, .verdict-route-away, .src-missing {
+    .circuit-open, .reach-degraded, .status-Fail, .verdict-route-away, .learned-broken, .src-missing {
       background: var(--pill-err-bg); color: var(--pill-err-fg);
     }
     .circuit-half_open_ready, .status-Warn {
@@ -826,8 +826,8 @@
        status / qstatus) in the pill's own fg color. The dot is keyed on the
        dedicated .tok-dot marker class applied by the token builder for those
        families only, so no other family can grow a dot by sharing a class-name
-       substring. Non-status token families (verdict / tier / prov / src)
-       intentionally carry no marker and no dot. */
+       substring. Non-status token families (verdict / learned / tier / prov /
+       src) intentionally carry no marker and no dot. */
     .tok.tok-dot::before {
       content: "";
       display: inline-block;
@@ -925,7 +925,7 @@
     // co-versioning note in the document head: same-binary, so a mismatch
     // should never occur in practice; the check is a graceful-degrade
     // guard, not version negotiation.
-    var EXPECTED = { usage: 2, health: 4, config: 1, doctor: 4 };
+    var EXPECTED = { usage: 2, health: 5, config: 1, doctor: 4 };
     var PANELS = ['usage', 'health', 'config', 'doctor'];
     var WINDOWS = ['today', 'week', 'month', 'all'];
 
@@ -1092,6 +1092,10 @@
       verdict: {
         'route-away': { label: 'route away', title: 'route-away - capability filtered out for this target' },
         'force-supported': { label: 'force supported', title: 'force-supported - capability forced on for this target' }
+      },
+      learned: {
+        verified: { label: 'verified', title: 'verified - capability confirmed supported for this target' },
+        broken: { label: 'broken', title: 'broken - capability confirmed unsupported for this target' }
       },
       prov: {
         provider: { label: 'provider', title: 'provider - legacy per-provider unsupported_features' },
@@ -1908,15 +1912,17 @@
       return det;
     }
 
-    // Circuit "open for" duration from the SERVER clock: max(0, serverNowMs -
-    // open_since_ms). A null open_since (closed / post-restart) or an unusable
-    // server clock renders "-" -- never a negative age, never invented
-    // pre-restart history.
-    function circuitOpenFor(openSinceMs) {
-      if (openSinceMs === null || openSinceMs === undefined || !isFinite(serverNowMs)) {
+    // Relative age from the SERVER clock: max(0, serverNowMs - ms). Serves a
+    // circuit's "open for" duration (from open_since_ms) and a learned
+    // negative's last-observation age (from last_seen_ms). A null / absent
+    // input (closed / post-restart, or no last_seen) or an unusable server
+    // clock renders "-" -- never a negative age, never invented pre-restart
+    // history.
+    function ageSince(ms) {
+      if (ms === null || ms === undefined || !isFinite(serverNowMs)) {
         return '-';
       }
-      return humanDuration(Math.max(0, serverNowMs - Number(openSinceMs)));
+      return humanDuration(Math.max(0, serverNowMs - Number(ms)));
     }
 
     // Quota reset cell: a reset instant at or before the server's as_of has
@@ -2392,7 +2398,7 @@
             x.state_key, x.nickname, x.provider_name,
             tokLabeled('circuit', 'circuit', x.circuit), humanCount(x.rpm_available)
           ], [
-            ['open for', circuitOpenFor(x.open_since_ms)],
+            ['open for', ageSince(x.open_since_ms)],
             ['last outcome', labelCell('outcome', x.last_outcome)],
             ['last outcome at', fmtTsPos(x.last_outcome_at_ms)],
             ['upstream', x.upstream],
@@ -2417,7 +2423,58 @@
         });
         c.appendChild(lt.t);
       }
+
+      subhead(c, 'Capability matrix');
+      if (!ln.length) {
+        c.appendChild(none());
+      } else {
+        // Pivot the learned negatives into a lane x capability grid: rows are
+        // the sorted distinct lanes (state keys) present, columns the sorted
+        // distinct capabilities. Each populated cell is the verdict pill plus
+        // the relative age of the last observation; an empty (lane, capability)
+        // pairing renders "-".
+        var lanes = [];
+        var caps = [];
+        var byLane = {};
+        ln.forEach(function (x) {
+          var lane = x.state_key || '';
+          var cap = x.capability_key || '';
+          if (lanes.indexOf(lane) === -1) { lanes.push(lane); }
+          if (caps.indexOf(cap) === -1) { caps.push(cap); }
+          if (!byLane[lane]) { byLane[lane] = {}; }
+          byLane[lane][cap] = x;
+        });
+        lanes.sort();
+        caps.sort();
+        var cols = [R('lane')];
+        caps.forEach(function (cap) { cols.push(C(cap)); });
+        var mt = mkTable('Capability matrix', cols);
+        lanes.forEach(function (lane) {
+          var row = byLane[lane] || {};
+          var cells = [lane];
+          caps.forEach(function (cap) { cells.push(verdictAgeCell(row[cap])); });
+          trow(mt, cells);
+        });
+        c.appendChild(mt.t);
+      }
       return c;
+    }
+
+    // One capability-matrix cell: the learned verdict pill plus the relative
+    // age of its last observation. An absent entry (no learned row for this
+    // lane x capability) renders "-".
+    function verdictAgeCell(entry) {
+      if (!entry) { return '-'; }
+      var span = document.createElement('span');
+      span.appendChild(tokLabeled('learned', 'learned', entry.verdict));
+      var age = ageSince(entry.last_seen_ms);
+      if (age !== '-') {
+        var meta = document.createElement('span');
+        meta.className = 'meta';
+        meta.textContent = ' ' + age;
+        span.appendChild(meta);
+      }
+      return span;
     }
 
     function buildConfig(d) {

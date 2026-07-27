@@ -26,7 +26,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the health panel payload.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Per-target health plus learned negatives for the routing surface.
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +85,10 @@ struct LearnedNegative {
     phase: &'static str,
     /// Evidence-source token (`live`/`probe`) from the core `EvidenceSource`.
     source: &'static str,
+    /// Epoch-ms the row was last observed. Derived from the entry's monotonic
+    /// last-seen age against the single pinned build clock; a future-dated
+    /// last-seen clamps the age to zero, never yielding a negative age.
+    last_seen_ms: Option<i64>,
 }
 
 /// Map the internal `CircuitPhase` to its snake_case wire token. Owned by
@@ -155,7 +159,7 @@ fn map_target(target: RouteTargetStatus, now_ms: i64) -> TargetHealth {
     }
 }
 
-fn map_learned(entry: LearnedRegistryEntry) -> LearnedNegative {
+fn map_learned(entry: LearnedRegistryEntry, now: Instant, now_ms: i64) -> LearnedNegative {
     LearnedNegative {
         state_key: entry.state_key,
         capability_key: entry.feature_key,
@@ -164,6 +168,10 @@ fn map_learned(entry: LearnedRegistryEntry) -> LearnedNegative {
         observations: entry.observations,
         phase: entry.phase.as_str(),
         source: entry.source.as_str(),
+        last_seen_ms: Some(epoch_ms_of(
+            now_ms,
+            now.saturating_duration_since(entry.last_seen),
+        )),
     }
 }
 
@@ -183,7 +191,7 @@ fn build_from_view(view: &StatusRouterView) -> HealthPanel {
     let learned_negatives = view
         .learned_capabilities()
         .into_iter()
-        .map(map_learned)
+        .map(|entry| map_learned(entry, now, now_ms))
         .collect();
     HealthPanel {
         targets,
@@ -421,7 +429,7 @@ mod tests {
             phase: FailurePhase::F2,
             source: EvidenceSource::Live,
         };
-        let mapped = map_learned(entry);
+        let mapped = map_learned(entry, Instant::now(), 10_000);
         assert_eq!(mapped.state_key, "opus");
         assert_eq!(mapped.capability_key, "structured_output");
         assert_eq!(mapped.verdict, "broken");
@@ -448,9 +456,56 @@ mod tests {
             phase: FailurePhase::F3,
             source: EvidenceSource::Live,
         };
-        let mapped = map_learned(entry);
+        let mapped = map_learned(entry, Instant::now(), 10_000);
         assert_eq!(mapped.verdict, "verified");
         assert_eq!(mapped.phase, "f3");
+    }
+
+    fn learned_entry(last_seen: Instant) -> LearnedRegistryEntry {
+        LearnedRegistryEntry {
+            state_key: "opus".into(),
+            feature_key: "web_search".into(),
+            verdict: Verdict::LearnedBroken(FailurePhase::F1),
+            signal_tier: SignalTier::Inferred,
+            observations: 1,
+            first_seen: last_seen,
+            last_seen,
+            expires_at: last_seen,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+        }
+    }
+
+    /// `last_seen_ms` is derived from the entry's monotonic last-seen age
+    /// against the single pinned build clock. A past observation lands behind
+    /// `now_ms`; a future-dated last-seen clamps the age to zero, so the
+    /// instant never exceeds `now_ms` and never goes negative.
+    #[test]
+    fn map_learned_derives_last_seen_ms_and_clamps_future() {
+        let now = Instant::now();
+        let past = now
+            .checked_sub(Duration::from_millis(400))
+            .expect("test clock is well past boot");
+        let mapped = map_learned(learned_entry(past), now, 10_000);
+        assert_eq!(mapped.last_seen_ms, Some(9_600));
+
+        let future = now
+            .checked_add(Duration::from_millis(400))
+            .expect("no monotonic-clock overflow");
+        let clamped = map_learned(learned_entry(future), now, 10_000);
+        assert_eq!(clamped.last_seen_ms, Some(10_000));
+    }
+
+    /// Wire-shape golden: `last_seen_ms` serializes under its exact snake_case
+    /// key with the derived epoch-ms value.
+    #[test]
+    fn last_seen_ms_serializes_under_stable_key() {
+        let now = Instant::now();
+        let past = now
+            .checked_sub(Duration::from_millis(250))
+            .expect("test clock is well past boot");
+        let value = serde_json::to_value(map_learned(learned_entry(past), now, 5_000)).unwrap();
+        assert_eq!(value["last_seen_ms"], Value::from(4_750));
     }
 
     /// The DTO field names MUST equal the `docs/LOGGING.md` contract tokens,
@@ -466,6 +521,7 @@ mod tests {
             observations: 1,
             phase: "f1",
             source: "live",
+            last_seen_ms: Some(1_000),
         })
         .unwrap();
         let obj = value.as_object().unwrap();
@@ -482,6 +538,8 @@ mod tests {
         // The verdict discriminator surfaces under its own stable key.
         assert!(obj.contains_key("verdict"));
         assert_eq!(obj["verdict"], Value::from("broken"));
+        // The last-observation timestamp surfaces under its own stable key.
+        assert!(obj.contains_key("last_seen_ms"));
         // The pre-rename token must NOT surface on the wire.
         assert!(!obj.contains_key("feature_key"));
     }
@@ -538,6 +596,7 @@ mod tests {
             observations: 1,
             phase: "f1",
             source: "live",
+            last_seen_ms: Some(1_000),
         })
         .unwrap();
         let obj = wire.as_object().unwrap();
@@ -588,18 +647,22 @@ mod tests {
     fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
         let panel = HealthPanel {
             targets: vec![map_target(sample_target(CircuitPhase::Open), 1_000)],
-            learned_negatives: vec![map_learned(LearnedRegistryEntry {
-                state_key: "opus".into(),
-                feature_key: "web_search".into(),
-                verdict: Verdict::LearnedBroken(FailurePhase::F1),
-                signal_tier: SignalTier::Inferred,
-                observations: 1,
-                first_seen: Instant::now(),
-                last_seen: Instant::now(),
-                expires_at: Instant::now(),
-                phase: FailurePhase::F1,
-                source: EvidenceSource::Live,
-            })],
+            learned_negatives: vec![map_learned(
+                LearnedRegistryEntry {
+                    state_key: "opus".into(),
+                    feature_key: "web_search".into(),
+                    verdict: Verdict::LearnedBroken(FailurePhase::F1),
+                    signal_tier: SignalTier::Inferred,
+                    observations: 1,
+                    first_seen: Instant::now(),
+                    last_seen: Instant::now(),
+                    expires_at: Instant::now(),
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                },
+                Instant::now(),
+                1_000,
+            )],
         };
         let text = serde_json::to_string(&panel).unwrap();
         for forbidden in ["body", "error_text", "prompt", "message", "raw"] {
