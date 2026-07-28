@@ -77,6 +77,20 @@ pub enum ReplayScheme {
     Gray,
 }
 
+impl ReplayScheme {
+    /// Stable, low-cardinality token spelling for logs and observability.
+    /// Closed set, safe to emit -- it names the validator family only,
+    /// never any artifact bytes.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Mantle => "mantle",
+            Self::Gray => "gray",
+        }
+    }
+}
+
 /// Map a format tag to its validator family.
 ///
 /// Unknown and absent tags land in [`ReplayScheme::Gray`] rather than

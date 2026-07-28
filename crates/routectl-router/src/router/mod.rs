@@ -16,7 +16,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::{
-    ChatChunk, ChatResponse, PrefixComponent, Provider, Result, VolatileKind,
+    ChatChunk, ChatResponse, PrefixComponent, Provider, ReplayScheme, Result, VolatileKind,
     failure_class::FailureClass,
 };
 use serde_json::Value;
@@ -735,6 +735,49 @@ pub struct DispatchMeta {
     /// Collected ONLY at [`LearnedProbeGuard::settle_success`]. Additive,
     /// defaults empty.
     pub cleared_capabilities: Vec<CapabilityClearedEvent>,
+    /// Reasoning-replay degradation record for the whole chain walk.
+    /// `Some` exactly when the fixed strip-repair branch fired for this
+    /// request -- carried reasoning artifacts drew the proven replay
+    /// rejection and were stripped for a same-target re-dispatch. The
+    /// single aggregated degradation WARN reads it ONCE at request
+    /// resolution; `None` means nothing degraded (no WARN). Carries only
+    /// closed-set tokens and counts -- never the artifact bytes, an item
+    /// id, a hash, the session key, or the upstream body, at any level.
+    pub replay_degradation: Option<ReplayDegradation>,
+}
+
+/// Closed-set facts about a reasoning-replay strip-repair that fired
+/// during a chain walk, aggregated onto [`DispatchMeta`] for the single
+/// per-request degradation WARN. Every field is a stable token or a
+/// count: deliberately NO artifact bytes, reasoning item id, hash /
+/// digest, session key, or upstream body, at any verbosity. The request
+/// span already supplies `request_id` correlation across the retry and
+/// fallback hops.
+///
+/// `#[non_exhaustive]` so a future degradation action can add fields
+/// without breaking downstream construction.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct ReplayDegradation {
+    /// What the router did (closed token), e.g. the fixed strip-repair.
+    pub action: &'static str,
+    /// The target lane the artifacts were stripped against.
+    pub target_lane: ReplayScheme,
+    /// Sanitized `[providers]` state key of the repaired target.
+    pub state_key: String,
+    /// Distinct source schemes of the stripped non-portable artifacts,
+    /// first-seen order.
+    pub source_schemes: Vec<ReplayScheme>,
+    /// Why the strip fired (closed token).
+    pub reason: &'static str,
+    /// Count of non-portable reasoning artifacts stripped.
+    pub artifact_count: usize,
+    /// The strip-repair branch fired.
+    pub repair_attempted: bool,
+    /// The stripped re-dispatch reached success / a first chunk.
+    pub repair_succeeded: bool,
+    /// The confirmed negative was persisted to the learned registry.
+    pub learned: bool,
 }
 
 impl DispatchMeta {
@@ -769,6 +812,7 @@ impl DispatchMeta {
             learned_capabilities: Vec::new(),
             capability_observations: Vec::new(),
             cleared_capabilities: Vec::new(),
+            replay_degradation: None,
         }
     }
 

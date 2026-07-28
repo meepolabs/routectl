@@ -612,6 +612,15 @@ fn redact_value(v: &mut serde_json::Value) {
 
             // Per-key sweep. Known user-content keys are redacted at
             // the leaf; everything else recurses.
+            //
+            // Captured before the mutable walk so a per-key arm can gate
+            // on the block's own `type` without re-borrowing the map: an
+            // Anthropic `thinking` block's `signature` is an opaque
+            // reasoning carry blob (redact it), while a Bedrock Converse
+            // `reasoningText.signature` -- which carries no
+            // `type:"thinking"` sibling -- is a deliberately-kept operator
+            // triage signal (leave it visible).
+            let is_thinking_block = map.get("type").and_then(|t| t.as_str()) == Some("thinking");
             let keys: Vec<String> = map.keys().cloned().collect();
             for k in keys {
                 let Some(entry) = map.get_mut(&k) else {
@@ -650,6 +659,23 @@ fn redact_value(v: &mut serde_json::Value) {
                     // `output: {message: ...}` object -- both
                     // structured shapes recurse cleanly.
                     "system" | "content" | "output" => {
+                        redact_string_or_recurse(entry);
+                    }
+                    // Reasoning-replay carry payload. The OpenAI Responses
+                    // reasoning item's `encrypted_content` and an Anthropic
+                    // `thinking` block's `signature` are opaque
+                    // cryptographic carry blobs, never operator-facing
+                    // metadata (a `redacted_thinking` blob rides `data`,
+                    // caught above). A body-tracing path must never surface
+                    // one: redact the string leaf, recurse otherwise for
+                    // forward-compat. `signature` is gated on the thinking
+                    // block so a Bedrock `reasoningText.signature` (an
+                    // operator triage signal, no `type:"thinking"` sibling)
+                    // stays visible.
+                    "encrypted_content" => {
+                        redact_string_or_recurse(entry);
+                    }
+                    "signature" if is_thinking_block => {
                         redact_string_or_recurse(entry);
                     }
                     // Image / document source data (base64). Only
