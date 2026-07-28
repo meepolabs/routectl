@@ -1,0 +1,41 @@
+{
+  "note": "Real bedrock-runtime InvokeModel 400 ValidationException captures (us-west-2, 2026-07-28, global anthropic claude opus). Bodies are byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
+  "error_type_header": "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
+  "lifted_type": "ValidationException",
+  "templates": [
+    { "prefix": "tool type '", "suffix": "' is not supported for this model" },
+    { "prefix": "", "suffix": ": Extra inputs are not permitted" }
+  ],
+  "translations": [
+    { "token": "advisor", "capability": "advisor" }
+  ],
+  "canaries": {
+    "advisor-tool": {
+      "status": 400,
+      "body": "{\"message\":\"tool type 'advisor' is not supported for this model\"}",
+      "expect_capability": "advisor"
+    },
+    "unknown-body-field": {
+      "status": 400,
+      "body": "{\"message\":\"routectl_envelope_probe_field: Extra inputs are not permitted\"}",
+      "expect_capability": null
+    },
+    "unknown-beta": {
+      "status": 400,
+      "body": "{\"message\":\"invalid beta flag\"}",
+      "expect_capability": null
+    },
+    "supp-bad-model-id": {
+      "status": 400,
+      "body": "{\"message\":\"The provided model identifier is invalid.\"}",
+      "expect_capability": null
+    }
+  },
+  "near_miss_messages": {
+    "advisor_wording_drift": "tool type 'advisor' is unsupported for this model",
+    "advisor_extra_sentence": "tool type 'advisor' is not supported for this model. Adjust the request.",
+    "advisor_missing_seam": "advisor is not supported for this model",
+    "field_wording_drift": "routectl_envelope_probe_field: Extra inputs not permitted",
+    "field_whitespace_token": "two words: Extra inputs are not permitted"
+  }
+}

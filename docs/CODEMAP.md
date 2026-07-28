@@ -316,7 +316,15 @@ listed at the bottom of each crate.
   capability matcher re-parses (top-level `message` and/or `__type`, within
   the byte ceiling), so any other 400/422 shape (nested
   `{"error":{"message":...}}` from a proxy, HTML, plain text) keeps the short
-  512-char excerpt and cannot reflect a large body to the caller
+  512-char excerpt and cannot reflect a large body to the caller; also owns
+  `lift_aws_error_type_from_headers` / `classify_aws_error_type_header` --
+  the `x-amzn-errortype` response-header lift (a single unambiguous value,
+  split at the first `:` to drop the coral URL tail, validated through the
+  same bounded-token path) the native Bedrock lane falls back to when the
+  400 body carries no `__type`; a duplicate / conflicting / malformed /
+  missing header fails closed with a bounded reason label
+  (`missing|invalid|ambiguous|conflict`) and the URL tail never reaches an
+  `Error` field or a log line
 - `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: pure
   region-to-URL builders (`mantle_host` ->
   `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` ->
@@ -1587,11 +1595,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   message through an anchored-template engine (`extract_bedrock_capability`):
   each `(prefix, suffix)` template extracts one token that must pass
   `is_safe_param_token`, normalize via `normalize_capability_key`, and hit a
-  CLOSED translation table for a `SelfIdentifying` signal -- both
-  `BEDROCK_VALIDATION_TEMPLATES` and `BEDROCK_TOKEN_TRANSLATIONS` ship EMPTY
-  (precision over recall), so every bedrock `BadRequest` currently yields
-  `None`; `pub is_bedrock_validation_exception` lets the learn site flag drift
-  when a real `ValidationException` matched no template. A third F2
+  CLOSED translation table for a `SelfIdentifying` signal. The arm gates on
+  `is_bedrock_validation_exception` (the lifted, namespace-stripped
+  `upstream_type == "ValidationException"`) BEFORE the message read: the
+  captured must-not-learn rejections (bad model id, unknown beta flag) share
+  the learnable rejection's exact flat shape, so only the lifted discriminator
+  may unlock a match. `BEDROCK_VALIDATION_TEMPLATES` are grounded in captured
+  InvokeModel 400s (`tool type '<type>' is not supported for this model`;
+  `<field>: Extra inputs are not permitted`); `BEDROCK_TOKEN_TRANSLATIONS`
+  maps the rejected tool type onto the identically-named `derive_feature_keys`
+  tool-type key (`advisor` -> `advisor`) -- a rejected wire field name has no
+  row and stays dormant. `pub is_bedrock_validation_exception` also lets the
+  learn site flag drift when a real `ValidationException` matched no template.
+  A third F2
   FEATURE-NAMING arm handles a `BadRequest` whose nested `error.message` names
   the offending feature explicitly: `match_feature_naming` runs the message
   through the same anchored-template engine shape

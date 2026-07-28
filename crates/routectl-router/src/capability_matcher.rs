@@ -423,23 +423,47 @@ const BEDROCK_VALIDATION_EXCEPTION_TYPE: &str = "ValidationException";
 /// pass [`is_safe_param_token`], normalize via [`normalize_capability_key`],
 /// and hit [`BEDROCK_TOKEN_TRANSLATIONS`].
 ///
-/// Ships EMPTY (precision over recall): until a real captured envelope pins
-/// the exact wording, every Bedrock `BadRequest` yields `None`. Provisional
-/// shapes live in test data only.
-const BEDROCK_VALIDATION_TEMPLATES: &[(&str, &str)] = &[];
+/// Grounded byte-for-byte in captured bedrock-runtime InvokeModel 400
+/// envelopes:
+/// - a rejected tool type, single-quoted
+///   (`tool type '<type>' is not supported for this model`);
+/// - a rejected request field, pydantic-style prefix
+///   (`<field>: Extra inputs are not permitted`).
+///
+/// A message matching a template but whose extracted token has no
+/// [`BEDROCK_TOKEN_TRANSLATIONS`] row (the field-name case, absent a closed
+/// row) stays dormant: the seam extracts, but the closed set yields no
+/// capability, so nothing is learned.
+const BEDROCK_VALIDATION_TEMPLATES: &[(&str, &str)] = &[
+    ("tool type '", "' is not supported for this model"),
+    ("", ": Extra inputs are not permitted"),
+];
 
 /// Closed-set translation of a normalized Bedrock validation token onto the
 /// canonical request-capability key the request side derives and the act
 /// side looks up (the [`OPENAI_PARAM_TRANSLATIONS`] pattern). A token
 /// outside this set yields `None` (no-learn), keeping the set closed.
 ///
-/// Ships EMPTY alongside the template table.
-const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[];
+/// A rejected tool type maps onto the identically-named tool-type key
+/// `derive_feature_keys` emits for a `tools[]` entry of that type, so a
+/// learned key lands where the request side derives it and the membership
+/// gate admits the observation. A rejected wire field name has no row: it
+/// is not a `derive_feature_keys`-producible key, so it stays dormant.
+const BEDROCK_TOKEN_TRANSLATIONS: &[(&str, &str)] = &[("advisor", "advisor")];
 
-/// The Bedrock `BadRequest` arm: read the flat validation message, then run
-/// the anchored-template extraction pipeline. With the shipped-empty tables
-/// this always yields `None`.
+/// The Bedrock `BadRequest` arm: gate on the lifted `ValidationException`
+/// discriminator, then read the flat validation message and run the
+/// anchored-template extraction pipeline. The discriminator gate fires
+/// BEFORE the message read: the captured must-not-learn rejections (a bad
+/// model id, an unknown beta flag) share the exact flat-envelope shape of
+/// the learnable one, so shape alone cannot discriminate -- only the lifted
+/// type may unlock a match. A rejection without the lifted discriminator
+/// yields `None` (a visible, recoverable non-learn) rather than risking a
+/// silent false attribution from a shape fallback.
 fn match_bedrock_validation(err: &Error) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
+    if !is_bedrock_validation_exception(err) {
+        return None;
+    }
     let message = bedrock_validation_message(err)?;
     extract_bedrock_capability(
         &message,
@@ -1047,17 +1071,18 @@ mod tests {
 
     // --- Bedrock validation arm: flat reader + anchored-template engine ---
 
-    /// Provisional synthetic shapes for the anchored-template engine. The
-    /// PRODUCTION tables ship empty; these drive the engine in isolation and
-    /// are replaced by sanitized captured envelopes once real capture lands.
-    const BEDROCK_PROVISIONAL_FIXTURE: &str =
-        include_str!("../tests/fixtures/bedrock_validation_provisional.json");
+    /// Real captured bedrock-runtime InvokeModel 400 `ValidationException`
+    /// envelopes: byte-exact bodies + the header-lifted discriminator. The
+    /// production template + translation tables are grounded in these; the
+    /// fixture drives them (and their near-miss variants) end-to-end.
+    const BEDROCK_CAPTURE_FIXTURE: &str =
+        include_str!("../tests/fixtures/bedrock_validation_capture.json");
 
-    fn provisional_fixture() -> serde_json::Value {
-        serde_json::from_str(BEDROCK_PROVISIONAL_FIXTURE).expect("valid provisional fixture json")
+    fn capture_fixture() -> serde_json::Value {
+        serde_json::from_str(BEDROCK_CAPTURE_FIXTURE).expect("valid capture fixture json")
     }
 
-    fn provisional_pairs<'a>(
+    fn fixture_pairs<'a>(
         fixture: &'a serde_json::Value,
         array: &str,
         a: &str,
@@ -1081,65 +1106,121 @@ mod tests {
         serde_json::json!({ "__type": "ValidationException", "message": message }).to_string()
     }
 
-    #[test]
-    fn bedrock_provisional_template_matches_and_translates() {
-        // The engine, driven with a provisional template + translation,
-        // extracts the single anchored token, normalizes it, and maps it
-        // through the closed set to a canonical capability at
-        // SelfIdentifying tier.
-        let fx = provisional_fixture();
-        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = provisional_pairs(&fx, "translations", "token", "capability");
-        let message = fx["matched"]["message"].as_str().expect("matched message");
-        let expected = fx["matched"]["capability"]
+    /// The lifted, namespace-stripped discriminator a native-lane
+    /// `ValidationException` lands on `Error::Upstream.upstream_type`.
+    fn lifted_type(fx: &serde_json::Value) -> String {
+        fx["lifted_type"]
             .as_str()
-            .expect("matched capability");
+            .expect("fixture lifted_type")
+            .to_string()
+    }
 
-        let got = extract_bedrock_capability(message, &templates, &translations);
+    /// Each captured canary, driven through the full resolver with a VALID
+    /// lifted discriminator, resolves to its expected outcome: the
+    /// advisor-tool rejection to the `advisor` capability at SelfIdentifying;
+    /// the two must-not-learn controls (unknown beta flag, bad model id --
+    /// same flat shape, same valid header) and the untranslated field-name
+    /// rejection all to `None` (no-learn).
+    #[test]
+    fn bedrock_capture_canaries_resolve_to_expected_capability() {
+        let fx = capture_fixture();
+        let ty = lifted_type(&fx);
+        let canaries = fx["canaries"].as_object().expect("canaries object");
+        for (name, canary) in canaries {
+            let body = canary["body"].as_str().expect("canary body");
+            let err = upstream(400, body, Some(&ty), None);
+            let got = resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest));
+            match canary["expect_capability"].as_str() {
+                Some(expected) => assert_eq!(
+                    got,
+                    Some((
+                        expected.to_string(),
+                        SignalTier::SelfIdentifying,
+                        FailurePhase::F1
+                    )),
+                    "canary {name} must learn {expected}"
+                ),
+                None => assert_eq!(got, None, "canary {name} must not learn"),
+            }
+        }
+    }
 
+    /// The learnable advisor rejection carrying NO discriminator (absent or
+    /// a wrong `upstream_type`) yields `None`: the arm gates on the lifted
+    /// `ValidationException` before the message is ever read, so a stripped
+    /// header cannot silently false-learn on the shared flat shape.
+    #[test]
+    fn bedrock_arm_requires_lifted_discriminator() {
+        let fx = capture_fixture();
+        let body = fx["canaries"]["advisor-tool"]["body"]
+            .as_str()
+            .expect("advisor body");
+        for wrong_type in [None, Some("ThrottlingException")] {
+            let err = upstream(400, body, wrong_type, None);
+            assert_eq!(
+                resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+                None,
+                "no lifted ValidationException -> no learn (type {wrong_type:?})"
+            );
+        }
+    }
+
+    /// Near-miss / drifted variants of each real template fail closed: a
+    /// changed verb, a trailing sentence, a missing seam, and a
+    /// whitespace-bearing (unsafe) extracted token all yield `None`.
+    #[test]
+    fn bedrock_near_miss_variants_yield_none() {
+        let fx = capture_fixture();
+        let ty = lifted_type(&fx);
+        let near = fx["near_miss_messages"]
+            .as_object()
+            .expect("near_miss_messages object");
+        for (name, message) in near {
+            let body = flat_validation_body(message.as_str().expect("near-miss message"));
+            let err = upstream(400, &body, Some(&ty), None);
+            assert_eq!(
+                resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest)),
+                None,
+                "near-miss {name} must not learn"
+            );
+        }
+    }
+
+    /// The templates + translations, driven directly, extract and translate
+    /// the advisor token onto the canonical capability at SelfIdentifying;
+    /// the field-name token extracts through the same engine but has no
+    /// closed-set row, so it stays dormant.
+    #[test]
+    fn bedrock_engine_translates_advisor_and_leaves_field_dormant() {
+        let fx = capture_fixture();
+        let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = fixture_pairs(&fx, "translations", "token", "capability");
+
+        let advisor = "tool type 'advisor' is not supported for this model";
         assert_eq!(
-            got,
+            extract_bedrock_capability(advisor, &templates, &translations),
             Some((
-                expected.to_string(),
+                "advisor".to_string(),
                 SignalTier::SelfIdentifying,
                 FailurePhase::F1
             ))
         );
-    }
 
-    #[test]
-    fn bedrock_engine_fails_closed_on_drift_and_untranslated_tokens() {
-        // Wording drift, an extra sentence, a missing anchor, an
-        // untranslated (closed-set-miss) token, and a whitespace-bearing
-        // (unsafe) token all yield None -- no fuzzy match, no verdict.
-        let fx = provisional_fixture();
-        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = provisional_pairs(&fx, "translations", "token", "capability");
-        for key in [
-            "wording_drift",
-            "extra_sentence",
-            "missing_seam",
-            "untranslated_token",
-            "whitespace_token",
-        ] {
-            let message = fx["fail_closed_messages"][key]
-                .as_str()
-                .expect("fail-closed message");
-            assert_eq!(
-                extract_bedrock_capability(message, &templates, &translations),
-                None,
-                "case {key}"
-            );
-        }
+        let field = "routectl_envelope_probe_field: Extra inputs are not permitted";
+        assert_eq!(
+            extract_bedrock_capability(field, &templates, &translations),
+            None,
+            "an extracted field name with no closed-set row stays dormant"
+        );
     }
 
     #[test]
     fn bedrock_engine_fails_closed_on_oversized_token() {
         // A structurally-anchored match whose extracted token exceeds the
         // token-shape length cap fails closed rather than surfacing a blob.
-        let fx = provisional_fixture();
-        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let fx = capture_fixture();
+        let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = fixture_pairs(&fx, "translations", "token", "capability");
         let (prefix, suffix) = templates[0];
         let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_PARAM_TOKEN_LEN + 1));
 
@@ -1147,21 +1228,6 @@ mod tests {
             extract_bedrock_capability(&oversized, &templates, &translations),
             None
         );
-    }
-
-    #[test]
-    fn bedrock_empty_production_tables_yield_none() {
-        // The shipped-empty template + translation tables mean every bedrock
-        // BadRequest -- even a well-formed flat ValidationException whose
-        // wording a provisional template would match -- yields None.
-        let body =
-            flat_validation_body("The parameter response_schema is not supported for this model.");
-        let got = resolve_requested_capability(
-            "bedrock",
-            &upstream(400, &body, None, None),
-            &cf(FailureClass::BadRequest),
-        );
-        assert_eq!(got, None);
     }
 
     #[test]
@@ -1307,8 +1373,8 @@ mod tests {
         // through the closed set to a canonical capability at SelfIdentifying
         // tier and the F2 phase.
         let fx = feature_naming_fixture();
-        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = fixture_pairs(&fx, "translations", "token", "capability");
         let message = fx["matched"]["message"].as_str().expect("matched message");
         let expected = fx["matched"]["capability"]
             .as_str()
@@ -1333,8 +1399,8 @@ mod tests {
         // (closed-set-miss) token, and a whitespace-bearing (unsafe) token all
         // yield None -- no fuzzy match, no verdict.
         let fx = feature_naming_fixture();
-        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = fixture_pairs(&fx, "translations", "token", "capability");
         for key in [
             "wording_drift",
             "extra_sentence",
@@ -1363,8 +1429,8 @@ mod tests {
         // A structurally-anchored match whose extracted token exceeds the
         // token-shape length cap fails closed rather than surfacing a blob.
         let fx = feature_naming_fixture();
-        let templates = provisional_pairs(&fx, "templates", "prefix", "suffix");
-        let translations = provisional_pairs(&fx, "translations", "token", "capability");
+        let templates = fixture_pairs(&fx, "templates", "prefix", "suffix");
+        let translations = fixture_pairs(&fx, "translations", "token", "capability");
         let (prefix, suffix) = templates[0];
         let oversized = format!("{prefix}{}{suffix}", "a".repeat(MAX_PARAM_TOKEN_LEN + 1));
 
