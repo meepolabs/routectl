@@ -70,13 +70,16 @@ pub(crate) mod system;
 pub(crate) mod tools;
 pub(crate) mod types;
 
-/// Format tag stamped on every reasoning_details entry emitted by the
-/// Responses provider. Multi-turn callers echoing reasoning back must
-/// see the same tag across the non-streaming + streaming paths so a
-/// downstream ingress can differentiate the Responses shape from the
-/// Anthropic shape (Anthropic carries `signature`, Responses carries
-/// `encrypted_content`).
-pub(crate) const OPENAI_RESPONSES_FORMAT: &str = "openai-responses-v1";
+/// The lane-agnostic Responses format tag this provider used to stamp on
+/// every reasoning detail.
+///
+/// Recognized forever -- in-flight client histories carry it -- but NEVER
+/// emitted: more than one lane stamped it, so an artifact bearing it names
+/// no lane and can only be treated as unestablished. Emission goes through
+/// [`lane_format_tag`] instead, which is why nothing outside the test
+/// fixtures references this alias any more.
+#[cfg(test)]
+pub(crate) const OPENAI_RESPONSES_FORMAT: &str = routectl_core::OPENAI_RESPONSES_V1;
 
 /// Provider-kind discriminator string used in tracing fields. See
 /// the openai_compat module for the rationale.
@@ -148,7 +151,7 @@ impl Provider for OpenAiResponsesProvider {
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
         let typed: response_types::ResponsesResponse = serde_json::from_value(raw)
             .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
-        response::translate(&self.cfg.id, typed)
+        response::translate(&self.cfg.id, self.cfg.auth_kind, typed)
     }
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
@@ -434,11 +437,12 @@ impl Provider for OpenAiResponsesProvider {
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
         let provider_id = self.cfg.id.clone();
+        let auth_kind = self.cfg.auth_kind;
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
 
         let stream = async_stream::stream! {
-            let mut state = sse::ResponsesStreamState::default();
+            let mut state = sse::ResponsesStreamState::new(auth_kind);
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
                 match result {
@@ -715,3 +719,7 @@ mod header_merge_tests;
 #[cfg(test)]
 #[path = "lane_mapping_tests.rs"]
 mod lane_mapping_tests;
+
+#[cfg(test)]
+#[path = "lane_tag_emission_tests.rs"]
+mod lane_tag_emission_tests;

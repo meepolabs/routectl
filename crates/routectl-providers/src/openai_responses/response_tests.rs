@@ -8,8 +8,12 @@ use super::*;
 use serde_json::json;
 
 fn parse(body: Value) -> ChatResponse {
+    parse_as(AuthKind::ChatgptOauth, body)
+}
+
+fn parse_as(auth_kind: AuthKind, body: Value) -> ChatResponse {
     let typed: ResponsesResponse = serde_json::from_value(body).unwrap();
-    translate("test", typed).unwrap()
+    translate("test", auth_kind, typed).unwrap()
 }
 
 #[test]
@@ -53,7 +57,10 @@ fn response_with_message_and_reasoning_collapses_to_content_parts() {
     assert!(matches!(details[1].kind, ReasoningDetailKind::Text));
     assert!(matches!(details[2].kind, ReasoningDetailKind::Encrypted));
     for d in details {
-        assert_eq!(d.format.as_deref(), Some(OPENAI_RESPONSES_FORMAT));
+        assert_eq!(
+            d.format.as_deref(),
+            Some(lane_format_tag(AuthKind::ChatgptOauth))
+        );
     }
 }
 

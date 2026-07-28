@@ -45,9 +45,9 @@ const BLOCK_TAG_TOOL_USE: &str = "tool_use";
 /// legitimate breadth.
 pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 
-use super::OPENAI_RESPONSES_FORMAT;
 use super::response::{map_finish_reason, upstream_error_from_failed};
 use super::response_types::{ResponsesResponse, ResponsesStreamEvent};
+use super::{AuthKind, lane_format_tag};
 
 /// Per-output-item streaming state.
 #[derive(Debug, Clone)]
@@ -129,9 +129,21 @@ pub struct ResponsesStreamState {
     /// reaps blocks per item-done event, so by `response.completed`
     /// the map is empty. Bug F (cc-via-* 2026-05-18).
     saw_function_call: bool,
+    /// Lane that minted this stream. Selects the reasoning format tag
+    /// stamped on every emitted detail, so the streaming path and the
+    /// non-streaming path agree tag-for-tag on the same lane.
+    auth_kind: AuthKind,
 }
 
 impl ResponsesStreamState {
+    #[must_use]
+    pub(crate) fn new(auth_kind: AuthKind) -> Self {
+        Self {
+            auth_kind,
+            ..Self::default()
+        }
+    }
+
     /// Process one SSE event. Returns:
     ///   - `Ok(chunks)`: zero-or-more chunks to forward (empty for
     ///     housekeeping events like in_progress/output_text.done)
@@ -642,7 +654,7 @@ impl ResponsesStreamState {
         let detail = ReasoningDetail {
             kind: ReasoningDetailKind::Summary,
             id: Some(stable_or_minted_id(detail_id)),
-            format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+            format: Some(lane_format_tag(self.auth_kind).to_string()),
             index: Some(detail_index),
             payload: json!({"text": text}),
         };
@@ -669,7 +681,7 @@ impl ResponsesStreamState {
         let detail = ReasoningDetail {
             kind: ReasoningDetailKind::Text,
             id: Some(stable_or_minted_id(detail_id)),
-            format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+            format: Some(lane_format_tag(self.auth_kind).to_string()),
             index: Some(detail_index),
             payload: json!({"text": text}),
         };
@@ -701,7 +713,7 @@ impl ResponsesStreamState {
         let detail = ReasoningDetail {
             kind: ReasoningDetailKind::Encrypted,
             id: Some(stable_or_minted_id(detail_id)),
-            format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+            format: Some(lane_format_tag(self.auth_kind).to_string()),
             index: Some(detail_index),
             payload: json!({"encrypted_content": signature}),
         };

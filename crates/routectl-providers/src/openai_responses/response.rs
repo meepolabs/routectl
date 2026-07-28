@@ -4,7 +4,7 @@
 //! Walks `response.output[]` and produces:
 //!   - flat assistant `text` (concatenated `output_text` blocks)
 //!   - typed `reasoning_details` (summary + content + encrypted_content
-//!     surfaces) using the `openai-responses-v1` format tag so multi-
+//!     surfaces) tagged with the caller lane's format tag so multi-
 //!     turn callers echoing reasoning back can be routed correctly
 //!   - OpenAI-shape `tool_calls` derived from `function_call` items
 //!   - `parts` preserving every block in arrival order so
@@ -31,14 +31,23 @@ use routectl_core::{
     ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
 };
 
-use super::OPENAI_RESPONSES_FORMAT;
 use super::response_types::{
     IncompleteDetails, ReasoningContent, ReasoningSummary, ResponseOutputItem,
     ResponsesOutputContent, ResponsesResponse, ResponsesUsage,
 };
+use super::{AuthKind, lane_format_tag};
 
 /// Translate a deserialized Responses body into canonical `ChatResponse`.
-pub fn translate(provider_id: &str, body: ResponsesResponse) -> Result<ChatResponse> {
+///
+/// `auth_kind` selects the lane-faithful reasoning format tag stamped on
+/// every emitted `ReasoningDetail`; the lanes validate replay
+/// incompatibly, so a shared tag would make an artifact unreplayable on
+/// the lane that minted it.
+pub fn translate(
+    provider_id: &str,
+    auth_kind: AuthKind,
+    body: ResponsesResponse,
+) -> Result<ChatResponse> {
     let status = body.status.clone();
     let incomplete_reason = body
         .incomplete_details
@@ -46,7 +55,7 @@ pub fn translate(provider_id: &str, body: ResponsesResponse) -> Result<ChatRespo
         .and_then(|d: &IncompleteDetails| d.reason.clone());
 
     let (text, reasoning_details, tool_calls, parts, has_function_call) =
-        walk_output(provider_id, &body.output)?;
+        walk_output(provider_id, auth_kind, &body.output)?;
 
     let finish_reason = map_finish_reason(
         status.as_deref(),
@@ -106,6 +115,7 @@ pub fn translate(provider_id: &str, body: ResponsesResponse) -> Result<ChatRespo
 #[allow(clippy::type_complexity)] // multi-tuple return matches the wire walk; alias would obscure intent
 fn walk_output(
     provider_id: &str,
+    auth_kind: AuthKind,
     output: &[ResponseOutputItem],
 ) -> Result<(
     String,
@@ -115,6 +125,7 @@ fn walk_output(
     bool,
 )> {
     let mut text_parts: Vec<String> = Vec::new();
+    let format_tag = lane_format_tag(auth_kind);
     let mut reasoning_details: Vec<ReasoningDetail> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut parts: Vec<ContentPart> = Vec::new();
@@ -181,7 +192,7 @@ fn walk_output(
                         reasoning_details.push(ReasoningDetail {
                             kind: ReasoningDetailKind::Summary,
                             id: Some(canonical_id.clone()),
-                            format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+                            format: Some(format_tag.to_string()),
                             index: Some(detail_index),
                             payload: json!({"text": text}),
                         });
@@ -199,7 +210,7 @@ fn walk_output(
                             reasoning_details.push(ReasoningDetail {
                                 kind: ReasoningDetailKind::Text,
                                 id: Some(canonical_id.clone()),
-                                format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+                                format: Some(format_tag.to_string()),
                                 index: Some(detail_index),
                                 payload: json!({"text": text}),
                             });
@@ -209,7 +220,7 @@ fn walk_output(
                             reasoning_details.push(ReasoningDetail {
                                 kind: ReasoningDetailKind::Encrypted,
                                 id: Some(canonical_id.clone()),
-                                format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+                                format: Some(format_tag.to_string()),
                                 index: Some(detail_index),
                                 payload: json!({"encrypted_content": encrypted_content}),
                             });
@@ -234,7 +245,7 @@ fn walk_output(
                     reasoning_details.push(ReasoningDetail {
                         kind: ReasoningDetailKind::Encrypted,
                         id: Some(canonical_id.clone()),
-                        format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+                        format: Some(format_tag.to_string()),
                         index: Some(detail_index),
                         payload: json!({"encrypted_content": sig}),
                     });

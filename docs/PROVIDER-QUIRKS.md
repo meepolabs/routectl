@@ -350,12 +350,34 @@ Consequences an operator can observe:
   recognize) are not established either way. They are carried
   optimistically ONCE -- that is how an unproven pair gets settled from
   a real upstream verdict. If the upstream rejects the carry, recovery
-  is the router's job, not the provider's.
+  is the router's job, not the provider's. Newly captured reasoning never
+  joins that population: each lane now stamps its own tag on both the
+  streaming and non-streaming paths, and no lane emits the shared
+  compatibility tag any more.
 
 If you route the same conversation across lanes from different
 families, expect prior-turn reasoning to be dropped on the crossing hop.
 Keeping a conversation's fallback chain inside one family preserves
 replay.
+
+**What each lane stamps on the reasoning it produces:**
+
+| Lane | Emitted format tag |
+|---|---|
+| `chatgpt-oauth` | `codex-oauth` |
+| `api-key` | `openai-apikey` |
+| `bedrock-mantle` | `bedrock-mantle` |
+
+The tag is an observation of which lane minted the artifact, so it is
+never wrong and never needs a vocabulary migration. Both egress paths --
+non-streaming translation and the SSE state machine -- derive it from
+the same lane mapping, so the two paths agree tag-for-tag.
+
+`openai-responses-v1` is RECOGNIZED BUT NEVER EMITTED: readers keep
+accepting it because in-flight client histories carry it, but no egress
+mints it any more. Reintroducing it as an emitted value would put three
+mutually incompatible lanes back under one tag and make an artifact's
+origin unrecoverable.
 
 ### Gemini (native, `kind = "gemini"`)
 
