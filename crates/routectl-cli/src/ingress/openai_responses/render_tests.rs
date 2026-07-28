@@ -9,12 +9,12 @@
 use serde_json::{Value, json};
 
 use routectl_core::{
-    ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Role, Usage, schema::Choice,
+    BEDROCK_MANTLE, CODEX_OAUTH, ChatResponse, ContentPart, KnownContentPart, Message,
+    MessageContent, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind, Role,
+    Usage, schema::Choice,
 };
 
 use super::render_responses_response;
-use crate::ingress::openai_responses::OPENAI_RESPONSES_FORMAT;
 
 // ---------------------------------------------------------------------------
 // Builders
@@ -65,10 +65,19 @@ fn text_part(text: &str) -> ContentPart {
 }
 
 fn responses_detail(kind: ReasoningDetailKind, id: &str, payload: Value) -> ReasoningDetail {
+    tagged_detail(kind, id, payload, OPENAI_RESPONSES_V1)
+}
+
+fn tagged_detail(
+    kind: ReasoningDetailKind,
+    id: &str,
+    payload: Value,
+    format: &str,
+) -> ReasoningDetail {
     ReasoningDetail {
         kind,
         id: Some(id.to_string()),
-        format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+        format: Some(format.to_string()),
         index: None,
         payload,
     }
@@ -502,10 +511,49 @@ fn foreign_format_reasoning_details_are_skipped() {
     assert_eq!(items[0]["type"], "message");
 }
 
+fn assert_lane_tag_renders(tag: &str) {
+    // Arrange
+    let mut msg = assistant_message(MessageContent::Text("ans".into()));
+    msg.reasoning_details = vec![tagged_detail(
+        ReasoningDetailKind::Summary,
+        "rs_1",
+        json!({"text": "thinking step"}),
+        tag,
+    )];
+
+    // Act
+    let v = render(msg, Some("stop"));
+
+    // Assert
+    let items = output(&v);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["type"], "reasoning");
+    assert_eq!(items[0]["summary"][0]["text"], "thinking step");
+}
+
+#[test]
+fn codex_oauth_tagged_reasoning_detail_renders() {
+    assert_lane_tag_renders(CODEX_OAUTH);
+}
+
+#[test]
+fn openai_apikey_tagged_reasoning_detail_renders() {
+    assert_lane_tag_renders(OPENAI_APIKEY);
+}
+
+#[test]
+fn bedrock_mantle_tagged_reasoning_detail_renders() {
+    assert_lane_tag_renders(BEDROCK_MANTLE);
+}
+
+#[test]
+fn compatibility_tagged_reasoning_detail_still_renders() {
+    assert_lane_tag_renders(OPENAI_RESPONSES_V1);
+}
+
 // ---------------------------------------------------------------------------
 // refusal + forward-compat parts
 // ---------------------------------------------------------------------------
-
 #[test]
 fn refusal_part_renders_refusal_content_block() {
     // Arrange

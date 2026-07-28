@@ -41,9 +41,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, debug_upstream_error_body,
-    is_json_error_envelope, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
-    trace_upstream_success_body,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result,
+    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
+    trace_outgoing_body, trace_upstream_success_body,
 };
 
 // Construction/config/auth-wiring types live in `client`; the test
@@ -101,6 +101,37 @@ pub enum AuthKind {
     /// key (resolved via api_key_ref, typically
     /// env://AWS_BEARER_TOKEN_BEDROCK).
     BedrockMantle,
+}
+
+/// The format tag this lane stamps on the reasoning artifacts it
+/// produces.
+///
+/// A tag is an OBSERVATION of which lane minted the artifact, so it is
+/// never wrong and never needs a vocabulary migration. Keep it distinct
+/// from [`lane_scheme`], which is a revisable judgment about validator
+/// families -- collapsing the two would make a permanent wire value
+/// hostage to a mapping that is allowed to change.
+#[must_use]
+pub const fn lane_format_tag(kind: AuthKind) -> &'static str {
+    match kind {
+        AuthKind::ChatgptOauth => routectl_core::CODEX_OAUTH,
+        AuthKind::ApiKey => routectl_core::OPENAI_APIKEY,
+        AuthKind::BedrockMantle => routectl_core::BEDROCK_MANTLE,
+    }
+}
+
+/// The validator family whose artifacts this lane accepts on replay.
+///
+/// Probes put the two first-party OpenAI lanes in one id-validating
+/// family and the mantle lane in its own content-validating family, so
+/// this mapping is many-to-one and deliberately narrower than
+/// [`lane_format_tag`].
+#[must_use]
+pub const fn lane_scheme(kind: AuthKind) -> ReplayScheme {
+    match kind {
+        AuthKind::ChatgptOauth | AuthKind::ApiKey => ReplayScheme::Codex,
+        AuthKind::BedrockMantle => ReplayScheme::Mantle,
+    }
 }
 
 #[async_trait]
@@ -680,3 +711,7 @@ mod auth_wiring_tests;
 #[cfg(test)]
 #[path = "header_merge_tests.rs"]
 mod header_merge_tests;
+
+#[cfg(test)]
+#[path = "lane_mapping_tests.rs"]
+mod lane_mapping_tests;

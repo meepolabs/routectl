@@ -41,8 +41,8 @@ use routectl_core::{
     ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
 };
 
-use super::OPENAI_RESPONSES_FORMAT;
 use crate::ingress::read_alias_header;
+use routectl_core::OPENAI_RESPONSES_V1;
 
 /// Top-level Responses request fields handled explicitly below. Anything
 /// NOT in this set is swept into `provider_extras` so a future Responses
@@ -645,7 +645,7 @@ fn reasoning_detail(
     ReasoningDetail {
         kind,
         id,
-        format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+        format: Some(OPENAI_RESPONSES_V1.to_string()),
         index: None,
         payload,
     }

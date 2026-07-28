@@ -51,7 +51,7 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result, Role, Usage, UsageDelta, schema::Choice,
+    ReasoningDetailKind, Result, Role, Usage, UsageDelta, is_responses_family, schema::Choice,
 };
 
 use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
@@ -59,7 +59,7 @@ use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
 use super::render::{
     function_call_item, output_text_block, render_responses_response, status_from_finish_reason,
 };
-use super::{OPENAI_RESPONSES_FORMAT, OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
+use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
 /// Per-stream cap on the number of buffered function-call indices. A
 /// legitimate turn emits a small handful of parallel tool calls; an
@@ -245,12 +245,12 @@ fn emit_reasoning_detail(
     // (slice 2 filters to the Responses format when building it).
     state.reasoning_accumulator.push(d.clone());
 
-    // Only Responses-format reasoning participates in the streamed
+    // Only Responses-family reasoning participates in the streamed
     // lifecycle. A foreign-format detail (normal when the turn went to a
     // non-Responses upstream) must NOT open an item or emit a delta:
     // gating only the delta would still leak an `output_index` gap via
     // `ensure_reasoning_item` and absent it from the completed body.
-    if d.format.as_deref() != Some(OPENAI_RESPONSES_FORMAT) {
+    if !is_responses_family(d.format.as_deref()) {
         return;
     }
 
@@ -513,7 +513,7 @@ fn reasoning_done_item(detail_id: Option<String>, details: &[ReasoningDetail]) -
     let mut encrypted: Option<String> = None;
     for d in details
         .iter()
-        .filter(|d| d.id == detail_id && d.format.as_deref() == Some(OPENAI_RESPONSES_FORMAT))
+        .filter(|d| d.id == detail_id && is_responses_family(d.format.as_deref()))
     {
         match d.kind {
             ReasoningDetailKind::Summary => {

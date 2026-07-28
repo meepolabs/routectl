@@ -15,12 +15,16 @@
 //! chunks arrive. See `AnthropicStreamState`.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use serde_json::{Map, Value, json};
 
-use routectl_core::{CacheCreation, ChatChunk, ChatRequest, ChatResponse, Result};
+use routectl_core::{
+    CacheCreation, ChatChunk, ChatRequest, ChatResponse, ReasoningDetail, Result,
+    is_responses_family, reasoning_envelope,
+};
 
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
@@ -250,6 +254,50 @@ pub(super) fn cache_fields_into(
         }
         map.insert("cache_creation".into(), Value::Object(cc));
     }
+}
+
+/// The `redacted_thinking.data` bytes to emit for an `Encrypted`
+/// reasoning detail, self-describing when the artifact's scheme would
+/// otherwise be lost.
+///
+/// The Anthropic wire has no slot for a reasoning artifact's item id or
+/// its scheme, so a Responses-family artifact flattened here loses both
+/// and comes back next turn as a bare blob indistinguishable from a
+/// native `redacted_thinking` -- unreplayable on the lane that issued
+/// it. Wrapping restores the round trip with no server-side state.
+///
+/// The carve-out is load-bearing: anything NOT in the Responses family
+/// -- an Anthropic-sourced artifact above all -- is emitted BYTE-VERBATIM.
+/// An Anthropic signature is what makes same-model replay work on that
+/// lane, and it is platform-portable same-model and silently ignored
+/// cross-model, so it is never rejected; wrapping it would corrupt a
+/// mechanism that works today. Family membership comes from the shared
+/// `is_responses_family` classifier, never from a second local notion of
+/// what is Anthropic.
+///
+/// An artifact with no recoverable id still wraps, id-less, so its
+/// scheme survives: one lane family validates content and ignores the id
+/// entirely, making a scheme-only envelope fully replayable there.
+///
+/// The field name differs by dialect -- Anthropic and the OpenRouter
+/// passthrough use `data`, OpenAI Responses uses `encrypted_content` --
+/// so both aliases are read.
+fn encrypted_detail_data(d: &ReasoningDetail) -> Cow<'_, str> {
+    let blob = d
+        .payload
+        .get("data")
+        .and_then(|v| v.as_str())
+        .or_else(|| d.payload.get("encrypted_content").and_then(|v| v.as_str()))
+        .unwrap_or_default();
+
+    let format = d.format.as_deref();
+    // An empty blob carries nothing to replay, so an envelope around it
+    // would only be rejected on the way back.
+    if blob.is_empty() || !is_responses_family(format) {
+        return Cow::Borrowed(blob);
+    }
+    let scheme_tag = format.unwrap_or_default();
+    Cow::Owned(reasoning_envelope::wrap(scheme_tag, d.id.as_deref(), blob))
 }
 
 impl IngressAdapter for AnthropicIngress {

@@ -8,7 +8,10 @@
 
 use serde_json::{Value, json};
 
-use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, ReasoningDetail, ReasoningDetailKind};
+use routectl_core::{
+    BEDROCK_MANTLE, CODEX_OAUTH, ChatChunk, ChunkChoice, ChunkDelta, OPENAI_APIKEY,
+    OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind,
+};
 
 use super::*;
 use crate::ingress::StreamErrorClass;
@@ -58,6 +61,15 @@ fn finish_chunk(reason: &str, usage: Option<UsageDelta>) -> ChatChunk {
 }
 
 fn reasoning_chunk(kind: ReasoningDetailKind, id: &str, payload: Value) -> ChatChunk {
+    tagged_reasoning_chunk(kind, id, payload, OPENAI_RESPONSES_V1)
+}
+
+fn tagged_reasoning_chunk(
+    kind: ReasoningDetailKind,
+    id: &str,
+    payload: Value,
+    format: &str,
+) -> ChatChunk {
     ChatChunk {
         id: "resp_01".into(),
         model: "gpt-5-codex".into(),
@@ -67,7 +79,7 @@ fn reasoning_chunk(kind: ReasoningDetailKind, id: &str, payload: Value) -> ChatC
                 reasoning_details: vec![ReasoningDetail {
                     kind,
                     id: Some(id.into()),
-                    format: Some(OPENAI_RESPONSES_FORMAT.into()),
+                    format: Some(format.into()),
                     index: Some(0),
                     payload,
                 }],
@@ -83,15 +95,7 @@ fn reasoning_chunk(kind: ReasoningDetailKind, id: &str, payload: Value) -> ChatC
 }
 
 fn foreign_reasoning_chunk(kind: ReasoningDetailKind, id: &str, payload: Value) -> ChatChunk {
-    let mut chunk = reasoning_chunk(kind, id, payload);
-    // Re-tag the detail as coming from a non-Responses upstream (e.g. an
-    // Anthropic turn), which the streamed lifecycle must not surface.
-    for choice in &mut chunk.choices {
-        for d in &mut choice.delta.reasoning_details {
-            d.format = Some("anthropic-v1".into());
-        }
-    }
-    chunk
+    tagged_reasoning_chunk(kind, id, payload, "anthropic-claude-v1")
 }
 
 fn tool_chunk(index: u64, id: &str, name: &str, args: &str) -> ChatChunk {
@@ -1053,6 +1057,58 @@ fn foreign_format_reasoning_not_streamed_and_leaves_no_output_index_gap() {
         output.iter().all(|o| o["type"] != "reasoning"),
         "foreign reasoning must be absent from the completed body; got {output:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Every Responses-family tag streams and reaches the completed body
+// ---------------------------------------------------------------------------
+
+fn assert_lane_tag_streams(tag: &str) {
+    // Arrange
+    let mut state = fresh();
+
+    // Act
+    let mut events = render(
+        &mut state,
+        tagged_reasoning_chunk(
+            ReasoningDetailKind::Summary,
+            "rs_1",
+            json!({"text": "step"}),
+            tag,
+        ),
+    );
+    events.extend(render(&mut state, finish_chunk("stop", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    let delta = data_of(&events, "response.reasoning_summary_text.delta");
+    assert_eq!(delta["delta"], "step");
+    let completed = data_of(&events, "response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert!(
+        output.iter().any(|o| o["type"] == "reasoning"),
+        "tag {tag} must reach the completed body; got {output:?}"
+    );
+}
+
+#[test]
+fn codex_oauth_tagged_reasoning_streams() {
+    assert_lane_tag_streams(CODEX_OAUTH);
+}
+
+#[test]
+fn openai_apikey_tagged_reasoning_streams() {
+    assert_lane_tag_streams(OPENAI_APIKEY);
+}
+
+#[test]
+fn bedrock_mantle_tagged_reasoning_streams() {
+    assert_lane_tag_streams(BEDROCK_MANTLE);
+}
+
+#[test]
+fn compatibility_tagged_reasoning_still_streams() {
+    assert_lane_tag_streams(OPENAI_RESPONSES_V1);
 }
 
 // ---------------------------------------------------------------------------

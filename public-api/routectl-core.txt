@@ -890,6 +890,53 @@ impl<T> core::convert::From<T> for routectl_core::failure_class::ClassifiedFailu
 pub fn routectl_core::failure_class::ClassifiedFailure::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::failure_class::ClassifiedFailure
 impl<T> tracing::instrument::WithSubscriber for routectl_core::failure_class::ClassifiedFailure
+pub struct routectl_core::failure_class::ReplayAttempt
+impl routectl_core::ReplayAttempt
+pub const fn routectl_core::ReplayAttempt::carried_gray_artifact(self) -> bool
+pub const fn routectl_core::ReplayAttempt::none() -> Self
+pub const fn routectl_core::ReplayAttempt::with_gray_artifacts(usize) -> Self
+impl core::clone::Clone for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::clone(&self) -> routectl_core::ReplayAttempt
+impl core::cmp::Eq for routectl_core::ReplayAttempt
+impl core::cmp::PartialEq for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::eq(&self, &routectl_core::ReplayAttempt) -> bool
+impl core::default::Default for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::default() -> routectl_core::ReplayAttempt
+impl core::fmt::Debug for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::ReplayAttempt
+impl core::marker::StructuralPartialEq for routectl_core::ReplayAttempt
+impl core::marker::Freeze for routectl_core::ReplayAttempt
+impl core::marker::Send for routectl_core::ReplayAttempt
+impl core::marker::Sync for routectl_core::ReplayAttempt
+impl core::marker::Unpin for routectl_core::ReplayAttempt
+impl core::marker::UnsafeUnpin for routectl_core::ReplayAttempt
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::ReplayAttempt
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::ReplayAttempt
+impl<T, U> core::convert::Into<U> for routectl_core::ReplayAttempt where U: core::convert::From<T>
+pub fn routectl_core::ReplayAttempt::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::ReplayAttempt where U: core::convert::Into<T>
+pub type routectl_core::ReplayAttempt::Error = core::convert::Infallible
+pub fn routectl_core::ReplayAttempt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::ReplayAttempt where U: core::convert::TryFrom<T>
+pub type routectl_core::ReplayAttempt::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::ReplayAttempt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::ReplayAttempt where T: core::clone::Clone
+pub type routectl_core::ReplayAttempt::Owned = T
+pub fn routectl_core::ReplayAttempt::clone_into(&self, &mut T)
+pub fn routectl_core::ReplayAttempt::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::ReplayAttempt where T: 'static + ?core::marker::Sized
+pub fn routectl_core::ReplayAttempt::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::ReplayAttempt where T: ?core::marker::Sized
+pub fn routectl_core::ReplayAttempt::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::ReplayAttempt where T: ?core::marker::Sized
+pub fn routectl_core::ReplayAttempt::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::ReplayAttempt where T: core::clone::Clone
+pub unsafe fn routectl_core::ReplayAttempt::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::ReplayAttempt
+impl<T> tracing::instrument::WithSubscriber for routectl_core::ReplayAttempt
 pub struct routectl_core::failure_class::StatusClassGuidance
 pub routectl_core::failure_class::StatusClassGuidance::alternatives: alloc::vec::Vec<routectl_core::failure_class::FailureClass>
 pub routectl_core::failure_class::StatusClassGuidance::primary: routectl_core::failure_class::FailureClass
@@ -935,6 +982,7 @@ impl<T> tracing::instrument::Instrument for routectl_core::failure_class::Status
 impl<T> tracing::instrument::WithSubscriber for routectl_core::failure_class::StatusClassGuidance
 pub fn routectl_core::failure_class::class_guidance_for_status(u16) -> routectl_core::failure_class::StatusClassGuidance
 pub fn routectl_core::failure_class::classify(&routectl_core::error::Error, core::option::Option<&str>) -> routectl_core::failure_class::ClassifiedFailure
+pub fn routectl_core::failure_class::classify_with_attempt(&routectl_core::error::Error, core::option::Option<&str>, routectl_core::ReplayAttempt) -> routectl_core::failure_class::ClassifiedFailure
 pub mod routectl_core::identity
 pub mod routectl_core::identity::anthropic
 pub const routectl_core::identity::anthropic::CONTEXT_1M_BETA: &str
@@ -4582,6 +4630,53 @@ impl<T> core::convert::From<T> for routectl_core::context_reduction::ReductionDe
 pub fn routectl_core::context_reduction::ReductionDelta::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::context_reduction::ReductionDelta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::context_reduction::ReductionDelta
+pub struct routectl_core::ReplayAttempt
+impl routectl_core::ReplayAttempt
+pub const fn routectl_core::ReplayAttempt::carried_gray_artifact(self) -> bool
+pub const fn routectl_core::ReplayAttempt::none() -> Self
+pub const fn routectl_core::ReplayAttempt::with_gray_artifacts(usize) -> Self
+impl core::clone::Clone for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::clone(&self) -> routectl_core::ReplayAttempt
+impl core::cmp::Eq for routectl_core::ReplayAttempt
+impl core::cmp::PartialEq for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::eq(&self, &routectl_core::ReplayAttempt) -> bool
+impl core::default::Default for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::default() -> routectl_core::ReplayAttempt
+impl core::fmt::Debug for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::ReplayAttempt
+impl core::marker::StructuralPartialEq for routectl_core::ReplayAttempt
+impl core::marker::Freeze for routectl_core::ReplayAttempt
+impl core::marker::Send for routectl_core::ReplayAttempt
+impl core::marker::Sync for routectl_core::ReplayAttempt
+impl core::marker::Unpin for routectl_core::ReplayAttempt
+impl core::marker::UnsafeUnpin for routectl_core::ReplayAttempt
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::ReplayAttempt
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::ReplayAttempt
+impl<T, U> core::convert::Into<U> for routectl_core::ReplayAttempt where U: core::convert::From<T>
+pub fn routectl_core::ReplayAttempt::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::ReplayAttempt where U: core::convert::Into<T>
+pub type routectl_core::ReplayAttempt::Error = core::convert::Infallible
+pub fn routectl_core::ReplayAttempt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::ReplayAttempt where U: core::convert::TryFrom<T>
+pub type routectl_core::ReplayAttempt::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::ReplayAttempt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::ReplayAttempt where T: core::clone::Clone
+pub type routectl_core::ReplayAttempt::Owned = T
+pub fn routectl_core::ReplayAttempt::clone_into(&self, &mut T)
+pub fn routectl_core::ReplayAttempt::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::ReplayAttempt where T: 'static + ?core::marker::Sized
+pub fn routectl_core::ReplayAttempt::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::ReplayAttempt where T: ?core::marker::Sized
+pub fn routectl_core::ReplayAttempt::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::ReplayAttempt where T: ?core::marker::Sized
+pub fn routectl_core::ReplayAttempt::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::ReplayAttempt where T: core::clone::Clone
+pub unsafe fn routectl_core::ReplayAttempt::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::ReplayAttempt
+pub fn routectl_core::ReplayAttempt::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::ReplayAttempt
+impl<T> tracing::instrument::WithSubscriber for routectl_core::ReplayAttempt
 #[non_exhaustive] pub struct routectl_core::RoutectlInternal
 pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>

@@ -142,18 +142,10 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                 ));
             }
             routectl_core::ReasoningDetailKind::Encrypted => {
-                // Encrypted detail; field name on the wire differs by
-                // dialect:
-                //   - Anthropic: `data` (opaque encrypted payload)
-                //   - OpenAI Responses: `encrypted_content`
-                //   - OpenRouter passthrough: `data`
-                // Read whichever is populated.
-                let data = d
-                    .payload
-                    .get("data")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| d.payload.get("encrypted_content").and_then(|v| v.as_str()))
-                    .unwrap_or_default();
+                // Foreign-scheme artifacts ride out self-describing so
+                // the echo back is replayable; Anthropic-sourced bytes
+                // pass through verbatim. See `encrypted_detail_data`.
+                let data = super::encrypted_detail_data(d);
                 blocks.push(json!({
                     "type": "redacted_thinking",
                     "data": data,

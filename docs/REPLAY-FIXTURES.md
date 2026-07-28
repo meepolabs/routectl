@@ -18,6 +18,29 @@ the final regression gate. Replay catches wire-shape regressions
 cheaply between matrix runs against whatever corpus the contributor
 has on hand.
 
+## Captured bodies that do NOT live in the corpus
+
+A captured upstream body that a shipping unit test must pin belongs in
+that test as an inline constant, not here. Because the corpus is
+gitignored, a corpus-backed assertion is unrunnable for every
+contributor but the one who captured it -- the test would silently skip
+or fail on a fresh checkout and in CI, which is exactly where a pinned
+regression body needs to hold.
+
+The rule of thumb: the corpus holds bodies a DRIVER iterates over
+(whatever the contributor happens to have), while a body a NAMED test
+asserts against goes inline. Inlining is only appropriate for a small,
+secret-free body -- a rejection envelope, not a full response.
+
+Current inline captures:
+
+- The reasoning-replay rejection envelope (a 400 whose `error.message`
+  reports an unrecognized encrypted-content prefix), pinned in the
+  `failure_class` tests in `routectl-core` as the regression fixture for
+  the closed replay-rejection matcher. 166 bytes, no secret: it carries
+  only the upstream's own validation tokens and its prose message, no
+  request content and no artifact bytes.
+
 For the loader and structural comparators (`load_fixture`,
 `assert_json_equal_structural`, `assert_sse_equal`, ...) see
 `crates/routectl-cli/tests/common/replay/` -- the entry point is
