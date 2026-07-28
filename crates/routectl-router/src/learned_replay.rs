@@ -43,9 +43,6 @@
 //! and it carries only normalized keys -- never a request body, a reasoning
 //! artifact, or an artifact id. Nothing in this module's API can accept
 //! one.
-//!
-//! Not yet wired into dispatch: the rejection-repair arm that drives this
-//! lifecycle is a separate change.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashSet;

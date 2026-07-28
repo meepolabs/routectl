@@ -194,10 +194,6 @@ fn strip_plan(feature_key: &str) -> Option<StripPlan> {
 /// messages keep their exact position and every other field byte-for-byte
 /// -- nothing is reordered or rebuilt -- so upstream prompt-cache affinity
 /// survives the strip.
-///
-/// Not yet wired into dispatch: the rejection-repair path that selects
-/// this variant is a separate change.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn strip_replay_artifacts(req: &mut ChatRequest, lane: ReplayScheme) -> bool {
     let has_removable = req.messages.iter().any(|message| {
         message
@@ -218,7 +214,6 @@ pub fn strip_replay_artifacts(req: &mut ChatRequest, lane: ReplayScheme) -> bool
 
 /// Whether one reasoning detail must be dropped before dispatch onto a
 /// lane of scheme `lane`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn is_removable(detail: &ReasoningDetail, lane: ReplayScheme) -> bool {
     matches!(
         is_replayable(scheme_of(detail.format.as_deref()), lane),

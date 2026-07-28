@@ -1329,7 +1329,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   non-dispatch impls (`DispatchTarget.capability_prior`, the metric counters,
   `DispatchMeta::for_alias`/`mark_target`; `DispatchMeta` carries the additive
   capability ride-alongs `learned_capabilities` / `capability_observations` /
-  `cleared_capabilities`). Construction + hot-reload lifecycle: `new`,
+  `cleared_capabilities` plus the `replay_degradation` reasoning-replay
+  degradation record read once by the per-request WARN). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_learned_from` reload carries + `note_overlay_revision`, the
@@ -1344,7 +1345,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   declares the per-concern submodules: `dispatch`, `class_observe`, `chain`,
   `overlays`, `feature_filter`, `capability_learn`, `capability_observe`,
   `capability_cleared`, `cache_plan`, `runtime_gate`, `sticky`,
-  `count_tokens`, `status`
+  `count_tokens`, `status`, `replay_repair`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -1387,7 +1388,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `pub(super)`, shared with `count_tokens` and `feature_filter`; the pure
   classification/observability labels (`DispatchSurface`,
   `UpstreamFacts`/`upstream_facts`, `class_label`, `matched_by_label`) now
-  live in `class_observe` and are imported from there
+  live in `class_observe` and are imported from there. The reasoning-replay
+  strip-repair branch lives here too: a fixed one-shot correctness arm
+  (bounded additive, never nested across fallback) that on a classified
+  replay rejection admits via `replay_repair`, swaps to the stripped variant,
+  and retries once; `replay_rejection_body_free` rebuilds the rejection with
+  no upstream body before generic logging, and `emit_replay_degradation`
+  fires the single per-request degradation WARN
+- `src/router/replay_repair.rs` -- the router-side reasoning-replay carry
+  admission + strip-repair settlement the dispatch arm drives:
+  `ReplayCarryPlan` / `plan_replay_carry` decide carry-once vs proactive
+  strip against the `learned_replay` registry, and the plan settles the
+  two-phase learn (commit on stripped-repair success, release otherwise) and
+  records the `DispatchMeta.replay_degradation` summary
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
