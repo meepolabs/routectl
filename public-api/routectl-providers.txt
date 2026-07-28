@@ -1963,3 +1963,5 @@ impl<T> typenum::type_operators::Same for routectl_providers::openai_responses::
 pub type routectl_providers::openai_responses::OpenAiResponsesProvider::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_providers::openai_responses::OpenAiResponsesProvider where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_providers::openai_responses::OpenAiResponsesProvider::into_shared(self) -> Shared
+pub const fn routectl_providers::openai_responses::lane_format_tag(routectl_providers::openai_responses::AuthKind) -> &'static str
+pub const fn routectl_providers::openai_responses::lane_scheme(routectl_providers::openai_responses::AuthKind) -> routectl_core::reasoning_format::ReplayScheme

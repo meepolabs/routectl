@@ -1633,7 +1633,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   point for new provider body surfaces. Other providers (Bedrock) carry a
   field path in the token and normalize it directly. The `anthropic-api`
   `BadRequest` arm runs the body's `error.message` through a whole-phrase
-  table to yield an inferred signal. The `bedrock` `BadRequest` arm instead
+  table to yield an inferred signal; the `openai-responses` arm has its own
+  table whose replay-rejection row is PREFIX-anchored (the real message ends
+  in a variable enumeration of accepted content prefixes) and resolves to
+  `REASONING_REPLAY`, never `THINKING` -- the lane rejects a replayed
+  artifact, not reasoning itself. The `bedrock` `BadRequest` arm instead
   reads a FLAT `{"__type","message"}` AWS envelope via its own top-level
   `bedrock_flat_field` reader (distinct from the nested
   `upstream_error_field`, same `MAX_ERROR_BODY_BYTES` cap) and runs the
@@ -1715,7 +1719,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   type, `anthropic_beta` token, `provider_extras` body key) --
   `context_management` spans the `context-management-2025-06-27` beta token
   AND the `context_management` body key; `advisor` strips only its grounded
-  tool shape (no beta token is fabricated). `strip_beta_tokens(feature_key)`
+  tool shape (no beta token is fabricated). `reasoning_replay ->
+  Strip(AssistantReasoning)` has NO `strip_plan` row by design: its transform
+  is lane-directional, so it lives in `strip_replay_artifacts(req, lane)`,
+  which drops the assistant-turn `reasoning_details` whose
+  `is_replayable(scheme_of(detail.format), lane)` is `Strip` or `Gray` (the
+  repair variant carries no unproven artifact) while keeping proven-portable
+  `Carry` details and the legacy plaintext `reasoning` text, mutating through
+  the `Arc::make_mut` copy-on-write seam behind a read-only pre-scan so a
+  no-op never clones and the rest of the request stays byte-identical
+  (prompt-cache affinity). `StripInterceptor` skips that key -- it is not a
+  key-only transform -- and is not yet wired to a dispatch repair branch.
+  `strip_beta_tokens(feature_key)`
   exposes the beta surface so the dispatch layer's operator-floor-pin guard
   can route away when a stripped token would be re-added downstream.
   `StripInterceptor` (impl of `RequestInterceptor`) applies the transform
