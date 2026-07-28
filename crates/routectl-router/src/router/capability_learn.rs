@@ -172,6 +172,13 @@ impl Router {
         self.learned_capabilities.snapshot()
     }
 
+    /// The reasoning-replay lifecycle riding on the learned-capability
+    /// registry. `&self` delegate over the private field, so the dispatch
+    /// arm claims a carry slot and settles it without reaching inside.
+    pub fn learned_replay(&self) -> &crate::learned_replay::ReplayLearnRegistry {
+        &self.learned_replay
+    }
+
     /// Learn-path capture, called from both dispatch error arms beside
     /// [`Router::emit_class_observability`]. On an eligible, deduped
     /// capability rejection it records a learned negative in the registry,

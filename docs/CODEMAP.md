@@ -1464,8 +1464,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `capability_matcher::has_feature_naming_table` so it never fires on
   tableless providers),
   `expire_learned_on_override_change`/`override_identity_for` (targeted expiry
-  on override-cell change), and `learned_capability_snapshot` (the status
-  read-model)
+  on override-cell change), `learned_capability_snapshot` (the status
+  read-model), and `learned_replay` (the `&self` delegate handing the dispatch
+  arm the `ReplayLearnRegistry` for its carry-slot claim)
 - `src/router/capability_observe.rs` -- response-evidence observer: the
   SUCCESS-arm mirror of `observe_for_learning`, run inline on the terminal
   successful NON-STREAMING response (the streaming arm records nothing -- no
@@ -1583,7 +1584,26 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `from_capability_config` (decay / inferred-window from the `[capability]`
   hours + the shared `DEFAULT_MAX_ENTRIES` cap) -- the shared sizing path for
   both the router build and the doctor's read-only one-shot ledger rebuild;
-  `LearnedCapabilityRegistry` is a public export for that reuse
+  `LearnedCapabilityRegistry` is a public export for that reuse. Also exposes
+  `negative_state -> NegativeState{Absent,Acting,Lapsed}`, the read-only decay
+  view that never claims the probe slot, for callers running their own
+  admission discipline
+- `src/learned_replay.rs` -- the reasoning-replay learned lifecycle layered
+  over the registry. `ReplayLearnKey::new(state_key, provider_kind, lane
+  scheme, artifact scheme)` builds the `(scheme_tag, target_lane)` identity:
+  the lane discriminant is the configured target state key plus the lane's
+  `ReplayScheme` token and the capability key is `reasoning_replay:<artifact
+  scheme>` -- the caller-supplied model string never enters a key, so sibling
+  models on one lane share ONE learned truth. `ReplayLearnRegistry::
+  admit_provisional -> Option<ReplayProbeGuard>` is the per-pair single-flight
+  claim: `Some` means carry the artifacts (unknown or lapsed pair, no other
+  probe outstanding), `None` means strip. The guard is the two-phase learn --
+  `commit` persists the negative and returns the `CapabilityLearnEvent`
+  emission row ONLY after the stripped repair succeeded, `clear` drops the
+  entry when the carry itself succeeded, `release` (and an unsettled `Drop`)
+  frees the slot without learning. Together those cover the four decay
+  settlements: lapse -> one carry, success -> clear, same rejection ->
+  refresh, unrelated error -> release unchanged
 - `src/capability_rebuild.rs` -- boot warm-rebuild of the learned registry
   from the persisted capability-event ledger, mirroring the K estimator's
   `rebuild.rs`. Owns the `CapabilityLedgerReader` dependency-inversion trait

@@ -202,6 +202,25 @@ pub enum RoutingDecision {
     ProbeAdmitted,
 }
 
+/// Non-claiming view of the resident negative for a key.
+///
+/// The read-only counterpart to
+/// [`LearnedCapabilityRegistry::acting_negative_for`]: it never claims the
+/// re-probe slot, so a caller that runs its own admission discipline (the
+/// reasoning-replay lifecycle's single-flight) reads the decay state
+/// without mutating it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NegativeState {
+    /// No acting learned negative applies: nothing resident, a pending
+    /// (uncorroborated) observation, or a VerifiedWorking positive.
+    Absent,
+    /// An acting negative inside its decay window.
+    Acting,
+    /// An acting negative whose decay window has lapsed: due for exactly
+    /// one re-verification.
+    Lapsed,
+}
+
 /// Result of a re-probe dispatch, reported to settle the in-flight slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeOutcome {
@@ -454,6 +473,32 @@ impl LearnedCapabilityRegistry {
                     RoutingDecision::ProbeAdmitted
                 }
             }
+        }
+    }
+
+    /// Read the resident negative's decay state WITHOUT claiming the
+    /// re-probe slot. For callers that own their own admission discipline;
+    /// the ordinary dispatch path uses [`Self::acting_negative_for`], which
+    /// both reads and claims.
+    pub fn negative_state(
+        &self,
+        state_key: &str,
+        feature_key_raw: &str,
+        provider_kind: &str,
+        now: Instant,
+    ) -> NegativeState {
+        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
+        let entries = self.entries.read();
+        let Some(entry) = entries.get(&key) else {
+            return NegativeState::Absent;
+        };
+        if !matches!(entry.verdict, EntryVerdict::Negative) || !entry.is_acting() {
+            return NegativeState::Absent;
+        }
+        if entry.is_expired(now) {
+            NegativeState::Lapsed
+        } else {
+            NegativeState::Acting
         }
     }
 

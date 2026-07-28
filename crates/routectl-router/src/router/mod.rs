@@ -175,6 +175,12 @@ pub struct Router {
     /// unchanged -- either bump invalidates every learned negative because
     /// the fresher pricing / capability truth must win.
     learned_capabilities: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
+    /// Reasoning-replay lifecycle over `learned_capabilities`: per-pair
+    /// single-flight admission plus the two-phase learn the dispatch repair
+    /// arm drives. Holds only the in-flight coordination set -- every
+    /// persisted negative lives in the registry above, so a replay negative
+    /// carries across a hot reload on the same terms as any other.
+    learned_replay: Arc<crate::learned_replay::ReplayLearnRegistry>,
     /// Operator capability-override read-model, flattened from config at
     /// construction. Pure projection of `config.capability.overrides` plus
     /// the legacy provider / model `unsupported_features` lists -- no
@@ -1020,6 +1026,9 @@ impl Router {
                 &config.capability,
             ),
         );
+        let learned_replay = Arc::new(crate::learned_replay::ReplayLearnRegistry::new(Arc::clone(
+            &learned_capabilities,
+        )));
         let has_forwarded_provider = config
             .providers
             .values()
@@ -1037,6 +1046,7 @@ impl Router {
             k_estimator,
             shadow_store,
             learned_capabilities,
+            learned_replay,
             override_registry,
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
             overlay_revision: 0,

@@ -41,6 +41,7 @@ pub(crate) mod feature_keys;
 pub(crate) mod glob;
 pub(crate) mod k_estimator;
 pub(crate) mod learned_capability;
+pub(crate) mod learned_replay;
 pub(crate) mod override_registry;
 pub(crate) mod resolved;
 pub mod router;
@@ -146,6 +147,7 @@ pub use k_estimator::{
     ShadowOutcome, ShadowStore, rebuild_into,
 };
 pub use learned_capability::{LearnedCapabilityRegistry, LearnedRegistryEntry};
+pub use learned_replay::{ReplayLearnKey, ReplayLearnRegistry, ReplayProbeGuard};
 pub use override_registry::{
     OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,
     validate_capability_overrides,
