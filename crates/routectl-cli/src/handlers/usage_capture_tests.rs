@@ -579,6 +579,89 @@ async fn observe_meta_empty_capability_events_enqueues_nothing() {
 }
 
 #[tokio::test]
+async fn observe_meta_drains_a_committed_replay_negative_without_a_schema_change() {
+    // Arrange: a real reasoning-replay learn event, produced by the
+    // lifecycle's own two-phase commit rather than hand-built, rides the
+    // dispatch meta.
+    use routectl_core::ReplayScheme;
+    use routectl_router::{LearnedCapabilityRegistry, ReplayLearnKey, ReplayLearnRegistry};
+
+    let learned = std::sync::Arc::new(LearnedCapabilityRegistry::new(
+        std::time::Duration::from_hours(48),
+        std::time::Duration::from_hours(1),
+        64,
+    ));
+    let replay = ReplayLearnRegistry::new(learned);
+    let now = std::time::Instant::now();
+    let key = ReplayLearnKey::new(
+        "lane-target",
+        "openai-responses",
+        ReplayScheme::Mantle,
+        ReplayScheme::Codex,
+    );
+    let event = replay
+        .admit_provisional(&key, now)
+        .expect("an unknown pair admits its single carry")
+        .commit(400, vec!["reasoning_replay".to_string()], now);
+
+    let mut meta = any_dispatch_meta().await;
+    meta.learned_capabilities = vec![event];
+
+    // Act: the drain runs over the shipped `learned_capabilities` seam.
+    let (conn, _dir) = drain_and_open(&meta, 7, 3, 1);
+
+    // Assert: one `broken` row on the existing columns -- open-set tokens
+    // and normalized keys only. The row carries NO body and NO blob: the
+    // only nullable payload columns are both empty, and every populated
+    // column is a key or a closed-set token.
+    let (lane, cap_key, verdict, phase, source, tier): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT lane_key, capability, verdict, phase, source, tier \
+             FROM capability_events",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .expect("one replay row");
+    assert_eq!(lane, "lane-target#mantle");
+    assert_eq!(cap_key, "reasoning_replay:codex");
+    assert_eq!(verdict, "broken");
+    assert_eq!(phase, "f1");
+    assert_eq!(source, "live");
+    assert_eq!(tier, "self-identifying");
+    let (ec, ut): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT evidence_class, upstream_token FROM capability_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("one replay row");
+    assert!(ec.is_none(), "a replay row carries no evidence class");
+    assert!(ut.is_none(), "a replay row carries no upstream token");
+    // The lane key is derived from configuration, never from the model the
+    // caller asked for.
+    assert!(
+        !lane.contains("gpt-4o"),
+        "no caller model string in the row"
+    );
+}
+
+#[tokio::test]
 async fn observe_meta_learned_negative_maps_to_broken_row() {
     // Arrange: one inferred F1 learned negative.
     let mut meta = any_dispatch_meta().await;
