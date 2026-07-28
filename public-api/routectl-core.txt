@@ -402,6 +402,7 @@ pub const routectl_core::capability::CACHE_HIT: &str
 pub const routectl_core::capability::COMPUTER_USE: &str
 pub const routectl_core::capability::EVIDENCE_CLASSES: &[&str]
 pub const routectl_core::capability::PROMPT_CACHING: &str
+pub const routectl_core::capability::REASONING_REPLAY: &str
 pub const routectl_core::capability::SCHEMA_MISMATCH: &str
 pub const routectl_core::capability::SCHEMA_PARSE: &str
 pub const routectl_core::capability::SEARCH_ABSENT_FORCED: &str
