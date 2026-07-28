@@ -29,7 +29,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     warn_dropped_cache_control(req);
 
     let instructions = translate_system(req).unwrap_or_default();
-    let input = build_input(&cfg.id, &req.messages)?;
+    let input = build_input(&cfg.id, cfg.auth_kind, &req.messages)?;
     let tools = translate_tools(req);
     let tool_choice = translate_tool_choice(req.tool_choice.as_ref());
 

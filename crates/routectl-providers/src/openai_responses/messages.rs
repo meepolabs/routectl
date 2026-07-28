@@ -23,13 +23,16 @@
 
 use serde_json::Value;
 
-use routectl_core::{ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role};
+use routectl_core::{
+    ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability, Result, Role,
+    is_replayable, is_responses_family, scheme_of,
+};
 
-use super::OPENAI_RESPONSES_FORMAT;
 use super::types::{
     FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
     ReasoningSummaryItem, ResponseInputItem, ResponsesContentItem,
 };
+use super::{AuthKind, lane_scheme};
 use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 
 /// Walk the canonical `messages[]` and produce a flat `input[]` array
@@ -37,7 +40,15 @@ use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 /// `instructions` by `system.rs`); each non-system turn may produce
 /// 1+ input items (e.g. an assistant turn with both thinking and text
 /// emits `Reasoning` + `Message`).
-pub(super) fn build_input(id: &str, messages: &[Message]) -> Result<Vec<ResponseInputItem>> {
+///
+/// `auth_kind` names the lane this request is bound for: replay
+/// portability is a property of the (artifact lane, target lane) pair,
+/// so every reasoning artifact is gated against it before egress.
+pub(super) fn build_input(
+    id: &str,
+    auth_kind: AuthKind,
+    messages: &[Message],
+) -> Result<Vec<ResponseInputItem>> {
     let mut out: Vec<ResponseInputItem> = Vec::with_capacity(messages.len());
     for msg in messages {
         match msg.role {
@@ -46,7 +57,7 @@ pub(super) fn build_input(id: &str, messages: &[Message]) -> Result<Vec<Response
                 // intentionally dropped here.
             }
             Role::User => translate_user_message(id, msg, &mut out)?,
-            Role::Assistant => translate_assistant_message(id, msg, &mut out)?,
+            Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out)?,
             Role::Tool => translate_tool_message(id, msg, &mut out)?,
         }
     }
@@ -171,7 +182,7 @@ fn tool_result_to_output_body(id: &str, content: &Value) -> FunctionCallOutputBo
 /// Reasoning replay (critical correctness path): the Responses-side
 /// canonical channel for prior-turn reasoning is
 /// `msg.reasoning_details` (the response translator stamps every
-/// reasoning block there with `format = "openai-responses-v1"` and
+/// reasoning block there with the producing lane's format tag and
 /// preserves the upstream `encrypted_content` signature). Routing
 /// reasoning solely through content-parts would lose the signature
 /// because `ContentPart::Thinking` has no slot for the JWT payload.
@@ -184,6 +195,7 @@ fn tool_result_to_output_body(id: &str, content: &Value) -> FunctionCallOutputBo
 /// duplicate is visible during triage.
 fn translate_assistant_message(
     id: &str,
+    auth_kind: AuthKind,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
 ) -> Result<()> {
@@ -192,10 +204,10 @@ fn translate_assistant_message(
     let mut tool_calls: Vec<ResponseInputItem> = Vec::new();
 
     // First, lift reasoning_details into Reasoning input items.
-    // Only entries tagged with the Responses format participate; other
-    // formats (e.g. Anthropic) ride a different replay shape that the
-    // canonical hub doesn't translate here.
-    lift_reasoning_details(&msg.reasoning_details, &mut reasoning_items);
+    // Only entries tagged with a Responses-family format participate;
+    // other formats (e.g. Anthropic) ride a different replay shape that
+    // the canonical hub doesn't translate here.
+    lift_reasoning_details(&msg.reasoning_details, auth_kind, &mut reasoning_items);
     let suppress_thinking_parts = !reasoning_items.is_empty();
 
     let mut content_has_tool_use = false;
@@ -211,6 +223,7 @@ fn translate_assistant_message(
             for p in parts {
                 walk_assistant_part(
                     id,
+                    auth_kind,
                     p,
                     suppress_thinking_parts,
                     &mut reasoning_items,
@@ -276,10 +289,26 @@ fn append_function_calls_from_tool_calls(
 /// distinct upstream item id (or one fall-through item when no id is
 /// preserved). Multiple details sharing the same `id` collapse to a
 /// single Reasoning item carrying the union of summary, content, and
-/// encrypted_content surfaces. Format-tagged with anything other than
-/// `openai-responses-v1` is skipped: those entries come from a
-/// different upstream and replaying them here would corrupt the wire.
-fn lift_reasoning_details(details: &[ReasoningDetail], out: &mut Vec<ResponseInputItem>) {
+/// encrypted_content surfaces.
+///
+/// Two independent gates run per detail:
+///
+/// - RECOGNITION: only Responses-family tags participate. Anything else
+///   (e.g. Anthropic) comes from a different upstream and replaying it
+///   here would corrupt the wire. The check goes through
+///   `is_responses_family` rather than an equality test against one tag,
+///   so a newly minted lane tag is recognized instead of silently
+///   vanishing.
+/// - REPLAY: proven-incompatible (artifact scheme, lane scheme) pairs are
+///   stripped -- the upstream validator rejects them outright. Pairs that
+///   are not established either way are carried OPTIMISTICALLY: carrying
+///   once is how an unproven pair gets settled, and a rejection is the
+///   router's to learn from. This layer never retries and never learns.
+fn lift_reasoning_details(
+    details: &[ReasoningDetail],
+    auth_kind: AuthKind,
+    out: &mut Vec<ResponseInputItem>,
+) {
     if details.is_empty() {
         return;
     }
@@ -291,11 +320,18 @@ fn lift_reasoning_details(details: &[ReasoningDetail], out: &mut Vec<ResponseInp
         std::collections::HashMap::new();
     let mut skipped_count: u32 = 0;
     let mut skipped_formats: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut stripped_count: u32 = 0;
+    let lane = lane_scheme(auth_kind);
 
     for d in details {
-        if d.format.as_deref() != Some(OPENAI_RESPONSES_FORMAT) {
+        let format = d.format.as_deref();
+        if !is_responses_family(format) {
             skipped_count += 1;
-            skipped_formats.insert(d.format.as_deref().unwrap_or("<none>").to_string());
+            skipped_formats.insert(format.unwrap_or("<none>").to_string());
+            continue;
+        }
+        if is_replayable(scheme_of(format), lane) == Replayability::Strip {
+            stripped_count += 1;
             continue;
         }
         let key = d.id.clone();
@@ -365,7 +401,14 @@ fn lift_reasoning_details(details: &[ReasoningDetail], out: &mut Vec<ResponseInp
         tracing::debug!(
             skipped = skipped_count,
             formats = ?formats,
-            "openai-responses: skipped reasoning_details entries with non-openai-responses-v1 format"
+            "openai-responses: skipped reasoning_details entries with a non-Responses-family format"
+        );
+    }
+    if stripped_count > 0 {
+        tracing::debug!(
+            stripped = stripped_count,
+            lane = ?lane,
+            "openai-responses: stripped reasoning_details entries whose replay scheme the target lane rejects"
         );
     }
 }
@@ -486,6 +529,7 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
 /// signature in a slot that ContentPart::Thinking lacks.
 fn walk_assistant_part(
     id: &str,
+    auth_kind: AuthKind,
     p: &ContentPart,
     suppress_thinking_parts: bool,
     reasoning: &mut Vec<ResponseInputItem>,
@@ -513,6 +557,7 @@ fn walk_assistant_part(
                     thinking,
                     signature.as_deref(),
                     None,
+                    auth_kind,
                 ));
             }
         }
@@ -531,7 +576,7 @@ fn walk_assistant_part(
                 // that slot. `data` is treated as the (absent) signature
                 // for an unknown-format part, yielding empty
                 // encrypted_content.
-                reasoning.push(translate_thinking_part("", Some(data), None));
+                reasoning.push(translate_thinking_part("", Some(data), None, auth_kind));
             }
         }
         ContentPart::Known(KnownContentPart::ToolUse {
@@ -569,15 +614,22 @@ fn walk_assistant_part(
 
 /// Translate a canonical Thinking block to a Responses-shape
 /// `Reasoning` input item. The signature is forwarded as
-/// `encrypted_content` ONLY when `format` is `openai-responses-v1` --
-/// the one case where we know the signature is a valid OpenAI
-/// encrypted_content token. For Anthropic-format thinking parts the
-/// field is emitted as an empty string; codex treats empty
-/// `encrypted_content` as a no-op for replay (`arc_monitor.rs::325-336`).
+/// `encrypted_content` only when the source `format` is a
+/// Responses-family tag whose replay scheme the target lane does not
+/// reject -- otherwise the signature is not a token this lane's
+/// validator will accept, and forwarding it corrupts the replay gate on
+/// the upstream server. In every other case the field is emitted as an
+/// empty string; codex treats empty `encrypted_content` as a no-op for
+/// replay (`arc_monitor.rs::325-336`).
+///
+/// An unproven (artifact, lane) pair is carried optimistically: this
+/// layer neither retries nor learns, and carrying once is what lets the
+/// pair be settled from a real upstream verdict.
 pub(super) fn translate_thinking_part(
     thinking: &str,
     signature: Option<&str>,
     format: Option<&str>,
+    auth_kind: AuthKind,
 ) -> ResponseInputItem {
     let summary = if thinking.is_empty() {
         Vec::new()
@@ -586,11 +638,9 @@ pub(super) fn translate_thinking_part(
             text: thinking.to_string(),
         }]
     };
-    // Only forward the signature as encrypted_content when the source
-    // is openai-responses-v1. Anthropic signatures are not valid OpenAI
-    // encrypted_content tokens; forwarding them would corrupt the replay
-    // gate on the upstream server.
-    let encrypted_content = if format == Some(OPENAI_RESPONSES_FORMAT) {
+    let replayable = is_responses_family(format)
+        && is_replayable(scheme_of(format), lane_scheme(auth_kind)) != Replayability::Strip;
+    let encrypted_content = if replayable {
         signature.unwrap_or("").to_string()
     } else {
         String::new()
@@ -830,10 +880,13 @@ fn translate_tool_image_source(
 mod messages_tests {
     use serde_json::json;
 
-    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+    use routectl_core::{
+        BEDROCK_MANTLE, CODEX_OAUTH, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReasoningDetail,
+        ReasoningDetailKind,
+    };
 
-    use super::super::OPENAI_RESPONSES_FORMAT;
     use super::super::types::ResponseInputItem;
+    use super::super::{AuthKind, OPENAI_RESPONSES_FORMAT};
     use super::{lift_reasoning_details, translate_thinking_part};
 
     fn make_detail(
@@ -866,7 +919,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, &mut out);
+        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: no items emitted for anthropic-format details.
         assert!(
@@ -886,7 +939,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, &mut out);
+        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: no items emitted for format-less details.
         assert!(
@@ -907,7 +960,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, &mut out);
+        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: openai-responses-v1 details produce a Reasoning item.
         assert_eq!(
@@ -930,7 +983,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, &mut out);
+        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert
         assert!(
@@ -957,7 +1010,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, &mut out);
+        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: a single Reasoning item carrying the signature.
         assert_eq!(out.len(), 1, "expected one replayed Reasoning item");
@@ -994,7 +1047,7 @@ mod messages_tests {
 
         // Act
         let mut out = Vec::new();
-        lift_reasoning_details(&details, &mut out);
+        lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
 
         // Assert: only the v1 item is included.
         assert_eq!(
@@ -1016,7 +1069,7 @@ mod messages_tests {
         let signature = Some("anthropic_sig_MUST_NOT_APPEAR");
 
         // Act
-        let item = translate_thinking_part(thinking, signature, None);
+        let item = translate_thinking_part(thinking, signature, None, AuthKind::ChatgptOauth);
 
         // Assert: Anthropic signature MUST NOT appear in encrypted_content.
         let ResponseInputItem::Reasoning {
@@ -1038,7 +1091,12 @@ mod messages_tests {
         let signature = Some("test-openai-sig-not-real");
 
         // Act
-        let item = translate_thinking_part(thinking, signature, Some(OPENAI_RESPONSES_FORMAT));
+        let item = translate_thinking_part(
+            thinking,
+            signature,
+            Some(OPENAI_RESPONSES_FORMAT),
+            AuthKind::ChatgptOauth,
+        );
 
         // Assert: the signature IS forwarded.
         let ResponseInputItem::Reasoning {
@@ -1059,7 +1117,12 @@ mod messages_tests {
         let thinking = "Some reasoning";
 
         // Act
-        let item = translate_thinking_part(thinking, None, Some(OPENAI_RESPONSES_FORMAT));
+        let item = translate_thinking_part(
+            thinking,
+            None,
+            Some(OPENAI_RESPONSES_FORMAT),
+            AuthKind::ChatgptOauth,
+        );
 
         // Assert: no signature -> empty encrypted_content (the documented
         // "no prior signature" shape; codex treats it as a no-op).
@@ -1074,6 +1137,126 @@ mod messages_tests {
             "None signature should yield empty encrypted_content, got: {encrypted_content}"
         );
     }
+
+    // -------------------------------------------------------------------
+    // Egress replay gate: family recognition + per-lane carry/strip.
+    // -------------------------------------------------------------------
+
+    fn signed_detail(format: &str) -> ReasoningDetail {
+        make_detail(
+            Some(format),
+            ReasoningDetailKind::Encrypted,
+            json!({"encrypted_content": "SIG"}),
+        )
+    }
+
+    fn lifted_count(format: &str, lane: AuthKind) -> usize {
+        let mut out = Vec::new();
+        lift_reasoning_details(&[signed_detail(format)], lane, &mut out);
+        out.len()
+    }
+
+    #[test]
+    fn lift_carries_a_detail_toward_a_lane_of_the_same_proven_family() {
+        assert_eq!(
+            lifted_count(CODEX_OAUTH, AuthKind::ChatgptOauth),
+            1,
+            "codex-lane detail must replay onto a codex lane"
+        );
+        assert_eq!(
+            lifted_count(OPENAI_APIKEY, AuthKind::ApiKey),
+            1,
+            "api-key-lane detail must replay onto an api-key lane"
+        );
+        assert_eq!(
+            lifted_count(CODEX_OAUTH, AuthKind::ApiKey),
+            1,
+            "the two first-party lanes share one validator family"
+        );
+        assert_eq!(
+            lifted_count(BEDROCK_MANTLE, AuthKind::BedrockMantle),
+            1,
+            "mantle-lane detail must replay onto a mantle lane"
+        );
+    }
+
+    #[test]
+    fn lift_strips_a_detail_toward_a_lane_of_a_different_proven_family() {
+        assert_eq!(
+            lifted_count(CODEX_OAUTH, AuthKind::BedrockMantle),
+            0,
+            "codex-lane detail is proven-incompatible with a mantle lane"
+        );
+        assert_eq!(
+            lifted_count(BEDROCK_MANTLE, AuthKind::ChatgptOauth),
+            0,
+            "mantle-lane detail is proven-incompatible with a codex lane"
+        );
+    }
+
+    #[test]
+    fn lift_carries_a_gray_zone_detail_optimistically() {
+        // The compatibility tag names no lane, so no pair involving it is
+        // proven either way. Carrying it once is how the pair gets
+        // settled; the provider neither retries nor learns.
+        assert_eq!(
+            lifted_count(OPENAI_RESPONSES_V1, AuthKind::BedrockMantle),
+            1,
+            "a gray-zone detail must be carried once, not stripped"
+        );
+        assert_eq!(
+            lifted_count(OPENAI_RESPONSES_V1, AuthKind::ChatgptOauth),
+            1,
+            "a gray-zone detail must be carried once, not stripped"
+        );
+    }
+
+    fn thinking_signature(format: Option<&str>, lane: AuthKind) -> String {
+        let item = translate_thinking_part("reasoned", Some("SIG"), format, lane);
+        let ResponseInputItem::Reasoning {
+            encrypted_content, ..
+        } = item
+        else {
+            panic!("expected ResponseInputItem::Reasoning");
+        };
+        encrypted_content
+    }
+
+    #[test]
+    fn thinking_part_forwards_the_signature_for_every_recognized_lane_tag() {
+        assert_eq!(
+            thinking_signature(Some(CODEX_OAUTH), AuthKind::ChatgptOauth),
+            "SIG"
+        );
+        assert_eq!(
+            thinking_signature(Some(OPENAI_APIKEY), AuthKind::ApiKey),
+            "SIG"
+        );
+        assert_eq!(
+            thinking_signature(Some(BEDROCK_MANTLE), AuthKind::BedrockMantle),
+            "SIG"
+        );
+    }
+
+    #[test]
+    fn thinking_part_drops_the_signature_across_proven_families() {
+        assert!(
+            thinking_signature(Some(CODEX_OAUTH), AuthKind::BedrockMantle).is_empty(),
+            "a codex-lane signature must not reach a mantle lane"
+        );
+        assert!(
+            thinking_signature(Some(BEDROCK_MANTLE), AuthKind::ChatgptOauth).is_empty(),
+            "a mantle-lane signature must not reach a codex lane"
+        );
+    }
+
+    #[test]
+    fn thinking_part_forwards_a_gray_zone_signature_optimistically() {
+        assert_eq!(
+            thinking_signature(Some(OPENAI_RESPONSES_V1), AuthKind::BedrockMantle),
+            "SIG"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1082,6 +1265,7 @@ mod tool_calls_field_tests {
 
     use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
 
+    use super::super::AuthKind;
     use super::super::types::ResponseInputItem;
     use super::build_input;
 
@@ -1135,7 +1319,7 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", &messages).unwrap();
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
 
         // Assert: a function_call item carries the call data.
         let fc_idx = out
@@ -1187,7 +1371,7 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", &messages).unwrap();
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
 
         // Assert
         let call_id = out
@@ -1235,7 +1419,7 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", &messages).unwrap();
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
 
         // Assert: exactly one function_call item, not two.
         let count = out
@@ -1268,7 +1452,7 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", &messages).unwrap();
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
 
         // Assert: no function_call items; the assistant Message survives.
         assert!(

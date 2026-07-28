@@ -319,6 +319,44 @@ pin, and the maintenance protocol for tracking codex releases, see
 surface" -- that is contributor material; the two knobs above
 (`codex_version`, `ROUTECTL_COOKIE_FILE`) are the operator surface.
 
+### Reasoning replay is per-LANE, not per-model (`openai-responses`)
+
+Every `openai-responses` lane speaks the same wire shape, but the lanes
+do NOT validate replayed reasoning the same way, and their validators
+reject each other's artifacts:
+
+| Lane | What its validator checks | What it ignores |
+|---|---|---|
+| `chatgpt-oauth`, `api-key` (one id-validating family) | the reasoning item id | the encrypted content |
+| `bedrock-mantle` (content-validating family) | the encrypted-content prefix | the item id |
+
+The asymmetry is the trap: **both families mint identically shaped item
+ids**, so inspecting an id can never tell you which lane produced an
+artifact, and an artifact that looks perfectly well-formed to one lane
+earns a hard 400 from the other. The only usable signal is the format
+tag stamped on the artifact when it was produced.
+
+Consequences an operator can observe:
+
+- Replaying reasoning captured on one family toward the other lane is
+  proven-incompatible. The egress STRIPS those artifacts before dispatch
+  rather than shipping a request the upstream will reject. Reasoning
+  quietly not being replayed across a cross-family fallback hop is
+  expected behavior, not a bug.
+- Within a family, replay is portable: an artifact captured on
+  `chatgpt-oauth` replays onto an `api-key` lane and vice versa.
+- Artifacts that name no lane (older histories carrying the
+  compatibility tag `openai-responses-v1`, or a tag this build does not
+  recognize) are not established either way. They are carried
+  optimistically ONCE -- that is how an unproven pair gets settled from
+  a real upstream verdict. If the upstream rejects the carry, recovery
+  is the router's job, not the provider's.
+
+If you route the same conversation across lanes from different
+families, expect prior-turn reasoning to be dropped on the crossing hop.
+Keeping a conversation's fallback chain inside one family preserves
+replay.
+
 ### Gemini (native, `kind = "gemini"`)
 
 The native Gemini egress (`generateContent` / `streamGenerateContent`)

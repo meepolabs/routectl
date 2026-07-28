@@ -633,9 +633,10 @@ listed at the bottom of each crate.
 - `src/openai_responses/system.rs` -- canonical `system` -> Responses
   `instructions` flat string (drops per-block cache_control with DEBUG)
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses
-  `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items); also
-  translates `File` content blocks -> `InputFile` items with `file_data` or
-  `file_id`
+  `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items); gates
+  reasoning replay per target lane (family recognition + carry/strip/gray);
+  also translates `File` content blocks -> `InputFile` items with `file_data`
+  or `file_id`
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
   `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key
