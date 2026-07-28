@@ -1019,7 +1019,7 @@ fn provider_extras_client_metadata_forwards() {
 // multi-turn reasoning replay round-trip
 //
 // These tests prove that an assistant turn carrying response-side
-// reasoning_details (with the openai-responses-v1 format tag) survives
+// reasoning_details (tagged with the emitting lane's format tag) survives
 // the second-turn request translation: the encrypted_content signature
 // the upstream issued must reach the next /responses POST verbatim or
 // Anthropic/OpenAI reasoning-enabled models return 400.
@@ -1057,7 +1057,12 @@ fn response_reasoning_round_trips_through_canonical_to_replay_request() {
         ]
     });
     let typed: ResponsesResponse = from_value(upstream_body).unwrap();
-    let chat_response = response::translate("test", typed).unwrap();
+    let chat_response = response::translate(
+        "test",
+        crate::openai_responses::AuthKind::ChatgptOauth,
+        typed,
+    )
+    .unwrap();
     let assistant_msg = chat_response.choices[0].message.clone();
 
     // Act: build a fresh request whose second message is the assistant

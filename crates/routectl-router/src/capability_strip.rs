@@ -280,17 +280,14 @@ impl RequestInterceptor for StripInterceptor {
         let would_strip: Vec<&str> = keys
             .into_iter()
             .filter(|key| {
-                if !matches!(action_for(key), CapabilityAction::Strip(_)) {
-                    return false;
-                }
-                // The lane-parameterized surface is not a key-only
-                // transform and has no StripPlan by design; it runs
-                // through `strip_replay_artifacts`, not this interceptor.
-                if matches!(
-                    action_for(key),
+                match action_for(key) {
+                    // The lane-parameterized surface is not a key-only
+                    // transform and has no StripPlan by design; it runs
+                    // through `strip_replay_artifacts`, not this
+                    // interceptor.
                     CapabilityAction::Strip(StripKind::AssistantReasoning)
-                ) {
-                    return false;
+                    | CapabilityAction::RouteAway => return false,
+                    CapabilityAction::Strip(_) => {}
                 }
                 match strip_plan(key) {
                     Some(plan) => plan_matches(req, &plan),

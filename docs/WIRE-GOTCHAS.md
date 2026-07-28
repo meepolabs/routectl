@@ -384,6 +384,16 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   `is_responses_family(format)` -- an exact-equality check against a single
   tag drops every newly-tagged detail instead of failing loudly.
 
+- **The Responses egress stamps the lane's own tag, and never the legacy
+  shared one.** Both the non-streaming translator and the SSE state machine
+  take the provider's `auth_kind` and stamp `lane_format_tag(auth_kind)` on
+  every reasoning detail they emit, so the two paths agree tag-for-tag for a
+  given lane -- a divergence there would make a streamed artifact
+  unreplayable on the lane that minted it. `openai-responses-v1` is read
+  forever but emitted by nothing: more than one lane once stamped it, so
+  re-emitting it would keep minting artifacts that name no lane and can only
+  be treated as unestablished.
+
 - **Replay portability is per-lane, not per-model, and the lanes are not
   interchangeable.** `scheme_of(format)` maps a tag to its validator
   family: codex-oauth and openai-apikey validate the reasoning item id and

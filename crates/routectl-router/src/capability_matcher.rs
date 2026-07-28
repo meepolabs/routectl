@@ -122,13 +122,35 @@ type FeatureKey = String;
 /// the loop closes with no matcher change.
 const PREFILL: &str = "prefill";
 
-/// One inferred-rejection phrase: a free-text `error.message` equal to
-/// `phrase` (case-insensitive, trimmed) names `capability`.
+/// One inferred-rejection phrase: a free-text `error.message` that names
+/// `capability`. Comparison is case-insensitive over the trimmed message.
 struct InferredPhrase {
-    /// The verbatim upstream `error.message` phrase.
+    /// The upstream `error.message` phrase.
     phrase: &'static str,
+    /// When true the phrase is a PREFIX anchor rather than the whole
+    /// message. Reserved for a rejection whose message ends in a variable
+    /// tail (an enumeration of accepted values, a echoed identifier) whose
+    /// exact rendering is not captured: full equality on an unverified
+    /// tail is precision the evidence does not support and leaves the row
+    /// permanently dead, while an anchored prefix still fails closed on a
+    /// reworded or embedded message.
+    prefix_anchored: bool,
     /// The capability key the phrase names.
     capability: &'static str,
+}
+
+impl InferredPhrase {
+    /// Whether a trimmed upstream message matches this row. `get` rather
+    /// than a slice index so a multi-byte boundary at the anchor length
+    /// degrades to a non-match instead of panicking on hostile input.
+    fn matches(&self, message: &str) -> bool {
+        if self.prefix_anchored {
+            return message
+                .get(..self.phrase.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(self.phrase));
+        }
+        self.phrase.eq_ignore_ascii_case(message)
+    }
 }
 
 /// Anthropic Messages API inferred-rejection phrases. Small by design;
@@ -136,6 +158,7 @@ struct InferredPhrase {
 /// (sources cited in the module tests). Unverified capabilities wait.
 const ANTHROPIC_INFERRED: &[InferredPhrase] = &[InferredPhrase {
     phrase: "Prefilling assistant messages is not supported for this model.",
+    prefix_anchored: false,
     capability: PREFILL,
 }];
 
@@ -145,11 +168,14 @@ const ANTHROPIC_INFERRED: &[InferredPhrase] = &[InferredPhrase {
 /// prior artifact, not the ability to reason, so it resolves to
 /// [`REASONING_REPLAY`] and never to `thinking`.
 ///
-/// The phrase is the VERBATIM captured `error.message`, matched
-/// whole-phrase like every other inferred row: a shortened prefix would
-/// never equal the real message and the row would be dead on real traffic.
+/// Prefix-anchored on the tail-free phrase, matching the anchor the
+/// structured classifier's replay signature uses: the real message ends in
+/// a parenthesized list of accepted content prefixes whose exact rendering
+/// is not captured, so whole-phrase equality against a guessed tail would
+/// leave this row dead on real traffic.
 const OPENAI_RESPONSES_INFERRED: &[InferredPhrase] = &[InferredPhrase {
-    phrase: "encrypted content missing recognized prefix (expected `rsn_` or `smry_`)",
+    phrase: "encrypted content missing recognized prefix",
+    prefix_anchored: true,
     capability: REASONING_REPLAY,
 }];
 
@@ -276,8 +302,10 @@ fn resolve_openai_param_surface(param: &str) -> Option<(FeatureKey, SignalTier, 
     None
 }
 
-/// Whole-phrase match of the upstream `error.message` against the
-/// provider's inferred table.
+/// Match the upstream `error.message` against the provider's inferred
+/// table: whole-phrase equality, or an anchored PREFIX for a row whose
+/// message carries a variable tail. Both are case-insensitive over the
+/// trimmed message and both fail closed on an embedded or reworded phrase.
 fn match_inferred(
     provider_kind: &str,
     err: &Error,
@@ -285,9 +313,7 @@ fn match_inferred(
     let table = inferred_table_for(provider_kind)?;
     let message = upstream_error_field(err, "message")?;
     let needle = message.trim();
-    let matched = table
-        .iter()
-        .find(|entry| entry.phrase.eq_ignore_ascii_case(needle))?;
+    let matched = table.iter().find(|entry| entry.matches(needle))?;
     Some((
         matched.capability.to_string(),
         SignalTier::Inferred,
@@ -821,12 +847,11 @@ mod tests {
         );
     }
 
-    // --- Arm 2: openai-responses inferred whole-phrase ---
+    // --- Arm 2: openai-responses inferred replay rejection ---
 
-    /// The verbatim OpenAI Responses 400 body a content-prefix-validating
-    /// lane returns for a foreign replay artifact. Inline (the captured
-    /// fixture corpus never ships) and byte-exact: it is the regression pin
-    /// for the inferred row.
+    /// An OpenAI Responses 400 body a content-prefix-validating lane
+    /// returns for a foreign replay artifact. The message's parenthesized
+    /// tail is the VARIABLE part the row deliberately does not pin.
     const REPLAY_REJECTION_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
 
     fn replay_rejection() -> Error {
@@ -878,13 +903,45 @@ mod tests {
     }
 
     #[test]
-    fn openai_responses_near_miss_phrase_does_not_match() {
-        // Whole-phrase equality only: a truncated, embedded, or reworded
-        // message fails closed rather than learning off a partial match.
+    fn openai_responses_row_matches_any_accepted_prefix_tail() {
+        // The row is anchored, not whole-phrase: the parenthesized tail
+        // enumerating accepted content prefixes is upstream wording that
+        // may drift, and pinning it would leave the row dead. Every
+        // rendering carrying the anchor must resolve.
         for message in [
             "encrypted content missing recognized prefix",
+            "encrypted content missing recognized prefix (expected `rsn_` or `smry_`)",
+            "encrypted content missing recognized prefix (expected rsn_ or smry_)",
+            "Encrypted content missing recognized prefix.",
+        ] {
+            let err = upstream(
+                400,
+                &anthropic_body(message),
+                Some("invalid_request_error"),
+                None,
+            );
+            let classified = classify(&err, Some("openai-responses"));
+            assert_eq!(
+                resolve_requested_capability("openai-responses", &err, &classified),
+                Some((
+                    "reasoning_replay".to_string(),
+                    SignalTier::Inferred,
+                    FailurePhase::F1
+                )),
+                "message {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_responses_near_miss_phrase_does_not_match() {
+        // Anchored at the HEAD: an embedded, truncated, or reworded
+        // message fails closed rather than learning off a partial match.
+        for message in [
             "400: encrypted content missing recognized prefix (expected `rsn_` or `smry_`).",
             "encrypted content missing prefix (expected `rsn_` or `smry_`)",
+            "encrypted content missing recognize",
+            "",
         ] {
             let err = upstream(
                 400,
@@ -902,9 +959,30 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_row_stays_whole_phrase_under_the_anchored_matcher() {
+        // Only the replay row opts into prefix anchoring; a non-anchored
+        // row must still reject a message that merely STARTS with it.
+        let err = upstream(
+            400,
+            &anthropic_body(
+                "Prefilling assistant messages is not supported for this model. Retry.",
+            ),
+            Some("invalid_request_error"),
+            None,
+        );
+        let classified = classify(&err, Some("anthropic-api"));
+
+        // Act / Assert
+        assert_eq!(
+            resolve_requested_capability("anthropic-api", &err, &classified),
+            None
+        );
+    }
+
+    #[test]
     fn a_generic_openai_responses_bad_request_is_not_a_replay_rejection() {
         // An ordinary 400 on this provider must not resolve to the replay
-        // key -- the row is one exact phrase, not a family of 400s.
+        // key -- the row is one anchored phrase, not a family of 400s.
         let err = upstream(
             400,
             &anthropic_body("Invalid value for 'temperature'."),

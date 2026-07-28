@@ -642,9 +642,12 @@ listed at the bottom of each crate.
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key
   provider_extras allowlist; ChatgptOauth + BedrockMantle `store=false` lock
 - `src/openai_responses/response.rs` -- Responses response -> canonical
-  (output walk, finish_reason from status, usage)
+  (output walk, finish_reason from status, usage); stamps
+  `lane_format_tag(auth_kind)` on every emitted reasoning detail
 - `src/openai_responses/sse.rs` -- Responses SSE state machine keyed on
-  `output_index` (Text/Reasoning/ToolUse blocks)
+  `output_index` (Text/Reasoning/ToolUse blocks); carries the lane on
+  `ResponsesStreamState::new` so streamed reasoning details bear the same
+  lane tag the non-streaming path emits
 
 ### gemini
 

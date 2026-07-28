@@ -201,7 +201,7 @@ fn sse_reasoning_summary_text_delta_emits_thinking_summary_chunk() {
     ));
     assert_eq!(
         delta.reasoning_details[0].format.as_deref(),
-        Some(OPENAI_RESPONSES_FORMAT)
+        Some(lane_format_tag(AuthKind::ChatgptOauth))
     );
 }
 
