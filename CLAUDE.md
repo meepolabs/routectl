@@ -1,9 +1,10 @@
 # Working on routectl
 
-routectl is a Rust LLM routing proxy: two HTTP ingress dialects
-(OpenAI Chat Completions, Anthropic Messages) feed one canonical
-`ChatRequest` and N egress providers (openai-compat, anthropic-api,
-bedrock invoke + converse, openai-responses). This file is a slim
+routectl is a Rust LLM routing proxy: three HTTP ingress dialects
+(OpenAI Chat Completions, Anthropic Messages, OpenAI Responses) feed
+one canonical `ChatRequest` and five egress provider classes
+(openai-compat, anthropic-api, bedrock, openai-responses, gemini).
+This file is a slim
 runbook for contributors (humans and autonomous agents). Read it
 once; jump to the doc that matches your task.
 
@@ -46,21 +47,12 @@ module-level architecture and the hub-and-spoke design see
 
 ## Hub-and-spoke contract
 
-routectl is a translation pipe with three ingress dialects (OpenAI
-Chat Completions, Anthropic Messages, OpenAI Responses) feeding one
-canonical `ChatRequest` and five egress provider classes:
-
-- **New ingress dialect**: add a file under `src/ingress/`,
-  implement `IngressAdapter`, add a one-line route in
-  `src/server/mod.rs`. Zero changes to providers or canonical types.
-- **New egress provider**: implement `Provider` in
-  `routectl-providers`. Zero changes to ingress adapters.
-- **New canonical-shape feature**: extend `routectl-core` schema
-  first, then teach the relevant ingress and egress to read/write
-  it. Forward-compat catchalls (`ContentPart::Other`,
-  `ToolDef::Other`, `ContentBlock::Other` on the wire) make most
-  new Anthropic block types ship without code edits on the
-  all-Anthropic path.
+The canonical statement lives in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Hub-and-spoke
+contract". Short form: a new ingress dialect is one `IngressAdapter`
+file + one route line; a new egress provider is one `Provider` impl;
+a new canonical-shape feature extends `routectl-core` first, then the
+relevant ingress/egress -- never the other way around.
 
 ## Verification gate
 

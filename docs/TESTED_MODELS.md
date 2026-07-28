@@ -5,6 +5,11 @@ end-to-end through `routectl serve` and the `Router` core. The list lives
 alongside the `crates/routectl-cli/tests/live_matrix.rs` integration test
 so the README and the test stay in sync.
 
+PASS/flaky statuses are point-in-time observations from the most
+recent matrix run, not guarantees -- free tiers rate-limit, hosts
+deprecate models, upstreams have outages. Re-run the matrix (below)
+for current truth.
+
 ## How to run the matrix
 
 ```bash

@@ -2,6 +2,9 @@
 
 This document is the on-disk format reference for the local
 replay-fixture corpus at `crates/routectl-cli/tests/fixtures/captured/`.
+You only need it when writing or debugging replay tests; for the
+day-to-day capture recipe see [DEVELOPMENT.md](DEVELOPMENT.md)
+"Adding a replay fixture from a real session".
 
 The directory is gitignored. Fixtures are captured locally by
 `scripts/capture_fixtures.sh` from a TRACE-level routectl session and

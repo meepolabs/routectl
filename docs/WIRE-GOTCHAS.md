@@ -2,10 +2,20 @@
 
 This is the running log of upstream wire-shape weirdness routectl handles
 internally. Each entry names the wire-level reality, where in the code it's
-handled, and any residual seams. When a model breaks the live matrix, grep
-this doc first for similar patterns. For operator-facing config recipes see
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md); for the debug runbook see
-[DEVELOPMENT.md](DEVELOPMENT.md).
+handled, and any residual seams. When a model breaks the live integration
+matrix (`docs/TESTED_MODELS.md` -- the opt-in tests against real provider
+keys), grep this doc first for similar patterns. For operator-facing config
+recipes see [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md); for the debug runbook
+see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+Surfaces: [openai-compat](#openai-compat-surface) -
+[Anthropic API](#anthropic-api-surface) -
+[Bedrock](#bedrock-surface) -
+[OpenAI Responses](#openai-responses-surface) -
+[Gemini](#gemini-native-surface) -
+[xAI OAuth](#xai-grok-oauth-surface) -
+[claude-code URL bypasses](#claude-codes-hardcoded-url-bypasses) -
+[chatgpt-oauth client identity](#chatgpt-oauth-client-identity-surface)
 
 ## openai-compat surface
 
@@ -141,7 +151,7 @@ this doc first for similar patterns. For operator-facing config recipes see
   path and the streaming `messageStop` path, gated on
   `stop_reason == "stop_sequence"`.
 
-- **Anthropic streaming reasoning replay residual.** Strategy A
+- **Anthropic streaming reasoning replay residual.** The SSE decoder
   buffers `thinking_delta` text and `signature_delta` on the open
   block, then emits one aggregated `ReasoningDetail` at
   `content_block_stop` carrying both. When Anthropic 4.5 omits the
@@ -381,3 +391,70 @@ section names only the wire-level realities the egress handles.
   capturing them at the gateway layer alone is incomplete. Pair
   routectl with a network-level proxy (mitmproxy, a side-channel
   HTTP intercept) if full claude-code egress capture is required.
+
+## chatgpt-oauth client-identity surface
+
+The `openai-responses` provider in `chatgpt-oauth` mode mimics the
+codex CLI client header contract (operator-facing summary in
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) "chatgpt-oauth"). This
+section is the contributor-facing maintenance contract.
+
+**Pinned default** (source of truth for the baked-in `codex_version`):
+
+- Tag: `rust-v0.145.0` (most recent codex Rust release tag at adoption)
+- Commit: `1635de866c61d1b76e50b31928ee6d61482435a8`
+- Source: the `version` field on `codex-rs/cli/Cargo.toml` in the
+  upstream codex repo (workspace `version = "0.0.0"` is the
+  tip-of-tree dev placeholder; the tag pin above is what routectl
+  encodes against)
+
+Keep this pin in sync with the codex CLI version routectl targets by
+default; the `codex_version` config knob is the per-deployment escape
+hatch, not a replacement for bumping the pin when the target moves.
+
+**Headers that MUST stay in lockstep with codex** (any deviation
+breaks the client-compatibility contract):
+
+| Header                              | Source in codex-rs                                            | Notes                                                                |
+|-------------------------------------|---------------------------------------------------------------|----------------------------------------------------------------------|
+| `Authorization`                     | injected by routectl's auth layer per request                 | OAuth bearer JWT (`Bearer <jwt>`); resolved per request from the token store. Redacted to `Bearer [REDACTED]` in TRACE-level outgoing-headers logs. NOT a pinned constant -- the value rotates on every refresh -- but the header is mandatory and absence triggers a 401 immediately. |
+| `ChatGPT-Account-Id`                | injected by routectl's auth layer per request                 | The `chatgpt_account_id` claim parsed out of the bearer JWT; mandatory account-routing header. Stable per account. |
+| `User-Agent`                        | `login/src/auth/default_client.rs::get_codex_user_agent`      | `<originator>/<build_version> (<os_type> <os_version>; <arch>) <terminal>`; build_version is `CARGO_PKG_VERSION` of the codex binary, not routectl's. |
+| `originator`                        | `login/src/auth/default_client.rs::DEFAULT_ORIGINATOR`        | Constant `"codex_cli_rs"` for first-party CLI traffic.               |
+| `version` / per-request build tag   | passed through `CodexRequestBuilder` per call                 | Matches the targeted codex CLI build version.                        |
+| `session_id`                        | `core/src/client.rs::ModelClientState`                        | Stable per process; never reset within a routectl process lifetime.  |
+| `x-codex-installation-id`           | `core/src/client.rs::X_CODEX_INSTALLATION_ID_HEADER`          | Stable per install (persisted under `~/.config/routectl/`).          |
+| `x-codex-window-id`                 | `core/src/client.rs::X_CODEX_WINDOW_ID_HEADER`                | Per-window correlation; codex bumps on each new shell window.        |
+| `thread-id`                         | `core/src/client.rs::X_CODEX_PARENT_THREAD_ID_HEADER` family  | Per-conversation; new value on every fresh `ChatRequest`.            |
+| `x-client-request-id`               | `codex-api/src/endpoint/responses.rs:92`                      | Per-request UUID; carries the `thread_id` for upstream correlation.  |
+| `x-openai-internal-codex-residency` | `login/src/auth/default_client.rs::RESIDENCY_HEADER_NAME`     | Set when `--residency us` is configured; absent otherwise.           |
+
+The OAuth refresh client (used for `grant_type=refresh_token` POSTs to
+`https://auth.openai.com/oauth/token`) carries its OWN header set
+distinct from the responses-API client; both must carry the pinned
+codex client headers.
+
+**Defense-in-depth for the bearer JWT**: the `authorization` header on
+every outgoing request to `chatgpt.com/backend-api/codex` carries an
+OAuth access-token JWT that embeds `chatgpt_account_id`, `email`,
+`session_id`, `jti`, and `plan_type`. routectl's outgoing-headers
+TRACE log redacts this value to `Bearer [REDACTED]` before any line is
+emitted (`routectl_core::log_safe::redact_outgoing_header_values`);
+the same redaction applies to `x-api-key` and `proxy-authorization`.
+
+**Cross-link**: when adjusting any of the above, compare against the
+corresponding upstream source paths under the codex repo's `codex-rs/`:
+
+- Auth client and originator: `login/src/auth/default_client.rs`
+- Cookie jar:                  `codex-client/src/chatgpt_cloudflare_cookies.rs`
+- Header constants:            `core/src/client.rs`
+- Responses-API request:       `codex-api/src/endpoint/responses.rs`
+
+**Compatibility-contract risk**: future deviations (a UA bump on the
+routectl side that codex did not ship; a missing identity header; a
+refresh-client header re-ordering) are NOT debuggable as build / wire
+errors. The first symptom is a refresh endpoint that 401s on every
+retry. A mismatch with the targeted codex client contract can cause
+the upstream to reject the refresh token and require the operator to
+re-authenticate through the ChatGPT web UI. Treat any change here with
+the same gravity as a database migration on a production system.

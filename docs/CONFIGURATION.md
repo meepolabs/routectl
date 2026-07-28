@@ -3,13 +3,103 @@
 TOML configuration schema reference: every knob, how the layered
 overlays merge, what's reserved.
 
-> **In a hurry:** copy [`examples/config.toml`](../examples/config.toml)
-> for a working end-to-end config, or jump to [Adding a
-> provider](#provider-block-providersx), [Adding a
-> model](#model-block-modelsx), [claude-code as a gateway
+> **In a hurry:** run `routectl init` (guided setup wizard), or copy
+> [`examples/config.toml`](../examples/config.toml)
+> for a working end-to-end config (print one anytime with
+> `routectl config example`). Then jump to
+> [Getting started](#getting-started-provider--model--alias),
+> [claude-code as a gateway
 > client](#claude-code-as-a-gateway-client), or
 > [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for upstream-specific
 > tuning.
+
+## Contents
+
+**Basics**
+- [Getting started: provider + model + alias](#getting-started-provider--model--alias)
+- [Top-level shape](#top-level-shape)
+- [Editor autocomplete (JSON Schema)](#editor-autocomplete-json-schema)
+- [Listener auth + routing](#listener-auth--routing)
+- [Validating config](#validating-config)
+
+**Providers**
+- [Per-provider runtime gates](#per-provider-runtime-gates) (RPM, circuit breaker, timeouts)
+- [Per-provider capability filter](#per-provider-capability-filter-unsupported_features)
+- [Gemini](#providersx-gemini-kind--gemini) -
+  [ChatGPT / Codex](#chatgpt--codex-provider) -
+  [xAI (Grok)](#xai-grok-provider)
+- Bedrock: [api_shape](#providersx-api_shape----bedrock-api-selector) -
+  [beta-flag controls](#bedrock-and-anthropic-api-beta-flag-controls) -
+  [mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane) -
+  [mantle OpenAI lanes](#providersxbedrock_mantle----bedrock-mantle-openai-lanes)
+- anthropic-api flags: [context_management](#context_management-anthropic-api-provider-flag) -
+  [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
+
+**Models and routing**
+- [Per-model knobs](#per-model-knobs) (reasoning, effort, output caps)
+- [history_reasoning](#history_reasoning-reasoning-echo-back)
+- [Retry and fallback defaults](#retry-and-fallback-defaults)
+
+**Caching and cost**
+- [Prompt-cache auto-emission (`[cache]`)](#prompt-cache-auto-emission-cache)
+- [Context reduction (`[reduction]`)](#context-reduction-reduction)
+- [Steady-state advisory trim (`[trim]`)](#steady-state-advisory-trim-trim)
+- [Pricing registry](#pricing-registry-registrypatternpricing)
+- [Catalog: prompt-cache economics](#catalog-prompt-cache-economics-routectl-catalog)
+- [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
+
+**Operating the daemon**
+- [Log knobs (`[log]`)](#log-knobs-log)
+- [Usage accounting (`[usage]`)](#usage-accounting-usage)
+- [Reading usage (`routectl usage`)](#reading-usage-routectl-usage)
+- [Diagnostics (doctor / probe)](#diagnostics-routectl-doctor-and-routectl-provider-probe)
+- [Inspecting a request offline (`prompt-size`)](#inspecting-a-request-offline-routectl-prompt-size)
+- [Inspecting the effective config](#inspecting-the-effective-config-config-show---effective)
+- [Editing config from the CLI](#editing-config-from-the-cli-config-set--config-unset)
+- [MITM front-proxy (`[mitm]`)](#mitm-front-proxy-mitm)
+
+**Client integrations**
+- [claude-code as a gateway client](#claude-code-as-a-gateway-client)
+
+**Advanced: overlay merge internals**
+- [Field-assignment table](#field-assignment-table)
+- [header_extras merge](#header_extras-merge) /
+  [payload_extras merge](#payload_extras-merge) /
+  [Reserved-header buckets](#reserved-header-buckets)
+- [Worked example: three-source anthropic-beta compose](#worked-example-three-source-anthropic-beta-compose)
+
+## Getting started: provider + model + alias
+
+Three blocks route your first request. A **provider** says how to
+reach an upstream (transport + auth), a **model** names one upstream
+model on that provider, and an **alias** maps the model string your
+client sends to that model (or to a fallback chain of them):
+
+```toml
+version = 3           # config schema version; routectl refuses older
+                      # files until `routectl config migrate` runs
+
+[providers.anthropic]
+kind        = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+
+[models.heavy]
+provider = "anthropic"
+upstream = "claude-opus-4-20250514"
+
+[aliases]
+heavy   = "heavy"
+default = "heavy"     # catch-all for unmatched model strings
+```
+
+Save as `~/.config/routectl/config.toml`, then `routectl config check`
+and `routectl serve`. Credentials always arrive as references --
+`env://VAR`, `file:///abs/path` (owner-only, 0600), or
+`oauth://<provider>` (populated by `routectl login <provider>`);
+inline `literal:` values are rejected at parse and resolve. To add a
+provider interactively (with secret capture) use
+`routectl provider add`; the rest of this document is the full
+reference for everything the wizard does not cover.
 
 ## Top-level shape
 
@@ -1032,7 +1122,7 @@ Three fields on `[models.X]` declare what reasoning a model supports.
 The router and egresses read them at dispatch time; callers never set
 these fields directly.
 
-**`supports_adaptive_thinking` (bool, default false)**
+#### `supports_adaptive_thinking` (bool, default false)
 
 When `true`, the Anthropic-API and Bedrock egresses emit the adaptive
 thinking wire shape:
@@ -1050,7 +1140,7 @@ When `false`, they emit the legacy fixed-budget shape:
 Set `true` only for models that accept the adaptive shape (Anthropic
 Opus 4.7+). Non-adaptive models sent the adaptive shape receive a 400.
 
-**`effort_levels` (array of strings, default ["low","medium","high"])**
+#### `effort_levels` (array of strings, default ["low","medium","high"])
 
 Ordered list of effort levels the operator declares this model accepts.
 Every element must be one of the full vocabulary:
@@ -1073,7 +1163,7 @@ the least capable when it is below the minimum). When `effort_levels` is empty,
 the egress emits whatever effort the caller supplied without operator-side
 filtering.
 
-**`max_thinking_budget` (u32, default 0)**
+#### `max_thinking_budget` (u32, default 0)
 
 Declares the model's maximum thinking-token budget in tokens. `0` means
 "not a budget-capped model" -- the egress falls back to its own
@@ -1082,7 +1172,7 @@ for the egress's budget negotiation. Only relevant on the legacy
 `supports_adaptive_thinking = false` path; the adaptive path uses effort
 strings and has no budget field.
 
-**`max_output_tokens` (Option<u32>, default None)**
+#### `max_output_tokens` (Option<u32>, default None)
 
 Per-model ceiling on the `max_tokens` value the Anthropic-shape egresses
 (`anthropic-api`, `bedrock-invoke`) inject when the caller omits the
@@ -1116,7 +1206,7 @@ upstream          = "claude-opus-4"
 max_output_tokens = 32000
 ```
 
-**`reported_model` (Option<String>, default None) -- response `model` label**
+#### `reported_model` (Option<String>, default None) -- response `model` label
 
 The `model` field routectl echoes back in responses (and on every
 streaming chunk, including the terminal usage-only chunk) is the
@@ -1152,7 +1242,7 @@ and are unchanged. The `routectl_provider` field remains the intentional
 transparency channel naming the provider that answered; it is unaffected
 by `reported_model`.
 
-**`visible_routectl_provider` (bool, default true) -- response `routectl_provider` field**
+#### `visible_routectl_provider` (bool, default true) -- response `routectl_provider` field
 
 `routectl_provider` is a routectl response extension naming the provider
 that actually answered (e.g. `"anthropic-api"`, `"openai-compat:deepseek"`).
@@ -1877,8 +1967,8 @@ Every edit runs the same pipeline before a single byte reaches disk, so
 a rejected edit leaves the file byte-identical:
 
 - **Version preflight.** A config older than the schema version this
-  binary writes is refused outright (a matching-version binary or the
-  future `config migrate` is the fix) -- `config set` never migrates a
+  binary writes is refused outright (run `config migrate`, or use a
+  matching-version binary) -- `config set` never migrates a
   file as a side effect of editing it.
 - **Path validation.** The dotted path is checked against the config
   schema before any mutation. An unknown key is rejected with the valid
@@ -2576,7 +2666,9 @@ provider permits -- see the README "Responsible use" section.
    ```
 
 4. Set claude-code env vars in your shell profile (`~/.bashrc`,
-   `~/.zshrc`, etc.):
+   `~/.zshrc`, etc.). Use whatever `[server] port` your config sets
+   (the examples in this section assume `port = 9100`; the quick-start
+   default is `8787`):
 
    ```bash
    export ANTHROPIC_BASE_URL=http://127.0.0.1:9100

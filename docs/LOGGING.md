@@ -5,6 +5,27 @@ level, recipes, request correlation, triage modes for full body
 inspection, and the prompt-redaction knob. For TOML configuration of
 providers, models, and the runtime, see [CONFIGURATION.md](CONFIGURATION.md).
 
+The first half is for operators (filtering, triage, redaction); the
+"Event catalog" second half is the per-event field reference.
+
+- [Env filter and default level](#env-filter-and-default-level)
+- [Recipes](#recipes)
+- [Request correlation](#request-correlation)
+- [Triage recipes (full bodies on demand)](#triage-recipes-full-bodies-on-demand)
+- [Redaction](#redaction)
+- [What's never logged](#whats-never-logged)
+- [Trace-level surfaces](#trace-level-surfaces)
+- Event catalog:
+  [SSE forward-compat](#anthropic-sse-forward-compat-observability),
+  [auth failures](#auth-failure-log-shapes),
+  [usage accounting](#usage-accounting-log-shapes),
+  [config-edit audit](#config-edit-audit-shape),
+  [prompt-cache auto-emission](#prompt-cache-auto-emission-log-shapes),
+  [activation inventory](#auto-activation-inventory-audit-events),
+  [context reduction](#context-reduction-log-shapes),
+  [stream first-activity](#stream-first-activity-mark),
+  [capability intelligence](#capability-intelligence-events)
+
 ## Env filter and default level
 
 routectl uses `tracing` with the env filter `ROUTECTL_LOG` (NOT the
@@ -156,6 +177,17 @@ ROUTECTL_LOG=routectl=trace ROUTECTL_LOG_REDACT_PROMPTS=1 \
   ./routectl serve 2>/tmp/triage.log
 ```
 
+## What's never logged
+
+- Resolved secret values (env contents, file contents, OAuth tokens,
+  bearer keys, AWS access/secret keys).
+- The supplied `x-api-key` / `Authorization: Bearer` value on a
+  rejected listener auth (we log only header presence).
+- Full upstream request/response bodies. Bodies are only excerpted to
+  256 chars on 4xx/5xx upstream paths, intentionally. Full body
+  inspection is available at trace level -- see the Triage recipes
+  section above.
+
 ## Trace-level surfaces
 
 Operator grep cheat sheet:
@@ -172,15 +204,14 @@ Operator grep cheat sheet:
 
 The `"structural summary"` line fires on every REQUEST-side body
 (directions 1 and 2 only -- response bodies are not summarized). It
-carries a stable set of prompt-content-free fields so the operator's
-smart-heartbeat validator can grep wire-shape invariants (`model=`,
+carries a stable set of prompt-content-free fields for grepping
+wire-shape invariants (`model=`,
 `max_tokens=`, `thinking_shape=`, `output_config_effort=`,
 `tool_choice_shape=`, `cache_control_count=`, `messages_len=`,
 `tools_len=`, `anthropic_beta=`, `provider_extras_keys=`, `stream=`)
 without fighting the 16 KB body cap that truncates fields appearing
-after a large messages array. Field-name stability: adding a new
-field is allowed without ceremony; renaming or removing an existing
-field requires updating this table.
+after a large messages array. Existing field names in this line are
+stable; pin scripts on them freely.
 
 ### Header trace redaction policy
 
@@ -426,8 +457,6 @@ secrets.
 
 ## Startup cache-policy banner
 
-## Startup cache-policy banner
-
 At server startup, immediately after the `routectl listening on ...` line,
 routectl emits one INFO banner summarizing the two cache-policy switches:
 
@@ -521,7 +550,7 @@ Only `applied` emits a `context_reduction` log line; the `skipped:*`
 tokens are recorded in the usage DB but produce no log line (there is
 nothing to report).
 
-## First-activity mark (M4)
+## Stream first-activity mark
 
 `try_stream_with_first_chunk` (routectl-router) emits one DEBUG line the
 instant a streaming upstream's response headers arrive -- before the
@@ -546,8 +575,8 @@ stream first-activity: upstream response headers received provider=... upstream=
 `elapsed_ms` is measured from the per-attempt clock at dispatch. The
 gap between this mark and the request's existing first-content mark
 (`mark_first_byte`, recorded as `ttfb_ms` in the usage DB -- see
-`routectl usage`) is the first-activity-to-first-content delta -- the
-upstream prefill time M4 makes measurable.
+`routectl usage`) is the first-activity-to-first-content delta --
+effectively the upstream prefill time.
 
 ## Capability intelligence events
 
@@ -568,20 +597,16 @@ event vocabulary was unified on `event` / `state_key` / `capability_key`;
 the tail-demotion event was renamed to `route_away` with INFO/WARN
 levels; the `learn` event gained the `provider_kind` / `upstream_status`
 / `upstream_code` / `upstream_param` enrichment fields; `clear`,
-`expire_probe`, and `count_tokens` were added). Renaming or
-removing any field below, or changing an `outcome` / `signal_tier` /
-`event` token, is a breaking change to this contract and updates this
-note. Adding a new field to an existing event is allowed without
-ceremony.
+`expire_probe`, and `count_tokens` were added). The field names and
+`outcome` / `signal_tier` / `event` tokens below are a stable
+contract; new fields may be added between releases.
 
 **Not the stable API.** `routectl doctor --json` surfaces the capability
 panel (catalog priors and operator overrides read by a fresh process;
 the learned registry is runtime-only and NOT visible to doctor) for
-human triage, but its shape is NOT a stability
-guarantee and may change between releases. The stable programmatic path
-is the future serve-embedded status endpoint, which adopts THIS event
-vocabulary (these `event` tokens and field names) verbatim. Build
-tooling against the event contract documented here, not against
+human triage, but its shape is NOT a stability guarantee and may
+change between releases. Build tooling against the event contract
+documented here (these `event` tokens and field names), not against
 `doctor --json`.
 
 Summary (grep the `event` field to isolate a kind):
@@ -863,14 +888,3 @@ WARN routectl_cli::server event=legacy_deprecation
   release cycle and rejected at the next config schema version. Move them
   under [capability.overrides] with `config migrate`."
 ```
-
-## What's never logged
-
-- Resolved secret values (env contents, file contents, OAuth tokens,
-  bearer keys, AWS access/secret keys).
-- The supplied `x-api-key` / `Authorization: Bearer` value on a
-  rejected listener auth (we log only header presence).
-- Full upstream request/response bodies. Bodies are only excerpted to
-  256 chars on 4xx/5xx upstream paths, intentionally. Full body
-  inspection is available at trace level -- see the Triage recipes
-  section above.

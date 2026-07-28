@@ -1,11 +1,14 @@
-# Provider Configuration Guide
+# Provider Quirks and Config Recipes
 
 Per-model config tips for routectl operators. Most upstream LLMs work out of
 the box with default routectl config -- the entries below cover the cases
 where you need to flip a knob.
 
 If your model isn't listed and works fine, you don't need anything from this
-doc. If it 4xxs or behaves weirdly, find the matching row.
+doc. If it 4xxs or behaves weirdly, start with the
+[Quick reference](#quick-reference) and the
+[Troubleshooting matrix](#troubleshooting-matrix), then find the
+matching per-model section.
 
 ## Quick reference
 
@@ -304,52 +307,19 @@ reasoning_dialect = "openai"
 
 The `openai-responses` provider in `chatgpt-oauth` mode **mimics the codex CLI client header contract**. The chatgpt.com backend requires requests to the Codex / ChatGPT-Pro responses API to match that contract: the User-Agent literal, the `originator` value, the per-process identity headers, and the OAuth refresh client's own header set must all match what the codex CLI sends. If any of these values drift, the upstream may reject requests or require re-authentication -- this is a client-compatibility constraint, not a recoverable build error.
 
-**Client version -- pinned default, operator-overridable**:
+**Client version**: the codex CLI version routectl claims on the wire has a pinned default baked into the build, overridable WITHOUT a rebuild via the `codex_version` knob (see [CONFIGURATION.md](CONFIGURATION.md#codex_version-client-identity-override)). The knob only sets the version segment; the User-Agent and `version` identity header derive from it single-sourced, so egress and the OAuth refresh client can never diverge from each other. Use it to track a newer upstream codex release the moment it lands rather than waiting for a routectl release.
 
-The codex CLI version routectl claims on the wire has a pinned default baked into the build (the source of truth below), and an operator override that changes it WITHOUT a rebuild via the `codex_version` knob (see [CONFIGURATION.md](CONFIGURATION.md#codex_version-client-identity-override)). The knob only sets the version segment; the derivation of the User-Agent and the `version` identity header from it is single-sourced, so egress and the OAuth refresh client can never diverge from each other. The default stays authoritative when the knob is omitted; the override exists so an operator can track a newer upstream codex release the moment it lands rather than waiting for a routectl release.
+**Cloudflare cookie jar**: the `chatgpt.com` surface sits behind Cloudflare and pins `__cf_bm`, `_cfuvid`, `cf_clearance`, etc. on first contact. The provider attaches a persistent jar (default path `~/.config/routectl/cookies/chatgpt.json`, mode `0600`; override via `ROUTECTL_COOKIE_FILE`) so a cold-start does not pay the challenge cycle on every request. The jar is allowlist-filtered to Cloudflare service-cookie names on both load and save, so a stale on-disk file or a hostile Set-Cookie cannot smuggle account / session cookies into the persistence slot.
 
-Pinned default (source of truth for the baked-in version):
+**Refresh tracing**: the OAuth refresh path emits `tracing::debug!` lines tagged with `refresh_token_sha8` (8 hex chars from `sha256(token)[..4]`) so operators can correlate a 401 across logs without ever surfacing a token VALUE. The response leg adds `new_refresh_token_present` and `expires_in`; on failure, `tracing::error!` carries `status`, `error_kind` (`refresh_expired` / `token_endpoint` / `network` / `other`), and `prior_refresh_token_sha8` (the same correlation tag as the pre-POST event). The failure path deliberately does NOT echo any portion of the upstream response body: token-endpoint error envelopes can echo the submitted refresh_token, and logging the body verbatim would defeat the bearer-redaction contract. Non-refresh error paths still carry the truncated body in the human-readable error returned to the caller.
 
-- Tag: `rust-v0.145.0` (most recent codex Rust release tag at adoption)
-- Commit: `1635de866c61d1b76e50b31928ee6d61482435a8`
-- Source: the `version` field on `codex-rs/cli/Cargo.toml` in the upstream codex repo (workspace `version = "0.0.0"` is the tip-of-tree dev placeholder; the tag pin above is what routectl encodes against)
+For the full header-by-header contract, the upstream source-of-truth
+pin, and the maintenance protocol for tracking codex releases, see
+[WIRE-GOTCHAS.md](WIRE-GOTCHAS.md) "chatgpt-oauth client-identity
+surface" -- that is contributor material; the two knobs above
+(`codex_version`, `ROUTECTL_COOKIE_FILE`) are the operator surface.
 
-Keep this pin in sync with the codex CLI version routectl targets by default; `codex_version` is the per-deployment escape hatch, not a replacement for bumping the pin when the target moves.
-
-**Headers that MUST stay in lockstep with codex** (any deviation breaks the client-compatibility contract):
-
-| Header                              | Source in codex-rs                                            | Notes                                                                |
-|-------------------------------------|---------------------------------------------------------------|----------------------------------------------------------------------|
-| `Authorization`                     | injected by routectl's auth layer per request                 | OAuth bearer JWT (`Bearer <jwt>`); resolved per request from the token store. Redacted to `Bearer [REDACTED]` in TRACE-level outgoing-headers logs. NOT a pinned constant -- the value rotates on every refresh -- but the header is mandatory and absence triggers a 401 immediately. |
-| `ChatGPT-Account-Id`                | injected by routectl's auth layer per request                 | The `chatgpt_account_id` claim parsed out of the bearer JWT; mandatory account-routing header. Stable per account. |
-| `User-Agent`                        | `login/src/auth/default_client.rs::get_codex_user_agent`      | `<originator>/<build_version> (<os_type> <os_version>; <arch>) <terminal>`; build_version is `CARGO_PKG_VERSION` of the codex binary, not routectl's. |
-| `originator`                        | `login/src/auth/default_client.rs::DEFAULT_ORIGINATOR`        | Constant `"codex_cli_rs"` for first-party CLI traffic.               |
-| `version` / per-request build tag   | passed through `CodexRequestBuilder` per call                 | Matches the targeted codex CLI build version.                        |
-| `session_id`                        | `core/src/client.rs::ModelClientState`                        | Stable per process; never reset within a routectl process lifetime.  |
-| `x-codex-installation-id`           | `core/src/client.rs::X_CODEX_INSTALLATION_ID_HEADER`          | Stable per install (persisted under `~/.config/routectl/`).          |
-| `x-codex-window-id`                 | `core/src/client.rs::X_CODEX_WINDOW_ID_HEADER`                | Per-window correlation; codex bumps on each new shell window.        |
-| `thread-id`                         | `core/src/client.rs::X_CODEX_PARENT_THREAD_ID_HEADER` family  | Per-conversation; new value on every fresh `ChatRequest`.            |
-| `x-client-request-id`               | `codex-api/src/endpoint/responses.rs:92`                      | Per-request UUID; carries the `thread_id` for upstream correlation.  |
-| `x-openai-internal-codex-residency` | `login/src/auth/default_client.rs::RESIDENCY_HEADER_NAME`     | Set when `--residency us` is configured; absent otherwise.           |
-
-The OAuth refresh client (used for `grant_type=refresh_token` POSTs to `https://auth.openai.com/oauth/token`) carries its OWN header set distinct from the responses-API client; both must carry the pinned codex client headers.
-
-**Defense-in-depth for the bearer JWT**: the `authorization` header on every outgoing request to `chatgpt.com/backend-api/codex` carries an OAuth access-token JWT that embeds `chatgpt_account_id`, `email`, `session_id`, `jti`, and `plan_type`. Routectl's outgoing-headers TRACE log redacts this value to `Bearer [REDACTED]` before any line is emitted (see `routectl_core::log_safe::redact_outgoing_header_values`); the same redaction applies to `x-api-key` and `proxy-authorization`. Operators keep the value local; no log destination ever sees it.
-
-**Cloudflare cookie jar**: the `chatgpt.com` surface sits behind Cloudflare and pins `__cf_bm`, `_cfuvid`, `cf_clearance`, etc. on first contact. The provider attaches a persistent jar (default path `~/.config/routectl/cookies/chatgpt.json`, mode `0600`; override via `ROUTECTL_COOKIE_FILE`) so a cold-start does not pay the challenge cycle on every request. The jar is allowlist-filtered to Cloudflare service-cookie names on both load and save, so a stale on-disk file or a hostile Set-Cookie cannot smuggle account / session cookies into the persistence slot. Mirrors the codex CLI's `with_chatgpt_cloudflare_cookie_store`.
-
-**Refresh tracing**: the OAuth refresh path emits `tracing::debug!` lines tagged with `refresh_token_sha8` (8 hex chars from `sha256(token)[..4]`) so operators can correlate a 401 across logs without ever surfacing a token VALUE. The response leg adds `new_refresh_token_present` and `expires_in`; on failure, `tracing::error!` carries `status`, `error_kind` (`refresh_expired` / `token_endpoint` / `network` / `other`), and `prior_refresh_token_sha8` (the same correlation tag as the pre-POST event, so an interleaving operator can pin which credential triggered which 401). The failure path deliberately does NOT echo any portion of the upstream response body: token-endpoint error envelopes can echo the submitted refresh_token (or mint a new one), and logging the body verbatim would defeat the bearer-redaction contract above. The human-readable error returned to the caller still carries the truncated body for non-refresh paths.
-
-**Cross-link**: when adjusting any of the above, compare against the corresponding upstream source paths under the codex repo's `codex-rs/`:
-
-- Auth client and originator: `login/src/auth/default_client.rs`
-- Cookie jar:                  `codex-client/src/chatgpt_cloudflare_cookies.rs`
-- Header constants:            `core/src/client.rs`
-- Responses-API request:       `codex-api/src/endpoint/responses.rs`
-
-**Compatibility-contract risk**: future deviations (a UA bump on the routectl side that codex did not ship; a missing identity header; a refresh-client header re-ordering) are NOT debuggable as build / wire errors. The first symptom is a refresh endpoint that 401s on every retry. A mismatch with the targeted codex client contract can cause the upstream to reject the refresh token and require the operator to re-authenticate through the ChatGPT web UI. Treat any change here with the same gravity as a database migration on a production system.
-
-## Gemini (native, `kind = "gemini"`)
+### Gemini (native, `kind = "gemini"`)
 
 The native Gemini egress (`generateContent` / `streamGenerateContent`)
 replaces the older openai-compat shim. It talks the Gemini REST wire
@@ -427,7 +397,7 @@ maps to canonical `Usage`:
 - `cache_creation_input_tokens` is left `None` -- Gemini's prefix cache
   is automatic with free writes, so there is no write count to surface.
 
-### Before/after fidelity: native Gemini vs the openai-compat shim
+#### Before/after fidelity: native Gemini vs the openai-compat shim
 
 The native provider beats the prior openai-compat shim on four named
 features:
@@ -443,7 +413,7 @@ Net: the shim loses the system-prompt role distinction, all native
 thinking control, the exact tool schema, and the cache-read token
 count. Native gains all four, end to end.
 
-### Cloud Code (antigravity) egress mode (`auth_mode = "cloud-code"`)
+#### Cloud Code (antigravity) egress mode (`auth_mode = "cloud-code"`)
 
 Setting `auth_mode = "cloud-code"` on a `gemini`-kind provider switches
 the egress from the API-key `generativelanguage` surface to the Cloud
@@ -499,59 +469,14 @@ Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggres
 | Thinking-capable, max effort | 300000-600000 |
 | NIM cold-start (any model) | 180000+ |
 
-**Resolution priority** (model > provider > global):
-
-1. `[models.X] stream_first_byte_timeout_ms` -- per-model override (pin opus xhigh without forcing haiku to wait 5 min on a dead upstream)
-2. `[providers.Y] stream_first_byte_timeout_ms` -- per-provider default (use when an upstream is uniformly slow; every model routing through it inherits)
-3. `[retry] stream_first_byte_timeout_ms` -- workspace default (keep tight to surface real timeouts on routine calls)
-
-Per-route timeouts: split into separate `[providers.X]` entries with their own runtime knobs and route each `[models.X]` accordingly.
-
-### `request_timeout_ms`
-
-Default is unset (no cap; relies on reqwest's default). Supports **two tiers
-only** -- per-model override is NOT supported for this knob:
-
-1. `[providers.Y] request_timeout_ms` -- per-provider ceiling; fills in when
-   the global tier left the field unset.
-2. `[retry] request_timeout_ms` -- workspace global; lowest priority.
-
-There is no `[models.X] request_timeout_ms` field. To vary the request timeout
-per model, route those models through separate `[providers.X]` entries with
-distinct `runtime.request_timeout_ms` values. Bump alongside
-`stream_first_byte_timeout_ms` for long-thinking responses:
-
-```toml
-[providers.bedrock]
-stream_first_byte_timeout_ms = 300000   # 5 min until first byte
-request_timeout_ms           = 600000   # 10 min full request
-```
-
-### Honoring upstream rate-limit resets (`Retry-After` / `resets_at`)
-
-When an upstream rate-limits or overloads (429/503/529) and reports
-when it will reset, routectl honors that reset instead of re-probing on
-the flat backoff schedule. The reset is read from the standard
-`Retry-After` header (seconds or HTTP-date) and, on the Codex
-`openai-responses` surface, from the `usage_limit_reached`
-`resets_at` / `resets_in_seconds` fields (the 5-hour-cap quota window).
-
-What happens with the honored value:
-
-- A reset at or below 5s is folded into the next same-provider retry
-  sleep (it never blocks the request thread longer than that).
-- A larger reset parks the provider's circuit breaker open until the
-  reset elapses, so the fallback chain skips that exhausted seat rather
-  than re-hitting it every flat-schedule retry. The request itself
-  falls over to the next chain entry immediately.
-- The honored duration is clamped to `[retry] max_honored_retry_after_ms`
-  (default 1h) so a hostile or buggy upstream cannot pin a seat open
-  indefinitely. See [CONFIGURATION.md](./CONFIGURATION.md) "Honoring
-  upstream resets".
-
-Availability probes (`max_tokens <= probe_max_tokens`) are exempt: a
-probe that 429/529s still fast-fails immediately with no retry, no
-fallback, and no park.
+Resolution priority is model > provider > global
+(`[models.X]` > `[providers.Y]` > `[retry]`). The related
+`request_timeout_ms` full-request ceiling is provider/global only (no
+per-model tier); bump it alongside the first-byte timeout for
+long-thinking responses. For the full timeout/retry resolution rules
+and how upstream `Retry-After` / `resets_at` hints are honored, see
+[CONFIGURATION.md](CONFIGURATION.md) "Retry and fallback defaults" and
+"Honoring upstream resets".
 
 ## Multi-host fallback chains
 
@@ -659,9 +584,9 @@ is shaped for the beta-aware edit workflow.
 
 ## Troubleshooting matrix
 
-routectl logs a 512-chars-truncated `body_excerpt` (`sanitize_for_log`)
-at WARN on every 4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the
-full body.
+routectl logs a `body_excerpt` truncated to 256 chars
+(`sanitize_for_log`) at WARN on every 4xx/5xx; flip
+`ROUTECTL_LOG=routectl=debug` for the full body.
 
 | Symptom | Likely cause |
 |---|---|

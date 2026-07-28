@@ -14,18 +14,28 @@ inference with Remote Control still working.
 Read [Responsible use and fragility](#responsible-use-and-fragility)
 below before enabling this.
 
+**Happy path in three steps** (details in the sections below):
+
+1. Add an empty `[mitm]` block to `config.toml` and restart
+   `routectl serve`.
+2. Run `routectl rc env` and export the two variables it prints.
+3. Launch Claude Code with the env prefix it suggests; verify with
+   `claude --print "say hi"`.
+
 This doc covers two distinct features built on the same `[mitm]`
-plumbing: Remote Control (below) keeps routectl authenticating
-Anthropic inference with its own credential -- the default for any
-`[providers.X]` `anthropic-api` entry (`credential_source = "own"`) --
-while re-routing Claude Code's other `api.anthropic.com` traffic
-untouched; [Pure-proxy mode](#pure-proxy-mode) instead configures a
-provider with `credential_source = "forwarded"` so the client's own
-claude.ai token authenticates the inference call too, and that
-provider holds no Anthropic credential of its own. `credential_source`
-is a per-`[providers.X]` choice, not a `[mitm]`-level one -- `[mitm]`
-itself carries no credential knob (see
-[`docs/CONFIGURATION.md`](CONFIGURATION.md) "credential_source").
+plumbing; the difference is which credential authenticates the
+inference call:
+
+| Mode | Provider setting | Inference authenticated by |
+|---|---|---|
+| Remote Control (below) | `credential_source = "own"` (default) | routectl's own configured credential |
+| [Pure-proxy mode](#pure-proxy-mode) | `credential_source = "forwarded"` | the client's own claude.ai token; the provider holds no credential of its own |
+
+In both modes, Claude Code's non-inference `api.anthropic.com` traffic
+passes through untouched. `credential_source` is a per-`[providers.X]`
+choice, not a `[mitm]`-level one -- `[mitm]` itself carries no
+credential knob (see [`docs/CONFIGURATION.md`](CONFIGURATION.md)
+"credential_source").
 
 ## Prerequisites
 

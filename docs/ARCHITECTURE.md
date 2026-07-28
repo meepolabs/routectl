@@ -72,20 +72,35 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Hub-and-spoke contract
 
-See [`CLAUDE.md`](../CLAUDE.md) "Hub-and-spoke contract" -- the
-canonical statement of what changes when a new ingress dialect, a
-new egress provider, or a new canonical-shape feature lands.
+routectl is a translation pipe with three ingress dialects (OpenAI
+Chat Completions, Anthropic Messages, OpenAI Responses) feeding one
+canonical `ChatRequest` and five egress provider classes. The
+contract for extending it:
+
+- **New ingress dialect**: add a file under
+  `routectl-cli/src/ingress/`, implement `IngressAdapter`, add a
+  one-line route in `src/server/mod.rs`. Zero changes to providers or
+  canonical types.
+- **New egress provider**: implement `Provider` in
+  `routectl-providers`. Zero changes to ingress adapters.
+- **New canonical-shape feature**: extend the `routectl-core` schema
+  first, then teach the relevant ingress and egress to read/write it.
+  Forward-compat catchalls (`ContentPart::Other`, `ToolDef::Other`,
+  `ContentBlock::Other` on the wire) make most new Anthropic block
+  types ship without code edits on the all-Anthropic path.
 
 ## Config layering
 
 Configuration splits into two layers that compose at dispatch time:
-`[providers.X]` (transport-wide knobs -- auth, base URL, runtime
-gates) and `[models.X]` (per-model behavior -- reasoning, dialect,
-quirks). Two fields live on BOTH layers and merge per request:
-`header_extras` and `payload_extras`. The router's
-`apply_layered_overlays` helper (in `routectl-router/src/router.rs`)
-runs the merge before calling `provider.complete(req)` /
-`provider.stream(req)` -- the `Provider` trait surface stays stable
-across all five concrete providers. For the field-assignment table,
-header/payload merge semantics, reserved-header buckets, and worked
-examples, see [CONFIGURATION.md](CONFIGURATION.md).
+
+- `[providers.X]` -- transport-wide knobs: auth, base URL, runtime
+  gates.
+- `[models.X]` -- per-model behavior: reasoning, dialect, quirks.
+
+Two fields live on BOTH layers and merge per request:
+`header_extras` and `payload_extras`. The router runs the merge
+(`apply_layered_overlays` in `routectl-router/src/router.rs`) before
+calling `provider.complete(req)` / `provider.stream(req)`, so the
+`Provider` trait surface stays stable across all five concrete
+providers. For the field-assignment table, merge semantics, and
+worked examples, see [CONFIGURATION.md](CONFIGURATION.md).
