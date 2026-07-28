@@ -1747,3 +1747,390 @@ async fn unmatched_feature_naming_skips_provider_without_a_table() {
     assert!(feature_naming_unmatched_warns(&events).is_empty());
     assert_eq!(router.metrics.feature_naming_unmatched_total(), 0);
 }
+
+// --- Bedrock F1 loop-close: 400 once, learn, next request acts ---
+//
+// The full capability-learn loop for a real, mappable Bedrock capability,
+// driven through the UNCHANGED dispatch + observe gates against the REAL
+// captured envelope bodies (never inline .rs literals): a request carrying
+// `advisor` hits a native-lane Bedrock 400 whose lifted discriminator is
+// `ValidationException` and whose flat `{"message"}` body is the byte-exact
+// advisor-tool capture, learns exactly one self-identifying negative, and the
+// next request strips the droppable `advisor` tool and proceeds. The two
+// must-not-learn captures (unknown beta flag, bad model id) and a
+// valid-discriminator drift body close the negative-control and drift legs.
+
+#[cfg(feature = "bedrock")]
+const BEDROCK_CAPTURE_FIXTURE: &str =
+    include_str!("../../tests/fixtures/bedrock_validation_capture.json");
+
+#[cfg(feature = "bedrock")]
+fn bedrock_capture_fixture() -> serde_json::Value {
+    serde_json::from_str(BEDROCK_CAPTURE_FIXTURE).expect("valid bedrock capture fixture json")
+}
+
+/// The byte-exact captured body for a named canary, straight from the wire
+/// fixture -- never an inline literal.
+#[cfg(feature = "bedrock")]
+fn canary_body(fx: &serde_json::Value, name: &str) -> String {
+    fx["canaries"][name]["body"]
+        .as_str()
+        .expect("canary body")
+        .to_string()
+}
+
+/// The lifted, namespace-stripped discriminator the native lane lands on
+/// `Error::Upstream.upstream_type` for a `ValidationException`.
+#[cfg(feature = "bedrock")]
+fn lifted_type(fx: &serde_json::Value) -> String {
+    fx["lifted_type"]
+        .as_str()
+        .expect("fixture lifted_type")
+        .to_string()
+}
+
+/// A flat AWS validation envelope carrying a drift `message` the templates
+/// cannot attribute. The message text is sourced from the fixture's captured
+/// near-miss set; only the minimal envelope wrapper is synthesized.
+#[cfg(feature = "bedrock")]
+fn flat_validation_body(message: &str) -> String {
+    json!({ "message": message }).to_string()
+}
+
+/// A bedrock-kind provider that rejects any request still carrying an
+/// `advisor` tool with the captured advisor-tool 400 (flat validation body +
+/// lifted `ValidationException`), and succeeds once the tool has been stripped
+/// -- so the same provider drives both legs of the loop: the learn-triggering
+/// rejection and the post-strip success.
+#[cfg(feature = "bedrock")]
+struct AdvisorGatedProvider {
+    reject_body: String,
+    reject_type: String,
+    reject_calls: AtomicUsize,
+    proceeded_without_advisor: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "bedrock")]
+#[async_trait::async_trait]
+impl Provider for AdvisorGatedProvider {
+    fn id(&self) -> &'static str {
+        "p1"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("p1", "unused"))
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let keys = crate::feature_keys::derive_feature_keys(
+            req.tools.as_deref().unwrap_or(&[]),
+            req.provider_extras.as_ref(),
+        );
+        if keys.iter().any(|k| k == "advisor") {
+            self.reject_calls.fetch_add(1, Ordering::SeqCst);
+            return Err(Error::upstream_full(
+                "p1",
+                400,
+                self.reject_body.clone(),
+                None,
+                Some(self.reject_type.clone()),
+                None,
+            ));
+        }
+        self.proceeded_without_advisor.store(true, Ordering::SeqCst);
+        Ok(ChatResponse {
+            model: req.model,
+            ..Default::default()
+        })
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        Err(Error::upstream("p1", 500, "unused"))
+    }
+}
+
+#[cfg(feature = "bedrock")]
+fn advisor_gated_provider(fx: &serde_json::Value) -> Arc<AdvisorGatedProvider> {
+    Arc::new(AdvisorGatedProvider {
+        reject_body: canary_body(fx, "advisor-tool"),
+        reject_type: lifted_type(fx),
+        reject_calls: AtomicUsize::new(0),
+        proceeded_without_advisor: std::sync::atomic::AtomicBool::new(false),
+    })
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn bedrock_advisor_400_learns_one_self_identifying_negative() {
+    // Arrange: an advisor-carrying request against a bedrock-kind provider that
+    // returns the real captured advisor-tool 400 (flat validation body + lifted
+    // ValidationException).
+    let fx = bedrock_capture_fixture();
+    let router = router_with(BEDROCK_P1, advisor_gated_provider(&fx));
+
+    // Act
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
+    )
+    .await;
+
+    // Assert: exactly one self-identifying negative, carrying the normalized
+    // key, the bedrock kind, and the request's derived feature set.
+    assert!(dispatched.result.is_err());
+    assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+    let ev = &dispatched.meta.learned_capabilities[0];
+    assert_eq!(ev.state_key, "m1");
+    assert_eq!(ev.capability_key, "advisor");
+    assert_eq!(ev.provider_kind, "bedrock");
+    assert_eq!(ev.signal_tier, SignalTier::SelfIdentifying);
+    assert_eq!(ev.phase, FailurePhase::F1);
+    assert_eq!(ev.observations, 1);
+    assert_eq!(ev.upstream_status, 400);
+    assert!(!ev.remapped);
+    assert_eq!(ev.request_features, vec!["advisor".to_string()]);
+
+    // Exactly one learn WARN, and the drift counter never fired (the matcher
+    // attributed a capability, so this is not an unmatched validation fault).
+    assert_eq!(learn_warns(&events).len(), 1);
+    assert_eq!(router.metrics.bedrock_validation_unmatched_total(), 0);
+
+    // The registry now holds an acting negative for the target.
+    assert_eq!(
+        router
+            .learned_capabilities
+            .acting_negative_for("m1", "advisor", "bedrock", Instant::now(),),
+        crate::learned_capability::RoutingDecision::RouteAway {
+            signal: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+        },
+    );
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn bedrock_advisor_next_request_strips_and_proceeds() {
+    // Arrange: learn the advisor negative from the real 400 (request one).
+    let fx = bedrock_capture_fixture();
+    let provider = advisor_gated_provider(&fx);
+    let router = router_with(BEDROCK_P1, provider.clone());
+    let first = router
+        .complete_with_options(req_with_tool("advisor"), RouterOptions::default())
+        .await;
+    assert!(first.result.is_err(), "the first request learns via a 400");
+    assert_eq!(provider.reject_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(router.metrics.strip_total(), 0, "no strip before the learn");
+
+    // Act: a second advisor-carrying request now meets the acting negative.
+    let second = router
+        .complete_with_options(req_with_tool("advisor"), RouterOptions::default())
+        .await;
+
+    // Assert: `advisor` is droppable, so the interceptor strips the tool in
+    // place and the request proceeds without it -- the provider is reached with
+    // no advisor tool, succeeds, and the strip counter bumps exactly once. No
+    // second rejection: the strip removed the offending capability before
+    // dispatch.
+    assert!(
+        second.result.is_ok(),
+        "the stripped request proceeds and succeeds",
+    );
+    assert_eq!(router.metrics.strip_total(), 1);
+    assert_eq!(
+        provider.reject_calls.load(Ordering::SeqCst),
+        1,
+        "the second request never rejects -- advisor was stripped pre-dispatch",
+    );
+    assert!(
+        provider.proceeded_without_advisor.load(Ordering::SeqCst),
+        "the provider was reached with the advisor tool stripped",
+    );
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn bedrock_force_supported_masks_the_advisor_learn() {
+    // Arrange: an operator force_supported override masks `advisor` on m1. The
+    // mask short-circuits the act side to Allow, so the request dispatches WITH
+    // the tool, upstream still rejects it, and the learn side suppresses.
+    let fx = bedrock_capture_fixture();
+    let toml = format!(
+        "{BEDROCK_P1}\n\
+             [capability.overrides.\"p1:m1\"]\n\
+             force_supported = [\"advisor\"]\n"
+    );
+    let router = router_with(
+        &toml,
+        bedrock_400_provider(&canary_body(&fx, "advisor-tool"), Some(&lifted_type(&fx))),
+    );
+
+    // Act
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
+    )
+    .await;
+
+    // Assert: nothing learned, one suppression WARN + one counter, no negative.
+    assert!(dispatched.result.is_err());
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert!(learn_warns(&events).is_empty());
+    assert!(
+        router.learned_capabilities.is_empty(),
+        "a masked cell must never create a learned negative",
+    );
+    let supp = suppression_warns(&events);
+    assert_eq!(supp.len(), 1);
+    assert_eq!(supp[0].field("capability_key"), Some("advisor"));
+    assert_eq!(router.metrics.mask_suppressed_total(), 1);
+}
+
+#[cfg(feature = "bedrock")]
+struct ControlObservingProvider {
+    reject_body: String,
+    reject_type: String,
+    advisor_calls: AtomicUsize,
+    total_calls: AtomicUsize,
+}
+
+#[cfg(feature = "bedrock")]
+#[async_trait::async_trait]
+impl Provider for ControlObservingProvider {
+    fn id(&self) -> &'static str {
+        "p1"
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response("p1", "unused"))
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        self.total_calls.fetch_add(1, Ordering::SeqCst);
+        let keys = crate::feature_keys::derive_feature_keys(
+            req.tools.as_deref().unwrap_or(&[]),
+            req.provider_extras.as_ref(),
+        );
+        if keys.iter().any(|k| k == "advisor") {
+            self.advisor_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        // The control body names no attributable capability, so every
+        // advisor-carrying request keeps getting the same 400.
+        Err(Error::upstream_full(
+            "p1",
+            400,
+            self.reject_body.clone(),
+            None,
+            Some(self.reject_type.clone()),
+            None,
+        ))
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        Err(Error::upstream("p1", 500, "unused"))
+    }
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn bedrock_negative_controls_do_not_learn_or_route() {
+    // The two must-not-learn captures share the exact flat shape AND the valid
+    // ValidationException discriminator of the learnable advisor rejection, yet
+    // name no attributable capability: no learn event, no registry entry, and a
+    // following request neither strips nor routes away. The rejection IS a
+    // validation fault the templates cannot attribute, so the drift counter
+    // fires once per request -- the visible, recoverable non-learn the design
+    // intends. Behavior-level: a SECOND advisor-carrying request reaches the
+    // provider UNCHANGED (advisor still present, no strip) since nothing was
+    // learned to route away from.
+    let fx = bedrock_capture_fixture();
+    for control in ["unknown-beta", "supp-bad-model-id"] {
+        let provider = Arc::new(ControlObservingProvider {
+            reject_body: canary_body(&fx, control),
+            reject_type: lifted_type(&fx),
+            advisor_calls: AtomicUsize::new(0),
+            total_calls: AtomicUsize::new(0),
+        });
+        let router = router_with(BEDROCK_P1, provider.clone());
+
+        let (dispatched, events) = with_capture(
+            router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
+        )
+        .await;
+
+        assert!(dispatched.result.is_err(), "control {control}");
+        assert!(
+            dispatched.meta.learned_capabilities.is_empty(),
+            "control {control} must not learn",
+        );
+        assert!(learn_warns(&events).is_empty(), "control {control}");
+        assert!(
+            router.learned_capabilities.is_empty(),
+            "control {control} plants no negative -> no route-away",
+        );
+        assert_eq!(
+            router.metrics.strip_total(),
+            0,
+            "control {control} triggers no strip",
+        );
+        assert_eq!(
+            router.metrics.bedrock_validation_unmatched_total(),
+            1,
+            "control {control} is a valid but unattributable validation fault",
+        );
+
+        // A second advisor-carrying request meets no acting negative, so the
+        // interceptor leaves the tool in place and the provider is reached
+        // UNCHANGED -- both dispatches observed the advisor tool and nothing
+        // was ever stripped.
+        let second = router
+            .complete_with_options(req_with_tool("advisor"), RouterOptions::default())
+            .await;
+        assert!(second.result.is_err(), "control {control} still rejects");
+        assert_eq!(
+            router.metrics.strip_total(),
+            0,
+            "control {control} strips nothing on the second request",
+        );
+        assert_eq!(
+            provider.total_calls.load(Ordering::SeqCst),
+            2,
+            "control {control} reached the provider on both requests",
+        );
+        assert_eq!(
+            provider.advisor_calls.load(Ordering::SeqCst),
+            2,
+            "control {control} carried the advisor tool UNCHANGED to the provider both times",
+        );
+    }
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn bedrock_drift_body_bumps_only_the_unmatched_counter() {
+    // A 400 with the valid ValidationException discriminator whose message
+    // matches no template (a wording-drift variant of the real advisor
+    // rejection): the drift counter bumps exactly once and NOTHING else moves
+    // -- no learn, no F1 negative, no strip, no registry entry.
+    let fx = bedrock_capture_fixture();
+    let drift_body = flat_validation_body(
+        fx["near_miss_messages"]["advisor_wording_drift"]
+            .as_str()
+            .expect("near-miss drift message"),
+    );
+    let router = router_with(
+        BEDROCK_P1,
+        bedrock_400_provider(&drift_body, Some(&lifted_type(&fx))),
+    );
+
+    let (dispatched, events) = with_capture(
+        router.complete_with_options(req_with_tool("advisor"), RouterOptions::default()),
+    )
+    .await;
+
+    assert!(dispatched.result.is_err());
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert!(learn_warns(&events).is_empty());
+    assert!(router.learned_capabilities.is_empty());
+    assert_eq!(router.metrics.strip_total(), 0);
+    assert_eq!(bedrock_unmatched_warns(&events).len(), 1);
+    assert_eq!(router.metrics.bedrock_validation_unmatched_total(), 1);
+    assert_eq!(router.metrics.learned_negatives_f1_total(), 0);
+}

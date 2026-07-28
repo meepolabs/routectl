@@ -263,6 +263,28 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   is unchanged: those flags are always sent and bypass the filter
   (operator-asserted), independent of the global allowlist.
 
+- **`ValidationException` 400s are header-discriminated, not
+  `__type`-bodied.** AWS docs show request-validation errors as a flat
+  body carrying a `__type` key
+  (`{"__type":"...ValidationException","message":"..."}`), but real
+  bedrock-runtime `InvokeModel` 400s serve a flat MINIMAL body with NO
+  `__type` -- just `{"message":"..."}` -- and put the discriminator in
+  the `x-amzn-ErrorType` response header
+  (`ValidationException:http://internal.amazon.com/coral/...`, a fixed
+  public value, not account-specific). The capability matcher gates its
+  learn path on this token, so the native lane lifts it:
+  `read_error_body` in `crates/routectl-providers/src/bedrock/mod.rs`
+  reads the header BEFORE the body read consumes the response and falls
+  back to it when the body carries no `__type` (body `__type` still
+  wins). The lift
+  (`crate::aws_error::classify_aws_error_type_header`) requires a single
+  unambiguous header value, splits at the first `:` to drop the coral
+  URL tail, and validates the bare name through the same bounded-token
+  path as the body lift -- the URL tail never reaches an `Error` field
+  or a log line. A stripped / duplicated / garbled header surfaces a
+  bounded reason-labeled WARN (`missing|invalid|ambiguous|conflict`)
+  instead of silently degrading to a non-attributed rejection.
+
 ## OpenAI Responses surface
 
 - **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
