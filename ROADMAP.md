@@ -41,8 +41,9 @@ release cut. Highlights, roughly in dependency order:
 - **Streaming reliability** -- early-response commit with a
   flush-first grace window; interim usage semantics.
 - **Bedrock surface expansion** -- Amazon Bedrock "mantle"
-  bearer-auth lanes on the Anthropic and OpenAI provider classes;
-  Converse request-side gap closure.
+  bearer-auth lanes (bearer-key access to Bedrock's Anthropic- and
+  OpenAI-vocabulary endpoints) on the Anthropic and OpenAI provider
+  classes; Converse request-side gap closure.
 - **Native Gemini egress** -- `generateContent` API-key and Cloud
   Code OAuth auth modes.
 - **OpenAI Responses ingress** -- third ingress dialect
@@ -52,8 +53,9 @@ release cut. Highlights, roughly in dependency order:
   sharing, byte-oriented ingress).
 - **First-party passthrough** -- optional `[mitm]` front-proxy so
   Claude Code can route inference through routectl while Remote
-  Control keeps working against `api.anthropic.com`; per-target
-  forwarded-credential mode with strict transparency guarantees.
+  Control (Claude Code's remote-takeover feature) keeps working
+  against `api.anthropic.com`; per-target forwarded-credential mode
+  with strict transparency guarantees.
 - **Codex identity currency** -- config-overridable codex client
   version (`codex_version`) reaching every fingerprint surface from
   one derivation, plus a persistent installation id.
@@ -107,17 +109,19 @@ release cut. Highlights, roughly in dependency order:
   with suffix-glob keys + chain values; `openai-responses` provider
   (ChatGPT Codex chatgpt-oauth).
 
-- **v0.5.0** -- Translation hardening: `tool_choice` shape coercion,
-  top-level `system` lower for strict openai-compat hosts, per-
-  provider `history_reasoning`, operator-owned Bedrock allowlists,
-  [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md).
+- **v0.5.0** (development iteration; no standalone tag -- shipped
+  with v0.6.0) -- Translation hardening: `tool_choice` shape
+  coercion, top-level `system` lower for strict openai-compat hosts,
+  per-provider `history_reasoning`, operator-owned Bedrock
+  allowlists, [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md).
 
 - **v0.4.0** -- API-spec independence: two ingress dialects (OpenAI
   + Anthropic) feeding one canonical request shape, forward-compat
   catchalls, listener-side auth, adaptive thinking for Opus 4.7+.
 
-- **v0.3.0** -- Native AWS Bedrock provider (SigV4, full credential
-  chain, InvokeModel + Converse).
+- **v0.3.0** (development iteration; no standalone tag -- shipped
+  with v0.4.0) -- Native AWS Bedrock provider (SigV4, full
+  credential chain, InvokeModel + Converse).
 
 - **v0.2.0** -- Reliability tier: per-attempt timeouts, jittered
   backoff, per-error-class retry caps, per-provider RPM token

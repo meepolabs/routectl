@@ -4,10 +4,65 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Versions 0.3.0 and 0.5.0 were development iterations that never got
+standalone release tags; their changes are folded into the 0.4.0 and
+0.6.0 entries respectively.
+
 ## [Unreleased]
+
+A large body of work has landed since v0.9.0 and awaits the next
+release cut. [ROADMAP.md](ROADMAP.md) "On develop" carries the same
+list with more narrative.
 
 ### Added
 
+- **OpenAI Responses ingress** -- a third ingress dialect at
+  `POST /v1/responses`, feeding the same canonical request shape as
+  the OpenAI Chat Completions and Anthropic Messages routes.
+- **Native Gemini egress** (`kind = "gemini"`) -- Google
+  `generateContent` / `streamGenerateContent` with API-key and Cloud
+  Code OAuth (`oauth://antigravity`) auth modes.
+- **Learned capability system** -- a per-target capability registry
+  learned from live rejections and response evidence, persisted in
+  the usage ledger and rebuilt at boot; consented active probes
+  (`routectl probe --capabilities`); operator overrides
+  (`[capability.overrides]`); a doctor truth-matrix panel with
+  freshness/staleness hints.
+- **Per-failure-class retry policy** -- a stable failure-class
+  taxonomy (`rate-limited`, `auth`, `bad-request`, ...) with
+  `[retry.classes.<class>]` per-class retry/fallback overrides and
+  `[providers.X.class_overrides]` status remaps.
+- **Model catalog** -- a baked cache-economics catalog plus a user
+  overlay with provenance and verification stamps; `routectl catalog
+  list/verify/import/set/disable/export`.
+- **Config schema v3 + `config migrate`** -- versioned config with a
+  deterministic migration ladder; `config set/unset/show/check` with
+  dotted-key paths; a committed JSON Schema (`routectl.schema.json`)
+  for editor completion.
+- **Onboarding** -- the `routectl init` wizard, `provider add` with
+  secret capture, `doctor` diagnostics with a stable exit-code
+  contract, and reachability probes (`provider probe`).
+- **Read-only status dashboard** -- a single-file dashboard at
+  `GET /` plus `/status/{usage,health,config,doctor}` JSON panels;
+  structurally read-only (no mutation routes exist).
+- **First-party passthrough** -- an optional `[mitm]` front-proxy so
+  Claude Code can route inference through routectl while Remote
+  Control keeps working against `api.anthropic.com`; per-provider
+  forwarded-credential mode (`credential_source = "forwarded"`).
+- **Bedrock surface expansion** -- bearer-auth "mantle" lanes on the
+  Anthropic and OpenAI provider classes; Converse request-side gap
+  closure.
+- **Codex identity currency** -- a config-overridable codex client
+  version (`codex_version`) reaching every fingerprint surface from
+  one derivation, plus a persistent installation id.
+- **Cache stability guardrails** -- an advisory warning when a
+  caller-cached prefix carries volatile content; optional tool-array
+  normalization (`[cache] normalize_tools`).
+- **Advisory context reduction** -- lossless dedup/supersession
+  analysis with per-request would-save accounting and a
+  confidence-bounded cache-hit estimator (observation-only; no
+  request mutation). `routectl prompt-size` reports the same analysis
+  offline.
 - **Automatic prompt-cache breakpoint emission on the dispatch path** (default on). When a caller supplies no `cache_control` of its own, routectl adds a single top-level ephemeral 5-minute breakpoint over the stable cacheable prefix (system prompt + tool name/description strings) for capable providers, turning an otherwise-uncached prefix into a cache hit with no client change. The injection is lossless: applied to a per-attempt clone, re-validated before dispatch and rolled back on any doubt, and skipped entirely whenever the caller already supplied a breakpoint. Not applied to `count_tokens`.
   - **Kill-switches.** A global `[cache] auto_emit_top_level_breakpoint` (default true) plus a per-provider `auto_emit_top_level_breakpoint` override; the effective decision is "global on AND provider not explicitly off".
   - **Conservative per-provider capability.** A per-kind `cache_capability` default decides whether a provider honors a top-level breakpoint at all (anthropic-api / bedrock yes; openai-compat / unknown kinds no), overridable per entry. A `kind = "anthropic-api"` entry pointed at a non-default base URL fails closed until the operator opts in with an explicit `cache_capability`.
@@ -17,6 +72,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Production hardening pass** -- auth-store lock ordering + atomic
+  fsync-policy writes, network-exposure fail-closed middleware,
+  request-body caps and disconnect-cancel semantics, retry-boundary
+  fixes (no retry after the first content chunk), usage-ledger
+  accuracy (`http_status`, error classes), OAuth refresh cooldown,
+  and log-redaction tightening.
+- **Streaming reliability** -- early-response commit with a
+  flush-first grace window; interim usage semantics.
+- **Performance** -- a criterion bench harness plus hot-path
+  allocation reductions (zero-alloc token estimates, copy-on-write
+  message sharing, byte-oriented ingress).
 - **BREAKING: `[mitm] credential_source` removed.** A forwarded credential is now a per-provider choice, not a `[mitm]`-level one -- `[mitm]` reverts to transport-only (bind port, cert dir, upstream pin). A config still carrying the old key fails to load with an actionable error naming the exact replacement. Migrate by deleting the key and adding a provider block:
   ```toml
   [providers.anthropic-forwarded]
@@ -502,7 +568,7 @@ No automated migration tool; old configs hit raw serde errors at
 startup. Hand-edit your TOML against the new shape -- see
 `examples/config.toml` for a complete reference.
 
-## [0.4.0] - 2026-04-XX
+## [0.4.0] - 2026-05-10
 
 ### Added
 
@@ -614,6 +680,7 @@ Initial release.
 - **Per-provider retry** with exponential backoff.
 - **TOML config** in `~/.config/routectl/config.toml`.
 
+[Unreleased]: https://github.com/meepolabs/routectl/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/meepolabs/routectl/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/meepolabs/routectl/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/meepolabs/routectl/compare/v0.6.0...v0.7.0

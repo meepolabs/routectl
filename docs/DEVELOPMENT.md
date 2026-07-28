@@ -64,16 +64,15 @@ bash tools/git-hooks/install.sh
 ```
 
 This symlinks `pre-commit` and `commit-msg` into `.git/hooks/`. The
-`pre-commit` hook runs the gitleaks staged secret scan, the
-internal-ID scan (`scripts/check-internal-ids.sh --staged`), and the
-fmt / clippy / lean-check / workspace-test gate -- the same workspace
-tests CI runs EXCEPT the two replay suites (`egress_replay_all` /
-`ingress_replay_all`), which the hook skips locally pending the
-captured-corpus recapture (CI runs them unfiltered). The `commit-msg`
-hook scans the commit message for internal planning IDs. Set
-`ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate while
-iterating; the same internal-ID rules are enforced fail-closed in CI
-regardless.
+`pre-commit` hook runs the gitleaks staged secret scan, a scan for
+accidental non-public identifiers (`scripts/check-internal-ids.sh
+--staged`), and the fmt / clippy / lean-check / workspace-test gate --
+the same workspace tests CI runs EXCEPT the two replay suites
+(`egress_replay_all` / `ingress_replay_all`), which only run against a
+contributor's local fixture corpus (CI runs them unfiltered). The
+`commit-msg` hook applies the same identifier scan to the commit
+message. Set `ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate
+while iterating; CI enforces the same rules fail-closed regardless.
 
 ## When the Anthropic ingress breaks (a real client sending a real body)
 
@@ -231,15 +230,18 @@ day-to-day capture flow.
    ROUTECTL_TRACE_BODY_BYTES=2097152
    ```
 
-   The default service env at `~/.config/routectl/routectl.env`
-   documents these (commented by default).
+   If you run routectl as a service, put these in the service's env
+   file; for a foreground run, export them in the shell.
 
 2. **Restart the daemon.** Send traffic through it via your normal
    clients (claude-code, codex, custom scripts, etc.). The capture rig
    only sees completed requests, so let some real exchanges flow.
 
-3. **Bridge the systemd journal to a flat trace log** (the capture
-   script reads from a file path; the daemon writes to journal):
+3. **Point the capture script at a flat trace log.** The script reads
+   from a file path, so run the daemon in the foreground with stderr
+   redirected (`routectl serve 2>/tmp/routectl-trace.log`), or -- if
+   you run routectl as a systemd user service on Linux -- bridge the
+   journal to a file:
 
    ```
    journalctl --user -u routectl --since "10 minutes ago" --no-pager -o cat \
@@ -248,7 +250,9 @@ day-to-day capture flow.
    ```
 
    The `sed` strips ANSI color codes that the tracing-subscriber
-   emits.
+   emits. Prefer the foreground redirect when capturing large bodies:
+   journald truncates long lines (~48 KiB default `LineMax`), which
+   corrupts captured JSON bodies mid-escape.
 
 4. **Run the capture script:**
 
