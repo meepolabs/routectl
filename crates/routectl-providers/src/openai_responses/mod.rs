@@ -723,3 +723,7 @@ mod lane_mapping_tests;
 #[cfg(test)]
 #[path = "lane_tag_emission_tests.rs"]
 mod lane_tag_emission_tests;
+
+#[cfg(test)]
+#[path = "reasoning_continuity_tests.rs"]
+mod reasoning_continuity_tests;

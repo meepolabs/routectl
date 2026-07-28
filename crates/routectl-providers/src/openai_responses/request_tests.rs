@@ -183,13 +183,10 @@ fn assistant_text_message_translates_to_output_text() {
 }
 
 #[test]
-fn assistant_thinking_with_unknown_format_emits_empty_encrypted_content() {
+fn assistant_thinking_with_unknown_format_emits_no_reasoning_item() {
     // Arrange: assistant turn with a Thinking block carrying a signature.
     // ContentPart::Thinking has no format field, so the egress cannot
-    // know whether the signature is an Anthropic or OpenAI token.
-    // Correct behavior: emit a Reasoning input item with EMPTY
-    // encrypted_content (Anthropic signatures are not valid OpenAI
-    // encrypted_content tokens and must not be forwarded).
+    // establish that the signature is a token this lane will accept.
     let parts = vec![
         ContentPart::Known(KnownContentPart::Thinking {
             thinking: "step 1".into(),
@@ -206,29 +203,24 @@ fn assistant_thinking_with_unknown_format_emits_empty_encrypted_content() {
     // Act
     let v = translate_to_json(&cfg(), &req);
 
-    // Assert: reasoning item emitted FIRST, then the message item.
-    let reasoning = &v["input"][1];
-    assert_eq!(reasoning["type"], "reasoning");
-    // Signature must NOT be forwarded: KnownContentPart::Thinking carries
-    // no format tag so the egress cannot verify it is a valid OpenAI
-    // encrypted_content token. Empty string is the documented "no prior
-    // signature" shape (codex arc_monitor.rs:325-336 treats it as no-op).
-    assert_eq!(reasoning["encrypted_content"], "");
-    assert_eq!(
-        reasoning["summary"],
-        json!([{"type": "summary_text", "text": "step 1"}])
-    );
-    let message = &v["input"][2];
+    // Assert: no reasoning item at all -- an item with empty
+    // encrypted_content replays nothing and its id would dangle. The
+    // message item follows the user turn directly.
+    let message = &v["input"][1];
     assert_eq!(message["type"], "message");
     assert_eq!(message["role"], "assistant");
     assert_eq!(
         message["content"],
         json!([{"type": "output_text", "text": "final"}])
     );
+    assert!(
+        !v.to_string().contains("sig-xyz"),
+        "an unverifiable signature must not reach the wire"
+    );
 }
 
 #[test]
-fn assistant_thinking_without_signature_emits_empty_encrypted_content() {
+fn assistant_thinking_without_signature_emits_no_reasoning_item() {
     // Arrange
     let parts = vec![ContentPart::Known(KnownContentPart::Thinking {
         thinking: "hmm".into(),
@@ -239,20 +231,19 @@ fn assistant_thinking_without_signature_emits_empty_encrypted_content() {
     // Act
     let v = translate_to_json(&cfg(), &req);
 
-    // Assert: encrypted_content emitted as empty string, not null.
-    // codex's arc_monitor.rs:325-336 treats empty as "no replay" so
-    // this is safe.
-    let reasoning = &v["input"][1];
-    assert_eq!(reasoning["type"], "reasoning");
-    assert_eq!(reasoning["encrypted_content"], "");
-    assert!(reasoning["encrypted_content"].is_string());
+    // Assert: nothing to replay, so nothing is emitted.
+    assert!(
+        v["input"][1].is_null(),
+        "a signature-less thinking block must produce no input item"
+    );
 }
 
 #[test]
 fn assistant_redacted_thinking_does_not_leak_blob_into_encrypted_content() {
-    // Arrange: assistant turn with a RedactedThinking part. The opaque
-    // Anthropic base64 blob is NOT a valid OpenAI encrypted_content
-    // token and must not be forwarded into that slot.
+    // Arrange: assistant turn with a RedactedThinking part carrying an
+    // opaque dialect-native blob. It is not a valid token for this lane's
+    // encrypted_content slot and restores no artifact, so it must not be
+    // forwarded.
     let secret_blob = "EroBCkYIBxgCKkB_ANTHROPIC_REDACTED_BLOB";
     let parts = vec![ContentPart::Known(KnownContentPart::RedactedThinking {
         data: secret_blob.into(),
@@ -262,14 +253,14 @@ fn assistant_redacted_thinking_does_not_leak_blob_into_encrypted_content() {
     // Act
     let v = translate_to_json(&cfg(), &req);
 
-    // Assert: a reasoning item is emitted with EMPTY encrypted_content;
-    // the raw blob does not appear anywhere on the wire.
-    let reasoning = &v["input"][1];
-    assert_eq!(reasoning["type"], "reasoning");
-    assert_eq!(reasoning["encrypted_content"], "");
+    // Assert: no reasoning item, and the raw blob appears nowhere.
+    assert!(
+        v["input"][1].is_null(),
+        "an opaque redacted blob must produce no input item"
+    );
     assert!(
         !v.to_string().contains(secret_blob),
-        "redacted Anthropic blob must not leak onto the Responses wire"
+        "an opaque foreign blob must not leak onto the Responses wire"
     );
 }
 

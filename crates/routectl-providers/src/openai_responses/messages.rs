@@ -13,19 +13,24 @@
 //! instead of ToolUse content parts) are re-emitted the same way so a
 //! following `function_call_output` is never dangling.
 //!
-//! Reasoning replay: codex re-injects reasoning blocks only when
-//! `encrypted_content` is non-empty (see
-//! `codex/codex-rs/core/src/arc_monitor.rs::325-336`). routectl always
-//! emits the field; an empty string is the documented "no prior
-//! signature" shape. Canonical Thinking blocks without a signature
-//! (first-turn requests, or providers that didn't surface one) flow
-//! through cleanly as empty-string `encrypted_content`.
+//! Reasoning replay: a reasoning item is emitted only when it carries a
+//! non-empty `encrypted_content` this lane can validly replay. An item
+//! with an empty signature has nothing to re-inject and its upstream id
+//! is either a no-op or a hard "item not found" rejection, so no
+//! translation path can produce one: every producer returns `Option` and
+//! a final sweep before emission enforces the floor structurally.
+//!
+//! A `redacted_thinking` blob that crossed a dialect with no slot for a
+//! reasoning artifact's id and scheme carries both in a self-describing
+//! envelope, restored here so continuity survives the round trip. The
+//! restored pair is a CLIENT-CONTROLLED hint and passes through the same
+//! replay gate as a natively tagged artifact.
 
 use serde_json::Value;
 
 use routectl_core::{
     ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability, Result, Role,
-    is_replayable, is_responses_family, scheme_of,
+    is_replayable, is_responses_family, reasoning_envelope, scheme_of,
 };
 
 use super::types::{
@@ -247,6 +252,7 @@ fn translate_assistant_message(
     // which also `serde_json::to_string`s its input.
     append_function_calls_from_tool_calls(id, msg, content_has_tool_use, &mut tool_calls)?;
 
+    retain_replayable_reasoning(&mut reasoning_items);
     out.extend(reasoning_items);
     if !message_content.is_empty() {
         out.push(ResponseInputItem::Message {
@@ -256,6 +262,27 @@ fn translate_assistant_message(
     }
     out.extend(tool_calls);
     Ok(())
+}
+
+/// Final structural gate on the reasoning items an assistant turn is
+/// about to emit: a Reasoning item whose `encrypted_content` is empty
+/// carries nothing replayable, and re-injecting it by its upstream id is
+/// either a no-op or a hard "item not found" rejection.
+///
+/// Every producer already declines to build such an item. This sweep is
+/// deliberately redundant: it makes the floor a property of the emission
+/// point rather than of each producer, so a future path cannot reintroduce
+/// the hole by forgetting the check at its own site.
+pub(super) fn retain_replayable_reasoning(items: &mut Vec<ResponseInputItem>) {
+    items.retain(|item| {
+        !matches!(
+            item,
+            ResponseInputItem::Reasoning {
+                encrypted_content,
+                ..
+            } if encrypted_content.is_empty()
+        )
+    });
 }
 
 /// Re-emit OpenAI-shape `Message.tool_calls` as Responses `function_call`
@@ -515,10 +542,11 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
 
 /// Per-part walker for an assistant turn. Routes each part into the
 /// appropriate output bucket: `Thinking` -> reasoning items;
-/// `RedactedThinking` -> reasoning items with EMPTY encrypted_content
-/// (the opaque Anthropic blob is not a valid OpenAI token and is not
-/// forwarded); `Text` -> message content (output_text); `ToolUse` -> a
-/// separate `FunctionCall` input item. Everything else drops with a WARN.
+/// `RedactedThinking` -> a restored reasoning item when the blob is a
+/// self-describing envelope, otherwise nothing (an opaque foreign blob is
+/// not a valid token for the `encrypted_content` slot); `Text` -> message
+/// content (output_text); `ToolUse` -> a separate `FunctionCall` input
+/// item. Everything else drops with a WARN.
 ///
 /// `suppress_thinking_parts` is true when `reasoning_details` already
 /// produced Reasoning items: in that case Thinking + RedactedThinking
@@ -553,7 +581,7 @@ fn walk_assistant_part(
                     "skipping Thinking content-part because reasoning_details already emitted Reasoning items"
                 );
             } else {
-                reasoning.push(translate_thinking_part(
+                reasoning.extend(translate_thinking_part(
                     thinking,
                     signature.as_deref(),
                     None,
@@ -569,14 +597,22 @@ fn walk_assistant_part(
                     "skipping RedactedThinking content-part because reasoning_details already emitted Reasoning items"
                 );
             } else {
-                // A RedactedThinking content-part carries an opaque
-                // Anthropic blob with no format tag, so it is gated the
-                // same way as Thinking: the blob is NOT a valid OpenAI
-                // encrypted_content token and must not be forwarded into
-                // that slot. `data` is treated as the (absent) signature
-                // for an unknown-format part, yielding empty
-                // encrypted_content.
-                reasoning.push(translate_thinking_part("", Some(data), None, auth_kind));
+                // A RedactedThinking content-part carries an opaque blob
+                // with no format tag of its own. When it is a
+                // Responses-family artifact that crossed a dialect with no
+                // slot for its id and scheme, both ride inside a
+                // self-describing envelope and are restored here --
+                // without which the artifact is unreplayable on the lane
+                // that issued it and reasoning continuity is lost.
+                //
+                // The restored (scheme, id) is CLIENT-CONTROLLED and is a
+                // HINT ONLY. It is fed into exactly the same replay gate a
+                // natively tagged detail passes through, so a claim can
+                // never be what admits a blob to a lane. A non-envelope
+                // blob -- an Anthropic-native redacted_thinking above all
+                // -- restores nothing and is not forwarded: it is not a
+                // valid token for this slot.
+                reasoning.extend(decode_redacted_thinking(data, auth_kind));
             }
         }
         ContentPart::Known(KnownContentPart::ToolUse {
@@ -612,25 +648,79 @@ fn walk_assistant_part(
     Ok(())
 }
 
-/// Translate a canonical Thinking block to a Responses-shape
-/// `Reasoning` input item. The signature is forwarded as
-/// `encrypted_content` only when the source `format` is a
-/// Responses-family tag whose replay scheme the target lane does not
-/// reject -- otherwise the signature is not a token this lane's
-/// validator will accept, and forwarding it corrupts the replay gate on
-/// the upstream server. In every other case the field is emitted as an
-/// empty string; codex treats empty `encrypted_content` as a no-op for
-/// replay (`arc_monitor.rs::325-336`).
+/// The signature to forward as `encrypted_content`, or `None` when there
+/// is nothing this lane can validly replay.
 ///
-/// An unproven (artifact, lane) pair is carried optimistically: this
-/// layer neither retries nor learns, and carrying once is what lets the
-/// pair be settled from a real upstream verdict.
+/// A signature survives only when its source `format` is a
+/// Responses-family tag whose replay scheme the target lane does not
+/// reject. Otherwise it is not a token this lane's validator will accept,
+/// and forwarding it corrupts the replay gate on the upstream server.
+///
+/// An unproven (artifact, lane) pair is carried optimistically: this layer
+/// neither retries nor learns, and carrying once is what lets the pair be
+/// settled from a real upstream verdict.
+///
+/// An absent or empty signature is `None` for the same reason a rejected
+/// one is: an item whose `encrypted_content` is empty has no replayable
+/// content, and re-injecting it by its upstream id is either a no-op or a
+/// hard "item not found" rejection.
+fn replayable_signature(
+    signature: Option<&str>,
+    format: Option<&str>,
+    auth_kind: AuthKind,
+) -> Option<String> {
+    let replayable = is_responses_family(format)
+        && is_replayable(scheme_of(format), lane_scheme(auth_kind)) != Replayability::Strip;
+    if !replayable {
+        return None;
+    }
+    signature.filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// Restore a reasoning artifact from a `redacted_thinking` blob that
+/// crossed a dialect with no slot for its id and scheme.
+///
+/// Returns `None` for every blob that is not a well-formed envelope --
+/// a dialect-native redacted blob, a truncated or malformed envelope, an
+/// unknown envelope version -- which leaves the caller holding an opaque
+/// foreign blob and emitting no item, exactly as it would without this
+/// decode.
+///
+/// SECURITY: the envelope is CLIENT-CONTROLLED. Anyone can mint one
+/// claiming any scheme and any id, so the unwrapped pair is a HINT and
+/// never an authorization. The claimed scheme is fed into the same replay
+/// gate a natively tagged detail passes through, which means a claim of a
+/// scheme the target lane rejects strips the artifact regardless of what
+/// was claimed. The gate decides; the claim never does.
+///
+/// The blob rides through byte-identical to the bytes the provider
+/// originally issued, so prompt-cache affinity upstream is untouched.
+fn decode_redacted_thinking(data: &str, auth_kind: AuthKind) -> Option<ResponseInputItem> {
+    let (claimed_scheme, claimed_id, blob) = reasoning_envelope::unwrap(data)?;
+    let encrypted_content = replayable_signature(Some(blob), Some(claimed_scheme), auth_kind)?;
+    Some(ResponseInputItem::Reasoning {
+        id: claimed_id.map(str::to_string),
+        summary: Vec::new(),
+        content: Vec::new(),
+        encrypted_content,
+    })
+}
+
+/// Translate a canonical Thinking block to a Responses-shape `Reasoning`
+/// input item, or `None` when the block has no signature this lane can
+/// replay (see [`replayable_signature`]).
+///
+/// Returning `Option` rather than an item with empty `encrypted_content`
+/// is what keeps the empty-item floor structural: the walk path and the
+/// `reasoning_details` lift path cannot drift apart on whether an
+/// unreplayable item is emitted, because no producer can build one.
 pub(super) fn translate_thinking_part(
     thinking: &str,
     signature: Option<&str>,
     format: Option<&str>,
     auth_kind: AuthKind,
-) -> ResponseInputItem {
+) -> Option<ResponseInputItem> {
+    let encrypted_content = replayable_signature(signature, format, auth_kind)?;
     let summary = if thinking.is_empty() {
         Vec::new()
     } else {
@@ -638,19 +728,12 @@ pub(super) fn translate_thinking_part(
             text: thinking.to_string(),
         }]
     };
-    let replayable = is_responses_family(format)
-        && is_replayable(scheme_of(format), lane_scheme(auth_kind)) != Replayability::Strip;
-    let encrypted_content = if replayable {
-        signature.unwrap_or("").to_string()
-    } else {
-        String::new()
-    };
-    ResponseInputItem::Reasoning {
+    Some(ResponseInputItem::Reasoning {
         id: None,
         summary,
         content: Vec::new(),
         encrypted_content,
-    }
+    })
 }
 
 /// Translate an OpenAI-shape `File` part's nested `file` object into a
@@ -1071,16 +1154,11 @@ mod messages_tests {
         // Act
         let item = translate_thinking_part(thinking, signature, None, AuthKind::ChatgptOauth);
 
-        // Assert: Anthropic signature MUST NOT appear in encrypted_content.
-        let ResponseInputItem::Reasoning {
-            encrypted_content, ..
-        } = item
-        else {
-            panic!("expected ResponseInputItem::Reasoning");
-        };
+        // Assert: the signature is not replayable on this lane, so no item
+        // is produced at all -- there is nothing for it to leak into.
         assert!(
-            encrypted_content.is_empty(),
-            "Anthropic signature must not leak into encrypted_content, got: {encrypted_content}"
+            item.is_none(),
+            "an unreplayable signature must produce no reasoning item"
         );
     }
 
@@ -1099,9 +1177,9 @@ mod messages_tests {
         );
 
         // Assert: the signature IS forwarded.
-        let ResponseInputItem::Reasoning {
+        let Some(ResponseInputItem::Reasoning {
             encrypted_content, ..
-        } = item
+        }) = item
         else {
             panic!("expected ResponseInputItem::Reasoning");
         };
@@ -1112,7 +1190,7 @@ mod messages_tests {
     }
 
     #[test]
-    fn openai_responses_format_no_signature_emits_empty_encrypted_content() {
+    fn openai_responses_format_no_signature_emits_no_item() {
         // Arrange: openai-responses-v1 format, no signature available.
         let thinking = "Some reasoning";
 
@@ -1124,17 +1202,11 @@ mod messages_tests {
             AuthKind::ChatgptOauth,
         );
 
-        // Assert: no signature -> empty encrypted_content (the documented
-        // "no prior signature" shape; codex treats it as a no-op).
-        let ResponseInputItem::Reasoning {
-            encrypted_content, ..
-        } = item
-        else {
-            panic!("expected ResponseInputItem::Reasoning");
-        };
+        // Assert: nothing to replay -> no item, rather than an item whose
+        // upstream id would dangle.
         assert!(
-            encrypted_content.is_empty(),
-            "None signature should yield empty encrypted_content, got: {encrypted_content}"
+            item.is_none(),
+            "a signature-less thinking block must produce no reasoning item"
         );
     }
 
@@ -1211,41 +1283,41 @@ mod messages_tests {
         );
     }
 
-    fn thinking_signature(format: Option<&str>, lane: AuthKind) -> String {
-        let item = translate_thinking_part("reasoned", Some("SIG"), format, lane);
+    fn thinking_signature(format: Option<&str>, lane: AuthKind) -> Option<String> {
+        let item = translate_thinking_part("reasoned", Some("SIG"), format, lane)?;
         let ResponseInputItem::Reasoning {
             encrypted_content, ..
         } = item
         else {
             panic!("expected ResponseInputItem::Reasoning");
         };
-        encrypted_content
+        Some(encrypted_content)
     }
 
     #[test]
     fn thinking_part_forwards_the_signature_for_every_recognized_lane_tag() {
         assert_eq!(
-            thinking_signature(Some(CODEX_OAUTH), AuthKind::ChatgptOauth),
-            "SIG"
+            thinking_signature(Some(CODEX_OAUTH), AuthKind::ChatgptOauth).as_deref(),
+            Some("SIG")
         );
         assert_eq!(
-            thinking_signature(Some(OPENAI_APIKEY), AuthKind::ApiKey),
-            "SIG"
+            thinking_signature(Some(OPENAI_APIKEY), AuthKind::ApiKey).as_deref(),
+            Some("SIG")
         );
         assert_eq!(
-            thinking_signature(Some(BEDROCK_MANTLE), AuthKind::BedrockMantle),
-            "SIG"
+            thinking_signature(Some(BEDROCK_MANTLE), AuthKind::BedrockMantle).as_deref(),
+            Some("SIG")
         );
     }
 
     #[test]
     fn thinking_part_drops_the_signature_across_proven_families() {
         assert!(
-            thinking_signature(Some(CODEX_OAUTH), AuthKind::BedrockMantle).is_empty(),
+            thinking_signature(Some(CODEX_OAUTH), AuthKind::BedrockMantle).is_none(),
             "a codex-lane signature must not reach a mantle lane"
         );
         assert!(
-            thinking_signature(Some(BEDROCK_MANTLE), AuthKind::ChatgptOauth).is_empty(),
+            thinking_signature(Some(BEDROCK_MANTLE), AuthKind::ChatgptOauth).is_none(),
             "a mantle-lane signature must not reach a codex lane"
         );
     }
@@ -1253,8 +1325,8 @@ mod messages_tests {
     #[test]
     fn thinking_part_forwards_a_gray_zone_signature_optimistically() {
         assert_eq!(
-            thinking_signature(Some(OPENAI_RESPONSES_V1), AuthKind::BedrockMantle),
-            "SIG"
+            thinking_signature(Some(OPENAI_RESPONSES_V1), AuthKind::BedrockMantle).as_deref(),
+            Some("SIG")
         );
     }
 }
