@@ -154,6 +154,10 @@ impl Provider for OpenAiResponsesProvider {
         response::translate(&self.cfg.id, self.cfg.auth_kind, typed)
     }
 
+    fn replay_lane(&self) -> ReplayScheme {
+        lane_scheme(self.cfg.auth_kind)
+    }
+
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), lane = tracing::field::Empty, auth_mode = tracing::field::Empty, region = tracing::field::Empty))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         #[cfg(feature = "bedrock")]

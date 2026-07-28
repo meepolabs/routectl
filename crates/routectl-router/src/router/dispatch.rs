@@ -16,11 +16,14 @@ use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
     cache_control::{MAX_BREAKPOINTS, validate_source},
     context_reduction::{ReductionOutcome, apply_json_minify},
-    failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
+    failure_class::{
+        ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify, classify_with_attempt,
+    },
     sanitize_for_log, scan_caller_prefix_advisory,
 };
 use serde_json::Value;
 
+use crate::capability_strip::strip_replay_artifacts;
 use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::{CacheCapability, RetryPolicy};
 use crate::context_trim::{
@@ -28,6 +31,7 @@ use crate::context_trim::{
     near_lossless_candidate, propose_steady_state_trim, trimmed_prefix_fingerprint,
 };
 use crate::cost_gate::break_even_k;
+use crate::feature_keys::derive_feature_keys;
 
 use super::cache_plan::{AutoCacheRequestPlan, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
@@ -291,6 +295,19 @@ impl Router {
                 meta,
             );
 
+            // Reasoning-replay carry admission: claim the single-flight slot
+            // for every non-portable artifact scheme this request carries
+            // toward the target lane. `Some` holds the guards and leaves the
+            // carried variant intact; `None` either found nothing to repair or
+            // already stripped `attempt_req` proactively (an acting negative or
+            // a peer probe). Runs after every request-shaping step so the
+            // gray-artifact count reflects the exact carried bytes.
+            let now_admit = Instant::now();
+            let mut replay_plan = self.plan_replay_carry(target, &mut attempt_req, now_admit);
+            let mut replay_repair_attempted = false;
+            let mut replay_reject_status: u16 = 0;
+            let mut skip_replay_backoff = false;
+
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
             // Per-chain-entry one-shot auth-recovery flag. Set after a
@@ -340,11 +357,12 @@ impl Router {
                 // it. Disarmed at each settle below; inert + a no-op otherwise.
                 let mut probe_guard = self.probe_slot_guard(state_key);
 
-                if attempts_made > 0 {
+                if attempts_made > 0 && !skip_replay_backoff {
                     let jittered = add_jitter(backoff, policy.jitter_ms);
                     tokio::time::sleep(jittered).await;
                     backoff = mul_duration(backoff, policy.backoff_multiplier);
                 }
+                skip_replay_backoff = false;
 
                 let attempt_policy = self.compose_attempt_policy(
                     &policy,
@@ -402,11 +420,35 @@ impl Router {
                         // blocking). Self-gates on the kill switch. The
                         // streaming arm records nothing (no assembled response
                         // exists there -- fail closed).
+                        // Settle the replay carry: a stripped repair that
+                        // reached success confirms the negative (commit); a
+                        // carried variant that succeeded outright proves the
+                        // pair works (release, learning nothing).
+                        if let Some(plan) = replay_plan.take() {
+                            if replay_repair_attempted {
+                                let features = derive_feature_keys(
+                                    req.tools.as_deref().unwrap_or(&[]),
+                                    req.provider_extras.as_ref(),
+                                );
+                                meta.learned_capabilities.extend(plan.commit(
+                                    replay_reject_status,
+                                    &features,
+                                    Instant::now(),
+                                ));
+                            } else {
+                                plan.release();
+                            }
+                        }
                         self.observe_capabilities(&req, &resp, target, meta, Instant::now());
                         return Ok(resp);
                     }
                     Err(e) => {
-                        let native_cf = classify(&e, target.provider_kind);
+                        let native_cf = match replay_plan.as_ref() {
+                            Some(plan) => {
+                                classify_with_attempt(&e, target.provider_kind, plan.attempt())
+                            }
+                            None => classify(&e, target.provider_kind),
+                        };
                         let original_class = native_cf.class.clone();
                         let remap_candidate_status = upstream_status_for_remap(&e);
                         let (cf, remapped) =
@@ -489,6 +531,30 @@ impl Router {
                             // restart. Releasing here lets the re-gate claim a
                             // fresh slot (the per-attempt accounting the
                             // in-loop gate promises).
+                            self.release_probe_slot(state_key);
+                            probe_guard.disarm();
+                            continue;
+                        }
+                        // Reasoning-replay strip repair: a FIXED correctness
+                        // branch, not a retry policy. When the optimistically
+                        // carried variant drew the proven replay rejection,
+                        // switch to the pre-stripped variant and re-dispatch
+                        // this same target exactly ONCE with no backoff. Fires
+                        // at most once per target and never nests inside the
+                        // per-target retry or the fallback walk, so the call
+                        // count stays additive; it never re-attempts the
+                        // carried variant. The held guards settle at the
+                        // success arm (commit) or on any later exit (release /
+                        // drop, learning nothing).
+                        if !replay_repair_attempted
+                            && let Some(plan) = replay_plan.as_ref()
+                            && Self::is_replay_rejection_class(&cf.class)
+                        {
+                            replay_repair_attempted = true;
+                            replay_reject_status = upstream_facts(&e).status.unwrap_or(0);
+                            let lane = plan.lane();
+                            strip_replay_artifacts(&mut attempt_req, lane);
+                            skip_replay_backoff = true;
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
                             continue;
@@ -904,6 +970,13 @@ impl Router {
                 meta,
             );
 
+            // Reasoning-replay carry admission (see `complete_inner`): claim
+            // the single-flight slot for each non-portable carried scheme, or
+            // strip proactively when an acting negative / peer probe refuses.
+            let now_admit = Instant::now();
+            let mut replay_plan = self.plan_replay_carry(target, &mut attempt_req, now_admit);
+            let mut replay_repair_attempted = false;
+            let mut replay_reject_status: u16 = 0;
             let attempt_policy = self.compose_attempt_policy(
                 &policy,
                 provider_name,
@@ -1038,6 +1111,25 @@ impl Router {
                             }
                             Err(e) => Err(e),
                         });
+                        // Settle the replay carry (see `complete_inner`): a
+                        // stripped repair reaching a first chunk confirms the
+                        // negative (commit); a carried first chunk proves the
+                        // pair works (release).
+                        if let Some(plan) = replay_plan.take() {
+                            if replay_repair_attempted {
+                                let features = derive_feature_keys(
+                                    req.tools.as_deref().unwrap_or(&[]),
+                                    req.provider_extras.as_ref(),
+                                );
+                                meta.learned_capabilities.extend(plan.commit(
+                                    replay_reject_status,
+                                    &features,
+                                    Instant::now(),
+                                ));
+                            } else {
+                                plan.release();
+                            }
+                        }
                         return Ok(wrap_with_breaker_accounting(
                             relabeled.boxed(),
                             state,
@@ -1045,7 +1137,12 @@ impl Router {
                         ));
                     }
                     Err(e) => {
-                        let native_cf = classify(&e, target.provider_kind);
+                        let native_cf = match replay_plan.as_ref() {
+                            Some(plan) => {
+                                classify_with_attempt(&e, target.provider_kind, plan.attempt())
+                            }
+                            None => classify(&e, target.provider_kind),
+                        };
                         let original_class = native_cf.class.clone();
                         let remap_candidate_status = upstream_status_for_remap(&e);
                         let (cf, remapped) =
@@ -1106,6 +1203,25 @@ impl Router {
                             // which would leave the breaker locked open until
                             // restart. Releasing here lets the re-gate claim a
                             // fresh slot.
+                            self.release_probe_slot(state_key);
+                            probe_guard.disarm();
+                            continue;
+                        }
+                        // Reasoning-replay strip repair (see `complete_inner`):
+                        // a FIXED correctness branch. On the proven replay
+                        // rejection, switch to the pre-stripped variant and
+                        // re-dispatch this target exactly ONCE. Streams take no
+                        // in-loop backoff, so the retry is immediate; it never
+                        // nests across the fallback walk and never re-attempts
+                        // the carried variant.
+                        if !replay_repair_attempted
+                            && let Some(plan) = replay_plan.as_ref()
+                            && Self::is_replay_rejection_class(&cf.class)
+                        {
+                            replay_repair_attempted = true;
+                            replay_reject_status = upstream_facts(&e).status.unwrap_or(0);
+                            let lane = plan.lane();
+                            strip_replay_artifacts(&mut attempt_req, lane);
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
                             continue;

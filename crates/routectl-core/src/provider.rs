@@ -105,4 +105,16 @@ pub trait Provider: Send + Sync {
     async fn probe(&self) -> ProbeOutcome {
         ProbeOutcome::UnsupportedFreeProbe
     }
+
+    /// The reasoning-replay validator family this backend's lane accepts on
+    /// replay. The router's learned/repair layer keys per `(artifact scheme,
+    /// target lane)` on it and strips artifacts the lane's validator would
+    /// reject. Defaults to [`ReplayScheme::Gray`] -- an unestablished lane,
+    /// for which no proven carry/strip rule and no learned negative can form
+    /// -- so a backend with no replay validator opts out by inheriting it.
+    ///
+    /// [`ReplayScheme::Gray`]: crate::ReplayScheme::Gray
+    fn replay_lane(&self) -> crate::ReplayScheme {
+        crate::ReplayScheme::Gray
+    }
 }

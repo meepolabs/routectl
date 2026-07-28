@@ -36,6 +36,7 @@ mod count_tokens;
 mod dispatch;
 mod feature_filter;
 mod overlays;
+mod replay_repair;
 mod runtime_gate;
 mod status;
 mod sticky;
