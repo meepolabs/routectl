@@ -44,6 +44,7 @@ use super::{CapabilityLearnEvent, DispatchTarget, Router};
 pub(super) struct ReplayCarryPlan<'a> {
     lane: ReplayScheme,
     gray_count: usize,
+    schemes: Vec<ReplayScheme>,
     guards: Vec<ReplayProbeGuard<'a>>,
 }
 
@@ -51,6 +52,18 @@ impl ReplayCarryPlan<'_> {
     /// The target lane the stripped repair removes rejected artifacts against.
     pub(super) const fn lane(&self) -> ReplayScheme {
         self.lane
+    }
+
+    /// The distinct source schemes of the carried non-portable artifacts,
+    /// first-seen order -- closed-set tokens for the degradation WARN.
+    pub(super) fn source_schemes(&self) -> &[ReplayScheme] {
+        &self.schemes
+    }
+
+    /// The count of carried non-portable reasoning artifacts -- the
+    /// degradation WARN's artifact count.
+    pub(super) const fn artifact_count(&self) -> usize {
+        self.gray_count
     }
 
     /// The replay signal to hand the classifier: the count of non-portable
@@ -117,7 +130,7 @@ impl Router {
         }
         let provider_kind = target.provider_kind.unwrap_or("");
         let mut guards: Vec<ReplayProbeGuard<'a>> = Vec::with_capacity(schemes.len());
-        for scheme in schemes {
+        for &scheme in &schemes {
             let key = ReplayLearnKey::new(&target.provider_name, provider_kind, lane, scheme);
             match self.learned_replay().admit_provisional(&key, now) {
                 Some(guard) => guards.push(guard),
@@ -135,6 +148,7 @@ impl Router {
         Some(ReplayCarryPlan {
             lane,
             gray_count,
+            schemes,
             guards,
         })
     }

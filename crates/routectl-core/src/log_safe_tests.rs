@@ -338,6 +338,40 @@ fn redact_anthropic_system_array_form_recurses_into_blocks() {
 }
 
 #[test]
+fn redact_reasoning_carry_blobs_encrypted_content_and_data() {
+    // Reasoning-replay carry payloads must never reach a trace body: the
+    // OpenAI Responses reasoning item's `encrypted_content` and a
+    // `redacted_thinking` blob (on `data`) both collapse to a length
+    // marker. `data` redacts only long strings, so the blob is padded well
+    // past the 256-byte threshold. (Bedrock `reasoningText.signature` is a
+    // deliberately-kept triage signal and is intentionally NOT swept -- see
+    // `redact_bedrock_converse_reasoning_redacted_content_replaced`.)
+    let redacted_thinking_blob = format!("SECRET-REDACTED-THINKING-BLOB-{}", "X".repeat(300));
+    let body = json!({
+        "model": "gpt-5",
+        "input": [
+            {"type": "reasoning", "id": "rs_keep_the_id",
+             "encrypted_content": "SECRET-REASONING-BLOB"},
+            {"type": "redacted_thinking", "data": redacted_thinking_blob},
+        ],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    let dump = got.to_string();
+    assert!(!dump.contains("SECRET-REASONING-BLOB"), "{dump}");
+    assert!(!dump.contains("SECRET-REDACTED-THINKING-BLOB"), "{dump}");
+    // Structural metadata (type, id) stays visible for triage.
+    assert_eq!(got["input"][0]["type"], "reasoning");
+    assert_eq!(got["input"][0]["id"], "rs_keep_the_id");
+    assert!(
+        got["input"][0]["encrypted_content"]
+            .as_str()
+            .unwrap()
+            .starts_with("<redacted len="),
+        "{got}"
+    );
+}
+
+#[test]
 fn redact_openai_responses_replaces_instructions_and_input_text() {
     // OpenAI Responses: top-level instructions + input array of
     // {type:"input_text", text:...} parts.

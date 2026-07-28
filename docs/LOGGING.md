@@ -147,7 +147,9 @@ not OK to disk, set `ROUTECTL_LOG_REDACT_PROMPTS=1` BEFORE launching
 routectl. The redactor walks every traced body and replaces known
 prompt-bearing fields (text blocks, system, instructions, tool_use
 input, function_call arguments, refusal blocks, image source data,
-image_url data URIs, Bedrock Converse `toolUse.input` and
+image_url data URIs, reasoning-replay carry blobs
+(`encrypted_content` and the `redacted_thinking` `data` blob), Bedrock
+Converse `toolUse.input` and
 `toolResult.content[*].json`) with `<redacted len=N>` placeholders
 while preserving structural fields (model, tools, sampling params,
 finish_reason, usage). Best-effort: unknown wire shapes (a new
@@ -176,6 +178,33 @@ Two known residual leaks even with the knob ON:
 ROUTECTL_LOG=routectl=trace ROUTECTL_LOG_REDACT_PROMPTS=1 \
   ./routectl serve 2>/tmp/triage.log
 ```
+
+### Reasoning-replay degradation WARN
+
+When a request carries reasoning-replay artifacts onto a lane that
+rejects them, the router strips them and re-dispatches the same target
+once (the fixed strip-repair branch). Each such request emits EXACTLY
+ONE aggregated WARN at resolution -- `"reasoning_replay_degraded"` -- and
+none when nothing degraded. The line carries a CLOSED SET of tokens
+only, never the artifact bytes, a reasoning item id, any hash/digest,
+the session key, or the upstream body:
+
+| Field | Meaning |
+|---|---|
+| `action` | What the router did (`strip_repair`) |
+| `target_lane` | The lane stripped against (`codex` / `mantle` / `gray`) |
+| `state_key` | Sanitized `[providers]` state key of the repaired target |
+| `source_schemes` | Distinct source schemes of the stripped artifacts, comma-joined |
+| `reason` | Why the strip fired (`upstream_replay_rejection`) |
+| `artifact_count` | Count of non-portable artifacts stripped |
+| `repair_attempted` | The strip-repair branch fired |
+| `repair_succeeded` | The stripped re-dispatch reached success / first chunk |
+| `learned` | The confirmed negative was persisted to the learned registry |
+
+Correlate across the retry/fallback hops with the request span's
+`request_id`. A classified replay rejection is converted to a body-free
+structured error before it reaches the generic retry/fallback logs, so
+the rejection envelope never renders into an `error = ?e` line.
 
 ## What's never logged
 

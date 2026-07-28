@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result,
     cache_control::{MAX_BREAKPOINTS, validate_source},
     context_reduction::{ReductionOutcome, apply_json_minify},
     failure_class::{
@@ -33,6 +33,7 @@ use crate::context_trim::{
 use crate::cost_gate::break_even_k;
 use crate::feature_keys::derive_feature_keys;
 
+use super::ReplayDegradation;
 use super::cache_plan::{AutoCacheRequestPlan, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
 use super::class_observe::{
@@ -44,6 +45,74 @@ use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
+
+/// Message/event name of the single aggregated reasoning-replay
+/// degradation WARN. Stable, greppable, closed-set.
+const REPLAY_DEGRADE_EVENT: &str = "reasoning_replay_degraded";
+/// Action token: the fixed strip-repair correctness branch stripped the
+/// carried reasoning artifacts and re-dispatched the same target once.
+const REPLAY_ACTION_STRIP_REPAIR: &str = "strip_repair";
+/// Reason token: the carried variant drew the proven upstream replay
+/// rejection.
+const REPLAY_REASON_UPSTREAM_REJECTION: &str = "upstream_replay_rejection";
+
+/// Emit the single aggregated reasoning-replay degradation WARN for a
+/// resolved request. Fires exactly ONCE when the strip-repair branch
+/// degraded a carried reasoning artifact anywhere in the chain walk, and
+/// not at all otherwise. Carries closed-set tokens and counts only --
+/// never the artifact bytes, a reasoning item id, a hash, the session
+/// key, or the upstream body. The request span already supplies
+/// `request_id` correlation across the retry and fallback hops.
+fn emit_replay_degradation(meta: &DispatchMeta) {
+    let Some(deg) = meta.replay_degradation.as_ref() else {
+        return;
+    };
+    tracing::warn!(
+        action = deg.action,
+        target_lane = deg.target_lane.as_str(),
+        state_key = %deg.state_key,
+        source_schemes = %join_schemes(deg.source_schemes.as_slice()),
+        reason = deg.reason,
+        artifact_count = deg.artifact_count,
+        repair_attempted = deg.repair_attempted,
+        repair_succeeded = deg.repair_succeeded,
+        learned = deg.learned,
+        "{REPLAY_DEGRADE_EVENT}",
+    );
+}
+
+/// Join replay scheme tokens into a stable, comma-separated closed-set
+/// string for the degradation WARN's `source_schemes` field.
+fn join_schemes(schemes: &[ReplayScheme]) -> String {
+    schemes
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A body-free rebuild of a classified reasoning-replay rejection, or
+/// `None` when the class is anything else (leaving the original error
+/// untouched -- no clone on the common path). The upstream body of a
+/// replay rejection is a rejection envelope that can echo a reasoning
+/// artifact fragment, and the generic retry/fallback logs below
+/// debug-render the `Error`. The rebuilt `Upstream` keeps the status and
+/// the already-structured classifier tokens every downstream consumer
+/// reads, dropping ONLY the body.
+fn replay_rejection_body_free(err: &Error, class: &FailureClass, provider: &str) -> Option<Error> {
+    if !Router::is_replay_rejection_class(class) {
+        return None;
+    }
+    let facts = upstream_facts(err);
+    Some(Error::upstream_full(
+        provider,
+        facts.status.unwrap_or(0),
+        "",
+        None,
+        facts.upstream_type.map(str::to_string),
+        facts.upstream_code.map(str::to_string),
+    ))
+}
 
 /// The largest upstream reset hint we honor as an in-loop, same-provider
 /// retry sleep (blocking the request thread). A reset at or below this
@@ -93,6 +162,7 @@ impl Router {
     pub async fn complete_with_options(&self, req: ChatRequest, opts: RouterOptions) -> Dispatched {
         let mut meta = DispatchMeta::for_alias(&req.model);
         let result = self.complete_inner(req, opts, &mut meta).await;
+        emit_replay_degradation(&meta);
         Dispatched { meta, result }
     }
 
@@ -435,6 +505,10 @@ impl Router {
                                     &features,
                                     Instant::now(),
                                 ));
+                                if let Some(deg) = meta.replay_degradation.as_mut() {
+                                    deg.repair_succeeded = true;
+                                    deg.learned = true;
+                                }
                             } else {
                                 plan.release();
                             }
@@ -442,7 +516,7 @@ impl Router {
                         self.observe_capabilities(&req, &resp, target, meta, Instant::now());
                         return Ok(resp);
                     }
-                    Err(e) => {
+                    Err(mut e) => {
                         let native_cf = match replay_plan.as_ref() {
                             Some(plan) => {
                                 classify_with_attempt(&e, target.provider_kind, plan.attempt())
@@ -553,11 +627,27 @@ impl Router {
                             replay_repair_attempted = true;
                             replay_reject_status = upstream_facts(&e).status.unwrap_or(0);
                             let lane = plan.lane();
+                            meta.replay_degradation = Some(ReplayDegradation {
+                                action: REPLAY_ACTION_STRIP_REPAIR,
+                                target_lane: lane,
+                                state_key: sanitize_for_log(state_key),
+                                source_schemes: plan.source_schemes().to_vec(),
+                                reason: REPLAY_REASON_UPSTREAM_REJECTION,
+                                artifact_count: plan.artifact_count(),
+                                repair_attempted: true,
+                                repair_succeeded: false,
+                                learned: false,
+                            });
                             strip_replay_artifacts(&mut attempt_req, lane);
                             skip_replay_backoff = true;
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
                             continue;
+                        }
+                        if let Some(body_free) =
+                            replay_rejection_body_free(&e, &cf.class, provider_name)
+                        {
+                            e = body_free;
                         }
                         let do_fallback = should_fallback(&e, &cf.class, &policy, is_probe);
                         // Probe fast-fail: a probe (max_tokens <=
@@ -805,6 +895,7 @@ impl Router {
     ) -> DispatchedStream {
         let mut meta = DispatchMeta::for_alias(&req.model);
         let result = self.stream_inner(req, opts, &mut meta).await;
+        emit_replay_degradation(&meta);
         DispatchedStream { meta, result }
     }
 
@@ -1126,6 +1217,10 @@ impl Router {
                                     &features,
                                     Instant::now(),
                                 ));
+                                if let Some(deg) = meta.replay_degradation.as_mut() {
+                                    deg.repair_succeeded = true;
+                                    deg.learned = true;
+                                }
                             } else {
                                 plan.release();
                             }
@@ -1136,7 +1231,7 @@ impl Router {
                             target.provider_kind,
                         ));
                     }
-                    Err(e) => {
+                    Err(mut e) => {
                         let native_cf = match replay_plan.as_ref() {
                             Some(plan) => {
                                 classify_with_attempt(&e, target.provider_kind, plan.attempt())
@@ -1221,10 +1316,26 @@ impl Router {
                             replay_repair_attempted = true;
                             replay_reject_status = upstream_facts(&e).status.unwrap_or(0);
                             let lane = plan.lane();
+                            meta.replay_degradation = Some(ReplayDegradation {
+                                action: REPLAY_ACTION_STRIP_REPAIR,
+                                target_lane: lane,
+                                state_key: sanitize_for_log(state_key),
+                                source_schemes: plan.source_schemes().to_vec(),
+                                reason: REPLAY_REASON_UPSTREAM_REJECTION,
+                                artifact_count: plan.artifact_count(),
+                                repair_attempted: true,
+                                repair_succeeded: false,
+                                learned: false,
+                            });
                             strip_replay_artifacts(&mut attempt_req, lane);
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
                             continue;
+                        }
+                        if let Some(body_free) =
+                            replay_rejection_body_free(&e, &cf.class, provider_name)
+                        {
+                            e = body_free;
                         }
                         let do_fallback = should_fallback(&e, &cf.class, &policy, is_probe);
                         // Probe fast-fail: a probe that hit a rate-limit/
@@ -2444,3 +2555,7 @@ mod auto_emit_cache_control_tests;
 #[cfg(test)]
 #[path = "capability_acceptance_tests.rs"]
 mod capability_acceptance_tests;
+
+#[cfg(test)]
+#[path = "replay_degradation_observability_tests.rs"]
+mod replay_degradation_observability_tests;
