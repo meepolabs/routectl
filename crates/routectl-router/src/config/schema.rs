@@ -990,8 +990,9 @@ pub struct ServerConfig {
 
     /// Listener-side auth. When `tokens` is non-empty, every request
     /// must carry a matching `x-api-key` or `Authorization: Bearer
-    /// <token>` header. Tokens are SecretRef URIs (env://, file://,
-    /// literal:) and are resolved at startup.
+    /// <token>` header. Tokens are SecretRef URIs (env://, file://)
+    /// and are resolved at startup. Inline `literal:` refs are rejected
+    /// at parse.
     #[serde(default)]
     pub auth: Option<ServerAuth>,
 
@@ -1157,7 +1158,7 @@ pub enum ProviderEntry {
         /// Reference to the API key. One of:
         ///   - `env://VAR_NAME`             (process env var)
         ///   - `file:///abs/path/to/key`    (mode-600 file)
-        ///   - `literal:plaintext`          (inline; placeholders only)
+        ///   - `oauth://<provider>[#seat]`  (routectl-managed OAuth token)
         api_key_ref: String,
         /// Provider-level header extras. Merged with the per-model
         /// `header_extras` at dispatch time; model wins on key
@@ -1530,7 +1531,7 @@ pub enum BedrockApiShapeConfig {
 /// TOML-side credentials descriptor for a Bedrock provider.
 ///
 /// Each variant is tagged by `kind`. Secret-bearing fields hold raw
-/// secret-URI strings (`env://`, `file://`, `literal:`) which the
+/// secret-URI strings (`env://`, `file://`) which the
 /// factory parses + resolves at provider build time -- same pattern
 /// as `api_key_ref` on the other provider variants.
 ///

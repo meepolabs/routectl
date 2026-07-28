@@ -4,6 +4,67 @@ routectl is a single-binary LLM router. This file lists shipped
 releases, planned work, deferred items, and explicit non-goals. For
 per-feature change history see [CHANGELOG.md](CHANGELOG.md).
 
+## On develop (unreleased since v0.9.0)
+
+A large body of work has landed on `develop` and awaits the next
+release cut. Highlights, roughly in dependency order:
+
+- **Production hardening** -- auth-store lock ordering + atomic
+  fsync-policy writes, network-exposure fail-closed middleware,
+  request-body caps and disconnect-cancel semantics, retry-boundary
+  fixes (no retry after first content chunk), usage-ledger accuracy
+  (`http_status`, error classes), OAuth refresh cooldown, log
+  redaction tightening.
+- **Per-failure-class retry policy** -- a stable failure-class
+  taxonomy (`rate-limited`, `auth`, `bad-request`, ...) with
+  `[retry.classes.<class>]` per-class retry/fallback overrides and
+  `[providers.X.class_overrides]` status remaps.
+- **Model catalog** -- baked cache-economics catalog + user overlay
+  with provenance and verification stamps; `routectl catalog
+  list/verify/import/set/disable`.
+- **Config schema v3 + `config migrate`** -- versioned config with a
+  deterministic migration ladder; `config set/show/check` with
+  dotted-key paths; a committed JSON Schema (`routectl.schema.json`).
+- **Onboarding** -- `routectl init` wizard, `provider add` with
+  secret capture (`env://`/managed `file://`; inline `literal:` refs
+  now rejected), `doctor` diagnostics with exit-code contract,
+  reachability probes.
+- **Learned capability system** -- per-target capability registry
+  learned from live rejections and response evidence, persisted in
+  the usage ledger and rebuilt at boot; consented active probes
+  (`probe --capabilities`); operator overrides
+  (`[capability.overrides]`); a doctor truth-matrix panel and
+  staleness hints.
+- **Read-only status dashboard** -- `GET /` single-file dashboard +
+  `/status/{usage,health,config,doctor}` JSON panels; structurally
+  read-only.
+- **Streaming reliability** -- early-response commit with a
+  flush-first grace window; interim usage semantics.
+- **Bedrock surface expansion** -- Amazon Bedrock "mantle"
+  bearer-auth lanes on the Anthropic and OpenAI provider classes;
+  Converse request-side gap closure.
+- **Native Gemini egress** -- `generateContent` API-key and Cloud
+  Code OAuth auth modes.
+- **OpenAI Responses ingress** -- third ingress dialect
+  (`POST /v1/responses`).
+- **Performance** -- criterion bench harness + allocation reductions
+  on the hot path (zero-alloc token estimates, copy-on-write message
+  sharing, byte-oriented ingress).
+- **First-party passthrough** -- optional `[mitm]` front-proxy so
+  Claude Code can route inference through routectl while Remote
+  Control keeps working against `api.anthropic.com`; per-target
+  forwarded-credential mode with strict transparency guarantees.
+- **Codex identity currency** -- config-overridable codex client
+  version (`codex_version`) reaching every fingerprint surface from
+  one derivation, plus a persistent installation id.
+- **Cache stability guardrails** -- advisory warning when a
+  caller-cached prefix carries volatile content; optional tool-array
+  normalization (`[cache] normalize_tools`).
+- **Advisory context reduction** -- lossless dedup/supersession
+  analysis with per-request would-save accounting and a
+  confidence-bounded cache-hit estimator (observation-only; no
+  request mutation).
+
 ## Released
 
 - **v0.9.0** (2026-06-18) -- Per-request usage accounting
@@ -68,20 +129,21 @@ per-feature change history see [CHANGELOG.md](CHANGELOG.md).
 
 ## Planned
 
-### v0.10.0+ -- Token reduction (themed)
+### Token reduction, active phase
 
-Driven by long-session cost pressure. Concrete scopes TBD before
-the milestone opens; the workstream covers tool-output truncation
-past N turns, reasoning-history compaction, `encrypted_content`
-aging-out on the openai-responses path, and operator-side
-`cache_control` hint emission on long boilerplate.
+The observation layer shipped on develop (advisory dedup/
+supersession analysis + cache-hit estimator, see above). The
+remaining planned phase is the live request-mutating cut, designed
+as adaptive self-gating (dormant where trimming is uneconomical,
+active where a workload earns it). Structural/size heuristics and
+estimator warm-start follow behind it.
 
 ## Deferred (might do, might never)
 
-- Cost-aware routing (overlap with [LMSYS
-  RouteLLM](https://github.com/lm-sys/RouteLLM)).
-- Latency-aware routing (sliding-window p95 across healthy chain
-  entries, weighted random).
+- Cost- and latency-aware routing: explored and closed as an
+  in-proxy feature -- the proxy sees only wire bytes, so its role is
+  to expose cache/latency/cost signals a client-side harness can
+  route on, not to make the routing decision itself.
 - Spend tracking: per-request SQLite accounting and the `routectl
   usage` CLI shipped in v0.9.0. The remaining deferred scope is the
   `/v1/metrics` Prometheus exposition endpoint -- an in-process
@@ -94,8 +156,10 @@ aging-out on the openai-responses path, and operator-side
 ## Never (explicitly out of scope)
 
 - SSO / LDAP / OIDC / SAML auth -- use a sidecar proxy.
-- Multi-tenancy, per-user routing, persistent server state -- fork
-  if needed.
+- Multi-tenancy, per-user routing, multi-tenant server-session
+  state -- fork if needed. (Persistent LOCAL state is in scope and
+  shipped: the usage ledger, learned-capability registry, catalog
+  overlay.)
 - Config-editing / interactive admin web UI -- the read-only status
   dashboard (GET / and the /status JSON family) is deliberate; all
   mutation stays config.toml + CLI.

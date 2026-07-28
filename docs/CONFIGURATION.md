@@ -112,7 +112,7 @@ max_body_bytes = 33554432       # 32 MiB default; larger bodies are rejected wit
 allow_disable_fallbacks = true  # set false for hardened multi-tenant deployments
 
 [server.auth]
-tokens = ["env://ROUTECTL_LISTENER_TOKEN", "literal:sk-routectl-dev"]
+tokens = ["env://ROUTECTL_LISTENER_TOKEN", "file:///etc/routectl/listener-token"]
 
 # Unified [aliases] table: wire-string -> model nickname.
 # Suffix-globs (`*`) collapse per-version sprawl. Single-string
@@ -128,9 +128,10 @@ default           = "default"
 # field is ignored. Header always wins over the aliases map.
 ```
 
-`tokens` entries are secret-refs (`env://`, `file://`, `literal:`)
-resolved at startup. Bind non-loopback only with `--unsafe-public` on
-the CLI.
+`tokens` entries are secret-refs (`env://`, `file://`) resolved at
+startup. Inline `literal:` refs are rejected at parse -- the resolver
+names `env://` and `file://` as the alternatives. Bind non-loopback only
+with `--unsafe-public` on the CLI.
 
 On a non-loopback bind, routectl refuses to start unless at least one
 `[server.auth].tokens` entry is configured. The startup error names
@@ -236,6 +237,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
+| `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
 | `auto_emit_top_level_breakpoint` | `[providers.X]`               | `Option<bool>`, default None (inherits global); `false` disables auto-cache for this provider     |
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
 | `enabled`                      | `[reduction]` global            | bool, default false; master switch for dispatch-path context reduction (see `[reduction]`)        |
@@ -244,6 +246,10 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `clear_at_least_tokens`        | `[trim]` global                 | u64, default 20000; see `[trim]`                                                                  |
 | `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
 | `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
+| `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
+| `decay_hours`                  | `[capability]` global           | u64, default 48; hours a learned negative acts before a re-probe (see `[capability]`)             |
+| `inferred_window_hours`        | `[capability]` global           | u64, default 1; window a pending inferred signal waits for confirmation (see `[capability]`)      |
+| `staleness_hint_days`          | `[capability]` global           | u64, default 14; display-only age past which a capability reads as stale in diagnostics (see `[capability]`) |
 
 **`base_url` scheme requirement.** `base_url` must use `https://` (or
 `http://` for loopback addresses only). Link-local addresses
@@ -448,7 +454,7 @@ Fields:
   one of four shapes:
   - `{ kind = "bearer-key", key_ref = "<secret-uri>" }` -- a long-term
     Bedrock API key sent as `Authorization: Bearer`. `key_ref` resolves a
-    secret URI (`env://`, `file://`, `literal:`).
+    secret URI (`env://`, `file://`).
   - `{ kind = "static", access_key_ref = "<uri>", secret_key_ref = "<uri>", session_token_ref = "<uri>" }`
     -- static AWS access/secret keys signed with SigV4. `session_token_ref`
     is optional (set it for short-term STS credentials).
@@ -643,7 +649,7 @@ upstream = "gemini-2.5-flash"
 Fields:
 
 - `api_key_ref` (required) -- secret-URI (`env://`, `file://`,
-  `literal:`, `oauth://`) resolving to a Google AI Studio API key. The
+  `oauth://`) resolving to a Google AI Studio API key. The
   resolved key is sent as the `x-goog-api-key` request header. A
   routectl-managed token source may rotate the key without a daemon
   restart.
@@ -1954,6 +1960,10 @@ block keeps the default: auto-emit enabled.
 # Master switch for dispatch-path auto-emission of a top-level
 # cache_control breakpoint. Default true.
 auto_emit_top_level_breakpoint = true
+# Stabilize the tool-array order on the non-Claude-Code OAuth Anthropic
+# path so a random client tool order can still hit the prompt cache.
+# Default true.
+normalize_tools = true
 ```
 
 Auto-emit applies to completions and streaming. It is **not** applied to
@@ -1973,7 +1983,7 @@ first-line remedy for a cache-thrash warning (see LOGGING.md).
 ```toml
 [providers.some-anthropic]
 kind = "anthropic-api"
-api_key_ref = "literal:PLACEHOLDER"
+api_key_ref = "env://SOME_ANTHROPIC_API_KEY"
 # Opt this provider out of auto-cache while leaving the global default on.
 auto_emit_top_level_breakpoint = false
 ```
@@ -1997,10 +2007,10 @@ override the default per entry with an explicit `cache_capability`:
 
 ```toml
 # An anthropic-compatible third-party host that DOES honor a top-level
-# breakpoint and DOES report cache hits. Use PLACEHOLDER values.
+# breakpoint and DOES report cache hits.
 [providers.compat-anthropic]
 kind = "anthropic-api"
-api_key_ref = "literal:PLACEHOLDER"
+api_key_ref = "env://COMPAT_ANTHROPIC_API_KEY"
 base_url = "https://example.invalid/v1"
 cache_capability = { supports_top_level_cache_control = true, cache_hit_observable = true }
 ```
@@ -2028,6 +2038,76 @@ Invoke it is an undocumented top-level field AWS does not honor). So the
 usage is still reported back (`cache_hit_observable = true`).
 Caller-supplied per-block markers are unaffected and still cache
 normally; an operator may override per entry.
+
+### Tool-array normalization (`normalize_tools`)
+
+`normalize_tools` (bool, default true) sorts the outbound `tools` array
+by each tool's final wire name on the non-Claude-Code OAuth Anthropic
+path. Many clients emit their tool definitions in a nondeterministic
+order from run to run; because the tool block sits inside the cacheable
+prefix, a reshuffled order breaks the prompt-cache prefix even though the
+tool set is identical. Sorting by wire name gives that prefix a stable
+byte shape so it keeps hitting the cache regardless of client emission
+order.
+
+The sort is applied only when it is provably safe: every entry must be a
+named custom tool with a unique name. Any opaque or server-side tool
+entry, or a duplicate name, disables the sort for that request (the array
+is passed through untouched), so normalization can never reorder a set it
+cannot fully reason about.
+
+```toml
+[cache]
+# Kill switch: set false to pass the client's tool order through
+# verbatim on the OAuth Anthropic path.
+normalize_tools = false
+```
+
+A missing `[cache]` block keeps the default: normalization enabled.
+
+## Learned capability tempo (`[capability]`)
+
+routectl learns per-provider capability signals (which upstreams honor
+which features) and lets a negative decay back into a re-probe over time.
+The optional `[capability]` block is the **global** control surface for
+that subsystem: a kill switch plus the tempo knobs. A missing block keeps
+the defaults below.
+
+```toml
+[capability]
+# Master switch for the learned-capability subsystem. Default true.
+enabled = true
+# Hours a learned negative acts before it lapses into a single re-probe.
+# Default 48.
+decay_hours = 48
+# Hours a pending single-observation inferred signal waits for a
+# confirming second observation before it resets. Default 1.
+inferred_window_hours = 1
+# Days past which a verified capability reads as stale in diagnostics.
+# Display-only -- surfaced in doctor / CLI hints, never wired into the
+# act path. Default 14.
+staleness_hint_days = 14
+```
+
+- **`enabled`** (bool, default true) -- the master switch. When off, any
+  learned entries stay resident but inert: both the learn path and the
+  act path are skipped.
+- **`decay_hours`** (u64, default 48) -- how long a learned negative acts
+  before it lapses into a single re-probe.
+- **`inferred_window_hours`** (u64, default 1) -- how long a pending
+  single-observation inferred signal waits for a confirming second
+  observation before it resets.
+- **`staleness_hint_days`** (u64, default 14) -- the age past which a
+  verified capability reads as stale in diagnostics. This is
+  **display-only**: it drives the stale-cell flag in the `routectl
+  doctor` capability matrix and the CLI staleness hint, and is never
+  wired into router construction or the act path.
+
+Operator capability overrides nest under this parent as
+`[capability.overrides]` (keyed by `"provider"` or `"provider:nickname"`)
+rather than a new top-level section. A missing `[capability]` block
+deserializes to the defaults above, and an unknown key inside the block
+fails config load rather than being silently ignored.
 
 ## Context reduction (`[reduction]`)
 
@@ -2083,13 +2163,13 @@ enabled = true
 
 [providers.compat-a]
 kind = "openai-compat"
-api_key_ref = "literal:PLACEHOLDER"
+api_key_ref = "env://COMPAT_A_API_KEY"
 base_url = "https://example.invalid/v1"
 # Inherits the global switch (reduction ON for this provider).
 
 [providers.compat-b]
 kind = "openai-compat"
-api_key_ref = "literal:PLACEHOLDER"
+api_key_ref = "env://COMPAT_B_API_KEY"
 base_url = "https://example.invalid/v1"
 # Opt this provider out while leaving the global default on.
 reduction_enabled = false
@@ -2296,8 +2376,8 @@ it never makes a billed upstream call and never mutates a credential.
   missing or expired one reports a FAIL with a `routectl login`
   remediation. The probe never refreshes a near-expiry token, so the
   credentials store is byte-identical afterward.
-- **Static-credential and bedrock providers** (`env://` / `file://` /
-  `literal:`, bedrock) build the provider and call its free reachability
+- **Static-credential and bedrock providers** (`env://` / `file://`,
+  bedrock) build the provider and call its free reachability
   check.
 - **Unreachable -> FAIL.** A provider that cannot be reached (network
   failure, a credential store that will not open, or a probe that overruns
@@ -2370,12 +2450,13 @@ actually reaches the upstream). A partial Bedrock allowlist silently
 breaks every Bedrock request, so the validator surfaces it as a clean
 `Error::Config` at startup rather than a runtime 400.
 
-`config show` prints the post-merge view: `literal:`-prefixed secrets
-are redacted to `literal:[REDACTED]`; `env://`, `file://`, and
+`config show` prints the post-merge view: `env://`, `file://`, and
 `oauth://` references remain as opaque URIs (they are non-secret
 pointers, not credential values); defaults are filled in; layered
 overlays NOT yet applied
-(those compose per request, not at startup). Useful when chasing
+(those compose per request, not at startup). There is nothing to redact
+here -- a config carrying an inline `literal:` secret is rejected at
+validation before this view is ever produced. Useful when chasing
 "why is my model picking provider Y instead of Z" without flipping
 trace logging.
 
@@ -2710,12 +2791,12 @@ at the file or env var and supply the account UUID explicitly:
 kind           = "openai-responses"
 auth_kind      = "chatgpt-oauth"
 api_key_ref    = "env://OPENAI_JWT"
-account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
+account_id_ref = "env://OPENAI_ACCOUNT_ID"
 ```
 
 `account_id_ref` is REQUIRED on this path -- there is no OAuth session
-for routectl to derive the UUID from. `env://`, `file://`, and
-`literal:` refs all work for both fields. routectl never refreshes a
+for routectl to derive the UUID from. `env://` and `file://` refs work
+for both fields. routectl never refreshes a
 static bearer; rotation is the operator's job.
 
 ### `codex_version` (client-identity override)

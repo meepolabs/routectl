@@ -44,10 +44,11 @@ cargo check -p routectl-providers --no-default-features \
   --features openai-compat,anthropic-api
 ```
 
-The workspace has six crates: `routectl-core`, `routectl-auth`,
+The workspace has seven crates: `routectl-core`, `routectl-auth`,
 `routectl-providers`, `routectl-router`, `routectl-usage` (SQLite
 per-request usage accounting + the `routectl usage` CLI subcommand),
-and `routectl-cli`. All six are covered by the `--workspace` test
+`routectl-cli`, and `routectl-testkit` (dev-only shared test
+doubles). All seven are covered by the `--workspace` test
 commands above.
 
 The live matrix is slow (~30s) and costs cents per run. Use it as a
@@ -124,9 +125,9 @@ regardless.
 ## When a model breaks the live matrix
 
 1. **Add the failing target to the matrix** in
-   `crates/routectl-cli/tests/live_matrix.rs`. The const arrays are
-   `OPENROUTER_MODELS`, `OPENCODE_GO_MODELS`, `NIM_MODELS`. One
-   string per row; the test harness handles the rest.
+   `crates/routectl-cli/tests/live_matrix/openai_compat.rs`. The const
+   arrays are `OPENROUTER_MODELS`, `OPENCODE_GO_MODELS`, `NIM_MODELS`.
+   One string per row; the test harness handles the rest.
 
 2. **Run the matrix** and capture the failing row:
 
@@ -177,7 +178,7 @@ regardless.
 Step-by-step example: "OpenAI launches o5-mini on OpenRouter."
 
 1. Append to `OPENROUTER_MODELS` in
-   `crates/routectl-cli/tests/live_matrix.rs`:
+   `crates/routectl-cli/tests/live_matrix/openai_compat.rs`:
    ```rust
    "openai/o5-mini",
    ```
