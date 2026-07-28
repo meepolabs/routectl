@@ -15,6 +15,9 @@
 //! mantle upstream lifts + redacts AWS error bodies without linking the AWS
 //! SDK.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use reqwest::header::HeaderMap;
 use routectl_core::sanitize_for_log;
 use serde_json::Value;
 
@@ -89,6 +92,151 @@ fn strip_aws_namespace(raw: &str) -> String {
     raw.rsplit_once('#')
         .map_or(raw, |(_, bare)| bare)
         .to_string()
+}
+
+/// The response header AWS/Bedrock uses to carry the exception
+/// discriminator when the error body is the flat minimal `{"message":...}`
+/// shape that omits the `__type` key. Compared case-insensitively by
+/// [`HeaderMap`], so the lowercase form matches the wire's mixed case.
+const AWS_ERROR_TYPE_HEADER: &str = "x-amzn-errortype";
+
+/// Outcome of lifting the AWS exception discriminator from response
+/// headers. The unusable variants are reason-labeled so the native lane
+/// can surface a bounded WARN when the header fallback yields no
+/// discriminator -- a stripped, duplicated, or garbled value stays
+/// visible instead of silently degrading to a non-attributed rejection.
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+pub enum ErrorTypeHeaderLift {
+    Lifted(String),
+    Missing,
+    Invalid,
+    Ambiguous,
+    Conflict,
+}
+
+impl ErrorTypeHeaderLift {
+    /// The bounded reason label for an unusable lift, or `None` when a
+    /// token was lifted. Only this fixed label ever reaches a log line --
+    /// never the raw header value. Shares its label set with the bounded
+    /// counter slots ([`ERROR_TYPE_HEADER_UNUSABLE_REASONS`]) so the WARN
+    /// label and the counter key cannot drift.
+    #[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+    pub const fn unusable_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Lifted(_) => None,
+            Self::Missing => Some(ERROR_TYPE_HEADER_UNUSABLE_REASONS[0]),
+            Self::Invalid => Some(ERROR_TYPE_HEADER_UNUSABLE_REASONS[1]),
+            Self::Ambiguous => Some(ERROR_TYPE_HEADER_UNUSABLE_REASONS[2]),
+            Self::Conflict => Some(ERROR_TYPE_HEADER_UNUSABLE_REASONS[3]),
+        }
+    }
+}
+
+/// The fixed reason labels for an unusable `x-amzn-errortype` lift, in the
+/// same slot order as [`ERROR_TYPE_HEADER_UNUSABLE_COUNTS`]. Single source
+/// of truth for both the WARN label and the counter key.
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+const ERROR_TYPE_HEADER_UNUSABLE_REASONS: [&str; 4] =
+    ["missing", "invalid", "ambiguous", "conflict"];
+
+/// Bounded fixed-cardinality counters for the unusable-header path, one slot
+/// per reason label above. The reason-labeled WARN alone leaves the RATE
+/// invisible; a rising slot means a stripped, garbled, duplicated, or
+/// proxy-merged discriminator is arriving on the native lane and the
+/// capability matcher is losing its gate token -- visible drift instead of a
+/// silent non-attributed rejection. Keyed ONLY by the fixed labels (no
+/// unbounded dimension); mirrors the router's
+/// `bedrock_validation_unmatched_total`.
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+static ERROR_TYPE_HEADER_UNUSABLE_COUNTS: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+fn error_type_header_unusable_index(reason: &str) -> Option<usize> {
+    ERROR_TYPE_HEADER_UNUSABLE_REASONS
+        .iter()
+        .position(|label| *label == reason)
+}
+
+/// Bump the bounded counter slot for an unusable-header reason label,
+/// incremented alongside the native lane's reason-labeled WARN. A no-op for
+/// any label outside the fixed set (the lift never produces one).
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+pub fn incr_error_type_header_unusable(reason: &str) {
+    if let Some(index) = error_type_header_unusable_index(reason) {
+        ERROR_TYPE_HEADER_UNUSABLE_COUNTS[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Read the cumulative unusable-header count for `reason`, or 0 for an
+/// unknown label. Test-visible accessor mirroring the router metrics readers.
+#[cfg(test)]
+pub fn error_type_header_unusable_count(reason: &str) -> u64 {
+    error_type_header_unusable_index(reason).map_or(0, |index| {
+        ERROR_TYPE_HEADER_UNUSABLE_COUNTS[index].load(Ordering::Relaxed)
+    })
+}
+
+/// Classify the `x-amzn-errortype` response header into a lifted
+/// discriminator or a reason-labeled failure. A single unambiguous value
+/// is REQUIRED: zero entries are `Missing`, repeated identical entries are
+/// `Ambiguous`, and differing entries are `Conflict` -- all fail closed so
+/// a tampered or proxy-merged header can never seed a false classifier.
+///
+/// The single value is split at the FIRST `:` (the delimiter before the
+/// coral URL tail the wire appends, distinct from the body lift's `#`
+/// namespace delimiter); the head is validated through the same bounded
+/// token path as the body lift ([`is_bounded_aws_token`] +
+/// [`strip_aws_namespace`]) so only a bounded exception name -- never the
+/// URL tail, an oversized blob, or non-token bytes -- survives.
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+pub fn classify_aws_error_type_header(headers: &HeaderMap) -> ErrorTypeHeaderLift {
+    let mut values = headers.get_all(AWS_ERROR_TYPE_HEADER).iter();
+    let Some(first) = values.next() else {
+        return ErrorTypeHeaderLift::Missing;
+    };
+    let Ok(first_str) = first.to_str() else {
+        return ErrorTypeHeaderLift::Invalid;
+    };
+    let mut duplicate = false;
+    for other in values {
+        match other.to_str() {
+            Ok(s) if s == first_str => duplicate = true,
+            // A differing (or non-UTF8, hence non-comparable) second value
+            // makes the discriminator ambiguous in intent: fail closed.
+            _ => return ErrorTypeHeaderLift::Conflict,
+        }
+    }
+    if duplicate {
+        return ErrorTypeHeaderLift::Ambiguous;
+    }
+    let head = first_str
+        .split_once(':')
+        .map_or(first_str, |(head, _)| head);
+    if is_bounded_aws_token(head) {
+        ErrorTypeHeaderLift::Lifted(strip_aws_namespace(head))
+    } else {
+        ErrorTypeHeaderLift::Invalid
+    }
+}
+
+/// Lift the bare AWS exception name from the `x-amzn-errortype` response
+/// header, or `None` when the header is absent, duplicated, conflicting,
+/// or malformed. Thin wrapper over [`classify_aws_error_type_header`] that
+/// discards the failure reason; the native lane uses the classifier
+/// directly to label its WARN. Separate from [`lift_aws_error_tokens`]:
+/// different input (headers, not a parsed body), different split char
+/// (`:` before the URL tail, not `#`), different provenance.
+#[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
+pub fn lift_aws_error_type_from_headers(headers: &HeaderMap) -> Option<String> {
+    match classify_aws_error_type_header(headers) {
+        ErrorTypeHeaderLift::Lifted(token) => Some(token),
+        _ => None,
+    }
 }
 
 /// Whether a request-fault (400/422) body may be carried RAW (byte-capped)
@@ -632,5 +780,132 @@ mod tests {
             &body,
             routectl_core::MAX_ERROR_BODY_BYTES
         ));
+    }
+
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+    const ERROR_TYPE_HEADER_NAME: &str = "x-amzn-errortype";
+
+    /// The exact value bedrock-runtime serves on a 400: the bare exception
+    /// name followed by `:` and the coral URL tail. The URL tail must never
+    /// survive the lift.
+    const REAL_ERROR_TYPE_VALUE: &str =
+        "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+
+    fn headers_with_error_type(values: &[&str]) -> HeaderMap {
+        let name = HeaderName::from_static(ERROR_TYPE_HEADER_NAME);
+        let mut headers = HeaderMap::new();
+        for v in values {
+            headers.append(name.clone(), HeaderValue::from_str(v).unwrap());
+        }
+        headers
+    }
+
+    /// The real captured header value lifts to the bare, namespace-stripped
+    /// exception name -- the coral URL tail past the first `:` is dropped.
+    #[test]
+    fn header_lift_reads_real_captured_value() {
+        let headers = headers_with_error_type(&[REAL_ERROR_TYPE_VALUE]);
+        assert_eq!(
+            lift_aws_error_type_from_headers(&headers),
+            Some("ValidationException".to_string())
+        );
+    }
+
+    /// A bare exception name with no `:` tail lifts unchanged, and a value
+    /// whose head is namespaced (`...#Name:url`) lifts the stripped name.
+    #[test]
+    fn header_lift_handles_bare_and_namespaced_heads() {
+        let bare = headers_with_error_type(&["ThrottlingException"]);
+        assert_eq!(
+            lift_aws_error_type_from_headers(&bare),
+            Some("ThrottlingException".to_string())
+        );
+        let namespaced = headers_with_error_type(&[
+            "com.amazon.coral.validate#ValidationException:http://internal.example/coral/",
+        ]);
+        assert_eq!(
+            lift_aws_error_type_from_headers(&namespaced),
+            Some("ValidationException".to_string())
+        );
+    }
+
+    /// Repeated identical entries are ambiguous, and differing entries
+    /// conflict -- both fail closed with distinct reason labels so a
+    /// duplicated or proxy-merged header can never seed a false classifier.
+    #[test]
+    fn header_lift_fails_closed_on_duplicate_and_conflicting_values() {
+        let duplicate = headers_with_error_type(&[REAL_ERROR_TYPE_VALUE, REAL_ERROR_TYPE_VALUE]);
+        assert_eq!(lift_aws_error_type_from_headers(&duplicate), None);
+        assert_eq!(
+            classify_aws_error_type_header(&duplicate).unusable_reason(),
+            Some("ambiguous")
+        );
+        let conflicting =
+            headers_with_error_type(&["ValidationException:x", "ThrottlingException:y"]);
+        assert_eq!(lift_aws_error_type_from_headers(&conflicting), None);
+        assert_eq!(
+            classify_aws_error_type_header(&conflicting).unusable_reason(),
+            Some("conflict")
+        );
+    }
+
+    /// A non-UTF8 value, an empty value, and a URL-tail-only value (a leading
+    /// `:` leaving an empty head) all lift as `None` with the `invalid`
+    /// reason. An absent header is `missing`.
+    #[test]
+    fn header_lift_fails_closed_on_malformed_and_missing() {
+        let name = HeaderName::from_static(ERROR_TYPE_HEADER_NAME);
+        let mut non_utf8 = HeaderMap::new();
+        non_utf8.append(
+            name.clone(),
+            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        assert_eq!(lift_aws_error_type_from_headers(&non_utf8), None);
+        assert_eq!(
+            classify_aws_error_type_header(&non_utf8).unusable_reason(),
+            Some("invalid")
+        );
+
+        let empty = headers_with_error_type(&[""]);
+        assert_eq!(lift_aws_error_type_from_headers(&empty), None);
+        assert_eq!(
+            classify_aws_error_type_header(&empty).unusable_reason(),
+            Some("invalid")
+        );
+
+        let url_tail_only =
+            headers_with_error_type(&[":http://internal.amazon.com/coral/com.amazon.bedrock/"]);
+        assert_eq!(lift_aws_error_type_from_headers(&url_tail_only), None);
+        assert_eq!(
+            classify_aws_error_type_header(&url_tail_only).unusable_reason(),
+            Some("invalid")
+        );
+
+        let absent = HeaderMap::new();
+        assert_eq!(lift_aws_error_type_from_headers(&absent), None);
+        assert_eq!(
+            classify_aws_error_type_header(&absent).unusable_reason(),
+            Some("missing")
+        );
+    }
+
+    /// Each fixed reason label owns a distinct bounded counter slot: bumping
+    /// one advances only that slot. An unknown label is a no-op that reads
+    /// back 0.
+    #[test]
+    fn unusable_header_counter_bumps_each_reason_slot() {
+        for reason in ["missing", "invalid", "ambiguous", "conflict"] {
+            let before = error_type_header_unusable_count(reason);
+            incr_error_type_header_unusable(reason);
+            assert_eq!(
+                error_type_header_unusable_count(reason),
+                before + 1,
+                "reason {reason} slot must advance by exactly one",
+            );
+        }
+        // An out-of-set label never allocates a slot and reads back 0.
+        incr_error_type_header_unusable("bogus");
+        assert_eq!(error_type_header_unusable_count("bogus"), 0);
     }
 }

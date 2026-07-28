@@ -638,7 +638,10 @@ fn probe_outcome_for_resolve_error(err: &Error) -> routectl_core::ProbeOutcome {
 ///
 /// The flat AWS envelope carries no first-party `error.type` / `error.code`,
 /// so the body is parsed once here and the bounded classifier tokens are
-/// lifted via [`lift_error_tokens`]. Those TYPE/CODE tokens are safe to carry
+/// lifted via [`lift_error_tokens`]. When the body carries no `__type` (the
+/// native lane's minimal `{"message":...}` shape), the discriminator is
+/// lifted from the `x-amzn-errortype` response header instead, read before
+/// the body consumes `resp`. Those TYPE/CODE tokens are safe to carry
 /// on every status class (they name the exception, not a principal); the
 /// body/message redaction split by status happens downstream in
 /// [`build_client_error`].
@@ -663,6 +666,17 @@ async fn read_error_body(
 ) -> (String, bool, Option<String>, Option<String>) {
     let status = resp.status().as_u16();
     let content_length = resp.content_length();
+    // Read the AWS exception discriminator from the response headers BEFORE
+    // the body read consumes `resp`. The native lane's 400 body is the flat
+    // minimal `{"message":...}` shape with no `__type`, so the header is the
+    // only in-band source of the `ValidationException` token the capability
+    // matcher gates on; the body `__type` keeps precedence when present
+    // (mantle-proxied shapes). The reason label is captured alongside so an
+    // unusable header can be surfaced without re-reading (the response is
+    // gone after the body read).
+    let header_type = crate::aws_error::lift_aws_error_type_from_headers(resp.headers());
+    let header_unusable_reason =
+        crate::aws_error::classify_aws_error_type_header(resp.headers()).unusable_reason();
     let (bytes, hit_cap) = match crate::http_client::read_body_capped(
         resp,
         crate::http_client::MAX_RESPONSE_BODY_BYTES,
@@ -687,7 +701,28 @@ async fn read_error_body(
         crate::http_client::warn_body_cap(provider, status, content_length, "error_body");
     }
     let body_text = String::from_utf8_lossy(&bytes);
-    let (upstream_type, upstream_code) = lift_error_tokens(&body_text);
+    let (body_type, upstream_code) = lift_error_tokens(&body_text);
+    // The flat native envelope carries no body `__type`, so fall back to the
+    // header-lifted discriminator; a present body `__type` (mantle shapes)
+    // wins. On a request-fault status (400/422) the discriminator is what the
+    // capability matcher gates its learn path on, so an unusable header there
+    // surfaces a bounded, reason-labeled WARN -- a stripped or garbled header
+    // stays visible instead of a silent non-attributed rejection. Other
+    // statuses (5xx without the header) are not gated on it and would only
+    // add noise. The raw header value is never logged.
+    if is_request_fault_status(status)
+        && body_type.is_none()
+        && let Some(reason) = header_unusable_reason
+    {
+        crate::aws_error::incr_error_type_header_unusable(reason);
+        tracing::warn!(
+            provider = %provider,
+            status,
+            reason,
+            "bedrock upstream error-type header unusable",
+        );
+    }
+    let upstream_type = body_type.or(header_type);
     log_bedrock_upstream_error(provider, status, &body_text, hit_cap);
     // Emit the full (capped) upstream error body at debug level alongside
     // the status-specific WARN above. The WARN excerpt (cap via
@@ -1527,6 +1562,17 @@ mod tests {
     /// an honest Content-Length, so a chunked server is the only way to
     /// drive `read_error_body` down its streaming read path.
     async fn spawn_chunked_error_server(status: u16, body: &'static str) -> String {
+        spawn_chunked_error_server_with_headers(status, body, "").await
+    }
+
+    /// Variant of [`spawn_chunked_error_server`] that injects
+    /// `extra_headers` (each a full `Name: value\r\n` line) into the
+    /// response head, so a test can exercise the `x-amzn-errortype` lift.
+    async fn spawn_chunked_error_server_with_headers(
+        status: u16,
+        body: &'static str,
+        extra_headers: &'static str,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1536,7 +1582,7 @@ mod tests {
             let mut buf = [0u8; 1024];
             let _ = socket.read(&mut buf).await;
             let head = format!(
-                "HTTP/1.1 {status} ERR\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "HTTP/1.1 {status} ERR\r\nContent-Type: application/json\r\n{extra_headers}Transfer-Encoding: chunked\r\n\r\n"
             );
             let _ = socket.write_all(head.as_bytes()).await;
             let _ = socket
@@ -1547,6 +1593,79 @@ mod tests {
             let _ = socket.flush().await;
         });
         format!("http://{addr}")
+    }
+
+    /// A native-lane 400 whose flat `{"message":...}` body omits `__type`
+    /// lifts the `ValidationException` discriminator from the
+    /// `x-amzn-errortype` header, and the coral URL tail that rides in that
+    /// header value never reaches any `Error::Upstream` field.
+    #[tokio::test]
+    async fn error_type_header_lifts_without_leaking_coral_url() {
+        let error_type = "x-amzn-ErrorType: ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/\r\n";
+        let body = r#"{"message":"tool type 'advisor' is not supported for this model"}"#;
+        let url = spawn_chunked_error_server_with_headers(400, body, error_type).await;
+        let resp = reqwest::get(url).await.unwrap();
+
+        let (prefix, _hit_cap, upstream_type, upstream_code) =
+            read_error_body("bedrock-invoke", "prov", resp).await;
+        let err = build_client_error(
+            "prov",
+            400,
+            None,
+            &prefix,
+            false,
+            upstream_type,
+            upstream_code,
+        );
+        let Error::Upstream {
+            body: err_body,
+            upstream_type,
+            upstream_code,
+            ..
+        } = err
+        else {
+            panic!("expected Error::Upstream");
+        };
+        assert_eq!(
+            upstream_type.as_deref(),
+            Some("ValidationException"),
+            "the bare exception name must lift from the header"
+        );
+        for field in [
+            Some(err_body.as_str()),
+            upstream_type.as_deref(),
+            upstream_code.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                !field.contains("internal.amazon.com") && !field.contains("coral"),
+                "the coral URL tail leaked into an Error field: {field}"
+            );
+        }
+    }
+
+    /// When a native-lane 400 carries BOTH a valid body `__type` and the
+    /// `x-amzn-errortype` header, the body token keeps precedence: the
+    /// mantle-proxied shape's in-band discriminator wins over the header
+    /// fallback so a header-provided token can never override a present
+    /// body classifier.
+    #[tokio::test]
+    async fn body_type_wins_over_error_type_header() {
+        let error_type = "x-amzn-ErrorType: ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/\r\n";
+        let body =
+            r#"{"__type":"com.amazon.coral.service#ThrottlingException","message":"slow down"}"#;
+        let url = spawn_chunked_error_server_with_headers(400, body, error_type).await;
+        let resp = reqwest::get(url).await.unwrap();
+
+        let (_prefix, _hit_cap, upstream_type, _upstream_code) =
+            read_error_body("bedrock-invoke", "prov", resp).await;
+        assert_eq!(
+            upstream_type.as_deref(),
+            Some("ThrottlingException"),
+            "a present body __type must win over the x-amzn-errortype header",
+        );
     }
 
     #[tokio::test]
