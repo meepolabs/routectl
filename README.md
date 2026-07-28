@@ -12,12 +12,6 @@ and one config file for all your keys.
 [![Rust 1.95](https://img.shields.io/badge/Rust-1.95-orange.svg)](https://www.rust-lang.org)
 [![Workspace tests](https://img.shields.io/badge/tests-5900%2B%20passing-brightgreen.svg)](docs/DEVELOPMENT.md)
 
-```
-your client speaks              routectl routes                to any provider
-OpenAI or Anthropic     -->     fallbacks, retries,     -->    OpenAI, Anthropic, Bedrock,
-wire format                     cost tracking                  Gemini, DeepSeek, Groq, ...
-```
-
 ## Why routectl
 
 - **Real fallback, not just retries.** Aliases map to fallback chains
@@ -131,13 +125,18 @@ capability matrix.
 
 ## How it works
 
-routectl is a hub-and-spoke translation pipe: three ingress dialects
-(OpenAI Chat Completions, Anthropic Messages, OpenAI Responses) parse
-into one canonical request shape, the router resolves the alias to a
-fallback chain and applies policy, and one of five egress provider
-classes translates back out. N+M translators instead of NxM -- a new
-ingress dialect or egress provider is one file that knows nothing
-about the other side.
+routectl is a hub-and-spoke translation pipe:
+
+1. One of three ingress dialects (OpenAI Chat Completions, Anthropic
+   Messages, OpenAI Responses) parses the request into one canonical
+   shape.
+2. The router resolves the alias to a fallback chain and applies
+   policy (retry, capability filter, cache planning).
+3. One of five egress provider classes translates back out to the
+   upstream's wire format.
+
+N+M translators instead of NxM -- a new ingress dialect or egress
+provider is one file that knows nothing about the other side.
 
 ![Request flow: three ingress dialects normalize into one canonical ChatRequest, the router applies routing policy, five egress provider classes translate back out.](docs/assets/architecture.svg)
 
@@ -178,11 +177,17 @@ heavy = ["heavy", "fast"]        # fallback chain
 default = "fast"
 ```
 
-Credentials resolve through URI schemes -- `env://VAR`,
-`file:///abs/path` (owner-only), or `oauth://<provider>` (managed by
-`routectl login`); inline literals are rejected outright. The full
-config surface -- retry policy, capability overrides, cache knobs, the
-model catalog, hot-reload, managed OAuth -- lives in
+Credentials resolve through URI schemes; inline literals are rejected
+outright:
+
+| Scheme | Meaning |
+|---|---|
+| `env://VAR` | Process env var |
+| `file:///abs/path` | File contents (refused on Unix unless owner-only, `chmod 600`) |
+| `oauth://<provider>` | routectl-managed OAuth credential, populated by `routectl login <provider>` |
+
+The full config surface -- retry policy, capability overrides, cache
+knobs, the model catalog, hot-reload, managed OAuth -- lives in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md), with a committed
 JSON Schema (`routectl.schema.json`) for editor completion.
 
@@ -240,10 +245,15 @@ cargo test -p routectl-cli --features live-integration --release \
 
 ## Out of scope
 
-Multi-user auth, TLS termination, multi-tenancy, a config-editing web
-UI, a caching layer, and in-proxy cost-based routing decisions are all
-deliberate non-goals -- see [ROADMAP.md](ROADMAP.md) for the full list
-and rationale. If you need those, reach for
+Deliberate non-goals (see [ROADMAP.md](ROADMAP.md) for the rationale):
+
+- Multi-user auth, SSO, TLS termination, multi-tenancy
+- A config-editing web UI (the dashboard is read-only by design)
+- A caching layer
+- In-proxy cost/latency-based routing decisions -- routectl exposes
+  the signals; a client-side harness makes the call
+
+If you need those, reach for
 [LiteLLM](https://github.com/BerriAI/litellm) or a dedicated gateway.
 
 ## Responsible use
@@ -282,9 +292,11 @@ gate, debug runbooks) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 (where things live). [`SECURITY.md`](SECURITY.md) covers the security
 posture and vulnerability reporting.
 
-Conventions: ASCII-only in source and commits; functions under 50
-lines, files under 800; one file per dialect, one row per quirk in
-the model-profile table.
+Conventions:
+
+- ASCII-only in source and commits
+- Functions under 50 lines, files under 800
+- One file per dialect; one row per quirk in the model-profile table
 
 ## License
 
