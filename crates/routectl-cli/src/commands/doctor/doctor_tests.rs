@@ -2169,9 +2169,12 @@ mod matrix_panel {
 
         let panel = build_capability_matrix_panel(&ctx);
         assert_eq!(panel.availability, MatrixAvailability::Available);
-        // The five well-known columns lead; the observed non-well-known key
+        // The well-known columns lead; the observed non-well-known key
         // becomes an other column.
-        let leading: Vec<&str> = panel.columns[..5].iter().map(String::as_str).collect();
+        let leading: Vec<&str> = panel.columns[..WELL_KNOWN_CAPABILITY_KEYS.len()]
+            .iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(leading, WELL_KNOWN_CAPABILITY_KEYS);
         assert!(panel.columns.iter().any(|c| c == "custom_tool"));
 
@@ -2231,8 +2234,8 @@ mod matrix_panel {
         );
 
         let panel = build_capability_matrix_panel(&ctx);
-        // 5 well-known + 10 rendered other columns.
-        assert_eq!(panel.columns.len(), 15);
+        // 6 well-known + 10 rendered other columns.
+        assert_eq!(panel.columns.len(), 16);
         assert_eq!(panel.other_overflow, 2);
     }
 

@@ -24,6 +24,16 @@ pub const PROMPT_CACHING: &str = "prompt_caching";
 /// Feature key for extended-thinking / reasoning requests.
 pub const THINKING: &str = "thinking";
 
+/// Feature key for REPLAY of a prior reasoning artifact -- an encrypted
+/// blob or signed thinking block echoed back on a follow-up turn.
+///
+/// Deliberately DISTINCT from [`THINKING`]: that key controls whether a
+/// target may GENERATE reasoning at all, while this one controls only
+/// whether a previously-issued artifact may be replayed to it. Collapsing
+/// the two would turn reasoning off entirely for a lane that merely
+/// rejects a foreign lane's blob.
+pub const REASONING_REPLAY: &str = "reasoning_replay";
+
 /// All well-known capability keys. Not exhaustive: both `derive_feature_keys`
 /// and the catalog's capability map accept arbitrary tool-type strings
 /// beyond this list; this slice documents the ones routectl itself knows
@@ -34,6 +44,7 @@ pub const WELL_KNOWN_CAPABILITY_KEYS: &[&str] = &[
     STRUCTURED_OUTPUT,
     PROMPT_CACHING,
     THINKING,
+    REASONING_REPLAY,
 ];
 
 /// Evidence class for a verified structured-output observation: the
@@ -364,6 +375,15 @@ mod tests {
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&STRUCTURED_OUTPUT));
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&PROMPT_CACHING));
         assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&THINKING));
+        assert!(WELL_KNOWN_CAPABILITY_KEYS.contains(&REASONING_REPLAY));
+    }
+
+    #[test]
+    fn reasoning_replay_is_distinct_from_thinking() {
+        // Generation and replay are separate capabilities: a lane may
+        // reject a foreign replay artifact while still reasoning fine.
+        assert_ne!(REASONING_REPLAY, THINKING);
+        assert_eq!(REASONING_REPLAY, "reasoning_replay");
     }
 
     #[test]
@@ -373,6 +393,7 @@ mod tests {
         assert_eq!(STRUCTURED_OUTPUT, "structured_output");
         assert_eq!(PROMPT_CACHING, "prompt_caching");
         assert_eq!(THINKING, "thinking");
+        assert_eq!(REASONING_REPLAY, "reasoning_replay");
     }
 
     #[test]

@@ -316,16 +316,15 @@ mod replay {
 
     /// One proven rejection shape.
     ///
-    /// `upstream_type` / `upstream_code` are matched against the structured
-    /// classifiers already on the error; `message_anchor` against the
-    /// normalized `error.message`. A `None` field is "don't care", so a row
-    /// carrying only structured tokens matches on those alone -- but no
-    /// such row exists today, because every token the captured envelope
-    /// carries is generic on its own.
-    ///
-    /// `error.param` is not matched: it is `null` in the captured envelope,
-    /// and the canonical error carries no param field, so reading it would
-    /// buy body parsing for no discrimination.
+    /// `upstream_type` / `upstream_code` are matched against the canonical
+    /// structured classifiers when the error carries them, falling back to
+    /// the same tokens read out of the body's own error envelope -- see
+    /// [`Envelope`] for why the canonical fields alone are not enough.
+    /// `message_anchor` is matched against the normalized `error.message`.
+    /// A `None` field is "don't care", so a row carrying only structured
+    /// tokens matches on those alone -- but no such row exists today,
+    /// because every token the captured envelope carries is generic on its
+    /// own.
     struct ReplaySignature {
         /// Required `error.type`, or `None` to ignore it.
         upstream_type: Option<&'static str>,
@@ -409,52 +408,96 @@ mod replay {
         if !matches!(provider_kind, Some(kind) if FIXTURE_BACKED_KINDS.contains(&kind)) {
             return false;
         }
-        let message = normalized_message(body);
+        let envelope = Envelope::read(body);
         PROVEN_REJECTIONS
             .iter()
-            .any(|sig| signature_matches(sig, upstream_type, upstream_code, message.as_deref()))
+            .any(|sig| signature_matches(sig, upstream_type, upstream_code, &envelope))
+    }
+
+    /// The `type`, `code`, and normalized `message` of a JSON error
+    /// envelope.
+    ///
+    /// The envelope is read because the canonical error does NOT reliably
+    /// carry these tokens: a provider that recognizes a body as its own
+    /// first-party `{"error":{...}}` envelope carries the body RAW and
+    /// leaves `upstream_type` / `upstream_code` empty, since the
+    /// structured-classifier fields exist for the shapes whose tokens live
+    /// at the top level instead. Matching only the canonical fields would
+    /// therefore never fire on exactly the family this matcher is for.
+    ///
+    /// `param` is deliberately not read: it is `null` in the captured
+    /// envelope, so it buys no discrimination.
+    #[derive(Default)]
+    struct Envelope {
+        error_type: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+    }
+
+    impl Envelope {
+        /// Read the envelope, or an empty one when the body is not a JSON
+        /// `{"error":{...}}` shape.
+        ///
+        /// Strict by design: a non-envelope body yields no fields rather
+        /// than falling back to a raw excerpt, so an anchor can never match
+        /// text that merely appeared somewhere in an unstructured body. An
+        /// oversized body is refused unparsed, bounding the JSON a hostile
+        /// upstream can push onto the routing path -- the same ceiling the
+        /// request-fault producers write against.
+        fn read(body: &str) -> Self {
+            if body.len() > MAX_ERROR_BODY_BYTES {
+                return Self::default();
+            }
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) else {
+                return Self::default();
+            };
+            let Some(error) = parsed.get("error") else {
+                return Self::default();
+            };
+            Self {
+                error_type: string_at(error, "type"),
+                code: string_at(error, "code"),
+                message: string_at(error, "message").map(|m| normalize(&m)),
+            }
+        }
+    }
+
+    fn string_at(value: &serde_json::Value, key: &str) -> Option<String> {
+        value.get(key)?.as_str().map(str::to_string)
+    }
+
+    /// Lowercase with whitespace runs collapsed, so a re-cased or rewrapped
+    /// rendering of the same rejection still matches its anchor.
+    fn normalize(text: &str) -> String {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
     }
 
     fn signature_matches(
         sig: &ReplaySignature,
         upstream_type: Option<&str>,
         upstream_code: Option<&str>,
-        message: Option<&str>,
+        envelope: &Envelope,
     ) -> bool {
-        if sig.upstream_type.is_some() && sig.upstream_type != upstream_type {
+        // The canonical structured field wins when present; the envelope's
+        // own token is the fallback for the families that leave it empty.
+        let effective_type = upstream_type.or(envelope.error_type.as_deref());
+        let effective_code = upstream_code.or(envelope.code.as_deref());
+        if sig.upstream_type.is_some() && sig.upstream_type != effective_type {
             return false;
         }
-        if sig.upstream_code.is_some() && sig.upstream_code != upstream_code {
+        if sig.upstream_code.is_some() && sig.upstream_code != effective_code {
             return false;
         }
         match sig.message_anchor {
             None => true,
-            Some(anchor) => message.is_some_and(|m| m.starts_with(anchor)),
+            Some(anchor) => envelope
+                .message
+                .as_deref()
+                .is_some_and(|m| m.starts_with(anchor)),
         }
-    }
-
-    /// The `error.message` of a JSON error envelope, lowercased with
-    /// whitespace runs collapsed.
-    ///
-    /// Strict by design: a body that is not a `{"error":{"message":...}}`
-    /// envelope yields `None` rather than falling back to a raw excerpt, so
-    /// an anchor can never match text that merely appeared somewhere in an
-    /// unstructured body. Oversized bodies are refused unparsed, bounding
-    /// the JSON a hostile upstream can push onto the routing path -- the
-    /// same ceiling the request-fault producers write against.
-    fn normalized_message(body: &str) -> Option<String> {
-        if body.len() > MAX_ERROR_BODY_BYTES {
-            return None;
-        }
-        let parsed = serde_json::from_str::<serde_json::Value>(body).ok()?;
-        let message = parsed.pointer("/error/message")?.as_str()?;
-        Some(
-            message
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase(),
-        )
     }
 
     #[cfg(test)]

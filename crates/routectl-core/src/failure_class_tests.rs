@@ -702,10 +702,62 @@ fn replay_rejection_error(status: u16) -> Error {
     )
 }
 
+/// The SAME rejection as the production error reader actually builds it.
+///
+/// The reader recognizes the body as the family's own first-party error
+/// envelope, so it carries the body raw and leaves both canonical
+/// classifier fields empty. Matching only those fields would make the
+/// matcher inert on exactly the family it exists for.
+fn replay_rejection_error_without_canonical_tokens(status: u16) -> Error {
+    Error::upstream_full("p", status, REPLAY_REJECTION_BODY, None, None, None)
+}
+
 fn replay_class() -> FailureClass {
     FailureClass::FeatureUnsupported {
         capability: "reasoning_replay".to_string(),
     }
+}
+
+#[test]
+fn the_rejection_matches_on_envelope_tokens_when_the_canonical_fields_are_empty() {
+    // Arrange: the production shape -- a first-party envelope carried raw,
+    // with no canonical type/code. The tokens must be read back out of the
+    // envelope itself, or the matcher never fires on a real rejection.
+    let err = replay_rejection_error_without_canonical_tokens(400);
+
+    // Act
+    let got = classify_with_attempt(
+        &err,
+        Some(REPLAY_KIND),
+        ReplayAttempt::with_gray_artifacts(1),
+    );
+
+    // Assert
+    assert_eq!(got.class, replay_class());
+}
+
+#[test]
+fn a_conflicting_canonical_token_overrides_the_envelope() {
+    // Arrange: the canonical field is the authoritative reading, so when
+    // it disagrees with the raw envelope it wins and the gate fails.
+    let err = Error::upstream_full(
+        "p",
+        400,
+        REPLAY_REJECTION_BODY,
+        None,
+        Some("some_other_error".to_string()),
+        None,
+    );
+
+    // Act
+    let got = classify_with_attempt(
+        &err,
+        Some(REPLAY_KIND),
+        ReplayAttempt::with_gray_artifacts(1),
+    );
+
+    // Assert
+    assert_eq!(got.class, FailureClass::BadRequest);
 }
 
 #[test]
