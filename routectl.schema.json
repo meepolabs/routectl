@@ -67,7 +67,7 @@
       ]
     },
     "BedrockCredsConfig": {
-      "description": "TOML-side credentials descriptor for a Bedrock provider.\n\nEach variant is tagged by `kind`. Secret-bearing fields hold raw\nsecret-URI strings (`env://`, `file://`, `literal:`) which the\nfactory parses + resolves at provider build time -- same pattern\nas `api_key_ref` on the other provider variants.\n\nExamples:\n```toml\n# Bedrock console short-term API key\ncreds = { kind = \"bearer-key\", key_ref = \"file://<local-path>\" }\n\n# Static AWS access keys\ncreds = { kind = \"static\",\n          access_key_ref  = \"env://AWS_ACCESS_KEY_ID\",\n          secret_key_ref  = \"env://AWS_SECRET_ACCESS_KEY\",\n          session_token_ref = \"env://AWS_SESSION_TOKEN\" }\n\n# Named profile in ~/.aws/credentials (incl. SSO)\ncreds = { kind = \"profile\", name = \"bedrock-prod\" }\n\n# Standard AWS provider chain (env -> profile -> SSO -> IRSA -> IMDS)\ncreds = { kind = \"default-chain\" }\n```",
+      "description": "TOML-side credentials descriptor for a Bedrock provider.\n\nEach variant is tagged by `kind`. Secret-bearing fields hold raw\nsecret-URI strings (`env://`, `file://`) which the\nfactory parses + resolves at provider build time -- same pattern\nas `api_key_ref` on the other provider variants.\n\nExamples:\n```toml\n# Bedrock console short-term API key\ncreds = { kind = \"bearer-key\", key_ref = \"file://<local-path>\" }\n\n# Static AWS access keys\ncreds = { kind = \"static\",\n          access_key_ref  = \"env://AWS_ACCESS_KEY_ID\",\n          secret_key_ref  = \"env://AWS_SECRET_ACCESS_KEY\",\n          session_token_ref = \"env://AWS_SESSION_TOKEN\" }\n\n# Named profile in ~/.aws/credentials (incl. SSO)\ncreds = { kind = \"profile\", name = \"bedrock-prod\" }\n\n# Standard AWS provider chain (env -> profile -> SSO -> IRSA -> IMDS)\ncreds = { kind = \"default-chain\" }\n```",
       "oneOf": [
         {
           "description": "A long-term Bedrock API key (bearer token).",
@@ -799,7 +799,7 @@
           "description": "OpenAI-compatible chat-completions provider.",
           "properties": {
             "api_key_ref": {
-              "description": "Reference to the API key. One of:\n  - `env://VAR_NAME`             (process env var)\n  - `file:///abs/path/to/key`    (mode-600 file)\n  - `literal:plaintext`          (inline; placeholders only)",
+              "description": "Reference to the API key. One of:\n  - `env://VAR_NAME`             (process env var)\n  - `file:///abs/path/to/key`    (mode-600 file)\n  - `oauth://<provider>[#seat]`  (routectl-managed OAuth token)",
               "type": "string"
             },
             "auto_emit_top_level_breakpoint": {
@@ -1823,7 +1823,7 @@
             }
           ],
           "default": null,
-          "description": "Listener-side auth. When `tokens` is non-empty, every request\nmust carry a matching `x-api-key` or `Authorization: Bearer\n<token>` header. Tokens are SecretRef URIs (env://, file://,\nliteral:) and are resolved at startup."
+          "description": "Listener-side auth. When `tokens` is non-empty, every request\nmust carry a matching `x-api-key` or `Authorization: Bearer\n<token>` header. Tokens are SecretRef URIs (env://, file://)\nand are resolved at startup. Inline `literal:` refs are rejected\nat parse."
         },
         "host": {
           "default": "127.0.0.1",

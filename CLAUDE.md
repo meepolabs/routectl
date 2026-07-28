@@ -7,7 +7,7 @@ bedrock invoke + converse, openai-responses). This file is a slim
 runbook for contributors (humans and autonomous agents). Read it
 once; jump to the doc that matches your task.
 
-## The 6 crates at a glance
+## The 7 crates at a glance
 
 - `routectl-core` -- canonical wire types (`ChatRequest`,
   `ChatResponse`, `ChatChunk`, `Message`, `ReasoningDetail`) and
@@ -18,7 +18,7 @@ once; jump to the doc that matches your task.
   the lossless cache-safe context-reduction primitive
   (`context_reduction.rs`)
 - `routectl-providers` -- concrete provider impls (`openai_compat`,
-  `anthropic_api`, `bedrock`, `openai_responses`) plus the per-model
+  `anthropic_api`, `bedrock`, `openai_responses`, `gemini`) plus the per-model
   quirks table (`model_profile.rs`), the per-dialect reasoning
   files (`openai_compat/dialects/*.rs`), and the shared
   `effort.rs` / `header_trace.rs` helpers
@@ -28,13 +28,17 @@ once; jump to the doc that matches your task.
   design; pair a non-Anthropic primary with a fallback target if
   availability matters.
 - `routectl-auth` -- `SecretStore` trait + default resolver for
-  `env://`, `file://`, `literal:`, and `oauth://` references
+  `env://`, `file://`, and `oauth://` references (`literal:` is
+  rejected at parse and resolve)
 - `routectl-cli` -- axum HTTP server, clap subcommands
-  (serve / login / logout / refresh / whoami / test / config / usage / pricing),
-  live matrix integration tests
+  (serve / init / provider / doctor / probe / login / logout /
+  refresh / whoami / test / config / catalog / usage / rc),
+  the read-only status dashboard, live matrix integration tests
 - `routectl-usage` -- SQLite per-request usage accounting:
   `UsageRecord`, `UsageHandle`, cost estimation, retention pruning,
   and the query layer backing `routectl usage`
+- `routectl-testkit` -- dev-only shared test doubles (tracing
+  capture); test-target dependency only, never shipped code
 
 For per-file detail see [docs/CODEMAP.md](docs/CODEMAP.md). For
 module-level architecture and the hub-and-spoke design see
@@ -42,8 +46,9 @@ module-level architecture and the hub-and-spoke design see
 
 ## Hub-and-spoke contract
 
-routectl is a translation pipe with two ingress dialects feeding
-one canonical `ChatRequest` and N egress providers:
+routectl is a translation pipe with three ingress dialects (OpenAI
+Chat Completions, Anthropic Messages, OpenAI Responses) feeding one
+canonical `ChatRequest` and five egress provider classes:
 
 - **New ingress dialect**: add a file under `src/ingress/`,
   implement `IngressAdapter`, add a one-line route in

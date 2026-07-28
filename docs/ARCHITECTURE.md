@@ -11,7 +11,7 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   (`ChatRequest`, `ChatResponse`, `ChatChunk`, `Message`,
   `ReasoningDetail`). Wire shapes only; no provider code.
 
-- `crates/routectl-providers/` -- four concrete provider impls,
+- `crates/routectl-providers/` -- five concrete provider impls,
   default-on:
   - `openai_compat` -- OpenAI-shape hosts (OpenAI, OpenRouter,
     DeepSeek, Groq, vLLM, NIM, llama.cpp, ...). Per-dialect files in
@@ -27,6 +27,9 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   - `openai_responses` -- OpenAI Responses API (chatgpt-oauth JWT,
     OpenAI api-key, or AWS bedrock-mantle bearer); `complete()`
     force-streams.
+  - `gemini` -- native Google Gemini (`generateContent` /
+    `streamGenerateContent`) with api-key or Cloud Code OAuth
+    (`oauth://antigravity`) auth modes.
 
   `model_profile.rs` is the per-model quirks table (edit here when a
   model needs new behavior). `effort.rs` and `header_trace.rs` are
@@ -40,8 +43,9 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   slot into the fallback chain.
 
 - `crates/routectl-auth/` -- `SecretStore` trait + resolvers for
-  `env://`, `file://`, `literal:`, and `oauth://<provider>` (PKCE
-  login + atomic credentials.json + lazy refresh).
+  `env://`, `file://`, and `oauth://<provider>` (PKCE login + atomic
+  credentials.json + lazy refresh). `literal:` refs are rejected at
+  parse and resolve -- reference a 0600 file instead.
   `oauth://<provider>#<label>` pins a named seat; a bare pool ref
   expands via `list_seats` to all stored seats. No OS-keychain
   integration.
@@ -53,11 +57,18 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   Intentionally thin -- no AWS SDK or axum dependency.
 
 - `crates/routectl-cli/` -- axum HTTP server, clap CLI (`serve`,
-  `login`, `logout`, `refresh`, `whoami`, `test`, `config`,
-  `usage`), and the three ingress dialects (`openai.rs` for
+  `init`, `provider`, `doctor`, `probe`, `login`, `logout`,
+  `refresh`, `whoami`, `test`, `config`, `catalog`, `usage`, `rc`),
+  the three ingress dialects (`openai.rs` for
   `POST /v1/chat/completions`, `anthropic/` for `POST /v1/messages`
   + `POST /v1/messages/count_tokens`, `openai_responses/` for
-  `POST /v1/responses`). Live matrix integration tests live here.
+  `POST /v1/responses`), and the read-only status dashboard
+  (`GET /` + the `/status/*` JSON panels). Live matrix integration
+  tests live here.
+
+- `crates/routectl-testkit/` -- dev-only shared test doubles
+  (tracing capture); depended on by the other crates' test targets
+  only, never by shipped code.
 
 ## Hub-and-spoke contract
 
@@ -75,6 +86,6 @@ quirks). Two fields live on BOTH layers and merge per request:
 `apply_layered_overlays` helper (in `routectl-router/src/router.rs`)
 runs the merge before calling `provider.complete(req)` /
 `provider.stream(req)` -- the `Provider` trait surface stays stable
-across all four concrete providers. For the field-assignment table,
+across all five concrete providers. For the field-assignment table,
 header/payload merge semantics, reserved-header buckets, and worked
 examples, see [CONFIGURATION.md](CONFIGURATION.md).
