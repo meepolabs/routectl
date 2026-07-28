@@ -230,8 +230,13 @@ listed at the bottom of each crate.
   `ReplayAttempt` reports >= 1 carried gray artifact (the dispatcher's own
   record of what went on the wire -- unrecoverable from the rejection
   itself), the provider `kind` is one the matcher has a captured envelope
-  for, and the structured tokens plus an anchored prefix of the normalized
-  `/error/message` match a proven signature. Body parsing is the LAST gate,
+  for, and the type/code tokens plus an anchored prefix of the normalized
+  `/error/message` match a proven signature. The tokens are taken from the
+  canonical `upstream_type`/`upstream_code` when set, falling back to the
+  body envelope's own `error.type`/`error.code` -- a provider that
+  recognizes a first-party `{"error":{...}}` body carries it RAW and leaves
+  the canonical fields empty, so a canonical-only match would be inert on
+  exactly the family this matcher serves. Body parsing is the LAST gate,
   bounded by `MAX_ERROR_BODY_BYTES`, and only a rejection that would
   otherwise be a plain `BadRequest` is eligible -- an upstream that named
   its own cause (content-policy / context-window / feature token) keeps

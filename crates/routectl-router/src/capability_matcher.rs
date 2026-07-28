@@ -50,7 +50,7 @@
 //! resolver never manufactures a false positive.
 
 use routectl_core::capability::{
-    FailurePhase, STRUCTURED_OUTPUT, SignalTier, WELL_KNOWN_CAPABILITY_KEYS,
+    FailurePhase, REASONING_REPLAY, STRUCTURED_OUTPUT, SignalTier, WELL_KNOWN_CAPABILITY_KEYS,
     normalize_capability_key,
 };
 use routectl_core::error::Error;
@@ -69,6 +69,11 @@ const OPENAI_COMPAT_KIND: &str = "openai-compat";
 /// so it gets its own top-level reader and an anchored-template extraction
 /// path rather than the whole-phrase table.
 const BEDROCK_KIND: &str = "bedrock";
+
+/// The native OpenAI Responses provider `kind` string. Its lanes differ in
+/// which reasoning artifacts they accept on replay, so its inferred table
+/// carries the replay-rejection phrase.
+const OPENAI_RESPONSES_KIND: &str = "openai-responses";
 
 /// Closed-set translation of an openai-compat `error.param` WIRE param name
 /// onto the canonical request-capability key the request side derives and
@@ -132,6 +137,20 @@ struct InferredPhrase {
 const ANTHROPIC_INFERRED: &[InferredPhrase] = &[InferredPhrase {
     phrase: "Prefilling assistant messages is not supported for this model.",
     capability: PREFILL,
+}];
+
+/// OpenAI Responses inferred-rejection phrases. The content-validating lane
+/// family checks the encrypted-content PREFIX and rejects a blob minted by
+/// the id-validating family with this message; it names the replay of a
+/// prior artifact, not the ability to reason, so it resolves to
+/// [`REASONING_REPLAY`] and never to `thinking`.
+///
+/// The phrase is the VERBATIM captured `error.message`, matched
+/// whole-phrase like every other inferred row: a shortened prefix would
+/// never equal the real message and the row would be dead on real traffic.
+const OPENAI_RESPONSES_INFERRED: &[InferredPhrase] = &[InferredPhrase {
+    phrase: "encrypted content missing recognized prefix (expected `rsn_` or `smry_`)",
+    capability: REASONING_REPLAY,
 }];
 
 /// Anchored-template extractions for a provider's F2 FEATURE-NAMING rejection
@@ -281,6 +300,7 @@ fn match_inferred(
 fn inferred_table_for(provider_kind: &str) -> Option<&'static [InferredPhrase]> {
     match provider_kind {
         "anthropic-api" => Some(ANTHROPIC_INFERRED),
+        OPENAI_RESPONSES_KIND => Some(OPENAI_RESPONSES_INFERRED),
         _ => None,
     }
 }
@@ -798,6 +818,105 @@ mod tests {
                 SignalTier::SelfIdentifying,
                 FailurePhase::F1
             ))
+        );
+    }
+
+    // --- Arm 2: openai-responses inferred whole-phrase ---
+
+    /// The verbatim OpenAI Responses 400 body a content-prefix-validating
+    /// lane returns for a foreign replay artifact. Inline (the captured
+    /// fixture corpus never ships) and byte-exact: it is the regression pin
+    /// for the inferred row.
+    const REPLAY_REJECTION_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
+
+    fn replay_rejection() -> Error {
+        upstream(
+            400,
+            REPLAY_REJECTION_BODY,
+            Some("invalid_request_error"),
+            Some("validation_error"),
+        )
+    }
+
+    #[test]
+    fn openai_responses_replay_rejection_maps_to_reasoning_replay() {
+        // A lane whose replay validator rejects a foreign artifact names
+        // the REPLAY capability, not the ability to reason.
+        let err = replay_rejection();
+        let classified = classify(&err, Some("openai-responses"));
+
+        // Sanity: neither token is in a lift set, so the rejection arrives
+        // as a plain BadRequest -- which is what routes it to this arm.
+        assert_eq!(classified.class, FailureClass::BadRequest);
+
+        // Act
+        let got = resolve_requested_capability("openai-responses", &err, &classified);
+
+        // Assert -- resolves to the replay key, never to `thinking`.
+        assert_eq!(
+            got,
+            Some((
+                "reasoning_replay".to_string(),
+                SignalTier::Inferred,
+                FailurePhase::F1
+            ))
+        );
+    }
+
+    #[test]
+    fn openai_responses_inferred_phrase_is_scoped_to_its_provider_kind() {
+        // The same body from another provider must not resolve: the
+        // inferred tables are keyed by provider kind.
+        let err = replay_rejection();
+        let classified = classify(&err, Some("anthropic-api"));
+
+        // Act / Assert
+        assert_eq!(
+            resolve_requested_capability("anthropic-api", &err, &classified),
+            None
+        );
+    }
+
+    #[test]
+    fn openai_responses_near_miss_phrase_does_not_match() {
+        // Whole-phrase equality only: a truncated, embedded, or reworded
+        // message fails closed rather than learning off a partial match.
+        for message in [
+            "encrypted content missing recognized prefix",
+            "400: encrypted content missing recognized prefix (expected `rsn_` or `smry_`).",
+            "encrypted content missing prefix (expected `rsn_` or `smry_`)",
+        ] {
+            let err = upstream(
+                400,
+                &anthropic_body(message),
+                Some("invalid_request_error"),
+                None,
+            );
+            let classified = classify(&err, Some("openai-responses"));
+            assert_eq!(
+                resolve_requested_capability("openai-responses", &err, &classified),
+                None,
+                "message {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_generic_openai_responses_bad_request_is_not_a_replay_rejection() {
+        // An ordinary 400 on this provider must not resolve to the replay
+        // key -- the row is one exact phrase, not a family of 400s.
+        let err = upstream(
+            400,
+            &anthropic_body("Invalid value for 'temperature'."),
+            Some("invalid_request_error"),
+            None,
+        );
+        let classified = classify(&err, Some("openai-responses"));
+
+        // Act / Assert
+        assert_eq!(
+            resolve_requested_capability("openai-responses", &err, &classified),
+            None
         );
     }
 
