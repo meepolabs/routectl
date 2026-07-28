@@ -50,6 +50,7 @@ pub use context_reduction::{
     ReductionDelta, ReductionOutcome, apply_json_minify, minify_json_whitespace,
 };
 pub use error::{Error, Result};
+pub use failure_class::ReplayAttempt;
 pub use log_safe::{
     HDR_MSG_EGRESS, HDR_MSG_INGRESS, HDR_MSG_OUTGOING, HDR_MSG_UPSTREAM, MAX_TRACE_BODY_BYTES,
     StructuralSummary, debug_upstream_error_body, extract_upstream_message, header_trace_enabled,

@@ -219,7 +219,23 @@ listed at the bottom of each crate.
   taxonomy into HTTP families (client-error classes -> `Http4xx`,
   `ServerError`/`Overloaded`/`Unknown` -> `Http5xx`,
   `RateLimited`/`Timeout`/`NetworkError` direct), never producing `Ok`
-  (success) or `CircuitOpen` (both DTO-derived at the health panel)
+  (success) or `CircuitOpen` (both DTO-derived at the health panel).
+  `classify_with_attempt(&Error, provider_kind, ReplayAttempt)` is the
+  reasoning-replay-aware entry point (`classify` = the same call with
+  `ReplayAttempt::none()`, so every existing caller is unchanged): a private
+  `replay` submodule holds the CLOSED, fixture-backed matcher that lifts a
+  proven reasoning-replay rejection to `FeatureUnsupported{capability:
+  "reasoning_replay"}` -- no new variant, `class_token()` vocabulary
+  unchanged. Four conjunctive gates: status 400/422, the caller-supplied
+  `ReplayAttempt` reports >= 1 carried gray artifact (the dispatcher's own
+  record of what went on the wire -- unrecoverable from the rejection
+  itself), the provider `kind` is one the matcher has a captured envelope
+  for, and the structured tokens plus an anchored prefix of the normalized
+  `/error/message` match a proven signature. Body parsing is the LAST gate,
+  bounded by `MAX_ERROR_BODY_BYTES`, and only a rejection that would
+  otherwise be a plain `BadRequest` is eligible -- an upstream that named
+  its own cause (content-policy / context-window / feature token) keeps
+  that class
 
 ### Tests
 
@@ -575,7 +591,11 @@ listed at the bottom of each crate.
   execute (the first-party lane is byte-unchanged: same bytes + one
   deterministic content-type), and each records the lane span fields; `probe`
   on a mantle provider routes to `mantle::probe` (credential-resolve, no
-  `/models` dial) instead of the api-key GET
+  `/models` dial) instead of the api-key GET. Also owns the lane-mapping
+  helpers bridging `AuthKind` to the core tag vocabulary: `lane_format_tag`
+  -> the lane-faithful tag this lane EMITS (an observation), `lane_scheme`
+  -> the `ReplayScheme` this lane ACCEPTS (a revisable judgment; both
+  first-party lanes share `Codex`, mantle is `Mantle`)
 - `src/openai_responses/client.rs` -- provider construction, config, and auth
   wiring: `OpenAiResponsesConfig` (incl. `session_id` and `installation_id:
   Option<String>`, plus cfg `bedrock` `mantle: Option<MantleAuth>`),
@@ -2478,7 +2498,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/ingress/anthropic/mod.rs` -- `AnthropicIngress` impl (incl.
   `early_frame`: flushes the synthesized `message_start` and sets
   `state.started` so the real first-content chunk dedups it) + streaming state
-  types (`AnthropicStreamState`, `OpenBlockKind`)
+  types (`AnthropicStreamState`, `OpenBlockKind`) + `encrypted_detail_data`,
+  the shared `redacted_thinking.data` encoder used by both flatten sites
+  (wraps a Responses-family blob in the `reasoning_envelope`; everything
+  else, Anthropic-sourced above all, byte-verbatim)
 - `src/ingress/anthropic/parse.rs` -- Anthropic body -> canonical
   `ChatRequest`; forward-compat sweep into `provider_extras`.
   `resolve_inbound_session_key` captures the inbound per-conversation key (the

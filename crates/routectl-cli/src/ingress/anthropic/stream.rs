@@ -377,14 +377,10 @@ fn emit_delta_events(
                 close_open_block(state, events);
                 let idx = state.next_index;
                 state.next_index += 1;
-                // `data` (Anthropic / OpenRouter passthrough) or
-                // `encrypted_content` (OpenAI Responses).
-                let data = d
-                    .payload
-                    .get("data")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| d.payload.get("encrypted_content").and_then(|v| v.as_str()))
-                    .unwrap_or_default();
+                // Foreign-scheme artifacts ride out self-describing so
+                // the echo back is replayable; Anthropic-sourced bytes
+                // pass through verbatim. See `encrypted_detail_data`.
+                let data = super::encrypted_detail_data(d);
                 events.push(SseEvent::named(
                     "content_block_start",
                     serde_json::to_string(&json!({

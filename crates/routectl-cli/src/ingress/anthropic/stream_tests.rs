@@ -1708,3 +1708,112 @@ fn message_delta_missing_completion_tokens_still_emits_output_tokens_zero() {
     // input_tokens must still be present (existing behavior).
     assert_eq!(payload["usage"]["input_tokens"], 10);
 }
+
+/// Render one `Encrypted` reasoning detail through the streaming path
+/// and return the `redacted_thinking.data` string it put on the wire.
+fn streamed_redacted_thinking_data(format: Option<&str>, id: Option<&str>, blob: &str) -> String {
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+    let chunk = reasoning_chunk(ReasoningDetail {
+        kind: ReasoningDetailKind::Encrypted,
+        id: id.map(Into::into),
+        format: format.map(Into::into),
+        index: Some(0),
+        payload: json!({"encrypted_content": blob}),
+    });
+    let mut s = fresh_state();
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+    let start = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("content_block_start"))
+        .expect("content_block_start emitted");
+    let payload: Value = serde_json::from_str(&start.data).unwrap();
+    payload["content_block"]["data"]
+        .as_str()
+        .expect("data is a string")
+        .to_string()
+}
+
+/// Streaming twin of the non-streaming encode site: a Responses-family
+/// blob loses its id and scheme on the Anthropic wire unless it goes out
+/// self-describing, so it must be wrapped here too, blob bytes intact.
+#[test]
+fn streamed_encrypted_reasoning_wraps_a_foreign_scheme_blob_with_its_scheme_and_id() {
+    // Arrange
+    const BLOB: &str = "rsn_STREAMED-OPAQUE-PAYLOAD-2d90";
+
+    // Act
+    let data = streamed_redacted_thinking_data(
+        Some(routectl_core::BEDROCK_MANTLE),
+        Some("rs_stream1"),
+        BLOB,
+    );
+
+    // Assert
+    let (scheme, id, blob) =
+        routectl_core::reasoning_envelope::unwrap(&data).expect("wire data is an envelope");
+    assert_eq!(scheme, routectl_core::BEDROCK_MANTLE);
+    assert_eq!(id, Some("rs_stream1"));
+    assert_eq!(blob, BLOB, "inner blob bytes must be unchanged");
+}
+
+/// The carve-out holds on the streaming path as well: an
+/// Anthropic-family blob reaches the wire byte-verbatim.
+#[test]
+fn streamed_encrypted_reasoning_emits_an_anthropic_family_blob_byte_verbatim() {
+    // Arrange
+    const BLOB: &str = "ErkBCkYIBRgCKkDd-ANTHROPIC-NATIVE-SIGNATURE";
+
+    // Act
+    let data = streamed_redacted_thinking_data(Some(ANTHROPIC_FORMAT), Some("rd_1"), BLOB);
+
+    // Assert
+    assert_eq!(data, BLOB, "Anthropic-sourced blob must not be wrapped");
+}
+
+/// An id-less foreign artifact still wraps on the streaming path, so its
+/// scheme survives the trip through the Anthropic dialect.
+#[test]
+fn streamed_encrypted_reasoning_wraps_an_id_less_foreign_blob_so_its_scheme_survives() {
+    // Arrange
+    const BLOB: &str = "smry_STREAMED-OPAQUE-PAYLOAD-6b13";
+
+    // Act
+    let data = streamed_redacted_thinking_data(Some(routectl_core::OPENAI_APIKEY), None, BLOB);
+
+    // Assert
+    let (scheme, id, blob) =
+        routectl_core::reasoning_envelope::unwrap(&data).expect("id-less envelope round-trips");
+    assert_eq!(scheme, routectl_core::OPENAI_APIKEY);
+    assert_eq!(id, None);
+    assert_eq!(blob, BLOB);
+}
+
+/// Parity with the non-streaming path: an untagged blob has no scheme to
+/// record, so it rides out exactly as it arrived. The two paths diverging
+/// on this case is the failure mode the shared helper exists to prevent.
+#[test]
+fn streamed_encrypted_reasoning_emits_an_untagged_blob_byte_verbatim() {
+    // Arrange
+    const BLOB: &str = "UNTAGGED-STREAMED-PAYLOAD-4c21";
+
+    // Act
+    let data = streamed_redacted_thinking_data(None, Some("rd_9"), BLOB);
+
+    // Assert
+    assert_eq!(data, BLOB, "an untagged blob must not be wrapped");
+}
+
+/// An empty blob carries nothing to replay, so wrapping it would only
+/// produce an envelope the decode side rejects.
+#[test]
+fn streamed_encrypted_reasoning_leaves_an_empty_blob_unwrapped() {
+    // Act
+    let data = streamed_redacted_thinking_data(
+        Some(routectl_core::BEDROCK_MANTLE),
+        Some("rs_stream2"),
+        "",
+    );
+
+    // Assert
+    assert_eq!(data, "", "an empty blob must not become an envelope");
+}

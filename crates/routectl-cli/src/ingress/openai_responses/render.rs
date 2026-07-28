@@ -51,7 +51,7 @@ use serde_json::{Map, Value, json};
 
 use routectl_core::{
     ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result,
+    ReasoningDetailKind, Result, is_responses_family,
 };
 
 /// Render a canonical `ChatResponse` into a Responses `response` object.
@@ -250,9 +250,10 @@ struct ReasoningItemBuilder {
 }
 
 /// Reconstruct `reasoning` output items from canonical `reasoning_details`.
-/// Groups by `id` (preserving first-seen order); only details tagged
-/// `openai-responses-v1` participate (a foreign-format reasoning history
-/// would not deserialize into the Responses reasoning shape).
+/// Groups by `id` (preserving first-seen order); only details whose format
+/// tag belongs to the Responses family participate (a foreign-format
+/// reasoning history would not deserialize into the Responses reasoning
+/// shape).
 ///
 /// Per-id reconstruction mirrors `messages.rs::lift_reasoning_details`:
 ///   - Summary  -> `summary[] { type:"summary_text", text }`
@@ -267,7 +268,7 @@ fn build_reasoning_items(details: &[ReasoningDetail]) -> Vec<Value> {
         std::collections::HashMap::new();
 
     for d in details {
-        if d.format.as_deref() != Some(super::OPENAI_RESPONSES_FORMAT) {
+        if !is_responses_family(d.format.as_deref()) {
             continue;
         }
         let key = d.id.clone();

@@ -45,16 +45,6 @@ mod stream;
 
 use parse::translate_request;
 
-/// The reasoning-detail format tag routectl uses for Responses-shape
-/// reasoning history. Mirrors the egress constant
-/// `routectl_providers::openai_responses::OPENAI_RESPONSES_FORMAT`
-/// (`pub(crate)` over there, so it cannot be imported across the crate
-/// boundary). The ingress stamps inbound `reasoning` items with this tag
-/// so the egress's reasoning-replay path recognizes them on the next
-/// turn. Kept in lockstep with the egress spelling by hand; a divergence
-/// would silently break reasoning replay.
-pub(super) const OPENAI_RESPONSES_FORMAT: &str = "openai-responses-v1";
-
 /// OpenAI Responses ingress adapter.
 #[derive(Debug, Default)]
 pub struct ResponsesIngress;

@@ -8,8 +8,8 @@ use super::*;
 use axum::http::HeaderMap;
 use axum::http::header::HeaderName;
 use routectl_core::{
-    ContentPart, Error, KnownContentPart, MessageContent, ReasoningDetailKind, Role, SystemContent,
-    ToolDef,
+    ContentPart, Error, KnownContentPart, MessageContent, OPENAI_RESPONSES_V1, ReasoningDetailKind,
+    Role, SystemContent, ToolDef, is_responses_family,
 };
 use serde_json::json;
 
@@ -487,7 +487,7 @@ fn reasoning_item_maps_summary_to_reasoning_details() {
     assert_eq!(details.len(), 1);
     assert!(matches!(details[0].kind, ReasoningDetailKind::Summary));
     assert_eq!(details[0].id.as_deref(), Some("rs_1"));
-    assert_eq!(details[0].format.as_deref(), Some(OPENAI_RESPONSES_FORMAT));
+    assert_eq!(details[0].format.as_deref(), Some(OPENAI_RESPONSES_V1));
     assert_eq!(details[0].payload["text"], "step one");
 }
 
@@ -1043,13 +1043,11 @@ fn reasoning_item_opens_assistant_turn_when_none_trailing() {
 }
 
 #[test]
-fn openai_responses_format_constant_matches_egress_spelling() {
-    // The ingress redefines this tag rather than importing the egress's
-    // pub(crate) copy (hub-and-spoke forbids the cross-crate import). The
-    // two must stay byte-identical or reasoning replay silently breaks at
-    // the integration boundary. Machine-check the documented invariant;
-    // update BOTH constants together if the format tag ever changes.
-    assert_eq!(OPENAI_RESPONSES_FORMAT, "openai-responses-v1");
+fn stamped_ingress_tag_is_recognized_by_the_family_predicate() {
+    // The ingress stamps inbound reasoning items with the compatibility
+    // tag; every downstream reader gates on the family predicate, so the
+    // stamp must land inside the family or reasoning replay breaks.
+    assert!(is_responses_family(Some(OPENAI_RESPONSES_V1)));
 }
 
 // ---------------------------------------------------------------------------

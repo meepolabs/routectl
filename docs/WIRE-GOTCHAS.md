@@ -353,6 +353,26 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   - Being stateless is the point: continuity survives a daemon restart,
     an unbounded session, and several router instances behind a balancer
     without session affinity -- none of which a recovery table offers.
+  - **Encode site:** the two Anthropic-ingress flatten sites --
+    `build_content_array` in
+    `crates/routectl-cli/src/ingress/anthropic/render.rs` and its
+    streaming twin in `.../stream.rs` -- both go through
+    `encrypted_detail_data` in `.../anthropic/mod.rs`, so the two paths
+    cannot drift. A detail with no recoverable id wraps id-less rather
+    than not wrapping at all: one lane family validates content and
+    ignores the id entirely, so a scheme-only envelope is still fully
+    replayable there. An empty blob is never wrapped -- it carries
+    nothing to replay.
+  - **Anthropic-byte-verbatim carve-out.** The wrap fires ONLY on a
+    Responses-family detail, decided by the shared
+    `is_responses_family(format)` classifier. Everything else --
+    Anthropic-sourced above all, plus untagged and other-dialect details
+    -- reaches the wire byte-for-byte as the upstream issued it. An
+    Anthropic signature is precisely what makes same-model replay work
+    on that lane, and it is platform-portable same-model and silently
+    ignored cross-model, so it is never rejected; wrapping it would
+    corrupt a mechanism that works today. Never introduce a second local
+    notion of "is this Anthropic" beside the shared classifier.
 
 - **Reasoning `format` tags are a family, and comparing one with `==`
   silently drops details.** `ReasoningDetail.format` serializes outward to

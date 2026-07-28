@@ -841,3 +841,163 @@ fn render_response_drops_reserved_upstream_meta_key_from_extras() {
         "reserved upstream_meta key must never reach the rendered body, got: {obj:?}"
     );
 }
+
+/// Build a canonical response carrying exactly one `Encrypted`
+/// reasoning detail, so the flatten-to-`redacted_thinking` path can be
+/// exercised with an arbitrary `(format, id, blob)`.
+fn response_with_encrypted_detail(
+    format: Option<&str>,
+    id: Option<&str>,
+    blob: &str,
+) -> routectl_core::ChatResponse {
+    use routectl_core::{
+        Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, schema::Choice,
+    };
+    ChatResponse {
+        id: "msg_enc".into(),
+        model: "claude-opus-4-7".into(),
+        created: 0,
+        choices: vec![Choice {
+            logprobs: None,
+            index: 0,
+            message: Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("answer".into()),
+                reasoning: None,
+                reasoning_details: vec![ReasoningDetail {
+                    kind: ReasoningDetailKind::Encrypted,
+                    id: id.map(Into::into),
+                    format: format.map(Into::into),
+                    index: Some(0),
+                    payload: json!({"encrypted_content": blob}),
+                }],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        routectl_provider: None,
+        extras: Default::default(),
+        upstream_meta: None,
+    }
+}
+
+/// Extract the single `redacted_thinking.data` string from a rendered
+/// Anthropic response body.
+fn redacted_thinking_data(v: &Value) -> String {
+    v["content"]
+        .as_array()
+        .expect("content is array")
+        .iter()
+        .find(|b| b["type"] == "redacted_thinking")
+        .expect("redacted_thinking block present")["data"]
+        .as_str()
+        .expect("data is a string")
+        .to_string()
+}
+
+/// The Anthropic wire carries neither the artifact's item id nor its
+/// scheme, so a Responses-family blob flattened here would come back
+/// next turn indistinguishable from a native `redacted_thinking` and
+/// could no longer be replayed onto the lane that issued it. It must go
+/// out self-describing, with the original blob bytes untouched.
+#[test]
+fn render_response_wraps_a_foreign_scheme_encrypted_blob_with_its_scheme_and_id() {
+    // Arrange
+    const BLOB: &str = "rsn_OPAQUE-PROVIDER-PAYLOAD-9f31";
+    let resp = response_with_encrypted_detail(
+        Some(routectl_core::BEDROCK_MANTLE),
+        Some("rs_abc123"),
+        BLOB,
+    );
+
+    // Act
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+    let data = redacted_thinking_data(&v);
+
+    // Assert
+    let (scheme, id, blob) =
+        routectl_core::reasoning_envelope::unwrap(&data).expect("wire data is an envelope");
+    assert_eq!(scheme, routectl_core::BEDROCK_MANTLE);
+    assert_eq!(id, Some("rs_abc123"));
+    assert_eq!(blob, BLOB, "inner blob bytes must be unchanged");
+}
+
+/// An Anthropic-family blob must reach the wire BYTE-VERBATIM. Its
+/// native signature is what makes same-model replay work on that lane;
+/// wrapping it would corrupt a mechanism that works today.
+#[test]
+fn render_response_emits_an_anthropic_family_encrypted_blob_byte_verbatim() {
+    // Arrange
+    const BLOB: &str = "ErkBCkYIBRgCKkDd-ANTHROPIC-NATIVE-SIGNATURE";
+    let resp = response_with_encrypted_detail(
+        Some(crate::ingress::anthropic::ANTHROPIC_FORMAT),
+        Some("rd_1"),
+        BLOB,
+    );
+
+    // Act
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+    let data = redacted_thinking_data(&v);
+
+    // Assert
+    assert_eq!(data, BLOB, "Anthropic-sourced blob must not be wrapped");
+}
+
+/// An artifact with no recoverable id still wraps, id-less: one lane
+/// family validates content and ignores the id entirely, so the scheme
+/// alone keeps it replayable.
+#[test]
+fn render_response_wraps_an_id_less_foreign_blob_so_its_scheme_survives() {
+    // Arrange
+    const BLOB: &str = "smry_OPAQUE-PROVIDER-PAYLOAD-4c02";
+    let resp = response_with_encrypted_detail(Some(routectl_core::CODEX_OAUTH), None, BLOB);
+
+    // Act
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+    let data = redacted_thinking_data(&v);
+
+    // Assert
+    let (scheme, id, blob) =
+        routectl_core::reasoning_envelope::unwrap(&data).expect("id-less envelope round-trips");
+    assert_eq!(scheme, routectl_core::CODEX_OAUTH);
+    assert_eq!(id, None);
+    assert_eq!(blob, BLOB);
+}
+
+/// A detail with no format tag at all is not a Responses-family
+/// artifact, so it takes the verbatim path rather than being wrapped
+/// under a guessed scheme.
+#[test]
+fn render_response_emits_an_untagged_encrypted_blob_byte_verbatim() {
+    // Arrange
+    const BLOB: &str = "UNTAGGED-OPAQUE-PAYLOAD-1a77";
+    let resp = response_with_encrypted_detail(None, Some("rd_9"), BLOB);
+
+    // Act
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+    let data = redacted_thinking_data(&v);
+
+    // Assert
+    assert_eq!(data, BLOB, "an untagged blob must not be wrapped");
+}
+
+/// An empty blob carries nothing to replay, so wrapping it would only
+/// produce an envelope the decode side rejects.
+#[test]
+fn render_response_leaves_an_empty_encrypted_blob_unwrapped() {
+    // Arrange
+    let resp =
+        response_with_encrypted_detail(Some(routectl_core::BEDROCK_MANTLE), Some("rs_empty"), "");
+
+    // Act
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+    let data = redacted_thinking_data(&v);
+
+    // Assert
+    assert_eq!(data, "", "an empty blob must not become an envelope");
+}
