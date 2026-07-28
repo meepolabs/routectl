@@ -71,6 +71,22 @@ listed at the bottom of each crate.
   `CallerPrefixFinding`s (HIGH kinds only) for the dispatch-path advisory WARN
 - `src/reasoning_dialect.rs` -- crate-neutral `ReasoningDialect` +
   `HistoryReasoning` enums carried on `RoutectlInternal`
+- `src/reasoning_envelope.rs` -- std-only string codec making a reasoning
+  artifact self-describing when it crosses a dialect with no slot for its id
+  and scheme: `wrap` (closed `rctl1` version prefix + `.`-separated scheme/id,
+  blob copied verbatim) and `unwrap` (TOTAL parse -- malformed, truncated,
+  unknown-version, non-token-field, or empty-blob input returns `None`, never
+  errors, never panics). Stateless, so continuity survives restart, unbounded
+  sessions, and multiple router instances. The unwrapped `(scheme, id)` is
+  CLIENT-CONTROLLED and is a HINT, never an authorization -- carry-vs-strip
+  policy lives in the callers. `SEPARATOR_ABSENT_FROM_PROBED_BLOBS` pins the
+  observed blob prefixes the `.` separator choice rests on
+- `src/reasoning_format.rs` -- forever `ReasoningDetail.format` tag vocabulary
+  (`OPENAI_RESPONSES_V1` recognized-but-never-emitted, plus lane-faithful
+  `CODEX_OAUTH`/`OPENAI_APIKEY`/`BEDROCK_MANTLE`) + the pure predicates every
+  consumer shares: `is_responses_family` (family test, never `==`),
+  `scheme_of` -> `ReplayScheme` (Codex/Mantle/Gray validator family), and
+  `is_replayable(detail, lane)` -> `Replayability` (Carry/Strip/Gray)
 - `src/reserved.rs` -- `is_canonical_request_key` allowlist guarding
   extras-merge from clobbering `ChatRequest` fields
 - `src/capability.rs` -- shared capability-key vocabulary (`WEB_SEARCH`,
