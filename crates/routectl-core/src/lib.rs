@@ -17,6 +17,8 @@ pub mod identity;
 pub mod log_safe;
 pub(crate) mod provider;
 pub(crate) mod reasoning_dialect;
+pub mod reasoning_envelope;
+pub mod reasoning_format;
 pub(crate) mod reserved;
 pub mod schema;
 pub(crate) mod schema_opaque;
@@ -61,6 +63,10 @@ pub use log_safe::{
 pub use provider::{ProbeOutcome, Provider};
 pub use reasoning_dialect::{
     HistoryReasoning as CoreHistoryReasoning, ReasoningDialect as CoreReasoningDialect,
+};
+pub use reasoning_format::{
+    BEDROCK_MANTLE, CODEX_OAUTH, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReplayScheme, Replayability,
+    is_replayable, is_responses_family, scheme_of,
 };
 pub use reserved::is_canonical_request_key;
 pub use schema::{

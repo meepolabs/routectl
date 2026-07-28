@@ -1081,6 +1081,105 @@ pub fn routectl_core::log_safe::trace_structural_summary(&str, &str, &str, &serd
 pub fn routectl_core::log_safe::trace_upstream_response_headers(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::log_safe::trace_upstream_success_body(&str, &str, &serde_json::value::Value)
 pub fn routectl_core::log_safe::wrap_stream_with_summary<S>(S, &'static str, &'static str, alloc::string::String) -> futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>> where S: futures_core::stream::Stream<Item = routectl_core::error::Result<routectl_core::schema::ChatChunk>> + core::marker::Send + 'static
+pub mod routectl_core::reasoning_envelope
+pub fn routectl_core::reasoning_envelope::unwrap(&str) -> core::option::Option<(&str, core::option::Option<&str>, &str)>
+pub fn routectl_core::reasoning_envelope::wrap(&str, core::option::Option<&str>, &str) -> alloc::string::String
+pub mod routectl_core::reasoning_format
+pub enum routectl_core::reasoning_format::ReplayScheme
+pub routectl_core::reasoning_format::ReplayScheme::Codex
+pub routectl_core::reasoning_format::ReplayScheme::Gray
+pub routectl_core::reasoning_format::ReplayScheme::Mantle
+impl core::clone::Clone for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::clone(&self) -> routectl_core::reasoning_format::ReplayScheme
+impl core::cmp::Eq for routectl_core::reasoning_format::ReplayScheme
+impl core::cmp::PartialEq for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::eq(&self, &routectl_core::reasoning_format::ReplayScheme) -> bool
+impl core::fmt::Debug for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::StructuralPartialEq for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Freeze for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Send for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Sync for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Unpin for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::UnsafeUnpin for routectl_core::reasoning_format::ReplayScheme
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_format::ReplayScheme
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_format::ReplayScheme
+impl<T, U> core::convert::Into<U> for routectl_core::reasoning_format::ReplayScheme where U: core::convert::From<T>
+pub fn routectl_core::reasoning_format::ReplayScheme::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_format::ReplayScheme where U: core::convert::Into<T>
+pub type routectl_core::reasoning_format::ReplayScheme::Error = core::convert::Infallible
+pub fn routectl_core::reasoning_format::ReplayScheme::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_format::ReplayScheme where U: core::convert::TryFrom<T>
+pub type routectl_core::reasoning_format::ReplayScheme::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::reasoning_format::ReplayScheme::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_format::ReplayScheme where T: core::clone::Clone
+pub type routectl_core::reasoning_format::ReplayScheme::Owned = T
+pub fn routectl_core::reasoning_format::ReplayScheme::clone_into(&self, &mut T)
+pub fn routectl_core::reasoning_format::ReplayScheme::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::reasoning_format::ReplayScheme where T: 'static + ?core::marker::Sized
+pub fn routectl_core::reasoning_format::ReplayScheme::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_format::ReplayScheme where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::ReplayScheme::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_format::ReplayScheme where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::ReplayScheme::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::reasoning_format::ReplayScheme where T: core::clone::Clone
+pub unsafe fn routectl_core::reasoning_format::ReplayScheme::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::reasoning_format::ReplayScheme
+impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_format::ReplayScheme
+pub enum routectl_core::reasoning_format::Replayability
+pub routectl_core::reasoning_format::Replayability::Carry
+pub routectl_core::reasoning_format::Replayability::Gray
+pub routectl_core::reasoning_format::Replayability::Strip
+impl core::clone::Clone for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::clone(&self) -> routectl_core::reasoning_format::Replayability
+impl core::cmp::Eq for routectl_core::reasoning_format::Replayability
+impl core::cmp::PartialEq for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::eq(&self, &routectl_core::reasoning_format::Replayability) -> bool
+impl core::fmt::Debug for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::reasoning_format::Replayability
+impl core::marker::StructuralPartialEq for routectl_core::reasoning_format::Replayability
+impl core::marker::Freeze for routectl_core::reasoning_format::Replayability
+impl core::marker::Send for routectl_core::reasoning_format::Replayability
+impl core::marker::Sync for routectl_core::reasoning_format::Replayability
+impl core::marker::Unpin for routectl_core::reasoning_format::Replayability
+impl core::marker::UnsafeUnpin for routectl_core::reasoning_format::Replayability
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_format::Replayability
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_format::Replayability
+impl<T, U> core::convert::Into<U> for routectl_core::reasoning_format::Replayability where U: core::convert::From<T>
+pub fn routectl_core::reasoning_format::Replayability::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_format::Replayability where U: core::convert::Into<T>
+pub type routectl_core::reasoning_format::Replayability::Error = core::convert::Infallible
+pub fn routectl_core::reasoning_format::Replayability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_format::Replayability where U: core::convert::TryFrom<T>
+pub type routectl_core::reasoning_format::Replayability::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::reasoning_format::Replayability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_format::Replayability where T: core::clone::Clone
+pub type routectl_core::reasoning_format::Replayability::Owned = T
+pub fn routectl_core::reasoning_format::Replayability::clone_into(&self, &mut T)
+pub fn routectl_core::reasoning_format::Replayability::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::reasoning_format::Replayability where T: 'static + ?core::marker::Sized
+pub fn routectl_core::reasoning_format::Replayability::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_format::Replayability where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::Replayability::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_format::Replayability where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::Replayability::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::reasoning_format::Replayability where T: core::clone::Clone
+pub unsafe fn routectl_core::reasoning_format::Replayability::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::reasoning_format::Replayability
+impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_format::Replayability
+pub const routectl_core::reasoning_format::BEDROCK_MANTLE: &str
+pub const routectl_core::reasoning_format::CODEX_OAUTH: &str
+pub const routectl_core::reasoning_format::OPENAI_APIKEY: &str
+pub const routectl_core::reasoning_format::OPENAI_RESPONSES_V1: &str
+pub fn routectl_core::reasoning_format::is_replayable(routectl_core::reasoning_format::ReplayScheme, routectl_core::reasoning_format::ReplayScheme) -> routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::is_responses_family(core::option::Option<&str>) -> bool
+pub fn routectl_core::reasoning_format::scheme_of(core::option::Option<&str>) -> routectl_core::reasoning_format::ReplayScheme
 pub mod routectl_core::schema
 pub enum routectl_core::schema::MessageContent
 pub routectl_core::schema::MessageContent::Null
@@ -3032,6 +3131,94 @@ impl<T> core::convert::From<T> for routectl_core::context_reduction::ReductionOu
 pub fn routectl_core::context_reduction::ReductionOutcome::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::context_reduction::ReductionOutcome
 impl<T> tracing::instrument::WithSubscriber for routectl_core::context_reduction::ReductionOutcome
+pub enum routectl_core::ReplayScheme
+pub routectl_core::ReplayScheme::Codex
+pub routectl_core::ReplayScheme::Gray
+pub routectl_core::ReplayScheme::Mantle
+impl core::clone::Clone for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::clone(&self) -> routectl_core::reasoning_format::ReplayScheme
+impl core::cmp::Eq for routectl_core::reasoning_format::ReplayScheme
+impl core::cmp::PartialEq for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::eq(&self, &routectl_core::reasoning_format::ReplayScheme) -> bool
+impl core::fmt::Debug for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::StructuralPartialEq for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Freeze for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Send for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Sync for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::Unpin for routectl_core::reasoning_format::ReplayScheme
+impl core::marker::UnsafeUnpin for routectl_core::reasoning_format::ReplayScheme
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_format::ReplayScheme
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_format::ReplayScheme
+impl<T, U> core::convert::Into<U> for routectl_core::reasoning_format::ReplayScheme where U: core::convert::From<T>
+pub fn routectl_core::reasoning_format::ReplayScheme::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_format::ReplayScheme where U: core::convert::Into<T>
+pub type routectl_core::reasoning_format::ReplayScheme::Error = core::convert::Infallible
+pub fn routectl_core::reasoning_format::ReplayScheme::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_format::ReplayScheme where U: core::convert::TryFrom<T>
+pub type routectl_core::reasoning_format::ReplayScheme::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::reasoning_format::ReplayScheme::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_format::ReplayScheme where T: core::clone::Clone
+pub type routectl_core::reasoning_format::ReplayScheme::Owned = T
+pub fn routectl_core::reasoning_format::ReplayScheme::clone_into(&self, &mut T)
+pub fn routectl_core::reasoning_format::ReplayScheme::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::reasoning_format::ReplayScheme where T: 'static + ?core::marker::Sized
+pub fn routectl_core::reasoning_format::ReplayScheme::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_format::ReplayScheme where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::ReplayScheme::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_format::ReplayScheme where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::ReplayScheme::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::reasoning_format::ReplayScheme where T: core::clone::Clone
+pub unsafe fn routectl_core::reasoning_format::ReplayScheme::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::reasoning_format::ReplayScheme::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::reasoning_format::ReplayScheme
+impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_format::ReplayScheme
+pub enum routectl_core::Replayability
+pub routectl_core::Replayability::Carry
+pub routectl_core::Replayability::Gray
+pub routectl_core::Replayability::Strip
+impl core::clone::Clone for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::clone(&self) -> routectl_core::reasoning_format::Replayability
+impl core::cmp::Eq for routectl_core::reasoning_format::Replayability
+impl core::cmp::PartialEq for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::eq(&self, &routectl_core::reasoning_format::Replayability) -> bool
+impl core::fmt::Debug for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::reasoning_format::Replayability
+impl core::marker::StructuralPartialEq for routectl_core::reasoning_format::Replayability
+impl core::marker::Freeze for routectl_core::reasoning_format::Replayability
+impl core::marker::Send for routectl_core::reasoning_format::Replayability
+impl core::marker::Sync for routectl_core::reasoning_format::Replayability
+impl core::marker::Unpin for routectl_core::reasoning_format::Replayability
+impl core::marker::UnsafeUnpin for routectl_core::reasoning_format::Replayability
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::reasoning_format::Replayability
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::reasoning_format::Replayability
+impl<T, U> core::convert::Into<U> for routectl_core::reasoning_format::Replayability where U: core::convert::From<T>
+pub fn routectl_core::reasoning_format::Replayability::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::reasoning_format::Replayability where U: core::convert::Into<T>
+pub type routectl_core::reasoning_format::Replayability::Error = core::convert::Infallible
+pub fn routectl_core::reasoning_format::Replayability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::reasoning_format::Replayability where U: core::convert::TryFrom<T>
+pub type routectl_core::reasoning_format::Replayability::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::reasoning_format::Replayability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::reasoning_format::Replayability where T: core::clone::Clone
+pub type routectl_core::reasoning_format::Replayability::Owned = T
+pub fn routectl_core::reasoning_format::Replayability::clone_into(&self, &mut T)
+pub fn routectl_core::reasoning_format::Replayability::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::reasoning_format::Replayability where T: 'static + ?core::marker::Sized
+pub fn routectl_core::reasoning_format::Replayability::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::reasoning_format::Replayability where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::Replayability::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::reasoning_format::Replayability where T: ?core::marker::Sized
+pub fn routectl_core::reasoning_format::Replayability::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::reasoning_format::Replayability where T: core::clone::Clone
+pub unsafe fn routectl_core::reasoning_format::Replayability::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::reasoning_format::Replayability
+pub fn routectl_core::reasoning_format::Replayability::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::reasoning_format::Replayability
+impl<T> tracing::instrument::WithSubscriber for routectl_core::reasoning_format::Replayability
 #[non_exhaustive] pub enum routectl_core::RequestProvenance
 pub routectl_core::RequestProvenance::AnthropicIngress
 pub routectl_core::RequestProvenance::Library
@@ -4811,7 +4998,9 @@ impl<T> core::convert::From<T> for routectl_core::VolatileReport
 pub fn routectl_core::VolatileReport::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::VolatileReport
 impl<T> tracing::instrument::WithSubscriber for routectl_core::VolatileReport
+pub const routectl_core::BEDROCK_MANTLE: &str
 pub const routectl_core::CACHE_HIT: &str
+pub const routectl_core::CODEX_OAUTH: &str
 pub const routectl_core::COMPUTER_USE: &str
 pub const routectl_core::EVIDENCE_CLASSES: &[&str]
 pub const routectl_core::HDR_MSG_EGRESS: &str
@@ -4821,6 +5010,8 @@ pub const routectl_core::HDR_MSG_UPSTREAM: &str
 pub const routectl_core::MAX_ERROR_BODY_BYTES: usize
 pub const routectl_core::MAX_LOG_BODY_EXCERPT: usize
 pub const routectl_core::MAX_TRACE_BODY_BYTES: usize
+pub const routectl_core::OPENAI_APIKEY: &str
+pub const routectl_core::OPENAI_RESPONSES_V1: &str
 pub const routectl_core::PROMPT_CACHING: &str
 pub const routectl_core::SCHEMA_MISMATCH: &str
 pub const routectl_core::SCHEMA_PARSE: &str
@@ -4868,6 +5059,8 @@ pub fn routectl_core::init_log_overrides(core::option::Option<bool>, core::optio
 pub fn routectl_core::is_canonical_request_key(&str) -> bool
 pub fn routectl_core::is_json_error_envelope(&str) -> bool
 pub fn routectl_core::is_known_evidence_class(&str) -> bool
+pub fn routectl_core::is_replayable(routectl_core::reasoning_format::ReplayScheme, routectl_core::reasoning_format::ReplayScheme) -> routectl_core::reasoning_format::Replayability
+pub fn routectl_core::is_responses_family(core::option::Option<&str>) -> bool
 pub fn routectl_core::minify_json_whitespace(&str) -> core::option::Option<alloc::string::String>
 pub fn routectl_core::mutable_suffix_start(&routectl_core::schema::ChatRequest) -> core::option::Option<usize>
 pub fn routectl_core::normalize_capability_key(&str, &str) -> alloc::string::String
@@ -4879,6 +5072,7 @@ pub fn routectl_core::sanitize_upstream_body_with_byte_cap(&str, usize) -> alloc
 pub fn routectl_core::sanitize_upstream_body_with_cap(&str, usize) -> alloc::string::String
 pub fn routectl_core::scan_caller_prefix_advisory(&routectl_core::schema::ChatRequest) -> routectl_core::CallerPrefixAdvisory
 pub fn routectl_core::scan_volatile(&routectl_core::schema::ChatRequest) -> routectl_core::VolatileReport
+pub fn routectl_core::scheme_of(core::option::Option<&str>) -> routectl_core::reasoning_format::ReplayScheme
 pub fn routectl_core::trace_body_cap() -> usize
 pub fn routectl_core::trace_egress_body(&str, &serde_json::value::Value)
 pub fn routectl_core::trace_egress_headers(&str, &serde_json::value::Value)

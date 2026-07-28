@@ -317,6 +317,65 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   `#[serde(skip_serializing_if = "String::is_empty")]` -- it is always
   emitted (possibly as `""`) so the server never sees the field missing.
 
+- **A Responses-family reasoning artifact loses its id and scheme across
+  an Anthropic-dialect client.** The Anthropic wire has no slot for
+  either, so the blob flattens to `redacted_thinking.data`. When the
+  client echoes it back there is nothing on the wire saying what it is,
+  so it cannot be replayed onto the lane that issued it and reasoning
+  continuity is lost. `routectl-core/src/reasoning_envelope.rs` carries
+  the artifact in a self-describing envelope instead:
+
+  ```text
+  rctl1.<scheme>.<id>.<blob>
+  ```
+
+  - The `rctl1` version prefix is a CLOSED set. An unrecognized version
+    is a non-match, never a best-effort parse, so a future format cannot
+    be mis-read by an older reader.
+  - **Separator invariant:** `.` is safe because no artifact family
+    routectl carries contains it -- content-prefixed blobs (`rsn_`,
+    `smry_`) and Anthropic signatures (`CAIS`, `Erk`) are `.`-free as
+    probed, and Fernet-shaped blobs are base64url, which excludes `.` by
+    construction. Pinned by the `SEPARATOR_ABSENT_FROM_PROBED_BLOBS`
+    test constant. The invariant is collision-avoidance, not safety: a
+    blob that ever did contain `.` degrades to a non-match, which is the
+    safe direction.
+  - The blob rides the remainder UNTOUCHED whatever its alphabet, and
+    unwrapping returns a slice, so bytes replayed upstream are identical
+    to what the provider issued -- prompt-cache affinity is preserved.
+  - **The unwrapped `(scheme, id)` is CLIENT-CONTROLLED and is a HINT,
+    never an authorization.** Anyone can mint a string claiming any
+    scheme. Carry-vs-strip policy must run on an unwrapped result
+    exactly as on a natively tagged artifact; a claim can never be what
+    admits a blob to a lane. Parsing is total -- malformed,
+    unknown-version, or non-matching input degrades to opaque-foreign-blob
+    handling, never an error or a panic.
+  - Being stateless is the point: continuity survives a daemon restart,
+    an unbounded session, and several router instances behind a balancer
+    without session affinity -- none of which a recovery table offers.
+
+- **Reasoning `format` tags are a family, and comparing one with `==`
+  silently drops details.** `ReasoningDetail.format` serializes outward to
+  OpenAI-dialect clients, so its values are a wire contract and in-flight
+  client histories already carry them. The vocabulary lives in
+  `routectl-core::reasoning_format`: `openai-responses-v1` (recognized
+  forever, no longer emitted), plus the lane-faithful `codex-oauth`,
+  `openai-apikey` and `bedrock-mantle`. Every reader uses
+  `is_responses_family(format)` -- an exact-equality check against a single
+  tag drops every newly-tagged detail instead of failing loudly.
+
+- **Replay portability is per-lane, not per-model, and the lanes are not
+  interchangeable.** `scheme_of(format)` maps a tag to its validator
+  family: codex-oauth and openai-apikey validate the reasoning item id and
+  ignore the blob content; Bedrock mantle validates the content prefix
+  (`rsn_` / `smry_`) and ignores the id, 400ing with
+  `encrypted content missing recognized prefix` on a foreign blob. Both
+  lanes mint `rs_`-prefixed ids, so id shape can never discriminate --
+  only the tag can. `openai-responses-v1` maps to `ReplayScheme::Gray`
+  because both lanes emitted it, so a detail bearing it is genuinely
+  ambiguous; `is_replayable(detail, lane)` answers `Carry`/`Strip` only for
+  proven pairs and `Gray` otherwise.
+
 ## Gemini (native) surface
 
 Operator-facing config recipes live in
