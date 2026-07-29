@@ -401,6 +401,7 @@ fn lift_reasoning_details(
         }
     }
 
+    let mut empty_encrypted_count: u32 = 0;
     for key in order {
         let group = groups.remove(&key).expect("recorded in order");
         let encrypted_content = group.encrypted_content.unwrap_or_default();
@@ -408,11 +409,11 @@ fn lift_reasoning_details(
         // validly replayed: re-injecting it by its upstream id is a
         // no-op (chatgpt-oauth) or a hard 404 "Item not found"
         // (api.openai.com). Skip it rather than ship a dangling id.
+        // The upstream item id is a reasoning-replay artifact and must
+        // never reach a log line at any level -- count the skips and
+        // emit a bounded aggregate instead of the id itself.
         if encrypted_content.is_empty() {
-            tracing::debug!(
-                ?key,
-                "openai-responses: skipping reasoning replay item with empty encrypted_content"
-            );
+            empty_encrypted_count += 1;
             continue;
         }
         out.push(ResponseInputItem::Reasoning {
@@ -421,6 +422,12 @@ fn lift_reasoning_details(
             content: group.content,
             encrypted_content,
         });
+    }
+    if empty_encrypted_count > 0 {
+        tracing::debug!(
+            skipped_empty_encrypted = empty_encrypted_count,
+            "openai-responses: skipped reasoning replay item(s) with empty encrypted_content"
+        );
     }
 
     if skipped_count > 0 {
@@ -1073,6 +1080,43 @@ mod messages_tests {
             out.is_empty(),
             "expected no Reasoning items for a v1 detail with empty encrypted_content"
         );
+    }
+
+    #[test]
+    fn skip_path_never_logs_the_reasoning_item_id() {
+        // The empty-encrypted_content skip path drops a reasoning item
+        // that carries an upstream id. That id is a reasoning-replay
+        // artifact and must never reach a log line at any level -- capture
+        // every emitted event and assert the id appears in neither the
+        // message nor any field value.
+        const SECRET_ID: &str = "rs_SECRET_ITEM_ID_DO_NOT_LOG";
+        let details = vec![ReasoningDetail {
+            kind: ReasoningDetailKind::Text,
+            id: Some(SECRET_ID.to_string()),
+            format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+            index: None,
+            payload: json!({"text": "the reasoning text"}),
+        }];
+
+        let events = routectl_testkit::capture_events(|| {
+            let mut out = Vec::new();
+            lift_reasoning_details(&details, AuthKind::ChatgptOauth, &mut out);
+            assert!(out.is_empty(), "empty-encrypted item must be skipped");
+        });
+
+        for ev in &events {
+            assert!(
+                !ev.message.contains(SECRET_ID),
+                "reasoning item id leaked into a log message: {:?}",
+                ev.message
+            );
+            for (name, value) in &ev.fields {
+                assert!(
+                    !value.contains(SECRET_ID),
+                    "reasoning item id leaked into log field {name}={value}"
+                );
+            }
+        }
     }
 
     #[test]

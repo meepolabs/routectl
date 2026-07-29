@@ -28,15 +28,21 @@
 //!
 //! Plus 4xx/5xx error bodies via [`debug_upstream_error_body`] at DEBUG.
 //!
-//! All four body helpers honor `ROUTECTL_LOG_REDACT_PROMPTS=1`: when
-//! set, [`redact_prompts_in`] strips known prompt fields (text blocks,
-//! tool_use input, instructions, refusal blocks, image data URIs,
-//! Bedrock Converse `toolUse.input` and `toolResult.content[*].json`)
-//! and replaces them with `<redacted len=N>` while preserving
-//! structural fields (model, tools, sampling params, finish_reason,
-//! usage). Best-effort: the walker is keyed off known wire shapes
-//! and an unknown shape can still leak. Operators flipping TRACE in
-//! a sensitive environment should set the redact knob.
+//! All four body helpers redact reasoning-replay carry artifacts
+//! (`encrypted_content`, a `type:"thinking"` block's `signature`, a
+//! `type:"redacted_thinking"` block's `data`, and a `type:"reasoning"`
+//! item's `id`) UNCONDITIONALLY -- these opaque blobs and upstream item
+//! ids must never reach a trace body at any level, independent of the
+//! prompt-redaction knob. On top of that, they honor
+//! `ROUTECTL_LOG_REDACT_PROMPTS=1`: when set, [`redact_prompts_in`]
+//! strips known prompt fields (text blocks, tool_use input,
+//! instructions, refusal blocks, image data URIs, Bedrock Converse
+//! `toolUse.input` and `toolResult.content[*].json`) and replaces them
+//! with `<redacted len=N>` while preserving structural fields (model,
+//! tools, sampling params, finish_reason, usage). Best-effort: the
+//! walker is keyed off known wire shapes and an unknown shape can still
+//! leak. Operators flipping TRACE in a sensitive environment should set
+//! the redact knob.
 //!
 //! ## Helper arg shapes
 //!
@@ -441,11 +447,22 @@ fn log_header_trace_status() {
     });
 }
 
-/// Public facade: when `ROUTECTL_LOG_REDACT_PROMPTS=1` is set in the
-/// environment, walks `body` and replaces known user-content fields
-/// with `<redacted len=N>` placeholders while preserving structural
-/// fields (model, tools, sampling params, finish_reason, usage).
-/// When the env var is unset, returns a clone unchanged.
+/// Public facade for the body-trace helpers.
+///
+/// Reasoning-replay carry artifacts (`encrypted_content`, a
+/// `type:"thinking"` block's `signature`, a `type:"redacted_thinking"`
+/// block's `data`, and a `type:"reasoning"` item's `id`) are ALWAYS
+/// redacted, independent of `ROUTECTL_LOG_REDACT_PROMPTS` -- they are
+/// opaque cryptographic blobs and upstream item ids that must never
+/// reach a trace body at any level (a security constraint, not a
+/// prompt-privacy preference).
+///
+/// When `ROUTECTL_LOG_REDACT_PROMPTS=1` is additionally set, the full
+/// walk also replaces known user-content fields with `<redacted len=N>`
+/// placeholders while preserving structural fields (model, tools,
+/// sampling params, finish_reason, usage). When the env var is unset,
+/// only the reasoning-artifact redaction runs and every other field is
+/// returned unchanged.
 ///
 /// Best-effort redaction: covers the wire shapes used by OpenAI Chat
 /// Completions, Anthropic Messages, and OpenAI Responses (request
@@ -459,16 +476,80 @@ pub fn redact_prompts_in(body: &serde_json::Value) -> serde_json::Value {
 /// Test-friendly variant of [`redact_prompts_in`] that takes the flag
 /// explicitly, sidestepping the process-global `OnceLock` so unit
 /// tests can pin both branches deterministically.
+///
+/// `enabled` governs ONLY prompt/content-text redaction. Reasoning
+/// artifacts are redacted in both branches: the full [`redact_value`]
+/// walk covers them (it calls [`redact_reasoning_artifact_fields`] per
+/// object), and the flag-off branch runs the reasoning-only
+/// [`redact_reasoning_artifacts`] walk.
 pub(crate) fn redact_prompts_with_flag(
     body: &serde_json::Value,
     enabled: bool,
 ) -> serde_json::Value {
-    if !enabled {
-        return body.clone();
-    }
     let mut v = body.clone();
-    redact_value(&mut v);
+    if enabled {
+        redact_value(&mut v);
+    } else {
+        redact_reasoning_artifacts(&mut v);
+    }
     v
+}
+
+/// Walk `v` and redact reasoning-replay carry artifacts wherever they
+/// appear, leaving every other field untouched. Applied UNCONDITIONALLY
+/// by the body-trace helpers when the prompt-redaction knob is off, so a
+/// reasoning blob, its `data` / `signature` sibling, or an upstream
+/// reasoning item id can never reach a trace body at any level.
+fn redact_reasoning_artifacts(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Array(arr) => {
+            for elem in arr {
+                redact_reasoning_artifacts(elem);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            redact_reasoning_artifact_fields(map);
+            for (_, child) in map.iter_mut() {
+                redact_reasoning_artifacts(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Redact the reasoning-replay carry artifacts on a single object map,
+/// in place. These are opaque cryptographic carry blobs and upstream
+/// item identifiers -- never operator-facing triage metadata -- so a
+/// body-tracing path must never surface them, REGARDLESS of the
+/// `ROUTECTL_LOG_REDACT_PROMPTS` prompt-redaction knob:
+///
+/// - `encrypted_content` (OpenAI Responses reasoning item carry blob),
+/// - a `type:"thinking"` block's `signature` (Anthropic reasoning carry
+///   blob; a Bedrock `reasoningText.signature` -- no `type:"thinking"`
+///   sibling -- is an operator triage signal and stays visible),
+/// - a `type:"redacted_thinking"` block's `data` (opaque safety blob),
+/// - a `type:"reasoning"` item's `id` (the upstream reasoning item id;
+///   other item ids -- message, tool_call, response -- stay visible for
+///   triage).
+///
+/// Shared by [`redact_reasoning_artifacts`] (knob-off walk) and
+/// [`redact_value`] (full-redaction walk) so the reasoning rules live in
+/// one place.
+fn redact_reasoning_artifact_fields(map: &mut serde_json::Map<String, serde_json::Value>) {
+    let type_str = map.get("type").and_then(serde_json::Value::as_str);
+    let is_thinking = type_str == Some("thinking");
+    let is_redacted_thinking = type_str == Some("redacted_thinking");
+    let is_reasoning = type_str == Some("reasoning");
+    if let Some(entry) = map.get_mut("encrypted_content") {
+        redact_string_or_recurse(entry);
+    }
+    if is_thinking && let Some(sig) = map.get_mut("signature") {
+        redact_string_or_recurse(sig);
+    } else if is_redacted_thinking && let Some(data) = map.get_mut("data") {
+        redact_string_or_recurse(data);
+    } else if is_reasoning && let Some(id) = map.get_mut("id") {
+        redact_string_or_recurse(id);
+    }
 }
 
 /// Recursive in-place redaction. Key-aware: only known user-content
@@ -484,6 +565,12 @@ fn redact_value(v: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Object(map) => {
+            // Reasoning-replay carry artifacts (encrypted_content,
+            // thinking signature, redacted_thinking data, reasoning
+            // item id) are redacted here as well as on the knob-off
+            // path, so full redaction is a superset of the unconditional
+            // reasoning redaction. Rules live in one shared helper.
+            redact_reasoning_artifact_fields(map);
             // Whole-object replacements first.
             //
             // Anthropic-shape tool_use parts carry user-supplied tool
@@ -611,16 +698,10 @@ fn redact_value(v: &mut serde_json::Value) {
             }
 
             // Per-key sweep. Known user-content keys are redacted at
-            // the leaf; everything else recurses.
-            //
-            // Captured before the mutable walk so a per-key arm can gate
-            // on the block's own `type` without re-borrowing the map: an
-            // Anthropic `thinking` block's `signature` is an opaque
-            // reasoning carry blob (redact it), while a Bedrock Converse
-            // `reasoningText.signature` -- which carries no
-            // `type:"thinking"` sibling -- is a deliberately-kept operator
-            // triage signal (leave it visible).
-            let is_thinking_block = map.get("type").and_then(|t| t.as_str()) == Some("thinking");
+            // the leaf; everything else recurses. Reasoning-artifact
+            // keys (encrypted_content, thinking signature,
+            // redacted_thinking data, reasoning id) were already handled
+            // above by `redact_reasoning_artifact_fields`.
             let keys: Vec<String> = map.keys().cloned().collect();
             for k in keys {
                 let Some(entry) = map.get_mut(&k) else {
@@ -659,23 +740,6 @@ fn redact_value(v: &mut serde_json::Value) {
                     // `output: {message: ...}` object -- both
                     // structured shapes recurse cleanly.
                     "system" | "content" | "output" => {
-                        redact_string_or_recurse(entry);
-                    }
-                    // Reasoning-replay carry payload. The OpenAI Responses
-                    // reasoning item's `encrypted_content` and an Anthropic
-                    // `thinking` block's `signature` are opaque
-                    // cryptographic carry blobs, never operator-facing
-                    // metadata (a `redacted_thinking` blob rides `data`,
-                    // caught above). A body-tracing path must never surface
-                    // one: redact the string leaf, recurse otherwise for
-                    // forward-compat. `signature` is gated on the thinking
-                    // block so a Bedrock `reasoningText.signature` (an
-                    // operator triage signal, no `type:"thinking"` sibling)
-                    // stays visible.
-                    "encrypted_content" => {
-                        redact_string_or_recurse(entry);
-                    }
-                    "signature" if is_thinking_block => {
                         redact_string_or_recurse(entry);
                     }
                     // Image / document source data (base64). Only
@@ -1635,17 +1699,14 @@ impl Drop for StreamWithSummary {
 ///
 /// HTML pages from misconfigured proxies / CDN error pages are
 /// collapsed via [`sanitize_upstream_body_with_cap`] so the log
-/// doesn't fill with markup.
+/// doesn't fill with markup. A JSON error envelope is first run through
+/// [`redact_prompts_in`] so reasoning-replay carry artifacts an upstream
+/// echoes back can never reach a DEBUG body.
 pub fn debug_upstream_error_body(provider_kind: &str, provider_id: &str, status: u16, body: &str) {
     if !tracing::event_enabled!(tracing::Level::DEBUG) {
         return;
     }
-    let cleaned = sanitize_upstream_body_with_cap(body, MAX_DEBUG_BODY_BYTES);
-    // Strip control chars (CR, LF, ANSI escapes) that sanitize_upstream_body_with_cap
-    // does NOT remove -- it only HTML-collapses + length-caps. Without this step a
-    // malicious/compromised upstream can forge fake log lines up to 4 KB on any
-    // text-format subscriber when the operator runs at DEBUG during triage.
-    let cleaned = sanitize_capped(&cleaned, MAX_DEBUG_BODY_BYTES);
+    let cleaned = clean_upstream_error_body(body);
     tracing::debug!(
         provider_kind,
         provider = provider_id,
@@ -1653,6 +1714,32 @@ pub fn debug_upstream_error_body(provider_kind: &str, provider_id: &str, status:
         body = %cleaned,
         "upstream error body"
     );
+}
+
+/// Build the log-safe form of an upstream error body for the DEBUG line.
+///
+/// A JSON error envelope can echo the request's reasoning-replay carry
+/// artifacts (encrypted_content, a thinking signature, redacted_thinking
+/// data, a reasoning item id). Parseable bodies go through the same
+/// redaction entry point the trace helpers use -- it ALWAYS strips those
+/// artifacts regardless of the prompt-redaction knob -- before serializing
+/// and capping. serde_json escapes control chars, so the forged-log-line
+/// concern is handled by serialization on this path. Non-JSON bodies fall
+/// back to the HTML-collapse + control-char-strip path.
+fn clean_upstream_error_body(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(parsed) => truncate_json_for_log(&redact_prompts_in(&parsed), MAX_DEBUG_BODY_BYTES),
+        Err(_) => {
+            let collapsed = sanitize_upstream_body_with_cap(body, MAX_DEBUG_BODY_BYTES);
+            // Strip control chars (CR, LF, ANSI escapes) that
+            // sanitize_upstream_body_with_cap does NOT remove -- it only
+            // HTML-collapses + length-caps. Without this step a
+            // malicious/compromised upstream can forge fake log lines up to
+            // 4 KB on any text-format subscriber when the operator runs at
+            // DEBUG during triage.
+            sanitize_capped(&collapsed, MAX_DEBUG_BODY_BYTES)
+        }
+    }
 }
 
 // Config-side fallback seeds for the three `[log]` knobs. None until
