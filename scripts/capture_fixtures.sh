@@ -422,6 +422,38 @@ write_fixture() {
 }
 META
 
+  # Sanitize before promoting: captured bodies echo system-reminder text
+  # that embeds the contributor's own home path (both the literal
+  # `$HOME/...` form and the dash-encoded `.claude/projects/-home-...`
+  # dir-name form). Replace both with a neutral placeholder so a private
+  # filesystem path never lands in the corpus. Runs over every file the
+  # rig just wrote.
+  local _home="${HOME%/}"
+  if [ -n "$_home" ]; then
+    # A newline in HOME would split the sed script and silently corrupt
+    # or skip the scrub, promoting a fixture that still carries the
+    # private path -- refuse loudly instead.
+    case $_home in
+      *$'\n'*)
+        echo "capture_fixtures: HOME contains a newline; refusing to scrub" >&2
+        return 1
+        ;;
+    esac
+    local _home_enc="${_home//\//-}"
+    # Escape backslashes, BRE metacharacters, and the '#' delimiter so a
+    # home path carrying sed-special chars cannot break or misfire the
+    # substitution. The replacement sides below are fixed literals with
+    # no `&` or backslash, so only the match side needs escaping.
+    local _home_re _home_enc_re
+    _home_re=$(printf '%s' "$_home" | sed 's/[]\\.*^$[#]/\\&/g')
+    _home_enc_re=$(printf '%s' "$_home_enc" | sed 's/[]\\.*^$[#]/\\&/g')
+    local _f
+    for _f in "$tmp"/*; do
+      [ -f "$_f" ] || continue
+      sed -i -e "s#${_home_enc_re}#-home-user#g" -e "s#${_home_re}#/home/user#g" "$_f"
+    done
+  fi
+
   # Atomically promote the tmp directory into place. Until this
   # rename succeeds the final `$OUT/<id>` directory does not exist;
   # an interrupted run leaves a `.tmp.*` dir that the next startup

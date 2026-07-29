@@ -262,7 +262,15 @@ day-to-day capture flow.
 
    Fixtures land under
    `crates/routectl-cli/tests/fixtures/captured/<request_id>/`. The
-   directory is gitignored: never commit it.
+   directory is gitignored: never commit it. Before writing each
+   fixture the script rewrites your own home path (both `$HOME/...`
+   and the dash-encoded `-home-...` form that appears in
+   `.claude/projects/` dir names) to a neutral `/home/user`
+   placeholder, so a captured system-reminder never embeds a private
+   filesystem path. Other personal tokens a body may echo (git author
+   name/email from a captured `git log`, `ls -l` owner columns) are
+   not auto-scrubbed -- eyeball a fresh capture and sanitize by hand if
+   your traffic carried any.
 
 5. **Run the replay tests against the local corpus:**
 
