@@ -189,9 +189,14 @@ pub(super) fn read_parse_validate_config(path: &Path) -> Option<LoadedConfig> {
     let loaded = match load_effective_config(path) {
         Ok(c) => c,
         Err(e) => {
+            // The loader error can inline the offending config VALUE (a
+            // secret mistyped into a non-string field or a `literal:`
+            // credential on the failing source line) plus local paths.
+            // Route it through the same fail-safe redactor the cold-start
+            // seam and `doctor` use before it reaches structured logs.
             tracing::warn!(
                 path = %path.display(),
-                error = %e,
+                error = %crate::commands::parse_error_redaction::redact_config_load_error(&e),
                 "config reload failed; keeping previous config",
             );
             return None;

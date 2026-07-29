@@ -40,7 +40,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use url::Url;
 
-use crate::oauth::providers::{AuthParams, OAuthFlow, refresh_classify, truncate};
+use crate::oauth::providers::{
+    AuthParams, OAuthFlow, refresh_classify, token_parse_error, token_status_error,
+};
 use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
@@ -237,7 +239,7 @@ async fn decode_token_response(
     let body = read_capped_body(resp).await?;
 
     check_status_error(status, &url, &body, prior_refresh.is_some())?;
-    let parsed = parse_token_response_json(&body, prior_refresh.is_some())?;
+    let parsed = parse_token_response_json(&body)?;
     map_to_record(parsed, prior_refresh)
 }
 
@@ -266,7 +268,7 @@ async fn decode_token_response_traced(
         return Err(e);
     }
 
-    let parsed = match parse_token_response_json(&body, prior_refresh.is_some()) {
+    let parsed = match parse_token_response_json(&body) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(
@@ -332,10 +334,11 @@ async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
 /// re-run login). The status gate matters: a transient 5xx whose body
 /// incidentally carries `invalid_grant` must NOT terminate the refresh --
 /// it falls through to the generic `TokenEndpoint` path so the credential
-/// survives a retry. Any other refresh failure maps to `TokenEndpoint`
-/// without echoing the body (it may carry the long-lived refresh token);
-/// exchange failures keep the truncated body since the auth code is
-/// single-use and short-lived.
+/// survives a retry. Any other refresh failure maps to `TokenEndpoint`.
+/// Neither path echoes the upstream body (the refresh body can carry the
+/// long-lived refresh token; the exchange body can carry an echoed auth code
+/// / PKCE value); only status + url plus a shape-bounded machine error code
+/// survive.
 fn check_status_error(
     status: reqwest::StatusCode,
     url: &str,
@@ -353,30 +356,17 @@ fn check_status_error(
     Err(if is_refresh {
         OAuthError::TokenEndpoint(format!("{} {}", status.as_u16(), url))
     } else {
-        OAuthError::TokenEndpoint(format!(
-            "{} {}: {}",
-            status.as_u16(),
-            url,
-            truncate(body, 500)
-        ))
+        token_status_error(status, url, body)
     })
 }
 
-/// Parse the JSON body into the internal `Resp` shape. Flow-aware so a
-/// malformed refresh response does not echo the body (it may carry the
-/// long-lived refresh token); exchange responses keep the truncated body
-/// for operator triage since the auth code is single-use.
-fn parse_token_response_json(body: &str, is_refresh: bool) -> OAuthResult<Resp> {
-    serde_json::from_str::<Resp>(body).map_err(|e| {
-        if is_refresh {
-            OAuthError::TokenEndpoint(format!("parse token response: {e}"))
-        } else {
-            OAuthError::TokenEndpoint(format!(
-                "parse token response: {e}; body={}",
-                truncate(body, 200)
-            ))
-        }
-    })
+/// Parse the JSON body into the internal `Resp` shape. On failure the
+/// response body (freshly minted access/refresh tokens) is NEVER echoed,
+/// and neither is serde's own message (which can inline offending value
+/// fragments): the error collapses to a body-free category + position via
+/// the shared [`token_parse_error`].
+fn parse_token_response_json(body: &str) -> OAuthResult<Resp> {
+    serde_json::from_str::<Resp>(body).map_err(|e| token_parse_error(&e))
 }
 
 /// Project the parsed `Resp` onto the on-disk `TokenRecord`.
@@ -458,6 +448,25 @@ mod tests {
     use super::*;
     use routectl_testkit::with_capture;
 
+    /// A 200 token-exchange body carrying a freshly minted token but a
+    /// shape mismatch (the token sits in the serde-offending value) must
+    /// yield a body-free error: no token substring, only class + position.
+    #[test]
+    fn parse_error_never_leaks_token_from_body() {
+        let body =
+            r#"{"access_token":"placeholder","expires_in":"sk-antigravity-REALTOKENLEAK99"}"#;
+        let msg = match parse_token_response_json(body) {
+            Ok(_) => panic!("a shape-mismatched token body must fail to parse"),
+            Err(e) => e.to_string(),
+        };
+        assert!(!msg.contains("REALTOKENLEAK99"), "leaked token: {msg}");
+        assert!(
+            !msg.contains("sk-antigravity"),
+            "leaked token prefix: {msg}"
+        );
+        assert!(msg.contains("parse token response"), "lost triage: {msg}");
+    }
+
     /// Build a synthetic unsigned JWT (`header.payload.sig`) from a
     /// payload JSON `Value`. The signature segment is non-empty filler --
     /// routectl never verifies it.
@@ -510,7 +519,7 @@ mod tests {
         })
         .to_string();
         let before = unix_now();
-        let parsed = parse_token_response_json(&body, false).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let rec = map_to_record(parsed, None).unwrap();
         assert_eq!(rec.access_token.expose(), "AT");
         assert_eq!(rec.refresh_token.expose(), "RT");
@@ -532,7 +541,7 @@ mod tests {
             "token_type": "Bearer"
         })
         .to_string();
-        let parsed = parse_token_response_json(&body, true).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
     }
@@ -548,7 +557,7 @@ mod tests {
             "expires_in": 3600
         })
         .to_string();
-        let parsed = parse_token_response_json(&body, true).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
     }
@@ -561,7 +570,7 @@ mod tests {
             "expires_in": 3600
         })
         .to_string();
-        let parsed = parse_token_response_json(&body, true).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert_eq!(rec.refresh_token.expose(), "NEW-RT");
     }
@@ -569,7 +578,7 @@ mod tests {
     #[test]
     fn exchange_missing_refresh_token_is_error() {
         let body = serde_json::json!({ "access_token": "AT", "expires_in": 3600 }).to_string();
-        let parsed = parse_token_response_json(&body, false).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let err = map_to_record(parsed, None).unwrap_err();
         match err {
             OAuthError::TokenEndpoint(m) => assert!(m.contains("refresh_token"), "got: {m}"),
@@ -587,7 +596,7 @@ mod tests {
             "id_token": id
         })
         .to_string();
-        let parsed = parse_token_response_json(&body, false).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let rec = map_to_record(parsed, None).unwrap();
         assert_eq!(rec.account.email.as_deref(), Some("u@example.com"));
     }
@@ -600,7 +609,7 @@ mod tests {
             "expires_in": 3600
         })
         .to_string();
-        let parsed = parse_token_response_json(&body, false).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let rec = map_to_record(parsed, None).unwrap();
         assert!(rec.account.email.is_none());
     }
@@ -676,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn exchange_4xx_keeps_body_for_triage() {
+    fn exchange_4xx_keeps_status_and_error_code() {
         let err = check_status_error(
             reqwest::StatusCode::BAD_REQUEST,
             TOKEN_URL,
@@ -694,6 +703,23 @@ mod tests {
     }
 
     #[test]
+    fn exchange_4xx_does_not_leak_echoed_authorization_code() {
+        let leaked = "ac_MixedCase-AUTHCODE.deadbeef1234567890SECRETXYZ";
+        let body = format!(r#"{{"error":"{leaked}","access_token":"sk-live-MINTEDTOKEN99"}}"#);
+        let err = check_status_error(reqwest::StatusCode::BAD_REQUEST, TOKEN_URL, &body, false)
+            .unwrap_err();
+        match err {
+            OAuthError::TokenEndpoint(m) => {
+                assert!(m.contains("400"), "got: {m}");
+                assert!(!m.contains("AUTHCODE"), "auth code leaked: {m}");
+                assert!(!m.contains("MINTEDTOKEN99"), "token leaked: {m}");
+                assert!(!m.contains(leaked), "raw body leaked: {m}");
+            }
+            other => panic!("expected TokenEndpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn malformed_id_token_is_ignored_not_fatal() {
         // A junk id_token must not fail the whole login -- email is
         // best-effort and falls back to None.
@@ -704,7 +730,7 @@ mod tests {
             "id_token": "not-a-jwt"
         })
         .to_string();
-        let parsed = parse_token_response_json(&body, false).unwrap();
+        let parsed = parse_token_response_json(&body).unwrap();
         let rec = map_to_record(parsed, None).unwrap();
         assert!(rec.account.email.is_none());
     }

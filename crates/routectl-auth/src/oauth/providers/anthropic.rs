@@ -23,7 +23,9 @@
 use async_trait::async_trait;
 use url::Url;
 
-use crate::oauth::providers::{AuthParams, OAuthFlow, refresh_classify, truncate};
+use crate::oauth::providers::{
+    AuthParams, OAuthFlow, refresh_classify, token_parse_error, token_status_error,
+};
 use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
@@ -220,7 +222,7 @@ async fn decode_token_response(
     let body = read_capped_body(resp).await?;
 
     check_status_error(status, &url, &body, prior_refresh.is_some())?;
-    let parsed = parse_token_response_json(&body, prior_refresh.is_some())?;
+    let parsed = parse_token_response_json(&body)?;
     map_to_record(parsed, prior_refresh)
 }
 
@@ -258,7 +260,7 @@ pub(super) async fn decode_token_response_traced(
         return Err(e);
     }
 
-    let parsed = match parse_token_response_json(&body, prior_refresh.is_some()) {
+    let parsed = match parse_token_response_json(&body) {
         Ok(p) => p,
         Err(e) => {
             let kind = error_kind_label(&e);
@@ -328,9 +330,9 @@ async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
 /// whose body incidentally carries `invalid_grant` must NOT terminate the
 /// refresh -- it falls through to the generic `TokenEndpoint` path so the
 /// credential survives a retry. An exchange failure that hits the same is
-/// also `TokenEndpoint` -- the auth code is the thing that died, and the
-/// upstream body explains how (expired / already used / PKCE mismatch /
-/// redirect_uri mismatch).
+/// also `TokenEndpoint`. Neither path echoes the upstream body (it can carry
+/// the refresh token, or an echoed auth code / PKCE value on exchange); only
+/// status + url plus a shape-bounded machine error code survive.
 fn check_status_error(
     status: reqwest::StatusCode,
     url: &str,
@@ -345,43 +347,28 @@ fn check_status_error(
     if is_refresh && invalid_grant_status && refresh_classify::is_invalid_grant(body) {
         return Err(OAuthError::RefreshExpired("anthropic".into()));
     }
-    // Refresh-flow request bodies carry the long-lived refresh token,
-    // and some IdPs echo request fields in error envelopes. Omit the
-    // upstream body excerpt entirely on the refresh path to prevent
-    // secret leakage into operator-visible errors and logs. The
-    // exchange path stays as-is; its body is the authorization code
-    // (single-use, short-lived) plus the PKCE verifier (already used).
+    // Neither path may echo the upstream body: the refresh body carries the
+    // long-lived refresh token, and the exchange body carries the single-use
+    // authorization code plus the PKCE verifier -- an intercepting proxy can
+    // echo either back in an error envelope. Both collapse to status + url
+    // plus, at most, a shape-bounded machine error code.
     Err(if is_refresh {
         OAuthError::TokenEndpoint(format!("{} {}", status.as_u16(), url))
     } else {
-        OAuthError::TokenEndpoint(format!(
-            "{} {}: {}",
-            status.as_u16(),
-            url,
-            truncate(body, 500)
-        ))
+        token_status_error(status, url, body)
     })
 }
 
-/// Parse the JSON body into the internal `Resp` shape. Flow-aware so a
-/// malformed refresh response does not echo the body (which may carry
-/// the long-lived refresh token in error envelopes some IdPs return);
-/// exchange responses keep the truncated body for operator triage
-/// since the auth code in that flow is single-use and short-lived.
-/// Public-in-crate so tests can drive the deserializer directly with a
-/// fixture string -- the rest of `decode_token_response` is HTTP plumbing
-/// that the fixture would have to fake otherwise.
-pub(super) fn parse_token_response_json(body: &str, is_refresh: bool) -> OAuthResult<Resp> {
-    serde_json::from_str::<Resp>(body).map_err(|e| {
-        if is_refresh {
-            OAuthError::TokenEndpoint(format!("parse token response: {e}"))
-        } else {
-            OAuthError::TokenEndpoint(format!(
-                "parse token response: {e}; body={}",
-                truncate(body, 200)
-            ))
-        }
-    })
+/// Parse the JSON body into the internal `Resp` shape. On failure the
+/// response body (freshly minted access/refresh tokens) is NEVER echoed,
+/// and neither is serde's own message (which can inline offending value
+/// fragments): the error collapses to a body-free category + position via
+/// the shared [`token_parse_error`]. Public-in-crate so tests can drive
+/// the deserializer directly with a fixture string -- the rest of
+/// `decode_token_response` is HTTP plumbing that the fixture would have to
+/// fake otherwise.
+pub(super) fn parse_token_response_json(body: &str) -> OAuthResult<Resp> {
+    serde_json::from_str::<Resp>(body).map_err(|e| token_parse_error(&e))
 }
 
 /// Project the parsed `Resp` onto the on-disk `TokenRecord`. Computes
@@ -449,6 +436,21 @@ mod tests {
     use super::*;
     use routectl_testkit::with_capture;
 
+    /// A 200 token-exchange body carrying a freshly minted token but a
+    /// shape mismatch (the token sits in the serde-offending value) must
+    /// yield a body-free error: no token substring, only class + position.
+    #[test]
+    fn parse_error_never_leaks_token_from_body() {
+        let body = r#"{"access_token":"placeholder","expires_in":"sk-ant-oat01-REALTOKENLEAK99"}"#;
+        let msg = match parse_token_response_json(body) {
+            Ok(_) => panic!("a shape-mismatched token body must fail to parse"),
+            Err(e) => e.to_string(),
+        };
+        assert!(!msg.contains("REALTOKENLEAK99"), "leaked token: {msg}");
+        assert!(!msg.contains("sk-ant-oat01"), "leaked token prefix: {msg}");
+        assert!(msg.contains("parse token response"), "lost triage: {msg}");
+    }
+
     #[test]
     fn auth_url_includes_pkce_and_scopes() {
         let url = Anthropic.auth_url(&AuthParams {
@@ -484,7 +486,7 @@ mod tests {
             "scope": "user:inference user:profile",
             "account": { "email": "u@example.com", "account_id": "acc-123" }
         }"#;
-        let parsed = parse_token_response_json(body, false).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("acc-123")
@@ -505,7 +507,7 @@ mod tests {
             "expires_in": 100,
             "account": { "uuid": "uuid-form-123" }
         }"#;
-        let parsed = parse_token_response_json(body, false).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("uuid-form-123")
@@ -521,7 +523,7 @@ mod tests {
             "expires_in": 100,
             "account": { "id": "id-form-456" }
         }"#;
-        let parsed = parse_token_response_json(body, false).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("id-form-456")
@@ -539,7 +541,7 @@ mod tests {
             "refresh_token": "",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, false).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         let err = map_to_record(parsed, None).unwrap_err();
         match err {
             OAuthError::TokenEndpoint(m) => assert!(m.contains("refresh_token"), "got: {m}"),
@@ -557,7 +559,7 @@ mod tests {
             "refresh_token": "",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, true).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
     }
@@ -572,7 +574,7 @@ mod tests {
             "access_token": "AT",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, false).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         let err = map_to_record(parsed, None).unwrap_err();
         match err {
             OAuthError::TokenEndpoint(m) => assert!(m.contains("refresh_token"), "got: {m}"),
@@ -589,7 +591,7 @@ mod tests {
             "access_token": "AT",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, true).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert_eq!(rec.refresh_token.expose(), "PRIOR-RT");
     }
@@ -611,9 +613,9 @@ mod tests {
 
     #[test]
     fn check_status_error_invalid_grant_on_exchange_is_token_endpoint() {
-        // During login (exchange), invalid_grant means the auth code
-        // is the thing that died, not the refresh token. Operator
-        // needs the upstream's actual error body so they can tell
+        // During login (exchange), invalid_grant means the auth code is the
+        // thing that died, not the refresh token. The bounded error code
+        // (not the raw body) is surfaced so the operator can tell
         // expired-code from PKCE-mismatch from redirect_uri-mismatch.
         let err = check_status_error(
             reqwest::StatusCode::BAD_REQUEST,
@@ -626,6 +628,35 @@ mod tests {
             OAuthError::TokenEndpoint(msg) => {
                 assert!(msg.contains("400"), "got: {msg}");
                 assert!(msg.contains("invalid_grant"), "got: {msg}");
+                // The free-text description is part of the body and never
+                // surfaces -- only the shape-bounded code does.
+                assert!(!msg.contains("code expired"), "body leaked: {msg}");
+            }
+            other => panic!("expected TokenEndpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exchange_4xx_does_not_leak_echoed_authorization_code() {
+        // An intercepting proxy can echo the single-use authorization code
+        // (or a partially minted token) back inside the error envelope. Its
+        // mixed-case / hyphen / dot / over-length shape fails the bounded
+        // error-code check, so nothing but status + url survives.
+        let leaked = "ac_MixedCase-AUTHCODE.deadbeef1234567890SECRETXYZ";
+        let body = format!(r#"{{"error":"{leaked}","access_token":"sk-live-MINTEDTOKEN99"}}"#);
+        let err = check_status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            "https://example.invalid/v1/oauth/token",
+            &body,
+            false,
+        )
+        .unwrap_err();
+        match err {
+            OAuthError::TokenEndpoint(m) => {
+                assert!(m.contains("400"), "got: {m}");
+                assert!(!m.contains("AUTHCODE"), "auth code leaked: {m}");
+                assert!(!m.contains("MINTEDTOKEN99"), "token leaked: {m}");
+                assert!(!m.contains(leaked), "raw body leaked: {m}");
             }
             other => panic!("expected TokenEndpoint, got {other:?}"),
         }
@@ -727,7 +758,7 @@ mod tests {
             "refresh_token": "RT",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, false).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         let rec = map_to_record(parsed, None).unwrap();
         let sid = rec.session_id.expect("exchange must mint a session_id");
         // Must parse as a valid UUID v4.
@@ -749,7 +780,7 @@ mod tests {
             "refresh_token": "RT",
             "expires_in": 3600
         }"#;
-        let parsed = parse_token_response_json(body, true).unwrap();
+        let parsed = parse_token_response_json(body).unwrap();
         let rec = map_to_record(parsed, Some("PRIOR-RT")).unwrap();
         assert!(
             rec.session_id.is_none(),

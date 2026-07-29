@@ -316,6 +316,97 @@ fn config_check_stays_silent_and_passing_on_legacy_capability_lists() {
     );
 }
 
+/// A config whose failing parse line carries a `literal:` credential:
+/// the toml diagnostic echoes that source line verbatim. Assert the
+/// secret reaches neither the raw loader error's redacted form (the
+/// cold-start seam `main` runs every load error through) nor the
+/// hot-reload WARN (`read_parse_validate_config`), proving both serve
+/// paths are secret-free.
+const LITERAL_SECRET_PARSE_ERROR_CONFIG: &str = "version = 3\n\
+         api_key_ref = \"literal:sk-live-LEAKEDSECRET42\"\n\
+         [server]\n\
+         host = \"127.0.0.1\"\n";
+
+const LITERAL_SECRET_SUBSTRING: &str = "LEAKEDSECRET42";
+
+/// Serve COLD START: the parse error `load_effective_config` returns
+/// inlines the offending source line (the `literal:` secret), but the
+/// seam `main` surfaces every load error through
+/// (`redact_config_load_error`) strips it before stderr/journald.
+#[test]
+#[serial_test::serial]
+fn cold_start_parse_error_redacts_literal_secret() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, LITERAL_SECRET_PARSE_ERROR_CONFIG).expect("write config.toml");
+
+    // Act: the raw loader error, then the redaction the cold-start seam applies.
+    let raw = match load_effective_config(&cfg_path) {
+        Ok(_) => panic!("an unknown-field config must fail the parse"),
+        Err(e) => e,
+    };
+    let redacted = crate::commands::parse_error_redaction::redact_config_load_error(&raw);
+
+    // Assert: the leak exists pre-redaction (the case is real) and is gone after.
+    assert!(
+        raw.contains(LITERAL_SECRET_SUBSTRING),
+        "test premise: raw loader error must carry the secret; raw: {raw}"
+    );
+    assert!(
+        !redacted.contains(LITERAL_SECRET_SUBSTRING),
+        "cold-start seam must not leak the secret; redacted: {redacted}"
+    );
+    // Triage info survives.
+    assert!(
+        redacted.contains("TOML parse error"),
+        "redacted: {redacted}"
+    );
+}
+
+/// Hot RELOAD: a parse failure on a `literal:`-bearing line logs a WARN
+/// keeping the prior config. The WARN's `error` field must carry no
+/// secret substring.
+#[test]
+#[serial_test::serial]
+fn hot_reload_parse_error_warn_redacts_literal_secret() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, LITERAL_SECRET_PARSE_ERROR_CONFIG).expect("write config.toml");
+
+    // Act
+    let mut out = None;
+    let events = routectl_testkit::capture_events(|| {
+        out = Some(read_parse_validate_config(&cfg_path));
+    });
+
+    // Assert: the load rejected (prior config kept).
+    assert!(
+        out.expect("closure ran").is_none(),
+        "a parse failure must keep the previous config"
+    );
+
+    // Assert: a WARN fired, and no captured event leaks the secret.
+    let reload_warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN)
+        .collect();
+    assert!(
+        !reload_warns.is_empty(),
+        "a reload parse failure must emit a WARN"
+    );
+    for e in &events {
+        let blob = format!("{} {:?}", e.message, e.fields);
+        assert!(
+            !blob.contains(LITERAL_SECRET_SUBSTRING),
+            "reload WARN leaked the secret: {blob}"
+        );
+    }
+}
+
 /// A config with no legacy list set (empty lists are the pass-through
 /// default) emits no deprecation WARN on the serve load path.
 #[test]

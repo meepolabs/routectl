@@ -409,7 +409,13 @@ pub async fn run(config_path: &Path, args: CaptureArgs) -> i32 {
     let config = match crate::server::load_effective_config_unvalidated(config_path) {
         Ok(loaded) => loaded.config,
         Err(e) => {
-            eprintln!("error: {e}");
+            // The loader error can inline the offending config VALUE (a
+            // `literal:` credential on the failing source line). Route it
+            // through the same fail-safe redactor the serve/doctor seams use.
+            eprintln!(
+                "error: {}",
+                crate::commands::parse_error_redaction::redact_config_load_error(&e)
+            );
             return 1;
         }
     };
@@ -725,5 +731,40 @@ mod tests {
         );
         assert!(configured_secret_material(&BedrockCreds::DefaultChain).is_empty());
         assert!(configured_secret_material(&BedrockCreds::Profile { name: "p".into() }).is_empty());
+    }
+
+    /// The capture harness loads config via `load_effective_config_unvalidated`
+    /// (see `run`) and surfaces any load error through the shared fail-safe
+    /// `redact_config_load_error`. A malformed config whose failing parse line
+    /// carries a `literal:` credential must not leak that secret to the
+    /// terminal.
+    #[test]
+    fn capture_load_error_redacts_literal_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("config.toml");
+        let malformed = "version = 3\n\
+             api_key_ref = \"literal:sk-live-LEAKEDSECRET42\"\n\
+             [server]\n\
+             host = \"127.0.0.1\"\n";
+        std::fs::write(&cfg_path, malformed).expect("write config.toml");
+
+        let raw = match crate::server::load_effective_config_unvalidated(&cfg_path) {
+            Ok(_) => panic!("an unknown-field config must fail the parse"),
+            Err(e) => e,
+        };
+        let redacted = crate::commands::parse_error_redaction::redact_config_load_error(&raw);
+
+        assert!(
+            raw.contains("LEAKEDSECRET42"),
+            "test premise: raw loader error must carry the secret; raw: {raw}"
+        );
+        assert!(
+            !redacted.contains("LEAKEDSECRET42"),
+            "capture path must not leak the secret; redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("TOML parse error"),
+            "triage info lost; redacted: {redacted}"
+        );
     }
 }
