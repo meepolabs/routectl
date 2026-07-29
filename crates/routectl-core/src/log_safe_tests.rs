@@ -5,9 +5,9 @@
 //! this file is the body of `mod tests` declared inside `log_safe`.
 
 use super::{
-    MAX, MAX_DEBUG_BODY_BYTES, extract_upstream_message, is_json_error_envelope,
-    redact_prompts_with_flag, sanitize_capped, sanitize_detail_with_flag, sanitize_for_log,
-    sanitize_upstream_body,
+    MAX, MAX_DEBUG_BODY_BYTES, clean_upstream_error_body, extract_upstream_message,
+    is_json_error_envelope, redact_prompts_with_flag, sanitize_capped, sanitize_detail_with_flag,
+    sanitize_for_log, sanitize_upstream_body,
 };
 use serde_json::json;
 
@@ -338,19 +338,67 @@ fn redact_anthropic_system_array_form_recurses_into_blocks() {
 }
 
 #[test]
+fn debug_upstream_error_body_redacts_reasoning_artifacts_from_json_envelope() {
+    // An upstream error envelope can echo the request's reasoning-replay
+    // carry artifacts. The DEBUG-body path must strip all four shapes
+    // (encrypted_content, a thinking signature, redacted_thinking data, a
+    // reasoning item id) unconditionally -- independent of the prompt knob --
+    // by routing parseable bodies through the shared redaction entry point
+    // before serialization.
+    let redacted_thinking_blob = format!("SECRET-REDACTED-THINKING-BLOB-{}", "X".repeat(300));
+    let body = json!({
+        "error": {
+            "message": "bad request",
+            "echoed_input": [
+                {"type": "reasoning", "id": "rs_SECRET_ITEM_ID",
+                 "encrypted_content": "SECRET-REASONING-BLOB"},
+                {"type": "redacted_thinking", "data": redacted_thinking_blob},
+                {"type": "thinking", "thinking": "chain of thought",
+                 "signature": "SECRET-THINKING-SIGNATURE"},
+            ],
+        },
+    })
+    .to_string();
+
+    let cleaned = clean_upstream_error_body(&body);
+
+    assert!(!cleaned.contains("SECRET-REASONING-BLOB"), "{cleaned}");
+    assert!(!cleaned.contains("rs_SECRET_ITEM_ID"), "{cleaned}");
+    assert!(
+        !cleaned.contains("SECRET-REDACTED-THINKING-BLOB"),
+        "{cleaned}"
+    );
+    assert!(!cleaned.contains("SECRET-THINKING-SIGNATURE"), "{cleaned}");
+    // The operator-facing error message stays visible for triage.
+    assert!(cleaned.contains("bad request"), "{cleaned}");
+}
+
+#[test]
+fn debug_upstream_error_body_falls_back_for_non_json() {
+    // A non-JSON body (HTML error page, control chars) keeps the
+    // HTML-collapse + control-char-strip fallback so log injection stays
+    // impossible and the log does not fill with markup.
+    let html = "<!DOCTYPE html><html>\r\n\x1b[31mboom</html>";
+    let cleaned = clean_upstream_error_body(html);
+    assert!(!cleaned.contains('\r'), "{cleaned}");
+    assert!(!cleaned.contains('\n'), "{cleaned}");
+    assert!(!cleaned.contains('\x1b'), "{cleaned}");
+    assert!(cleaned.starts_with("<html error page"), "{cleaned}");
+}
+
+#[test]
 fn redact_reasoning_carry_blobs_encrypted_content_and_data() {
     // Reasoning-replay carry payloads must never reach a trace body: the
-    // OpenAI Responses reasoning item's `encrypted_content` and a
-    // `redacted_thinking` blob (on `data`) both collapse to a length
-    // marker. `data` redacts only long strings, so the blob is padded well
-    // past the 256-byte threshold. (Bedrock `reasoningText.signature` is a
+    // OpenAI Responses reasoning item's `encrypted_content`, its upstream
+    // `id`, and a `redacted_thinking` blob (on `data`) all collapse to a
+    // length marker. (Bedrock `reasoningText.signature` is a
     // deliberately-kept triage signal and is intentionally NOT swept -- see
     // `redact_bedrock_converse_reasoning_redacted_content_replaced`.)
     let redacted_thinking_blob = format!("SECRET-REDACTED-THINKING-BLOB-{}", "X".repeat(300));
     let body = json!({
         "model": "gpt-5",
         "input": [
-            {"type": "reasoning", "id": "rs_keep_the_id",
+            {"type": "reasoning", "id": "rs_SECRET_ITEM_ID",
              "encrypted_content": "SECRET-REASONING-BLOB"},
             {"type": "redacted_thinking", "data": redacted_thinking_blob},
         ],
@@ -359,9 +407,17 @@ fn redact_reasoning_carry_blobs_encrypted_content_and_data() {
     let dump = got.to_string();
     assert!(!dump.contains("SECRET-REASONING-BLOB"), "{dump}");
     assert!(!dump.contains("SECRET-REDACTED-THINKING-BLOB"), "{dump}");
-    // Structural metadata (type, id) stays visible for triage.
+    // The reasoning item id is a replay artifact and must be redacted
+    // too, while the structural `type` stays visible for triage.
+    assert!(!dump.contains("rs_SECRET_ITEM_ID"), "{dump}");
     assert_eq!(got["input"][0]["type"], "reasoning");
-    assert_eq!(got["input"][0]["id"], "rs_keep_the_id");
+    assert!(
+        got["input"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("<redacted len="),
+        "{got}"
+    );
     assert!(
         got["input"][0]["encrypted_content"]
             .as_str()
@@ -369,6 +425,56 @@ fn redact_reasoning_carry_blobs_encrypted_content_and_data() {
             .starts_with("<redacted len="),
         "{got}"
     );
+}
+
+#[test]
+fn redact_reasoning_artifacts_are_knob_independent() {
+    // The prompt-redaction knob being OFF must NOT expose reasoning-replay
+    // carry artifacts: encrypted_content, a reasoning item id, a thinking
+    // signature, and a redacted_thinking data blob all redact regardless.
+    let redacted_thinking_blob = format!("SECRET-REDACTED-THINKING-BLOB-{}", "X".repeat(300));
+    let body = json!({
+        "model": "gpt-5",
+        "input": [
+            {"type": "reasoning", "id": "rs_SECRET_ITEM_ID",
+             "encrypted_content": "SECRET-REASONING-BLOB"},
+            {"type": "redacted_thinking", "data": redacted_thinking_blob},
+            {"type": "thinking", "thinking": "chain of thought",
+             "signature": "SECRET-THINKING-SIGNATURE"},
+        ],
+    });
+    let got = redact_prompts_with_flag(&body, false);
+    let dump = got.to_string();
+    assert!(!dump.contains("SECRET-REASONING-BLOB"), "{dump}");
+    assert!(!dump.contains("rs_SECRET_ITEM_ID"), "{dump}");
+    assert!(!dump.contains("SECRET-REDACTED-THINKING-BLOB"), "{dump}");
+    assert!(!dump.contains("SECRET-THINKING-SIGNATURE"), "{dump}");
+    // Prompt/content text is UNTOUCHED with the knob off: the thinking
+    // chain-of-thought text stays visible (only the reasoning artifacts
+    // are unconditionally redacted).
+    assert_eq!(got["input"][2]["thinking"], "chain of thought");
+    // Structural discriminators stay visible.
+    assert_eq!(got["input"][0]["type"], "reasoning");
+    assert_eq!(got["input"][2]["type"], "thinking");
+}
+
+#[test]
+fn redact_off_leaves_non_reasoning_ids_and_content_visible() {
+    // Knob off: a non-reasoning item id (message / tool_use) and message
+    // content stay fully visible -- only reasoning artifacts are swept.
+    let body = json!({
+        "id": "msg_01",
+        "model": "claude-sonnet-4-5",
+        "content": [
+            {"type": "text", "text": "visible answer"},
+            {"type": "tool_use", "id": "t1", "name": "calc", "input": {"x": 1}},
+        ],
+    });
+    let got = redact_prompts_with_flag(&body, false);
+    assert_eq!(got["id"], "msg_01");
+    assert_eq!(got["content"][0]["text"], "visible answer");
+    assert_eq!(got["content"][1]["id"], "t1");
+    assert_eq!(got["content"][1]["input"], json!({"x": 1}));
 }
 
 #[test]
