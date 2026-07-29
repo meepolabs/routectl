@@ -209,26 +209,86 @@ pub mod testing {
     }
 }
 
-/// Truncate a string for inclusion in error/log messages without
-/// dragging unbounded upstream payloads into routectl logs. Pure ASCII
-/// (re-encodes through `&str` byte slicing); guarantees the result is
-/// at most `max + suffix` bytes. Note: `max` is treated as a byte
-/// count; multibyte UTF-8 input may be truncated on a non-char boundary
-/// in edge cases but the function never panics because we slice through
-/// `char_indices`.
-pub fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
+/// Build a body-free `TokenEndpoint` error from a serde_json parse
+/// failure of a token-exchange response.
+///
+/// The raw response body carries freshly minted access/refresh tokens,
+/// and serde's own `Display` echoes offending value fragments (`invalid
+/// type: string "sk-...", ...`), so NEITHER the body nor the serde
+/// message may reach an operator-visible error or log. Emit only the
+/// error category plus its line/column position -- secret-free integers
+/// that are enough to triage a shape mismatch. Shared by every provider's
+/// `parse_token_response_json` so the four cannot drift.
+pub(super) fn token_parse_error(e: &serde_json::Error) -> OAuthError {
+    let kind = match e.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    OAuthError::TokenEndpoint(format!(
+        "parse token response: {kind} error at line {} column {}",
+        e.line(),
+        e.column()
+    ))
+}
+
+/// Longest OAuth error code we will echo. RFC 6749 section 5.2 codes
+/// (`invalid_grant`, `invalid_client`, `unsupported_grant_type`) and the
+/// provider refresh codes (`refresh_token_expired`) are short snake_case
+/// tokens; a value longer than this is not a code and is dropped.
+const MAX_TOKEN_ERROR_CODE_LEN: usize = 48;
+
+/// Extract a machine-usable OAuth error code from a non-2xx token-endpoint
+/// body, fail-safe by SHAPE. Returns `Some(code)` only when a recognized
+/// error field (`error` as a string, `error.code`, or a top-level `code`)
+/// holds a value matching the tightly-bounded OAuth-error-code shape:
+/// 1..=`MAX_TOKEN_ERROR_CODE_LEN` bytes drawn only from `[a-z0-9_]`. Any
+/// other value fails the check and is dropped -- an echoed authorization
+/// code, PKCE verifier, or partially minted token carries uppercase, `-`,
+/// `.`, or over-length runs, so it can never survive as a "code".
+pub(super) fn safe_token_error_code(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let raw = token_error_code_field(&v)?;
+    is_token_error_code_shape(&raw).then_some(raw)
+}
+
+/// Pull the candidate error-code string from the recognized JSON fields,
+/// without shape-validating it (the caller does that).
+fn token_error_code_field(v: &serde_json::Value) -> Option<String> {
+    if let Some(err) = v.get("error") {
+        if let Some(code) = err.as_str() {
+            return Some(code.to_string());
+        }
+        if let Some(code) = err.get("code").and_then(|c| c.as_str()) {
+            return Some(code.to_string());
+        }
     }
-    // Walk char boundaries to avoid `s[..max]` panicking inside a
-    // multibyte sequence.
-    let cut = s
-        .char_indices()
-        .map(|(i, _)| i)
-        .take_while(|&i| i <= max)
-        .last()
-        .unwrap_or(0);
-    format!("{}... ({} bytes total)", &s[..cut], s.len())
+    v.get("code").and_then(|c| c.as_str()).map(String::from)
+}
+
+/// Whether `s` matches the bounded OAuth-error-code shape (nonempty, at
+/// most `MAX_TOKEN_ERROR_CODE_LEN` bytes, only `[a-z0-9_]`).
+fn is_token_error_code_shape(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_TOKEN_ERROR_CODE_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Build the `TokenEndpoint` error for a non-2xx token-endpoint response
+/// WITHOUT embedding the raw body. The exchange body carries the single-use
+/// authorization code plus the PKCE verifier and the refresh body carries
+/// the long-lived refresh token; an intercepting proxy can echo either back
+/// in an error envelope, so the body is never surfaced. Only `status` +
+/// `url` are kept, plus a machine-usable error code IF the body holds one in
+/// the tightly-bounded shape (see [`safe_token_error_code`]). Shared by every
+/// provider's `check_status_error` so the four cannot drift.
+pub(super) fn token_status_error(status: reqwest::StatusCode, url: &str, body: &str) -> OAuthError {
+    match safe_token_error_code(body) {
+        Some(code) => OAuthError::TokenEndpoint(format!("{} {} ({code})", status.as_u16(), url)),
+        None => OAuthError::TokenEndpoint(format!("{} {}", status.as_u16(), url)),
+    }
 }
 
 /// First 4 bytes of `SHA-256(token)` rendered as 8 lowercase hex
@@ -255,12 +315,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncate_handles_short_and_long() {
-        assert_eq!(truncate("hi", 10), "hi");
-        let long = "x".repeat(600);
-        let trimmed = truncate(&long, 500);
-        assert!(trimmed.starts_with(&"x".repeat(500)));
-        assert!(trimmed.contains("600 bytes total"));
+    fn safe_token_error_code_accepts_bounded_oauth_codes() {
+        assert_eq!(
+            safe_token_error_code(r#"{"error":"invalid_grant"}"#).as_deref(),
+            Some("invalid_grant")
+        );
+        assert_eq!(
+            safe_token_error_code(r#"{"error":{"code":"invalid_client"}}"#).as_deref(),
+            Some("invalid_client")
+        );
+        assert_eq!(
+            safe_token_error_code(r#"{"code":"unsupported_grant_type"}"#).as_deref(),
+            Some("unsupported_grant_type")
+        );
+    }
+
+    #[test]
+    fn safe_token_error_code_rejects_credential_shaped_values() {
+        // An echoed authorization code / minted token carries uppercase,
+        // hyphens, dots, or runs longer than the bound -- none may survive.
+        assert_eq!(
+            safe_token_error_code(r#"{"error":"ac_MixedCase-AUTHCODE.deadbeef"}"#),
+            None
+        );
+        assert_eq!(
+            safe_token_error_code(r#"{"error":"sk-live-TOKEN99"}"#),
+            None
+        );
+        let over_long = "a".repeat(MAX_TOKEN_ERROR_CODE_LEN + 1);
+        assert_eq!(
+            safe_token_error_code(&format!(r#"{{"error":"{over_long}"}}"#)),
+            None
+        );
+        // Non-string / absent / non-JSON bodies yield no code.
+        assert_eq!(safe_token_error_code(r#"{"error":123}"#), None);
+        assert_eq!(safe_token_error_code("not json"), None);
+        assert_eq!(safe_token_error_code(r#"{"error":""}"#), None);
+    }
+
+    #[test]
+    fn token_status_error_never_embeds_body_but_keeps_status_and_url() {
+        let err = token_status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            "https://example.invalid/token",
+            r#"{"error":"invalid_grant","secret_echo":"AUTHCODE-LEAK"}"#,
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("400"), "{msg}");
+        assert!(msg.contains("https://example.invalid/token"), "{msg}");
+        assert!(msg.contains("invalid_grant"), "{msg}");
+        assert!(!msg.contains("AUTHCODE-LEAK"), "body leaked: {msg}");
+        assert!(!msg.contains("secret_echo"), "body leaked: {msg}");
     }
 
     #[test]
