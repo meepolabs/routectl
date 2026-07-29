@@ -1399,8 +1399,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   admission + strip-repair settlement the dispatch arm drives:
   `ReplayCarryPlan` / `plan_replay_carry` decide carry-once vs proactive
   strip against the `learned_replay` registry, and the plan settles the
-  two-phase learn (commit on stripped-repair success, release otherwise) and
-  records the `DispatchMeta.replay_degradation` summary
+  two-phase learn (`commit` on stripped-repair success, `settle_success` ->
+  clear-on-carried-success returning the `CapabilityClearedEvent` rows for
+  `DispatchMeta.cleared_capabilities`, unsettled `Drop` on an unrelated error)
+  and records the `DispatchMeta.replay_degradation` summary
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
@@ -1613,7 +1615,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   probe outstanding), `None` means strip. The guard is the two-phase learn --
   `commit` persists the negative and returns the `CapabilityLearnEvent`
   emission row ONLY after the stripped repair succeeded, `clear` drops the
-  entry when the carry itself succeeded, `release` (and an unsettled `Drop`)
+  entry when the carry itself succeeded and returns a `CapabilityClearedEvent`
+  when a resident negative was removed (rides out on the meta so a warm rebuild
+  cannot resurrect it), `release` (and an unsettled `Drop`)
   frees the slot without learning. Together those cover the four decay
   settlements: lapse -> one carry, success -> clear, same rejection ->
   refresh, unrelated error -> release unchanged

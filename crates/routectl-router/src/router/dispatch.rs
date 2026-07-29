@@ -493,7 +493,9 @@ impl Router {
                         // Settle the replay carry: a stripped repair that
                         // reached success confirms the negative (commit); a
                         // carried variant that succeeded outright proves the
-                        // pair works (release, learning nothing).
+                        // pair works, so clear any resident (lapsed) negative
+                        // and ride each clear out on the meta so the ledger
+                        // records it and a warm rebuild does not resurrect it.
                         if let Some(plan) = replay_plan.take() {
                             if replay_repair_attempted {
                                 let features = derive_feature_keys(
@@ -510,7 +512,7 @@ impl Router {
                                     deg.learned = true;
                                 }
                             } else {
-                                plan.release();
+                                meta.cleared_capabilities.extend(plan.settle_success());
                             }
                         }
                         self.observe_capabilities(&req, &resp, target, meta, Instant::now());
@@ -1205,7 +1207,8 @@ impl Router {
                         // Settle the replay carry (see `complete_inner`): a
                         // stripped repair reaching a first chunk confirms the
                         // negative (commit); a carried first chunk proves the
-                        // pair works (release).
+                        // pair works, so clear any resident (lapsed) negative
+                        // and ride each clear out on the meta.
                         if let Some(plan) = replay_plan.take() {
                             if replay_repair_attempted {
                                 let features = derive_feature_keys(
@@ -1222,7 +1225,7 @@ impl Router {
                                     deg.learned = true;
                                 }
                             } else {
-                                plan.release();
+                                meta.cleared_capabilities.extend(plan.settle_success());
                             }
                         }
                         return Ok(wrap_with_breaker_accounting(

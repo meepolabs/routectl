@@ -240,8 +240,9 @@ fn a_lapsed_carry_that_succeeds_clears_the_negative() {
     // Act -- upstream was fixed: the carried artifacts went through.
     let cleared = guard.clear();
 
-    // Assert -- continuity is re-enabled at once, not after another decay.
-    assert!(cleared);
+    // Assert -- continuity is re-enabled at once, not after another decay,
+    // and the removal emits a cleared event to ride out on the dispatch meta.
+    assert!(cleared.is_some());
     assert!(!reg.is_negative_acting(&k, lapsed));
     assert!(reg.admit_provisional(&k, lapsed).is_some());
 }

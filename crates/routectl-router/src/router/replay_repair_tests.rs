@@ -14,7 +14,7 @@ use super::super::Router;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures::stream::BoxStream;
 use routectl_core::{
@@ -41,11 +41,14 @@ const GENERIC_400_BODY: &str =
 /// and succeeds once the artifacts are stripped, so a repair round trip is
 /// exactly two counted provider calls. `always_reject` keeps rejecting even
 /// the stripped variant (the repeat-rejection release path); `generic_400`
-/// answers a non-replay 400 regardless (the ordinary path).
+/// answers a non-replay 400 regardless (the ordinary path). Once `heal` is
+/// set, upstream serves the CARRIED variant too (the fix that lets a lapsed
+/// negative's re-probe succeed outright) -- the clear-on-success path.
 struct ReplayMockProvider {
     calls: AtomicUsize,
     always_reject: bool,
     generic_400: bool,
+    healed: AtomicBool,
 }
 
 impl ReplayMockProvider {
@@ -54,6 +57,7 @@ impl ReplayMockProvider {
             calls: AtomicUsize::new(0),
             always_reject: false,
             generic_400: false,
+            healed: AtomicBool::new(false),
         }
     }
 
@@ -62,6 +66,7 @@ impl ReplayMockProvider {
             calls: AtomicUsize::new(0),
             always_reject: true,
             generic_400: false,
+            healed: AtomicBool::new(false),
         }
     }
 
@@ -70,7 +75,14 @@ impl ReplayMockProvider {
             calls: AtomicUsize::new(0),
             always_reject: false,
             generic_400: true,
+            healed: AtomicBool::new(false),
         }
+    }
+
+    /// Upstream fixed the incompatibility: from now on the carried variant
+    /// succeeds, so a lapsed negative's admitted re-probe passes outright.
+    fn heal(&self) {
+        self.healed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -92,6 +104,9 @@ impl Provider for ReplayMockProvider {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.generic_400 {
             return Err(Error::upstream("replay-mock", 400, GENERIC_400_BODY));
+        }
+        if self.healed.load(Ordering::SeqCst) {
+            return Ok(success_response());
         }
         let carries_artifact = req
             .messages
@@ -167,6 +182,19 @@ api_key_ref = "literal:k"
 auth_kind = "api-key"
 "#;
 
+/// Single openai-responses target `p1`/`m1` with a zero-hour decay window, so
+/// a committed negative lapses immediately and its next carry is admitted as a
+/// re-probe -- the arrangement the clear-on-success path settles.
+const SINGLE_TARGET_ZERO_DECAY_TOML: &str = r#"
+[capability]
+decay_hours = 0
+
+[providers.p1]
+kind = "openai-responses"
+api_key_ref = "literal:k"
+auth_kind = "api-key"
+"#;
+
 /// Parse `toml_text` and install `provider` under nickname `m1` on provider
 /// `p1`, mirroring the shared single-leg fixture.
 fn router_from_toml(toml_text: &str, provider: Arc<dyn Provider>) -> Router {
@@ -220,6 +248,53 @@ fn req_chain_carrying(format: &str) -> ChatRequest {
         messages: vec![assistant_with_artifact(format)].into(),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn a_lapsed_carry_succeeding_outright_clears_the_negative_through_dispatch() {
+    use super::super::RouterOptions;
+
+    // Arrange -- a first request commits the negative; the zero-hour decay
+    // window lapses it at once, so its next carry is admitted as a re-probe.
+    let provider = Arc::new(ReplayMockProvider::new());
+    let router = router_from_toml(SINGLE_TARGET_ZERO_DECAY_TOML, provider.clone());
+    let first = router.complete(req_carrying(CODEX_OAUTH)).await;
+    assert!(first.is_ok(), "the stripped repair commits the negative");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "carried attempt rejected, stripped repair succeeded",
+    );
+    assert!(
+        !router.learned_capability_snapshot().is_empty(),
+        "the commit persisted a learned negative",
+    );
+
+    // Act -- upstream is fixed, so the admitted re-probe carries its artifact
+    // and succeeds OUTRIGHT (no stripped repair).
+    provider.heal();
+    let dispatched = router
+        .complete_with_options(req_carrying(CODEX_OAUTH), RouterOptions::default())
+        .await;
+
+    // Assert -- the carried variant succeeded on its first call (no repair),
+    // the resident negative was cleared, and the clear rode out on the meta so
+    // a warm rebuild cannot resurrect it.
+    assert!(dispatched.result.is_ok(), "the carried variant succeeded");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        3,
+        "the re-probe succeeded outright -- one carried call, no repair",
+    );
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "a successful carry clears the lapsed negative from the registry",
+    );
+    assert_eq!(
+        dispatched.meta.cleared_capabilities.len(),
+        1,
+        "the clear rides out as one cleared-capability event on the meta",
+    );
 }
 
 #[tokio::test]
