@@ -1106,17 +1106,29 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn concurrent_writer_blocks_on_the_lock_held_by_another_thread() {
-        // Arrange: the holder signals once it is inside the locked closure,
-        // then sleeps for `HOLD` before returning -- proving a real overlap
-        // (not just lucky thread scheduling) requires the waiter's total
-        // wait time to be at least `HOLD`.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The holder signals it is inside the lock, then stays in its
+        // critical section for this window before flipping `holder_released`
+        // just before returning. If the advisory lock were NOT honored the
+        // waiter would enter its own critical section during this window and
+        // observe `holder_released` still false; a working lock forces the
+        // waiter to block until the holder's closure has returned, so it
+        // always observes `true`. The invariant is asserted on this observed
+        // ordering, never on wall-clock elapsed time -- the two clocks
+        // (holder-internal sleep vs waiter-observed wait) are offset by
+        // channel-delivery and scheduling latency, which made an
+        // elapsed-vs-window comparison flaky.
         const HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog_overlay.json");
+        let holder_released = Arc::new(AtomicBool::new(false));
         let (holder_ready_tx, holder_ready_rx) = std::sync::mpsc::channel::<()>();
 
         let path_holder = path.clone();
+        let holder_released_writer = Arc::clone(&holder_released);
         let holder = std::thread::spawn(move || {
             with_overlay_write_lock::<OverlayError, _>(&path_holder, move |overlay| {
                 holder_ready_tx
@@ -1125,6 +1137,7 @@ mod tests {
                 std::thread::sleep(HOLD);
                 let mut next = overlay;
                 next.cells.insert("a:b".to_string(), Some(import_cell()));
+                holder_released_writer.store(true, Ordering::SeqCst);
                 Ok(next)
             })
         });
@@ -1133,16 +1146,21 @@ mod tests {
             .recv()
             .expect("holder must signal before the waiter starts");
 
-        // Act: the waiter can only proceed once the holder's sleep +
-        // save + lock release completes.
-        let waiter_start = std::time::Instant::now();
+        // Act: the holder now provably holds the lock. The waiter must block
+        // until the holder's critical section completes; by the time its own
+        // closure runs, the holder must already have released.
         let path_waiter = path.clone();
-        let waiter_result = with_overlay_write_lock::<OverlayError, _>(&path_waiter, |overlay| {
-            let mut next = overlay;
-            next.cells.insert("c:d".to_string(), Some(user_cell()));
-            Ok(next)
-        });
-        let elapsed = waiter_start.elapsed();
+        let holder_released_reader = Arc::clone(&holder_released);
+        let waiter_result =
+            with_overlay_write_lock::<OverlayError, _>(&path_waiter, move |overlay| {
+                assert!(
+                    holder_released_reader.load(Ordering::SeqCst),
+                    "waiter entered the lock before the holder released it"
+                );
+                let mut next = overlay;
+                next.cells.insert("c:d".to_string(), Some(user_cell()));
+                Ok(next)
+            });
 
         // Assert
         waiter_result.expect("waiter must succeed after the holder releases");
@@ -1150,9 +1168,5 @@ mod tests {
             .join()
             .expect("holder thread")
             .expect("holder must succeed");
-        assert!(
-            elapsed >= HOLD,
-            "waiter must block until the holder releases the lock, elapsed={elapsed:?}"
-        );
     }
 }
