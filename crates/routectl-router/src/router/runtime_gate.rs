@@ -505,6 +505,14 @@ pub(super) fn log_probe_fast_fail(
 mod probe_fast_fail_tests;
 
 #[cfg(test)]
+#[path = "probe_seat_failover_tests.rs"]
+mod probe_seat_failover_tests;
+
+#[cfg(test)]
+#[path = "retry_preserves_upstream_error_tests.rs"]
+mod retry_preserves_upstream_error_tests;
+
+#[cfg(test)]
 #[path = "gate_error_does_not_mask_real_error_tests.rs"]
 mod gate_error_does_not_mask_real_error_tests;
 

@@ -1399,4 +1399,44 @@ mod tests {
             "account_uuid fingerprint leaked into Invoke body: {serialized}"
         );
     }
+
+    #[test]
+    fn response_format_inherited_from_anthropic_normalize_reaches_invoke_body() {
+        // Bedrock Invoke delegates body construction to the Anthropic-API
+        // normalizer, so honoring req.response_format there means the
+        // output_config.format field rides through onto the Invoke body
+        // (it survives the anthropic_beta + body-field allowlist passes).
+        let cfg = fake_cfg();
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            max_tokens: Some(1024),
+            response_format: Some(json!({
+                "type": "json_schema",
+                "json_schema": {"name": "widget", "schema": {"type": "object"}}
+            })),
+            ..Default::default()
+        };
+
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        assert_eq!(
+            body["output_config"]["format"]["type"], "json_schema",
+            "response_format must reach the Invoke body: {body}"
+        );
+        assert_eq!(
+            body["output_config"]["format"]["name"], "widget",
+            "got: {body}"
+        );
+    }
 }

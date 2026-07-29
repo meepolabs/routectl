@@ -17,6 +17,7 @@
 //! `ContentBlock::Other`.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
@@ -486,9 +487,9 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
     }
 
     let mut blocks = emit_reasoning_blocks(id, &msg.reasoning_details)?;
-    append_assistant_message_blocks(&mut blocks, &msg.content);
+    let emitted_tool_ids = append_assistant_message_blocks(&mut blocks, &msg.content);
     if let Some(tool_calls) = msg.tool_calls.as_ref() {
-        emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks)?;
+        emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks, &emitted_tool_ids)?;
     }
     if blocks.is_empty() {
         // Last-resort backstop. `normalize_replay_invariants` drops a
@@ -533,15 +534,31 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
 /// and fall back to wrapping the raw string under
 /// `{"_arguments": "..."}` so the upstream can return a useful
 /// error rather than us silently producing a malformed body.
+///
+/// `already_emitted` holds the RAW (pre-sanitization) ids of any ToolUse
+/// content-part blocks `append_assistant_message_blocks` already pushed. A
+/// canonical assistant message produced by the response parser fills BOTH
+/// channels for one tool call (a ToolUse content part AND a `tool_calls`
+/// entry with the same id), so emitting from both would put two tool_use
+/// blocks with the same id on the wire -- which Anthropic rejects. We skip
+/// any call whose RAW id is already present; the content-part channel wins
+/// because it preserves interleaving with surrounding text. Deduping on the
+/// raw id (not the sanitized one) means two distinct calls whose ids differ
+/// only by a sanitized-away char (e.g. `call.a` and `call:a`) both survive.
 fn emit_tool_use_blocks_from_calls(
     id: &str,
     tool_calls: &[Value],
     blocks: &mut Vec<ContentBlock>,
+    already_emitted: &HashSet<String>,
 ) -> Result<()> {
     for call in tool_calls {
-        let tool_id =
-            crate::tool_id::sanitize_tool_id(call.get("id").and_then(|v| v.as_str()).unwrap_or(""))
-                .into_owned();
+        let raw_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if already_emitted.contains(raw_id) {
+            // Same tool call already emitted from the ToolUse content-part
+            // channel; emitting it again would duplicate the id on the wire.
+            continue;
+        }
+        let tool_id = crate::tool_id::sanitize_tool_id(raw_id).into_owned();
         let function = call.get("function");
         let name = function
             .and_then(|f| f.get("name"))
@@ -687,7 +704,19 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
 /// trailing text-after-tool_use, which both Bedrock and Anthropic
 /// reject with "tool_use ids were found without tool_result blocks
 /// immediately after").
-fn append_assistant_message_blocks(blocks: &mut Vec<ContentBlock>, content: &MessageContent) {
+///
+/// ToolUse content parts get their id run through `sanitize_tool_id`
+/// here -- the same normalization `emit_tool_use_blocks_from_calls`
+/// applies -- so a tool call surfacing on both channels cannot reach the
+/// wire with two divergent ids. Returns the set of RAW (pre-sanitization)
+/// ids emitted as ToolUse blocks so the tool_calls channel can skip only
+/// genuine duplicates (same source id), never two distinct calls that
+/// merely sanitize to the same value.
+fn append_assistant_message_blocks(
+    blocks: &mut Vec<ContentBlock>,
+    content: &MessageContent,
+) -> HashSet<String> {
+    let mut emitted_tool_ids: HashSet<String> = HashSet::new();
     match content {
         MessageContent::Text(t) if !t.is_empty() => blocks.push(ContentBlock::Text {
             text: t.clone(),
@@ -698,9 +727,46 @@ fn append_assistant_message_blocks(blocks: &mut Vec<ContentBlock>, content: &Mes
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
             for p in &cleaned {
-                blocks.push(translate_content_part(p));
+                let (block, tool_id) = translate_assistant_content_part(p);
+                if let Some(tool_id) = tool_id {
+                    emitted_tool_ids.insert(tool_id);
+                }
+                blocks.push(block);
             }
         }
+    }
+    emitted_tool_ids
+}
+
+/// Translate one assistant content part, sanitizing a ToolUse part's id
+/// so it matches the normalization the tool_calls channel and the
+/// tool_result correlation site (`build_tool_message`) apply -- an
+/// unsanitized tool_use id would orphan its sanitized tool_result.
+/// Returns the RAW (pre-sanitization) id when the part is a ToolUse so
+/// callers can dedupe against the tool_calls channel on the unambiguous
+/// source identity: two distinct raw ids that collapse to the same
+/// sanitized value (e.g. `call.a` and `call:a` -> `call_a`) are separate
+/// tool calls and must both survive. The emitted wire block still carries
+/// the sanitized id. Non-ToolUse parts delegate to the generic
+/// `translate_content_part`.
+fn translate_assistant_content_part(p: &ContentPart) -> (ContentBlock, Option<String>) {
+    if let ContentPart::Known(KnownContentPart::ToolUse {
+        id,
+        name,
+        input,
+        cache_control,
+    }) = p
+    {
+        let tool_id = crate::tool_id::sanitize_tool_id(id).into_owned();
+        let block = ContentBlock::ToolUse {
+            id: tool_id,
+            name: name.clone(),
+            input: input.clone(),
+            cache_control: cache_control.clone(),
+        };
+        (block, Some(id.clone()))
+    } else {
+        (translate_content_part(p), None)
     }
 }
 
@@ -713,7 +779,12 @@ fn translate_assistant_simple_content(c: &MessageContent) -> AnthropicContent {
     match c {
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
-            AnthropicContent::Blocks(cleaned.iter().map(translate_content_part).collect())
+            AnthropicContent::Blocks(
+                cleaned
+                    .iter()
+                    .map(|p| translate_assistant_content_part(p).0)
+                    .collect(),
+            )
         }
         // Text/Null arms are identical to `translate_simple_content`;
         // delegate to keep them in one place.
@@ -757,6 +828,7 @@ fn build_tool_message(msg: &Message) -> AnthropicMessage {
         ),
         MessageContent::Null => Value::Null,
     };
+    let content_val = ensure_min_tool_result_content(content_val);
     AnthropicMessage {
         role: AnthropicRole::User,
         content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
@@ -765,6 +837,21 @@ fn build_tool_message(msg: &Message) -> AnthropicMessage {
             cache_control: None,
             is_error: None,
         }]),
+    }
+}
+
+/// Anthropic rejects `tool_result.content: null` and `content: []`
+/// (content must be a string or a non-empty array of content blocks).
+/// Empty tool output is a legal, common shape -- a Null-content or
+/// empty-array tool message maps to an empty string. Mirrors the Bedrock
+/// Converse egress `ensure_min_tool_result_content` guard so the two
+/// Anthropic-shape seams agree on the same canonical input; the string
+/// form matches Converse's empty-string Text block.
+fn ensure_min_tool_result_content(content: Value) -> Value {
+    match &content {
+        Value::Null => Value::String(String::new()),
+        Value::Array(arr) if arr.is_empty() => Value::String(String::new()),
+        _ => content,
     }
 }
 
@@ -1464,5 +1551,269 @@ mod empty_content_backstop_tests {
             e.level == tracing::Level::WARN && e.field("event") == Some("empty_content_backstop")
         });
         assert!(backstop_warn.is_some(), "backstop WARN must fire");
+    }
+}
+
+#[cfg(test)]
+mod tool_use_dedup_tests {
+    use super::{ContentBlock, build_assistant_content, build_tool_message, translate_messages};
+    use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
+    use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
+    use serde_json::{Value, json};
+
+    fn tool_use_part(id: &str) -> ContentPart {
+        ContentPart::Known(KnownContentPart::ToolUse {
+            id: id.to_string(),
+            name: "lookup".to_string(),
+            input: json!({"q": "sky"}),
+            cache_control: None,
+        })
+    }
+
+    fn tool_call(id: &str) -> Value {
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {"name": "lookup", "arguments": "{\"q\":\"sky\"}"},
+        })
+    }
+
+    fn assistant(content: MessageContent, tool_calls: Option<Vec<Value>>) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls,
+        }
+    }
+
+    fn tool_use_blocks(content: &AnthropicContent) -> Vec<(&String, &Value)> {
+        let AnthropicContent::Blocks(blocks) = content else {
+            panic!("expected Blocks content");
+        };
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, input, .. } => Some((id, input)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A message carrying BOTH a ToolUse content part and a tool_calls
+    /// entry for the SAME id emits exactly one tool_use block -- the
+    /// content-part channel wins and the tool_calls channel skips the dup.
+    #[test]
+    fn both_channels_same_id_emits_single_tool_use_block() {
+        // Arrange
+        let msg = assistant(
+            MessageContent::Parts(vec![tool_use_part("t1")]),
+            Some(vec![tool_call("t1")]),
+        );
+
+        // Act
+        let content = build_assistant_content("anthropic", &msg).expect("build must not error");
+
+        // Assert
+        let uses = tool_use_blocks(&content);
+        assert_eq!(uses.len(), 1, "one tool call must emit exactly one block");
+        assert_eq!(uses[0].0, "t1");
+    }
+
+    /// The ToolUse content-part channel runs sanitize_tool_id, so an
+    /// OpenAI-origin id (`call.foo:1`) surfacing on the content-part
+    /// channel alone lands on the same `call_foo_1` the tool_calls channel
+    /// would produce -- ids cannot diverge by source channel.
+    #[test]
+    fn tool_use_content_part_id_is_sanitized() {
+        // Arrange -- only the content-part channel carries the tool call.
+        let msg = assistant(
+            MessageContent::Parts(vec![tool_use_part("call.foo:1")]),
+            None,
+        );
+
+        // Act
+        let content = build_assistant_content("anthropic", &msg).expect("build must not error");
+
+        // Assert
+        let uses = tool_use_blocks(&content);
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].0, "call_foo_1");
+    }
+
+    /// Both channels carry the SAME logical tool call under an
+    /// OpenAI-origin id. Sanitized identically on both sides, they collapse
+    /// to one block -- no divergent-id double emission.
+    #[test]
+    fn both_channels_openai_id_sanitized_and_deduped() {
+        // Arrange
+        let msg = assistant(
+            MessageContent::Parts(vec![tool_use_part("call.foo:1")]),
+            Some(vec![tool_call("call.foo:1")]),
+        );
+
+        // Act
+        let content = build_assistant_content("anthropic", &msg).expect("build must not error");
+
+        // Assert
+        let uses = tool_use_blocks(&content);
+        assert_eq!(uses.len(), 1, "divergent-id double emission must not occur");
+        assert_eq!(uses[0].0, "call_foo_1");
+    }
+
+    /// Non-overlapping ids on the two channels both survive: only matching
+    /// ids are deduped.
+    #[test]
+    fn distinct_ids_on_each_channel_both_emit() {
+        // Arrange
+        let msg = assistant(
+            MessageContent::Parts(vec![tool_use_part("t1")]),
+            Some(vec![tool_call("t2")]),
+        );
+
+        // Act
+        let content = build_assistant_content("anthropic", &msg).expect("build must not error");
+
+        // Assert
+        let uses = tool_use_blocks(&content);
+        assert_eq!(uses.len(), 2, "distinct tool calls both emit");
+        let ids: Vec<&str> = uses.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"t1") && ids.contains(&"t2"));
+    }
+
+    /// Round-trip: an Anthropic tool_use response, normalized to canonical
+    /// (which fills both the `parts` and `tool_calls` channels), then fed
+    /// back as the next request's history, produces a single valid
+    /// tool_use block rather than a duplicate-id body.
+    #[test]
+    fn anthropic_tool_use_response_round_trips_to_single_block() {
+        // Arrange -- raw Anthropic response with a text + tool_use content.
+        let raw = json!({
+            "id": "msg_01",
+            "model": "claude-opus-4-8",
+            "content": [
+                {"type": "text", "text": "looking it up"},
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "sky"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let resp = crate::anthropic_api::response::normalize("test", raw).expect("normalize");
+        let assistant_msg = resp.choices[0].message.clone();
+        // Precondition: the parser filled both channels.
+        assert!(
+            assistant_msg
+                .tool_calls
+                .as_ref()
+                .is_some_and(|tc| !tc.is_empty()),
+            "response parser must fill tool_calls"
+        );
+        assert!(
+            matches!(&assistant_msg.content, MessageContent::Parts(p)
+                if p.iter().any(|part| matches!(part,
+                    ContentPart::Known(KnownContentPart::ToolUse { .. })))),
+            "response parser must fill a ToolUse content part"
+        );
+
+        // Act -- thread it back through the egress.
+        let out = translate_messages("anthropic", &[assistant_msg]).expect("translate");
+
+        // Assert -- exactly one tool_use block, id preserved.
+        let uses = tool_use_blocks(&out[0].content);
+        assert_eq!(uses.len(), 1, "round-trip must not duplicate the tool_use");
+        assert_eq!(uses[0].0, "toolu_1");
+    }
+
+    /// Two DISTINCT tool calls whose raw ids differ only by a
+    /// sanitized-away char (`call.a` on the content-part channel,
+    /// `call:a` on the tool_calls channel -- both sanitize to `call_a`)
+    /// are separate calls and must BOTH be emitted. Deduping on the
+    /// sanitized id would collapse them and silently drop one; deduping on
+    /// the raw source id keeps both.
+    #[test]
+    fn distinct_raw_ids_that_sanitize_equal_both_emit() {
+        // Arrange
+        let msg = assistant(
+            MessageContent::Parts(vec![tool_use_part("call.a")]),
+            Some(vec![tool_call("call:a")]),
+        );
+
+        // Act
+        let content = build_assistant_content("anthropic", &msg).expect("build must not error");
+
+        // Assert: both survive; neither distinct call is dropped by dedup.
+        let uses = tool_use_blocks(&content);
+        assert_eq!(
+            uses.len(),
+            2,
+            "distinct raw ids that sanitize to the same value must both emit"
+        );
+        // Both wire ids are the sanitized form.
+        for (id, _) in &uses {
+            assert_eq!(id.as_str(), "call_a", "wire id must be the sanitized form");
+        }
+    }
+
+    fn tool_msg(content: MessageContent) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Tool,
+            content,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: Some("toolu_1".to_string()),
+            tool_calls: None,
+        }
+    }
+
+    fn tool_result_content(m: &AnthropicMessage) -> &Value {
+        let AnthropicContent::Blocks(blocks) = &m.content else {
+            panic!("expected Blocks content");
+        };
+        blocks
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .expect("tool_result block present")
+    }
+
+    /// A Null-content tool message maps to an empty string, never JSON
+    /// null (which api.anthropic.com rejects) -- mirrors the Converse
+    /// ensure_min_tool_result_content guard.
+    #[test]
+    fn null_content_tool_result_maps_to_empty_string() {
+        // Arrange / Act
+        let m = build_tool_message(&tool_msg(MessageContent::Null));
+
+        // Assert
+        assert_eq!(tool_result_content(&m), &Value::String(String::new()));
+    }
+
+    /// An empty Parts array would serialize to `content: []`, also
+    /// rejected; the guard collapses it to an empty string too.
+    #[test]
+    fn empty_parts_tool_result_maps_to_empty_string() {
+        // Arrange / Act
+        let m = build_tool_message(&tool_msg(MessageContent::Parts(Vec::new())));
+
+        // Assert
+        assert_eq!(tool_result_content(&m), &Value::String(String::new()));
+    }
+
+    /// Non-empty text content is untouched by the guard.
+    #[test]
+    fn non_empty_text_tool_result_is_preserved() {
+        // Arrange / Act
+        let m = build_tool_message(&tool_msg(MessageContent::Text("ok".to_string())));
+
+        // Assert
+        assert_eq!(tool_result_content(&m), &Value::String("ok".to_string()));
     }
 }

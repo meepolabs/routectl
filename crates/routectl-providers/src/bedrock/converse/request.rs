@@ -36,8 +36,12 @@
 //! mis-shaped cache prefix surfaces as a clean 400 locally rather than
 //! a vague AWS error.
 
+use serde_json::Value;
+
 use routectl_core::cache_control;
 use routectl_core::{ChatRequest, Result};
+
+use crate::anthropic_api::request::{build_thinking, clamp_sampling_for_thinking};
 
 use super::super::BedrockConfig;
 use super::extras::build_additional_fields;
@@ -59,7 +63,6 @@ const RESPONSE_FIELD_PATHS: &[&str] = &["/stop_sequence"];
 // ---------------------------------------------------------------------------
 
 pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseRequest> {
-    let inference_config = build_inference_config(req);
     let system = build_system(req);
     let messages = build_messages(&cfg.id, &req.messages)?;
     let tool_config = build_tool_config(&cfg.id, req)?;
@@ -70,6 +73,19 @@ pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseReque
     // stays in tools.rs.
     let tool_choice = tool_config.as_ref().and_then(|tc| tc.tool_choice.as_ref());
     let additional_model_request_fields = build_additional_fields(cfg, req, tool_choice);
+
+    // The sampling clamp must key off whether thinking ACTUALLY survives on
+    // the wire, not the provisional build_thinking result: build_additional_fields
+    // strips thinking when toolChoice forces tool use (and the allowlist filters
+    // can drop it too). Build the bag first, then inspect it -- clamping on the
+    // provisional value would force temperature=1.0 / drop top_p for a request
+    // that ships no thinking, diverging from the direct Anthropic path which
+    // restores caller sampling after its final thinking strip.
+    let thinking_survived = additional_model_request_fields
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|o| o.contains_key("thinking"));
+    let inference_config = build_inference_config(cfg, req, thinking_survived);
 
     validate_breakpoints(req)?;
 
@@ -88,26 +104,42 @@ pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseReque
     })
 }
 
-fn build_inference_config(req: &ChatRequest) -> Option<InferenceConfig> {
-    // Claude 4.x rejects requests that carry both `temperature` and
-    // `top_p`. Emit `top_p` only when no temperature is set; temperature
-    // wins.
-    let top_p = if req.temperature.is_some() {
-        None
+fn build_inference_config(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
+    thinking_survived: bool,
+) -> Option<InferenceConfig> {
+    // Clamp sampling for thinking mode via the shared Anthropic-API helper:
+    // Claude requires temperature=1.0 (and no top_p) while thinking, and
+    // rejects a temperature+top_p pair otherwise. The Anthropic-API and
+    // Bedrock-Invoke seams apply the identical clamp; Converse builds its
+    // inferenceConfig independently, so it must call the same helper or the
+    // clamp drifts.
+    //
+    // Only clamp when thinking survived into the final bag. `build_thinking`'s
+    // provisional result may be stripped downstream (toolChoice forces a tool,
+    // allowlist filters), and clamping on the provisional value would force
+    // temperature=1.0 / drop top_p even though no thinking ships -- matching
+    // the direct Anthropic path's reconcile_sampling_params, which restores
+    // caller sampling from the source request once no thinking survives.
+    let thinking = if thinking_survived {
+        build_thinking(req, cfg.adaptive_thinking.unwrap_or(false))
     } else {
-        req.top_p
+        None
     };
-    let cfg = InferenceConfig {
+    let (temperature, top_p) =
+        clamp_sampling_for_thinking(thinking.as_ref(), req.temperature, req.top_p);
+    let cfg_inference = InferenceConfig {
         max_tokens: req.max_tokens,
-        temperature: req.temperature,
+        temperature,
         top_p,
         stop_sequences: req.stop.clone(),
     };
-    let any_set = cfg.max_tokens.is_some()
-        || cfg.temperature.is_some()
-        || cfg.top_p.is_some()
-        || cfg.stop_sequences.is_some();
-    if any_set { Some(cfg) } else { None }
+    let any_set = cfg_inference.max_tokens.is_some()
+        || cfg_inference.temperature.is_some()
+        || cfg_inference.top_p.is_some()
+        || cfg_inference.stop_sequences.is_some();
+    if any_set { Some(cfg_inference) } else { None }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,3 +167,7 @@ mod tests;
 #[cfg(test)]
 #[path = "request_tests_round2.rs"]
 mod tests_round2;
+
+#[cfg(test)]
+#[path = "request_tests_parity.rs"]
+mod tests_parity;

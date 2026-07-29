@@ -94,6 +94,7 @@ impl Router {
         let request_features = crate::feature_keys::derive_feature_keys(
             req.tools.as_deref().unwrap_or(&[]),
             req.provider_extras.as_ref(),
+            req.response_format.as_ref(),
         );
         let ctx = detector_context(req, &request_features);
         let observations = capability_detect::detect(&ctx, resp);

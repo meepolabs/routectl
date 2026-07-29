@@ -248,7 +248,8 @@ impl Router {
         // sticky decision to record.
         let (order, token): (Vec<usize>, Option<&'static str>) = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
-                let (order, tok) = self.sticky_seat_order(seats, key);
+                let pin_key = sticky_pin_key(key, &m.nickname);
+                let (order, tok) = self.sticky_seat_order(seats, &pin_key);
                 (order, Some(tok))
             }
             // Keyless (or single-seat) StickyLeastLoaded collapses to
@@ -327,8 +328,11 @@ impl Router {
             req.routectl_internal.inbound_session_key.as_deref(),
         )?;
         let tools = req.tools.as_deref().unwrap_or(&[]);
-        let features =
-            crate::feature_keys::derive_feature_keys(tools, req.provider_extras.as_ref());
+        let features = crate::feature_keys::derive_feature_keys(
+            tools,
+            req.provider_extras.as_ref(),
+            req.response_format.as_ref(),
+        );
         let mut admissions = Vec::new();
         let chain = self.filter_chain_by_features(chain, &features, &req.model, &mut admissions)?;
         Ok((chain, admissions))
@@ -365,6 +369,18 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         class_overrides: BTreeMap::new(),
         capabilities,
     }
+}
+
+/// Namespace a sticky pin lookup key by the pool's model nickname so two
+/// StickyLeastLoaded pools in one chain keep independent pins for the same
+/// inbound session. Without the namespace both pools key by the bare session
+/// and clobber each other's pin every turn, defeating the prompt-cache
+/// locality StickyLeastLoaded exists to provide.
+///
+/// The nickname is length-prefixed so no (session, nickname) pair can collide
+/// with another regardless of which bytes appear in the session key.
+pub(super) fn sticky_pin_key(session: &str, nickname: &str) -> String {
+    format!("{}:{}:{}", nickname.len(), nickname, session)
 }
 
 /// Build a dispatch target for one seat of a pooled model. Identical to

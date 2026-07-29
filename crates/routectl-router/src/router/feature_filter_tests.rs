@@ -115,6 +115,26 @@ fn structured_output_request(model: &str) -> ChatRequest {
 /// Per-provider captured-request log for test introspection.
 type CapturedRequests = Arc<ParkingMutex<Vec<ChatRequest>>>;
 
+/// Request carrying a canonical top-level `response_format` json_schema
+/// directive -- the OpenAI-shape structured-output source forwarded by
+/// the router call sites, distinct from the Anthropic
+/// `output_config.format` slot on `provider_extras`.
+fn response_format_request(model: &str) -> ChatRequest {
+    ChatRequest {
+        model: model.into(),
+        messages: vec![].into(),
+        tools: None,
+        response_format: Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "r",
+                "schema": {"type": "object"}
+            }
+        })),
+        ..Default::default()
+    }
+}
+
 /// Build a router with a 2-entry alias chain `["bedrock-opus" ->
 /// "anthropic-opus"]`. Each provider entry carries the
 /// `unsupported_features` list passed by the caller.
@@ -336,6 +356,27 @@ async fn structured_output_skips_first_provider_when_listed_unsupported() {
         captured_bedrock.lock().len(),
         0,
         "bedrock must be skipped, not tried-and-fallback",
+    );
+    assert_eq!(captured_anthropic.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn response_format_json_schema_skips_first_provider_when_unsupported() {
+    // Proactive route-away for the canonical top-level `response_format`
+    // source (OpenAI-shape json_schema), forwarded by the chain call site.
+    // Chain [bedrock, anthropic]; bedrock declares structured_output
+    // unsupported. A request carrying response_format={json_schema} must
+    // skip bedrock and land on anthropic -- the proactive leg the reactive
+    // matcher previously had to cover alone.
+    let (router, captured_bedrock, captured_anthropic) =
+        build_router_with_chain(vec!["structured_output".into()], vec![]);
+    let req = response_format_request("alias");
+    let resp = router.complete(req).await.expect("dispatch must succeed");
+    assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-prov"));
+    assert_eq!(
+        captured_bedrock.lock().len(),
+        0,
+        "bedrock must be skipped proactively on the response_format source",
     );
     assert_eq!(captured_anthropic.lock().len(), 1);
 }

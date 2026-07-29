@@ -13,15 +13,18 @@
 //!
 //! Pattern-matches on `ToolDef::Other(v)["type"]` for tool-type keys
 //! (e.g. `web_search`, `computer_use`). The `structured_output` key is
-//! NOT tool-type-derived -- it is request-derived from two sources:
+//! NOT tool-type-derived -- it is request-derived from three sources:
 //!
 //! - `provider_extras["output_config"]["format"]` set to a non-null
 //!   value (Anthropic structured outputs), OR
+//! - the canonical top-level `response_format` directive
+//!   (`{type:"json_schema"|"json_object", ...}`), the OpenAI-shape slot
+//!   populated by the OpenAI-chat and OpenAI-Responses ingresses, OR
 //! - any tool requesting strict / constrained decoding: a
 //!   `ToolDef::Custom` with `strict == Some(true)`, or a
 //!   `ToolDef::Other(v)` carrying `v["strict"] == true`.
 //!
-//! Both rely on constrained decoding, which some upstreams (e.g. a
+//! All rely on constrained decoding, which some upstreams (e.g. a
 //! Bedrock Invoke leg on certain Claude models) do not enforce, yielding
 //! malformed `tool_use` JSON the client cannot parse. Declaring
 //! `unsupported_features = ["structured_output"]` on such a provider
@@ -40,10 +43,15 @@ use serde_json::Value;
 /// Skips `ToolDef::Custom` and `Other` entries without a string `type`
 /// for tool-type derivation. Additionally appends the request-derived
 /// `structured_output` key (after any tool-type keys) when the request
-/// needs constrained decoding -- see the module docs for the two
-/// trigger sources. Pure: takes only what it reads, holds no router
-/// state.
-pub fn derive_feature_keys(tools: &[ToolDef], provider_extras: Option<&Value>) -> Vec<String> {
+/// needs constrained decoding -- see the module docs for the three
+/// trigger sources (`output_config.format`, a strict tool, or the
+/// canonical top-level `response_format`). Pure: takes only what it
+/// reads, holds no router state.
+pub fn derive_feature_keys(
+    tools: &[ToolDef],
+    provider_extras: Option<&Value>,
+    response_format: Option<&Value>,
+) -> Vec<String> {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut keys: Vec<String> = Vec::new();
     for tool in tools {
@@ -60,7 +68,11 @@ pub fn derive_feature_keys(tools: &[ToolDef], provider_extras: Option<&Value>) -
             }
         }
     }
-    if needs_structured_output(tools, provider_extras)
+    // The canonical top-level `response_format` directive is forwarded by
+    // the router call sites (`req.response_format.as_ref()`), so a family
+    // whose config marks `structured_output` unsupported routes away
+    // proactively rather than being admitted and caught reactively.
+    if needs_structured_output(tools, provider_extras, response_format)
         && seen.insert(STRUCTURED_OUTPUT_KEY.to_string())
     {
         keys.push(STRUCTURED_OUTPUT_KEY.to_string());
@@ -68,11 +80,19 @@ pub fn derive_feature_keys(tools: &[ToolDef], provider_extras: Option<&Value>) -
     keys
 }
 
-/// True when the request needs constrained decoding: an
+/// True when the request needs constrained decoding: a canonical
+/// `response_format` requesting json (`json_schema` / `json_object`), an
 /// `output_config.format` set to a non-null value, or any strict tool
 /// (`ToolDef::Custom` with `strict == Some(true)`, or `ToolDef::Other`
 /// carrying `"strict": true`).
-fn needs_structured_output(tools: &[ToolDef], provider_extras: Option<&Value>) -> bool {
+fn needs_structured_output(
+    tools: &[ToolDef],
+    provider_extras: Option<&Value>,
+    response_format: Option<&Value>,
+) -> bool {
+    if response_format_requests_json(response_format) {
+        return true;
+    }
     let has_format = provider_extras
         .and_then(|v| v.get("output_config"))
         .and_then(|oc| oc.get("format"))
@@ -84,6 +104,18 @@ fn needs_structured_output(tools: &[ToolDef], provider_extras: Option<&Value>) -
         ToolDef::Custom(c) => c.strict == Some(true),
         ToolDef::Other(v) => v.get("strict").and_then(serde_json::Value::as_bool) == Some(true),
     })
+}
+
+/// True when a canonical `response_format` directive requests constrained
+/// JSON output (`{"type":"json_schema"}` or `{"type":"json_object"}`). A
+/// `{"type":"text"}` directive, a non-object, or an absent value is not a
+/// structured-output request.
+fn response_format_requests_json(response_format: Option<&Value>) -> bool {
+    response_format
+        .and_then(Value::as_object)
+        .and_then(|o| o.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|t| matches!(t, "json_schema" | "json_object"))
 }
 
 /// Strip a trailing `-YYYYMMDD` or `_YYYYMMDD` suffix if present.
@@ -179,13 +211,13 @@ mod tests {
 
     #[test]
     fn derive_returns_empty_for_no_tools() {
-        assert!(derive_feature_keys(&[], None).is_empty());
+        assert!(derive_feature_keys(&[], None, None).is_empty());
     }
 
     #[test]
     fn derive_returns_empty_for_only_custom_tools() {
         let tools = vec![custom_tool("calc"), custom_tool("send_email")];
-        assert!(derive_feature_keys(&tools, None).is_empty());
+        assert!(derive_feature_keys(&tools, None, None).is_empty());
     }
 
     #[test]
@@ -194,7 +226,7 @@ mod tests {
             "type": "web_search_20250305",
             "name": "search"
         }))];
-        assert_eq!(derive_feature_keys(&tools, None), vec!["web_search"]);
+        assert_eq!(derive_feature_keys(&tools, None, None), vec!["web_search"]);
     }
 
     #[test]
@@ -203,7 +235,10 @@ mod tests {
             "type": "computer_use_20250124",
             "name": "computer"
         }))];
-        assert_eq!(derive_feature_keys(&tools, None), vec!["computer_use"]);
+        assert_eq!(
+            derive_feature_keys(&tools, None, None),
+            vec!["computer_use"]
+        );
     }
 
     #[test]
@@ -219,7 +254,7 @@ mod tests {
                 }
             }
         });
-        let keys = derive_feature_keys(&[], Some(&extras));
+        let keys = derive_feature_keys(&[], Some(&extras), None);
         assert_eq!(keys, vec!["structured_output"]);
     }
 
@@ -232,7 +267,7 @@ mod tests {
                 "effort": "high"
             }
         });
-        assert!(derive_feature_keys(&[], Some(&extras)).is_empty());
+        assert!(derive_feature_keys(&[], Some(&extras), None).is_empty());
     }
 
     #[test]
@@ -243,7 +278,7 @@ mod tests {
                 "format": null
             }
         });
-        assert!(derive_feature_keys(&[], Some(&extras)).is_empty());
+        assert!(derive_feature_keys(&[], Some(&extras), None).is_empty());
     }
 
     #[test]
@@ -251,23 +286,26 @@ mod tests {
         // provider_extras that is not an object (e.g. a bare array)
         // cannot carry output_config; no key.
         let extras = json!([1, 2, 3]);
-        assert!(derive_feature_keys(&[], Some(&extras)).is_empty());
+        assert!(derive_feature_keys(&[], Some(&extras), None).is_empty());
     }
 
     #[test]
     fn derive_emits_structured_output_for_strict_custom_tool() {
         // A strict custom tool relies on constrained decoding too.
         let tools = vec![strict_custom_tool("lookup", Some(true))];
-        assert_eq!(derive_feature_keys(&tools, None), vec!["structured_output"]);
+        assert_eq!(
+            derive_feature_keys(&tools, None, None),
+            vec!["structured_output"]
+        );
     }
 
     #[test]
     fn derive_no_structured_output_for_non_strict_custom_tool() {
         // strict: Some(false) and strict: None both mean no constraint.
         let off = vec![strict_custom_tool("lookup", Some(false))];
-        assert!(derive_feature_keys(&off, None).is_empty());
+        assert!(derive_feature_keys(&off, None, None).is_empty());
         let unset = vec![strict_custom_tool("lookup", None)];
-        assert!(derive_feature_keys(&unset, None).is_empty());
+        assert!(derive_feature_keys(&unset, None, None).is_empty());
     }
 
     #[test]
@@ -279,7 +317,7 @@ mod tests {
             "name": "thing",
             "strict": true
         }))];
-        let keys = derive_feature_keys(&tools, None);
+        let keys = derive_feature_keys(&tools, None, None);
         // The Other tool also carries a `type`, so its tool-type key must
         // co-occur with structured_output (tool-type first, SO appended).
         assert_eq!(
@@ -300,7 +338,7 @@ mod tests {
             "output_config": { "format": {"type": "json_schema"} }
         });
         assert_eq!(
-            derive_feature_keys(&tools, Some(&extras)),
+            derive_feature_keys(&tools, Some(&extras), None),
             vec!["web_search".to_string(), "structured_output".to_string()]
         );
     }
@@ -314,7 +352,7 @@ mod tests {
             "output_config": { "format": {"type": "json_schema"} }
         });
         assert_eq!(
-            derive_feature_keys(&tools, Some(&extras)),
+            derive_feature_keys(&tools, Some(&extras), None),
             vec!["structured_output".to_string()]
         );
     }
@@ -327,7 +365,7 @@ mod tests {
             ToolDef::Other(json!({"type": "web_search_20250305", "name": "search"})),
             ToolDef::Other(json!({"type": "web_search_20251102", "name": "search"})),
         ];
-        assert_eq!(derive_feature_keys(&tools, None), vec!["web_search"]);
+        assert_eq!(derive_feature_keys(&tools, None, None), vec!["web_search"]);
     }
 
     #[test]
@@ -339,7 +377,7 @@ mod tests {
             ToolDef::Other(json!({"type": "computer_use_20250124", "name": "computer"})),
         ];
         assert_eq!(
-            derive_feature_keys(&tools, None),
+            derive_feature_keys(&tools, None, None),
             vec!["web_search".to_string(), "computer_use".to_string()]
         );
     }
@@ -350,7 +388,7 @@ mod tests {
             "type": 42,
             "name": "weird"
         }))];
-        assert!(derive_feature_keys(&tools, None).is_empty());
+        assert!(derive_feature_keys(&tools, None, None).is_empty());
     }
 
     #[test]
@@ -358,7 +396,7 @@ mod tests {
         let tools = vec![ToolDef::Other(json!({
             "name": "no_type"
         }))];
-        assert!(derive_feature_keys(&tools, None).is_empty());
+        assert!(derive_feature_keys(&tools, None, None).is_empty());
     }
 
     #[test]
@@ -368,7 +406,7 @@ mod tests {
             custom_tool("calc"),
             ToolDef::Other(json!({"type": "web_search_20250305", "name": "search"})),
         ];
-        assert_eq!(derive_feature_keys(&tools, None), vec!["web_search"]);
+        assert_eq!(derive_feature_keys(&tools, None, None), vec!["web_search"]);
     }
 
     #[test]
@@ -376,6 +414,60 @@ mod tests {
         // Some upstreams ship unversioned built-in tool types; those
         // pass through verbatim as the feature key.
         let tools = vec![ToolDef::Other(json!({"type": "bash", "name": "bash"}))];
-        assert_eq!(derive_feature_keys(&tools, None), vec!["bash"]);
+        assert_eq!(derive_feature_keys(&tools, None, None), vec!["bash"]);
+    }
+
+    #[test]
+    fn needs_structured_output_true_for_json_schema_response_format() {
+        // The OpenAI-chat / Responses ingresses populate the canonical
+        // response_format slot; a json_schema directive needs constrained
+        // decoding, so the gate-input predicate must fire.
+        let rf = json!({
+            "type": "json_schema",
+            "json_schema": {"name": "r", "schema": {"type": "object"}}
+        });
+        assert!(needs_structured_output(&[], None, Some(&rf)));
+    }
+
+    #[test]
+    fn needs_structured_output_true_for_json_object_response_format() {
+        let rf = json!({"type": "json_object"});
+        assert!(needs_structured_output(&[], None, Some(&rf)));
+    }
+
+    #[test]
+    fn needs_structured_output_false_for_text_response_format() {
+        // A plain-text directive is not a structured-output request.
+        let rf = json!({"type": "text"});
+        assert!(!needs_structured_output(&[], None, Some(&rf)));
+    }
+
+    #[test]
+    fn needs_structured_output_false_when_response_format_absent() {
+        assert!(!needs_structured_output(&[], None, None));
+    }
+
+    #[test]
+    fn derive_feature_keys_forwards_response_format_json_schema() {
+        // The router call sites forward `req.response_format.as_ref()`, so a
+        // canonical json_schema directive with no tools and no output_config
+        // still derives `structured_output` here -- the proactive route-away
+        // leg for a family that cannot enforce constrained decoding.
+        let rf = json!({
+            "type": "json_schema",
+            "json_schema": {"name": "r", "schema": {"type": "object"}}
+        });
+        assert_eq!(
+            derive_feature_keys(&[], None, Some(&rf)),
+            vec!["structured_output".to_string()]
+        );
+    }
+
+    #[test]
+    fn derive_feature_keys_ignores_text_response_format() {
+        // A plain-text directive is not a structured-output request, so no
+        // key is derived even when it is forwarded.
+        let rf = json!({"type": "text"});
+        assert!(derive_feature_keys(&[], None, Some(&rf)).is_empty());
     }
 }

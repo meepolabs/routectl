@@ -58,6 +58,7 @@ pub(super) fn build_additional_fields(
     // silently shadowed. Do not reorder these calls or relax the
     // `or_insert_with` semantics.
     insert_thinking(cfg, req, &mut bag);
+    insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
     insert_provider_extras(cfg, req, &mut bag);
@@ -176,6 +177,29 @@ fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<
         // matches the Anthropic egress precedence.
         bag.insert(k.clone(), v.clone());
     }
+}
+
+/// Honor the canonical structured-output directive on the Converse bag by
+/// mapping `req.response_format` (OpenAI-shape) onto Anthropic's
+/// `output_config.format`, the shape AWS forwards verbatim to Claude. Uses
+/// the same shared converter as the Anthropic-API egress so both Claude
+/// seams emit the identical wire field. Merges into any `output_config`
+/// `insert_thinking` already wrote (adaptive effort), preserving that
+/// sibling; a caller-supplied `output_config.format` is left untouched.
+///
+/// Non-Claude Converse models do not honor `output_config.format`; the
+/// admission-time capability gate (an operator `unsupported_features`
+/// declaration) is what routes those away -- forwarding the inert bag key
+/// here is harmless (AWS ignores unknown bag fields for such models).
+fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) {
+    let Some(rf) = req.response_format.as_ref() else {
+        return;
+    };
+    let Some(format) = crate::anthropic_api::request::response_format_to_anthropic_format(rf)
+    else {
+        return;
+    };
+    crate::anthropic_api::request::set_output_config_format(bag, format);
 }
 
 /// Reuse build_thinking from the Anthropic egress so the legacy vs
