@@ -1826,6 +1826,7 @@ impl Provider for AdvisorGatedProvider {
         let keys = crate::feature_keys::derive_feature_keys(
             req.tools.as_deref().unwrap_or(&[]),
             req.provider_extras.as_ref(),
+            req.response_format.as_ref(),
         );
         if keys.iter().any(|k| k == "advisor") {
             self.reject_calls.fetch_add(1, Ordering::SeqCst);
@@ -2008,6 +2009,7 @@ impl Provider for ControlObservingProvider {
         let keys = crate::feature_keys::derive_feature_keys(
             req.tools.as_deref().unwrap_or(&[]),
             req.provider_extras.as_ref(),
+            req.response_format.as_ref(),
         );
         if keys.iter().any(|k| k == "advisor") {
             self.advisor_calls.fetch_add(1, Ordering::SeqCst);

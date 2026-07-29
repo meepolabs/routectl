@@ -54,6 +54,10 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
 
     extras::apply_reasoning(&mut request, req);
     extras::merge_provider_extras(&mut request, req, cfg.auth_kind);
+    // Honor the canonical structured-output directive onto `text.format`.
+    // Runs after merge_provider_extras so a `verbosity` sibling lifted into
+    // provider_extras["text"] survives and the format merges alongside it.
+    extras::apply_response_format(&mut request, req);
     // Runs last: the encrypted-reasoning include depends on the final
     // `store` value (which merge_provider_extras may have flipped) and
     // on whether the operator pinned `include` explicitly.
@@ -111,3 +115,102 @@ fn warn_dropped_cache_control(req: &ChatRequest) {
 #[cfg(test)]
 #[path = "request_tests.rs"]
 mod tests;
+
+// response_format round-trip: the Responses ingress parses inbound
+// text.format into req.response_format; the egress must re-emit it onto
+// text.format (same-protocol regression).
+#[cfg(test)]
+mod response_format_tests {
+    use super::translate;
+    use crate::openai_responses::{AuthKind, OpenAiResponsesConfig};
+    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use serde_json::json;
+
+    fn cfg() -> OpenAiResponsesConfig {
+        let mut c = OpenAiResponsesConfig::new("openai-responses:test", "literal:test");
+        c.auth_kind = AuthKind::ChatgptOauth;
+        c
+    }
+
+    fn req_with(response_format: Option<serde_json::Value>) -> ChatRequest {
+        ChatRequest {
+            model: "gpt-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            response_format,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn json_schema_response_format_round_trips_to_text_format() {
+        let req = req_with(Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "widget",
+                "schema": {"type": "object", "required": ["x"]},
+                "strict": true
+            }
+        })));
+        let request = translate(&cfg(), &req).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+        let fmt = &body["text"]["format"];
+        assert_eq!(fmt["type"], "json_schema", "got: {body}");
+        assert_eq!(fmt["name"], "widget", "got: {body}");
+        assert_eq!(fmt["schema"]["required"][0], "x", "got: {body}");
+        assert_eq!(fmt["strict"], true, "got: {body}");
+    }
+
+    #[test]
+    fn json_object_response_format_round_trips_to_text_format() {
+        let req = req_with(Some(json!({"type": "json_object"})));
+        let request = translate(&cfg(), &req).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["text"]["format"]["type"], "json_object", "got: {body}");
+    }
+
+    #[test]
+    fn response_format_merges_with_verbosity_from_provider_extras() {
+        // The ingress lifts the non-format remainder of `text` (e.g.
+        // verbosity) into provider_extras["text"]; the egress must keep it
+        // and merge the format alongside.
+        let mut req = req_with(Some(json!({"type": "json_object"})));
+        req.provider_extras = Some(json!({"text": {"verbosity": "low"}}));
+        let request = translate(&cfg(), &req).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["text"]["verbosity"], "low", "got: {body}");
+        assert_eq!(body["text"]["format"]["type"], "json_object", "got: {body}");
+    }
+
+    #[test]
+    fn caller_text_format_wins_over_response_format() {
+        // An operator-supplied text.format is left untouched.
+        let mut req = req_with(Some(json!({"type": "json_object"})));
+        req.provider_extras = Some(json!({
+            "text": {"format": {"type": "json_schema", "name": "op", "schema": {}}}
+        }));
+        let request = translate(&cfg(), &req).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            body["text"]["format"]["type"], "json_schema",
+            "caller text.format must win: {body}"
+        );
+    }
+
+    #[test]
+    fn no_response_format_leaves_text_absent() {
+        let req = req_with(None);
+        let request = translate(&cfg(), &req).unwrap();
+        let body = serde_json::to_value(&request).unwrap();
+        assert!(body.get("text").is_none(), "got: {body}");
+    }
+}

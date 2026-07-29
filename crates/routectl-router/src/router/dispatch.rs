@@ -501,6 +501,7 @@ impl Router {
                                 let features = derive_feature_keys(
                                     req.tools.as_deref().unwrap_or(&[]),
                                     req.provider_extras.as_ref(),
+                                    req.response_format.as_ref(),
                                 );
                                 meta.learned_capabilities.extend(plan.commit(
                                     replay_reject_status,
@@ -609,6 +610,13 @@ impl Router {
                             // in-loop gate promises).
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
+                            // Preserve the genuine upstream 401 as last_err
+                            // before re-gating. If the re-gate then refuses
+                            // (CircuitOpen / RPM), the `last_err.is_none()`
+                            // guard above keeps this real error rather than
+                            // overwriting it with the synthetic status-0 gate
+                            // error, so the client sees the true 401.
+                            last_err = Some(e);
                             continue;
                         }
                         // Reasoning-replay strip repair: a FIXED correctness
@@ -644,6 +652,18 @@ impl Router {
                             skip_replay_backoff = true;
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
+                            // Preserve the genuine replay-rejection error as
+                            // last_err before re-gating the stripped variant.
+                            // If the re-gate refuses (CircuitOpen / RPM), the
+                            // `last_err.is_none()` guard keeps the real
+                            // upstream rejection rather than surfacing the
+                            // synthetic status-0 gate error. Store the body-free
+                            // form so a re-gate refusal cannot surface the
+                            // reasoning blob a replay rejection may echo.
+                            last_err = Some(
+                                replay_rejection_body_free(&e, &cf.class, provider_name)
+                                    .unwrap_or(e),
+                            );
                             continue;
                         }
                         if let Some(body_free) =
@@ -681,6 +701,21 @@ impl Router {
                             // must be freed without a breaker debit.
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
+                            // A probe fast-fails ACROSS distinct chain targets
+                            // (walking an all-Anthropic chain is futile -- every
+                            // hop shares the limit), but a rate-limited SEAT does
+                            // not mean the pooled model is out of quota: hop to
+                            // the next sibling seat of the SAME pool when one
+                            // exists (and fallbacks are enabled). Carry the
+                            // genuine 429/529 as last_err so a later synthetic
+                            // gate error cannot mask it; fast-fail once the
+                            // pool's seats are exhausted.
+                            if !opts.disable_fallbacks
+                                && next_is_sibling_seat(&chain, chain_idx, target)
+                            {
+                                last_err = Some(e);
+                                continue 'chain;
+                            }
                             return Err(e);
                         }
                         // The honored upstream reset for THIS error (clamped
@@ -1214,6 +1249,7 @@ impl Router {
                                 let features = derive_feature_keys(
                                     req.tools.as_deref().unwrap_or(&[]),
                                     req.provider_extras.as_ref(),
+                                    req.response_format.as_ref(),
                                 );
                                 meta.learned_capabilities.extend(plan.commit(
                                     replay_reject_status,
@@ -1303,6 +1339,11 @@ impl Router {
                             // fresh slot.
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
+                            // Preserve the genuine upstream 401 as last_err
+                            // before re-gating (see `complete_inner`): if the
+                            // re-gate refuses, the `last_err.is_none()` guard
+                            // keeps the real 401 over the synthetic gate error.
+                            last_err = Some(e);
                             continue;
                         }
                         // Reasoning-replay strip repair (see `complete_inner`):
@@ -1333,6 +1374,17 @@ impl Router {
                             strip_replay_artifacts(&mut attempt_req, lane);
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
+                            // Preserve the genuine replay-rejection error as
+                            // last_err before re-gating the stripped variant
+                            // (see `complete_inner`): if the re-gate refuses,
+                            // the `last_err.is_none()` guard keeps the real
+                            // rejection over the synthetic gate error. Store the
+                            // body-free form so a re-gate refusal cannot surface
+                            // the reasoning blob a replay rejection may echo.
+                            last_err = Some(
+                                replay_rejection_body_free(&e, &cf.class, provider_name)
+                                    .unwrap_or(e),
+                            );
                             continue;
                         }
                         if let Some(body_free) =
@@ -1368,6 +1420,17 @@ impl Router {
                             // without a breaker debit.
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
+                            // Fail over to a sibling seat of the SAME pool
+                            // before fast-failing (see `complete_inner`): a
+                            // rate-limited seat does not mean the pool is out of
+                            // quota. Fast-fail across DISTINCT chain targets and
+                            // once the pool's seats are exhausted.
+                            if !opts.disable_fallbacks
+                                && next_is_sibling_seat(&chain, chain_idx, target)
+                            {
+                                last_err = Some(e);
+                                continue 'chain;
+                            }
                             return Err(e);
                         }
                         // Stream dispatch never retries the same provider (no
@@ -2504,6 +2567,22 @@ fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
 fn mul_duration(d: Duration, factor: f64) -> Duration {
     let nanos = d.as_nanos() as f64 * factor;
     Duration::from_nanos(nanos.min(u64::MAX as f64) as u64)
+}
+
+/// Whether the chain entry AFTER `chain_idx` is another seat of the SAME
+/// pooled model as `target` -- i.e. a sibling seat a probe may fail over to
+/// before fast-failing. All seats of one pool share the model `Arc`
+/// (`dispatch_target_for_seat` clones the same `Arc<ResolvedModel>`), while
+/// distinct chain entries carry distinct model Arcs, so pointer identity is
+/// the exact same-pool discriminant.
+fn next_is_sibling_seat(
+    chain: &[DispatchTarget],
+    chain_idx: usize,
+    target: &DispatchTarget,
+) -> bool {
+    chain
+        .get(chain_idx + 1)
+        .is_some_and(|next| std::sync::Arc::ptr_eq(&next.model, &target.model))
 }
 
 #[cfg(test)]

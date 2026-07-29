@@ -446,7 +446,8 @@ async fn streaming_success_records_no_observation() {
 #[test]
 fn detector_context_derives_strict_and_schema_keys_from_output_config() {
     let req = structured_output_request(&["name", "age"]);
-    let features = crate::feature_keys::derive_feature_keys(&[], req.provider_extras.as_ref());
+    let features =
+        crate::feature_keys::derive_feature_keys(&[], req.provider_extras.as_ref(), None);
     let ctx = detector_context(&req, &features);
     assert!(ctx.strict_output_requested);
     assert_eq!(
@@ -472,7 +473,7 @@ fn detector_context_derives_schema_keys_from_strict_tool() {
         ..Default::default()
     };
     let features =
-        crate::feature_keys::derive_feature_keys(req.tools.as_deref().unwrap_or(&[]), None);
+        crate::feature_keys::derive_feature_keys(req.tools.as_deref().unwrap_or(&[]), None, None);
     let ctx = detector_context(&req, &features);
     assert!(ctx.strict_output_requested);
     assert_eq!(ctx.requested_schema_required_keys, vec!["q".to_string()]);

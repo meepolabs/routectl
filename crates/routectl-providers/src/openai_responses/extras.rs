@@ -120,6 +120,69 @@ pub(super) fn merge_provider_extras(
     }
 }
 
+/// Honor the canonical structured-output directive by mapping
+/// `req.response_format` (OpenAI Chat-Completions shape) onto the Responses
+/// API `text.format` field. This closes the same-protocol round-trip: the
+/// Responses ingress parses inbound `text.format` INTO `req.response_format`
+/// (saving the remainder of `text`, e.g. `verbosity`, into
+/// `provider_extras["text"]`), so the egress must re-emit it or strict JSON
+/// decode fails.
+///
+///   `{type:json_schema, json_schema:{schema, name?, strict?}}`
+///       -> `text.format = {type:json_schema, name, schema, strict?}`
+///   `{type:json_object}` -> `text.format = {type:json_object}`
+///
+/// Runs AFTER `merge_provider_extras`, so a `verbosity` sibling lifted into
+/// `provider_extras["text"]` survives and the format is merged alongside it.
+/// A caller-supplied `text.format` (already present) is left untouched.
+pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRequest) {
+    let Some(rf) = req.response_format.as_ref() else {
+        return;
+    };
+    let Some(format) = responses_text_format(rf) else {
+        return;
+    };
+    match request.text.as_mut() {
+        Some(tc) => {
+            if let Some(obj) = tc.inner.as_object_mut() {
+                obj.entry("format").or_insert(format);
+            }
+        }
+        None => {
+            request.text = Some(TextControls {
+                inner: serde_json::json!({ "format": format }),
+            });
+        }
+    }
+}
+
+/// Convert the canonical OpenAI Chat-shape `response_format` into the
+/// Responses API `text.format` object (flattened: `name`/`schema`/`strict`
+/// at the top level, not nested under `json_schema`). Returns `None` for an
+/// absent or unrecognized shape. The Responses API requires `name` on a
+/// json_schema format, so a missing name defaults to `"response"` (matching
+/// the openai-compat wire-lift default).
+fn responses_text_format(response_format: &Value) -> Option<Value> {
+    let obj = response_format.as_object()?;
+    match obj.get("type").and_then(Value::as_str)? {
+        "json_schema" => {
+            let js = obj.get("json_schema").and_then(Value::as_object)?;
+            let schema = js.get("schema").cloned()?;
+            let name = js.get("name").and_then(Value::as_str).unwrap_or("response");
+            let mut fmt = serde_json::Map::new();
+            fmt.insert("type".into(), Value::from("json_schema"));
+            fmt.insert("name".into(), Value::from(name));
+            fmt.insert("schema".into(), schema);
+            if js.get("strict").and_then(Value::as_bool) == Some(true) {
+                fmt.insert("strict".into(), Value::Bool(true));
+            }
+            Some(Value::Object(fmt))
+        }
+        "json_object" => Some(serde_json::json!({"type": "json_object"})),
+        _ => None,
+    }
+}
+
 /// The `include` entry that carries the encrypted reasoning blob back
 /// on the wire. Required whenever `store == false`, otherwise the
 /// upstream returns empty `encrypted_content` and a later reasoning

@@ -3,7 +3,7 @@
 //! breaker entry, ordered by the provider's `seat_selection`.
 
 use super::*;
-use crate::config::{ProviderEntry, ProviderRuntimePolicy, SeatSelection};
+use crate::config::{AliasValue, ProviderEntry, ProviderRuntimePolicy, SeatSelection};
 use crate::seat_pool::SeatTarget;
 use async_trait::async_trait;
 use routectl_core::{Choice, Message};
@@ -288,7 +288,10 @@ async fn sticky_defer_no_healthy_stamps_defer_token() {
         vec!["opus", "opus#seat-b", "opus#seat-c"]
     );
     assert!(
-        router.sticky_pins.get("S").is_none(),
+        router
+            .sticky_pins
+            .get(&super::chain::sticky_pin_key("S", "opus"))
+            .is_none(),
         "DeferNoHealthy must not write a pin"
     );
 }
@@ -474,7 +477,7 @@ async fn sticky_stale_pin_not_in_pool_is_re_picked() {
     // miss: the request re-picks a valid in-pool seat (and re-pins it).
     let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
     router.sticky_pins.put(
-        "S",
+        &super::chain::sticky_pin_key("S", "opus"),
         crate::seat_pool::SeatPin {
             state_key: "opus#seat-gone".to_string(),
             repinned: false,
@@ -492,7 +495,7 @@ async fn sticky_stale_pin_not_in_pool_is_re_picked() {
         valid.contains(
             &router
                 .sticky_pins
-                .get("S")
+                .get(&super::chain::sticky_pin_key("S", "opus"))
                 .expect("re-pinned")
                 .state_key
                 .as_str()
@@ -514,7 +517,11 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
     let first = chain_state_keys_for(&router, Some("S"));
     let home = first[0].clone();
     assert!(
-        !router.sticky_pins.get("S").expect("pinned").repinned,
+        !router
+            .sticky_pins
+            .get(&super::chain::sticky_pin_key("S", "opus"))
+            .expect("pinned")
+            .repinned,
         "birth pin must start un-repinned"
     );
 
@@ -531,7 +538,10 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
         "overflow-repin must migrate off the parked home seat"
     );
     let sibling = migrated[0].clone();
-    let pin_after = router.sticky_pins.get("S").expect("re-pinned");
+    let pin_after = router
+        .sticky_pins
+        .get(&super::chain::sticky_pin_key("S", "opus"))
+        .expect("re-pinned");
     assert_eq!(
         pin_after.state_key, sibling,
         "pin must point at the sibling"
@@ -562,8 +572,143 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
         "an already-repinned session must not chase a third seat"
     );
     assert_eq!(
-        router.sticky_pins.get("S").expect("still pinned").state_key,
+        router
+            .sticky_pins
+            .get(&super::chain::sticky_pin_key("S", "opus"))
+            .expect("still pinned")
+            .state_key,
         sibling,
         "the pin must remain on the sibling -- no second migration"
+    );
+}
+
+/// Build a two-pool StickyLeastLoaded chain `hot = [opusPool, sonnetPool]`,
+/// each a two-seat pool on provider `anthropic`. Both pools share the same
+/// inbound session; the per-model pin namespace must give each its own
+/// stable pin instead of clobbering a single session-keyed slot.
+fn two_pool_sticky_chain_router() -> Router {
+    fn seats_for(nickname: &str) -> Vec<SeatTarget> {
+        [None, Some("seat-b".to_string())]
+            .into_iter()
+            .map(|label| {
+                let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
+                    id: format!("{nickname}-{}", label.as_deref().unwrap_or("default")),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                });
+                SeatTarget {
+                    label: label.clone(),
+                    state_key: crate::seat_pool::seat_state_key(nickname, label.as_deref()),
+                    provider,
+                    auth_secret_ref: None,
+                }
+            })
+            .collect()
+    }
+
+    let mut providers = BTreeMap::new();
+    let runtime = ProviderRuntimePolicy {
+        seat_selection: SeatSelection::StickyLeastLoaded,
+        ..Default::default()
+    };
+    providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic").with_runtime(runtime),
+    );
+    let mut config = Config {
+        providers,
+        ..Config::default()
+    };
+    config.aliases.insert(
+        "hot".into(),
+        AliasValue::Chain(vec!["opusPool".into(), "sonnetPool".into()]),
+    );
+
+    let mut router = Router::new(Arc::new(config));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    for (nickname, wire) in [("opusPool", "claude-opus"), ("sonnetPool", "claude-sonnet")] {
+        let seats = seats_for(nickname);
+        let default_provider = seats[0].provider.clone();
+        let model = ResolvedModel::new(nickname, "anthropic", default_provider, wire)
+            .with_seats(Arc::from(seats));
+        models.insert(nickname.to_string(), Arc::new(model));
+    }
+    router.install_resolved_models(models);
+    router
+}
+
+#[tokio::test]
+async fn two_sticky_pools_in_one_chain_keep_independent_stable_pins() {
+    // Chain `hot = [opusPool, sonnetPool]`, both StickyLeastLoaded, same
+    // session "S". Each pool must birth-then-stay on its OWN home seat. With
+    // a single session-keyed pin the two pools clobber each other every turn,
+    // so the 2nd request would report birth_pick again for both.
+    let router = two_pool_sticky_chain_router();
+
+    // Request 1: both pools birth. Chain layout is
+    // [opus home, opus seat, sonnet home, sonnet seat]; the sticky token
+    // lands on each pool's home (first) target only.
+    let first = router
+        .dispatch_chain("hot", Some("S"))
+        .expect("chain resolves");
+    assert_eq!(first.len(), 4, "two two-seat pools expand to four targets");
+    assert_eq!(
+        first[0].selection_decision,
+        Some("birth_pick"),
+        "opus pool births on the first request"
+    );
+    assert_eq!(
+        first[2].selection_decision,
+        Some("birth_pick"),
+        "sonnet pool births on the first request"
+    );
+    let opus_home = first[0].state_key.clone();
+    let sonnet_home = first[2].state_key.clone();
+    assert!(
+        opus_home.starts_with("opusPool"),
+        "opus home is an opus seat, got {opus_home}"
+    );
+    assert!(
+        sonnet_home.starts_with("sonnetPool"),
+        "sonnet home is a sonnet seat, got {sonnet_home}"
+    );
+
+    // Request 2 for the SAME session: each pool STAYS on its own pinned home
+    // (sticky_stay, not a fresh birth) and the homes are unchanged.
+    let second = router
+        .dispatch_chain("hot", Some("S"))
+        .expect("chain resolves");
+    assert_eq!(
+        second[0].selection_decision,
+        Some("sticky_stay"),
+        "opus pool must retain its pin, not re-birth"
+    );
+    assert_eq!(
+        second[2].selection_decision,
+        Some("sticky_stay"),
+        "sonnet pool must retain its pin, not re-birth"
+    );
+    assert_eq!(
+        second[0].state_key, opus_home,
+        "opus pool keeps the same home seat across turns"
+    );
+    assert_eq!(
+        second[2].state_key, sonnet_home,
+        "sonnet pool keeps the same home seat across turns"
+    );
+
+    // The two pools hold DISTINCT, independent pins.
+    assert!(
+        router
+            .sticky_pins
+            .get(&super::chain::sticky_pin_key("S", "opusPool"))
+            .is_some(),
+        "opus pool owns its own namespaced pin"
+    );
+    assert!(
+        router
+            .sticky_pins
+            .get(&super::chain::sticky_pin_key("S", "sonnetPool"))
+            .is_some(),
+        "sonnet pool owns its own namespaced pin"
     );
 }

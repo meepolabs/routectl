@@ -83,6 +83,91 @@ pub(crate) use super::tools::translate_tool;
 use super::extras::{effort_ratio, is_routectl_managed_key};
 
 // ---------------------------------------------------------------------------
+// Sampling clamp (shared with the Bedrock egresses)
+// ---------------------------------------------------------------------------
+
+/// Clamp sampling params for Claude thinking mode. Anthropic requires
+/// `temperature = 1.0` when thinking is enabled (legacy `Enabled` and
+/// `Adaptive` both): no alternative-continuation sampling while spending
+/// reasoning budget. It also rejects a request carrying both `temperature`
+/// and `top_p` (and rejects `top_p` while thinking is active), so `top_p`
+/// survives only when no temperature is in play; temperature wins.
+///
+/// Shared by the Anthropic-API egress (`normalize` below, inherited by the
+/// Bedrock-Invoke seam) and the Bedrock-Converse `inferenceConfig` builder so
+/// the clamp cannot drift between the two seams that build sampling
+/// independently. Returns `(temperature, top_p)`.
+pub(crate) const fn clamp_sampling_for_thinking(
+    thinking: Option<&ThinkingConfig>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    let temperature = match thinking {
+        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive) => Some(1.0f64),
+        _ => temperature,
+    };
+    let top_p = if temperature.is_some() { None } else { top_p };
+    (temperature, top_p)
+}
+
+/// Map the canonical OpenAI-shape `response_format` onto the Anthropic-shape
+/// `output_config.format` object. This is the inverse of the openai-compat
+/// wire-lift (`openai_compat::wire_lift::response_format`):
+///
+///   `{type:json_schema, json_schema:{schema, name?, strict?}}`
+///       -> `{type:json_schema, schema, name?, strict?}`
+///   `{type:json_object}` -> `{type:json_object}`
+///
+/// Returns `None` for an absent or unrecognized shape so the caller emits
+/// nothing. Shared with the Bedrock-Converse bag builder so both Claude
+/// seams map the directive the same way.
+pub(crate) fn response_format_to_anthropic_format(response_format: &Value) -> Option<Value> {
+    let obj = response_format.as_object()?;
+    match obj.get("type").and_then(Value::as_str)? {
+        "json_schema" => {
+            let js = obj.get("json_schema").and_then(Value::as_object)?;
+            let schema = js.get("schema").cloned()?;
+            let mut format = serde_json::Map::new();
+            format.insert("type".into(), Value::from("json_schema"));
+            format.insert("schema".into(), schema);
+            if let Some(name) = js.get("name").and_then(Value::as_str) {
+                format.insert("name".into(), Value::from(name));
+            }
+            // Emit strict only when explicitly requested; absent beats an
+            // explicit false, matching the wire-lift direction.
+            if js.get("strict").and_then(Value::as_bool) == Some(true) {
+                format.insert("strict".into(), Value::Bool(true));
+            }
+            Some(Value::Object(format))
+        }
+        "json_object" => Some(serde_json::json!({"type": "json_object"})),
+        _ => None,
+    }
+}
+
+/// Insert `format` under `output_config.format` in `obj`, preserving any
+/// existing `output_config` sub-keys (e.g. `effort`). A `format` already
+/// present is left untouched (a caller-supplied `output_config.format` wins
+/// over the canonical `response_format`). Creates `output_config` when
+/// absent. Shared with the Bedrock-Converse bag builder.
+pub(crate) fn set_output_config_format(obj: &mut serde_json::Map<String, Value>, format: Value) {
+    let oc = obj
+        .entry("output_config")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !oc.is_object() {
+        // A pre-existing non-object output_config (null / scalar / array,
+        // e.g. from a malformed provider_extras forward-compat sweep) cannot
+        // carry a `format` sibling. Anthropic requires output_config to be an
+        // object, so replace the malformed value with a fresh object rather
+        // than silently dropping the caller's structured-output directive.
+        *oc = Value::Object(serde_json::Map::new());
+    }
+    if let Some(oc_obj) = oc.as_object_mut() {
+        oc_obj.entry("format").or_insert(format);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // cache_control validation
 // ---------------------------------------------------------------------------
 
@@ -316,22 +401,8 @@ pub(crate) fn normalize(
             .map(|ts| ts.iter().map(translate_tool).collect::<Vec<_>>())
     };
 
-    // Anthropic requires temperature=1.0 when thinking is enabled
-    // (legacy and adaptive both): no alternative-continuation sampling
-    // while spending reasoning budget.
-    let temperature = match &thinking {
-        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive) => Some(1.0f64),
-        _ => req.temperature,
-    };
-
-    // Claude 4.x rejects requests that carry both `temperature` and
-    // `top_p`, and also rejects `top_p` while thinking is active. Emit
-    // `top_p` only when no temperature is in play; temperature wins.
-    let top_p = if temperature.is_some() {
-        None
-    } else {
-        req.top_p
-    };
+    let (temperature, top_p) =
+        clamp_sampling_for_thinking(thinking.as_ref(), req.temperature, req.top_p);
 
     let ar = AnthropicRequest {
         model: req.model.clone(),
@@ -360,6 +431,17 @@ pub(crate) fn normalize(
         serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
     merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
+
+    // Honor the canonical structured-output directive: map req.response_format
+    // (OpenAI-shape) onto Anthropic's output_config.format. Runs after the
+    // provider_extras merge so an Anthropic-ingress round-trip that already
+    // carried output_config.format keeps its value (caller wins).
+    if let Some(rf) = req.response_format.as_ref()
+        && let Some(format) = response_format_to_anthropic_format(rf)
+        && let Some(obj) = body.as_object_mut()
+    {
+        set_output_config_format(obj, format);
+    }
 
     // When context_management emulation is active we have already applied
     // the edits above. Strip the `context_management` body key so it is
@@ -429,3 +511,191 @@ mod anthropic_effort_clamp_tests;
 #[cfg(test)]
 #[path = "request_effort_ratio_parity_tests.rs"]
 mod effort_ratio_parity_tests;
+
+// response_format honoring: the canonical OpenAI-shape structured-output
+// directive maps onto Anthropic's output_config.format.
+#[cfg(test)]
+mod response_format_tests {
+    use super::normalize;
+    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use serde_json::json;
+
+    fn user_req(response_format: Option<serde_json::Value>) -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            max_tokens: Some(1024),
+            response_format,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn json_schema_response_format_maps_to_output_config_format() {
+        let req = user_req(Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "widget",
+                "schema": {"type": "object", "required": ["x"]},
+                "strict": true
+            }
+        })));
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let fmt = &body["output_config"]["format"];
+        assert_eq!(fmt["type"], "json_schema", "got: {body}");
+        assert_eq!(fmt["schema"]["required"][0], "x", "got: {body}");
+        assert_eq!(fmt["name"], "widget", "got: {body}");
+        assert_eq!(fmt["strict"], true, "got: {body}");
+    }
+
+    #[test]
+    fn json_object_response_format_maps_to_output_config_format() {
+        let req = user_req(Some(json!({"type": "json_object"})));
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        assert_eq!(
+            body["output_config"]["format"]["type"], "json_object",
+            "got: {body}"
+        );
+    }
+
+    #[test]
+    fn text_response_format_emits_no_output_config() {
+        // A plain-text directive is not structured output; nothing maps.
+        let req = user_req(Some(json!({"type": "text"})));
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        assert!(body.get("output_config").is_none(), "got: {body}");
+    }
+
+    #[test]
+    fn absent_response_format_emits_no_output_config() {
+        let req = user_req(None);
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        assert!(body.get("output_config").is_none(), "got: {body}");
+    }
+
+    #[test]
+    fn caller_provider_extras_output_config_format_wins() {
+        // An Anthropic-ingress round-trip carries output_config.format in
+        // provider_extras; the canonical response_format must not clobber it.
+        let mut req = user_req(Some(json!({"type": "json_object"})));
+        req.provider_extras = Some(json!({
+            "output_config": {"format": {"type": "json_schema", "schema": {"type": "string"}}}
+        }));
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        assert_eq!(
+            body["output_config"]["format"]["type"], "json_schema",
+            "provider_extras format must win: {body}"
+        );
+    }
+
+    #[test]
+    fn null_provider_extras_output_config_does_not_drop_response_format() {
+        // A malformed forward-compat sweep leaves output_config as JSON null
+        // in provider_extras; merge_provider_extras copies it into the body.
+        // response_format honoring must still emit output_config.format by
+        // replacing the non-object value, not silently no-op.
+        let mut req = user_req(Some(json!({"type": "json_object"})));
+        req.provider_extras = Some(json!({"output_config": null}));
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        assert_eq!(
+            body["output_config"]["format"]["type"], "json_object",
+            "response_format must survive a null provider_extras output_config: {body}"
+        );
+    }
+
+    #[test]
+    fn scalar_provider_extras_output_config_does_not_drop_response_format() {
+        let mut req = user_req(Some(json!({"type": "json_object"})));
+        req.provider_extras = Some(json!({"output_config": 7}));
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        assert_eq!(
+            body["output_config"]["format"]["type"], "json_object",
+            "response_format must survive a scalar provider_extras output_config: {body}"
+        );
+    }
+
+    #[test]
+    fn array_provider_extras_output_config_does_not_drop_response_format() {
+        let mut req = user_req(Some(json!({"type": "json_object"})));
+        req.provider_extras = Some(json!({"output_config": [1, 2, 3]}));
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        assert_eq!(
+            body["output_config"]["format"]["type"], "json_object",
+            "response_format must survive an array provider_extras output_config: {body}"
+        );
+    }
+}
+
+// Unit coverage for the shared set_output_config_format helper: a
+// pre-existing non-object output_config (null / scalar / array) must be
+// replaced with an object carrying the format rather than dropping it.
+#[cfg(test)]
+mod set_output_config_format_tests {
+    use super::set_output_config_format;
+    use serde_json::{Map, Value, json};
+
+    fn format() -> Value {
+        json!({"type": "json_object"})
+    }
+
+    #[test]
+    fn creates_output_config_when_absent() {
+        let mut obj: Map<String, Value> = Map::new();
+        set_output_config_format(&mut obj, format());
+        assert_eq!(obj["output_config"]["format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn preserves_existing_object_siblings() {
+        let mut obj: Map<String, Value> = Map::new();
+        obj.insert("output_config".into(), json!({"effort": "high"}));
+        set_output_config_format(&mut obj, format());
+        assert_eq!(obj["output_config"]["effort"], "high");
+        assert_eq!(obj["output_config"]["format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn caller_format_wins_over_response_format() {
+        let mut obj: Map<String, Value> = Map::new();
+        obj.insert(
+            "output_config".into(),
+            json!({"format": {"type": "json_schema", "schema": {"type": "string"}}}),
+        );
+        set_output_config_format(&mut obj, format());
+        assert_eq!(obj["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn replaces_null_output_config() {
+        let mut obj: Map<String, Value> = Map::new();
+        obj.insert("output_config".into(), Value::Null);
+        set_output_config_format(&mut obj, format());
+        assert_eq!(obj["output_config"]["format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn replaces_scalar_output_config() {
+        let mut obj: Map<String, Value> = Map::new();
+        obj.insert("output_config".into(), json!(7));
+        set_output_config_format(&mut obj, format());
+        assert_eq!(obj["output_config"]["format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn replaces_array_output_config() {
+        let mut obj: Map<String, Value> = Map::new();
+        obj.insert("output_config".into(), json!([1, 2, 3]));
+        set_output_config_format(&mut obj, format());
+        assert_eq!(obj["output_config"]["format"]["type"], "json_object");
+    }
+}

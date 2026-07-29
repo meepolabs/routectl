@@ -310,6 +310,7 @@ impl Router {
         let request_features = crate::feature_keys::derive_feature_keys(
             req.tools.as_deref().unwrap_or(&[]),
             req.provider_extras.as_ref(),
+            req.response_format.as_ref(),
         );
         if !request_features.contains(&feature_key) {
             return;
@@ -562,6 +563,7 @@ impl Router {
         let request_features = crate::feature_keys::derive_feature_keys(
             req.tools.as_deref().unwrap_or(&[]),
             req.provider_extras.as_ref(),
+            req.response_format.as_ref(),
         );
         if request_features.is_empty() {
             return;
