@@ -21,14 +21,26 @@ const TOKENS_PER_MTOK: f64 = 1_000_000.0;
 /// usage-owned mirror of the router's pricing config -- deliberately NOT
 /// the same type, to keep this crate a leaf.
 ///
-/// There is no reasoning rate: Anthropic bills reasoning tokens as
-/// output, so reasoning never appears as a separate cost dimension.
+/// The reasoning dimension is priced ONLY when `reasoning_per_mtok` is set
+/// by the caller. It exists because providers disagree on whether reasoning
+/// tokens are DISJOINT from output: Gemini reports `thoughtsTokenCount`
+/// separately from `candidatesTokenCount` and bills it at the output rate,
+/// so the caller sets `reasoning_per_mtok = output_per_mtok` for a Gemini
+/// row. Anthropic / OpenAI / Bedrock fold reasoning INTO their output count,
+/// so their callers leave this `None` -- charging reasoning again would
+/// double-count. The per-provider decision lives at the caller, which knows
+/// the provider; this crate stays a pure leaf.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Rates {
     /// USD per million input tokens. `None` leaves the input dimension unpriced.
     pub input_per_mtok: Option<f64>,
     /// USD per million output tokens. `None` leaves the output dimension unpriced.
     pub output_per_mtok: Option<f64>,
+    /// USD per million reasoning tokens. `None` (the default) leaves reasoning
+    /// unpriced -- correct for providers that already fold reasoning into
+    /// output. Set to the output rate ONLY for a provider (e.g. Gemini) whose
+    /// reasoning tokens are disjoint from its output count.
+    pub reasoning_per_mtok: Option<f64>,
     /// USD per million cache-read tokens. `None` leaves cache reads unpriced.
     pub cache_read_per_mtok: Option<f64>,
     /// USD per million 5-minute cache-write tokens. `None` leaves them unpriced.
@@ -37,16 +49,19 @@ pub struct Rates {
     pub cache_write_1h_per_mtok: Option<f64>,
 }
 
-/// Per-dimension cost breakdown plus the total, all in USD. The five
+/// Per-dimension cost breakdown plus the total, all in USD. The six
 /// component fields always sum to `total_usd`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostBreakdown {
-    /// Sum of the five component costs, USD.
+    /// Sum of the six component costs, USD.
     pub total_usd: f64,
     /// Input-token cost, USD.
     pub input_usd: f64,
     /// Output-token cost, USD.
     pub output_usd: f64,
+    /// Reasoning-token cost, USD. Non-zero only when the rate table prices
+    /// reasoning separately (a disjoint-reasoning provider like Gemini).
+    pub reasoning_usd: f64,
     /// Cache-read cost, USD.
     pub cache_read_usd: f64,
     /// 5-minute cache-write cost, USD.
@@ -57,8 +72,8 @@ pub struct CostBreakdown {
 
 /// Estimate the cost of one usage row against a rate table.
 ///
-/// Returns `None` when the rate table is entirely unpriced (all five
-/// fields `None`) -- the caller decides how to display an unpriced row.
+/// Returns `None` when the rate table is entirely unpriced (every rate
+/// field `None`) -- the caller decides how to display an unpriced row.
 /// Otherwise returns a breakdown where each dimension contributes
 /// `tokens * rate / 1_000_000` only when BOTH the row's token count and
 /// the matching rate are present; any missing half makes that dimension
@@ -70,8 +85,10 @@ pub struct CostBreakdown {
 /// distinguish "n/a (subscription)" from "$0.00" using the provider /
 /// auth context, NOT this return value alone.
 ///
-/// Reasoning tokens are intentionally excluded: they are billed as
-/// output upstream, so counting them here would double-charge.
+/// Reasoning tokens are priced only when `rates.reasoning_per_mtok` is set
+/// (a disjoint-reasoning provider like Gemini); otherwise they contribute
+/// `0.0`, so a provider that folds reasoning into output is never
+/// double-charged.
 #[doc(hidden)]
 pub fn estimate_cost(record: &UsageRecord, rates: &Rates) -> Option<CostBreakdown> {
     estimate_cost_tokens(
@@ -91,13 +108,15 @@ pub fn estimate_cost(record: &UsageRecord, rates: &Rates) -> Option<CostBreakdow
 /// `AggRow`s into a display group.
 ///
 /// Same return contract as [`estimate_cost`]: `None` when the rate table
-/// is entirely unpriced (all five fields `None`); otherwise a breakdown
+/// is entirely unpriced (every rate field `None`); otherwise a breakdown
 /// where each dimension contributes `tokens * rate / 1_000_000` only when
 /// both the token count and the matching rate are present.
 ///
-/// `reasoning` is accepted for symmetry with the aggregate shape but is
-/// NOT priced: reasoning tokens are billed as output upstream, so charging
-/// them here would double-count.
+/// `reasoning` is priced only when `rates.reasoning_per_mtok` is set (a
+/// disjoint-reasoning provider like Gemini, whose thinking tokens are NOT
+/// part of the output count and bill at the output rate). Callers whose
+/// provider folds reasoning into output leave that rate `None`, so charging
+/// reasoning here can never double-count.
 pub fn estimate_cost_tokens(
     input: i64,
     output: i64,
@@ -107,11 +126,9 @@ pub fn estimate_cost_tokens(
     cache_write_1h: i64,
     rates: &Rates,
 ) -> Option<CostBreakdown> {
-    // `reasoning` is part of the aggregate shape but never priced.
-    let _ = reasoning;
-
     let all_unpriced = rates.input_per_mtok.is_none()
         && rates.output_per_mtok.is_none()
+        && rates.reasoning_per_mtok.is_none()
         && rates.cache_read_per_mtok.is_none()
         && rates.cache_write_5m_per_mtok.is_none()
         && rates.cache_write_1h_per_mtok.is_none();
@@ -121,17 +138,23 @@ pub fn estimate_cost_tokens(
 
     let input_usd = component(input, rates.input_per_mtok);
     let output_usd = component(output, rates.output_per_mtok);
+    let reasoning_usd = component(reasoning, rates.reasoning_per_mtok);
     let cache_read_usd = component(cache_read, rates.cache_read_per_mtok);
     let cache_write_5m_usd = component(cache_write_5m, rates.cache_write_5m_per_mtok);
     let cache_write_1h_usd = component(cache_write_1h, rates.cache_write_1h_per_mtok);
 
-    let total_usd =
-        input_usd + output_usd + cache_read_usd + cache_write_5m_usd + cache_write_1h_usd;
+    let total_usd = input_usd
+        + output_usd
+        + reasoning_usd
+        + cache_read_usd
+        + cache_write_5m_usd
+        + cache_write_1h_usd;
 
     Some(CostBreakdown {
         total_usd,
         input_usd,
         output_usd,
+        reasoning_usd,
         cache_read_usd,
         cache_write_5m_usd,
         cache_write_1h_usd,
@@ -235,9 +258,20 @@ mod tests {
         Rates {
             input_per_mtok: Some(3.0),
             output_per_mtok: Some(15.0),
+            reasoning_per_mtok: None,
             cache_read_per_mtok: Some(0.3),
             cache_write_5m_per_mtok: Some(3.75),
             cache_write_1h_per_mtok: Some(6.0),
+        }
+    }
+
+    /// A Gemini-shape rate table: reasoning priced at the output rate,
+    /// mirroring how the caller sets `reasoning_per_mtok = output_per_mtok`
+    /// for a disjoint-reasoning provider.
+    fn gemini_rates() -> Rates {
+        Rates {
+            reasoning_per_mtok: Some(15.0),
+            ..all_rates()
         }
     }
 
@@ -476,5 +510,58 @@ mod tests {
             + 600.0 * 0.3 / 1_000_000.0
             + 300.0 * 3.75 / 1_000_000.0;
         assert_ne!(breakdown.total_usd, pre_fix_double_count);
+    }
+
+    /// Disjoint-reasoning provider (Gemini): thinking tokens are separate
+    /// from output and bill at the output rate. With `reasoning_per_mtok`
+    /// set, the reasoning dimension is priced and folded into the total.
+    #[test]
+    fn gemini_reasoning_priced_at_output_rate() {
+        // Arrange: output and (disjoint) reasoning tokens, Gemini-shape rates.
+        let breakdown =
+            estimate_cost_tokens(0, 200_000, 500_000, 0, 0, 0, &gemini_rates()).expect("priced");
+
+        // Assert: reasoning priced at the output rate and included in total.
+        let expected_reasoning = 500_000.0 * 15.0 / 1_000_000.0;
+        let expected_output = 200_000.0 * 15.0 / 1_000_000.0;
+        assert_eq!(breakdown.reasoning_usd, expected_reasoning);
+        assert_eq!(breakdown.output_usd, expected_output);
+        assert_eq!(breakdown.total_usd, expected_output + expected_reasoning);
+    }
+
+    /// The same assertion via the record entry point: a usage row carrying
+    /// reasoning tokens (Gemini `thoughtsTokenCount`) accounts for them.
+    #[test]
+    fn gemini_record_reasoning_included_in_cost() {
+        // Arrange: a row with output + separately-reported reasoning tokens.
+        let mut record = record_with_tokens(None, Some(200_000), None, None, None);
+        record.reasoning_tokens = Some(500_000);
+
+        // Act
+        let breakdown = estimate_cost(&record, &gemini_rates()).expect("priced");
+
+        // Assert: reasoning is charged at the output rate on top of output.
+        let expected = 200_000.0 * 15.0 / 1_000_000.0 + 500_000.0 * 15.0 / 1_000_000.0;
+        assert_eq!(breakdown.total_usd, expected);
+        assert!(breakdown.reasoning_usd > 0.0);
+    }
+
+    /// Control: a subsumed-reasoning provider (Anthropic / OpenAI / Bedrock)
+    /// leaves `reasoning_per_mtok` unset, because its output count ALREADY
+    /// includes reasoning. The same reasoning-bearing row must NOT be charged
+    /// for reasoning -- doing so would double-count output.
+    #[test]
+    fn subsumed_provider_reasoning_not_double_counted() {
+        // Arrange: identical tokens, but a table that does not price reasoning.
+        let mut record = record_with_tokens(None, Some(200_000), None, None, None);
+        record.reasoning_tokens = Some(500_000);
+
+        // Act
+        let breakdown = estimate_cost(&record, &all_rates()).expect("priced");
+
+        // Assert: only output is charged; reasoning contributes nothing.
+        let output_only = 200_000.0 * 15.0 / 1_000_000.0;
+        assert_eq!(breakdown.reasoning_usd, 0.0);
+        assert_eq!(breakdown.total_usd, output_only);
     }
 }

@@ -695,7 +695,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `functionDeclarations`, `build_thinking_config` (budget verbatim / effort
   table / dynamic `-1`, `includeThoughts`), `build_response_format`
   (json_schema / json_object -> `responseMimeType` + `responseSchema`),
-  thought-part replay carrying `thoughtSignature`
+  thought-part replay carrying `thoughtSignature`; `warn_dropped_cache_control`
+  emits the drop-with-warn breadcrumb for caller `cache_control` markers
+  (Gemini has no breakpoint surface), matching the openai-compat/responses
+  egresses
 - `src/gemini/response.rs` -- Gemini response -> canonical `ChatResponse`;
   `translate_usage` maps `cachedContentTokenCount` ->
   `cache_read_input_tokens` and `thoughtsTokenCount` -> `reasoning_tokens`
@@ -1561,10 +1564,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   versioning; `ToolDef::Custom` (user-defined tools) does not contribute
   tool-type keys. ALSO emits the request-derived `structured_output` key
   (appended after tool-type keys) when the request needs constrained decoding
-  -- either `provider_extras["output_config"]["format"]` is non-null, or any
-  tool is strict (`ToolDef::Custom.strict == Some(true)` or `ToolDef::Other`
-  with `"strict": true`); `derive_feature_keys(tools, provider_extras)` is
-  pure
+  -- either `provider_extras["output_config"]["format"]` is non-null, the
+  canonical top-level `response_format` requests json (`json_schema` /
+  `json_object`), or any tool is strict (`ToolDef::Custom.strict == Some(true)`
+  or `ToolDef::Other` with `"strict": true`);
+  `derive_feature_keys(tools, provider_extras, response_format)` is pure
 - `src/learned_capability.rs` -- bounded in-memory capability-truth registry
   keyed `(state_key, normalized feature_key) -> LearnedEntry`,
   verdict-discriminated by `EntryVerdict` (a `Verified` VerifiedWorking
@@ -1937,8 +1941,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   flow mints the fresh `session_id` on first OAuth exchange);
   `seat_ref_from_key` inverse of `seat_key`
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry +
-  `known_provider_ids` (anthropic, codex, antigravity); `AuthParams` and
-  `truncate` helper
+  `known_provider_ids` (anthropic, codex, antigravity); `AuthParams`,
+  `token_parse_error`, and `token_status_error`/`safe_token_error_code`
+  (body-free token-endpoint error mapping)
 - `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow:
   `claude.com/cai/oauth/authorize` + `platform.claude.com/v1/oauth/token`,
   `anthropic-beta: oauth-2025-04-20`, manual-paste redirect support
@@ -2018,7 +2023,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cache_write_1h, &Rates) -> Option<CostBreakdown>` (the record path converts
   its `Option<u64>` fields to `i64` and delegates; per-dimension `tokens *
   rate / 1e6`, `None` when the rate table is fully unpriced, `Some(0.0)` when
-  priced with no tokens; reasoning excluded -- billed as output upstream);
+  priced with no tokens; reasoning priced only when `Rates.reasoning_per_mtok`
+  is set -- the caller sets it to the output rate for a disjoint-reasoning
+  provider (Gemini's `thoughtsTokenCount`) and leaves it unset for providers
+  that fold reasoning into output, so reasoning is never double-counted);
   `Rates` is a usage-owned mirror of the router `PricingConfig` so the crate
   stays a leaf
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never

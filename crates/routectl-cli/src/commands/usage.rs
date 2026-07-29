@@ -379,15 +379,27 @@ fn is_subscription(config: &Config, provider: &str) -> bool {
 }
 
 /// Convert the router's per-million-token pricing into the usage crate's
-/// leaf-safe `Rates`.
+/// leaf-safe `Rates`. `reasoning_per_mtok` starts unset; `cost_for_row`
+/// promotes it to the output rate only for a disjoint-reasoning provider.
 const fn rates_from_pricing(p: &routectl_router::PricingConfig) -> Rates {
     Rates {
         input_per_mtok: p.input_per_mtok,
         output_per_mtok: p.output_per_mtok,
+        reasoning_per_mtok: None,
         cache_read_per_mtok: p.cache_read_per_mtok,
         cache_write_5m_per_mtok: p.cache_write_5m_per_mtok,
         cache_write_1h_per_mtok: p.cache_write_1h_per_mtok,
     }
+}
+
+/// Whether the named provider is a Gemini kind. Gemini is the only provider
+/// whose reasoning tokens are disjoint from its output count (see
+/// `cost_for_row`), so it alone prices reasoning separately.
+fn provider_kind_is_gemini(config: &Config, provider: &str) -> bool {
+    config
+        .providers
+        .get(provider)
+        .is_some_and(|p| p.kind_str() == "gemini")
 }
 
 /// The cost contribution of one fine-grained `AggRow`.
@@ -418,7 +430,15 @@ fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
     let Some(pricing) = config.pricing_for(upstream, provider) else {
         return RowCost::Unpriced;
     };
-    let rates = rates_from_pricing(pricing);
+    let mut rates = rates_from_pricing(pricing);
+    // Gemini reports thinking tokens (`thoughtsTokenCount`) DISJOINT from its
+    // output count and bills them at the output rate, so reasoning must be
+    // priced as its own dimension for a Gemini row. Every other provider kind
+    // folds reasoning into its output count -- pricing it again would
+    // double-count -- so they leave `reasoning_per_mtok` unset.
+    if provider_kind_is_gemini(config, provider) {
+        rates.reasoning_per_mtok = rates.output_per_mtok;
+    }
     // cache_read is billed PER TURN, so the cost basis is the summed cache-read
     // volume (`cache_read_billed`), not the peak. The peak / avg are
     // display-only context SIZE and must NOT drive cost; input / output /

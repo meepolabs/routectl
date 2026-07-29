@@ -559,7 +559,13 @@ pub async fn run(
     let loaded = match crate::server::load_effective_config_unvalidated(config_path) {
         Ok(loaded) => loaded,
         Err(e) => {
-            eprintln!("error: {e}");
+            // The loader error can inline the offending config VALUE (a
+            // `literal:` credential on the failing source line). Route it
+            // through the same fail-safe redactor the serve/doctor seams use.
+            eprintln!(
+                "error: {}",
+                crate::commands::parse_error_redaction::redact_config_load_error(&e)
+            );
             return 1;
         }
     };
@@ -757,6 +763,7 @@ const fn rates_from_pricing(pricing: &routectl_router::PricingConfig) -> Rates {
     Rates {
         input_per_mtok: pricing.input_per_mtok,
         output_per_mtok: pricing.output_per_mtok,
+        reasoning_per_mtok: None,
         cache_read_per_mtok: pricing.cache_read_per_mtok,
         cache_write_5m_per_mtok: pricing.cache_write_5m_per_mtok,
         cache_write_1h_per_mtok: pricing.cache_write_1h_per_mtok,
