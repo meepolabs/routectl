@@ -12,6 +12,7 @@
 
 use serde_json::Value;
 
+use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::{ChatRequest, ReasoningDetail, Result};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
@@ -26,6 +27,7 @@ use super::types::{
 ///
 /// The config's `id` is used only for error attribution.
 pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
+    warn_dropped_cache_control(provider_id, req);
     let system_instruction = build_system_instruction(req);
     let contents = build_contents(provider_id, req)?;
     let (tools, tool_config) = build_tools_and_config(req);
@@ -38,6 +40,50 @@ pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContent
         tool_config,
         generation_config,
     })
+}
+
+/// Cache-prefix surfaces carrying a caller `cache_control` marker that the
+/// Gemini egress drops. Gemini uses implicit prefix caching (automatic, with
+/// no caller-controllable breakpoint surface), so every supplied marker is
+/// dropped -- this only names which surfaces carried one. Pure function of
+/// `req`: no logging, no mutation, so the detection can be unit-tested
+/// directly. Unlike the openai-responses egress, `system` is NOT excluded --
+/// Gemini's system-instruction assembly drops the marker without its own log,
+/// so reporting it here is the only breadcrumb the operator gets.
+fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
+    let mut surfaces: Vec<&'static str> = Vec::new();
+    for bp in req.cache_breakpoints() {
+        let name = match bp.position {
+            BreakpointPosition::Tools => "tools",
+            BreakpointPosition::System => "system",
+            BreakpointPosition::Messages => "messages",
+            BreakpointPosition::TopLevel => "top-level",
+        };
+        if !surfaces.contains(&name) {
+            surfaces.push(name);
+        }
+    }
+    surfaces
+}
+
+/// Emit one WARN naming every cache-prefix surface carrying a caller
+/// `cache_control` marker that the Gemini egress drops. Matches the
+/// openai-compat / openai-responses egress convention so an operator routing
+/// cache-hinted traffic to a Gemini target sees the same breadcrumb on this
+/// leg as on the others. Logs only the surface name(s) + a count: no message
+/// content, no bodies, no secrets.
+fn warn_dropped_cache_control(provider_id: &str, req: &ChatRequest) {
+    let surfaces = dropped_cache_surfaces(req);
+    if surfaces.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        provider = %provider_id,
+        dropped_surfaces = ?surfaces,
+        dropped_count = surfaces.len(),
+        "gemini egress: cache_control dropped (Gemini uses implicit prefix \
+         caching, no breakpoint surface)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -697,8 +743,10 @@ fn mime_from_filename(filename: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use routectl_core::{CacheControl, ChatRequest, Message, MessageContent, Role};
+    use routectl_core::{SystemBlock, SystemContent};
     use serde_json::json;
+    use tracing_test::traced_test;
 
     fn make_user(text: &str) -> Message {
         Message {
@@ -1141,5 +1189,73 @@ mod tests {
             "smuggled systemInstruction must be dropped"
         );
         assert!(body.get("toolConfig").is_none());
+    }
+
+    // ---------------------------------------------------------------------------
+    // cache_control drop-with-warn (Gemini has no caller breakpoint surface)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn dropped_cache_surfaces_names_every_carrier() {
+        // Arrange: a top-level marker AND a system-block marker.
+        let mut req = base_req();
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "sys".into(),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            citations: None,
+        }]));
+
+        // Act
+        let surfaces = dropped_cache_surfaces(&req);
+
+        // Assert: both surfaces reported (Gemini logs system too, unlike
+        // the Responses egress).
+        assert!(surfaces.contains(&"top-level"), "got: {surfaces:?}");
+        assert!(surfaces.contains(&"system"), "got: {surfaces:?}");
+    }
+
+    #[test]
+    fn dropped_cache_surfaces_empty_for_clean_request() {
+        // Arrange: no cache_control anywhere.
+        let req = base_req();
+
+        // Act + Assert
+        assert!(dropped_cache_surfaces(&req).is_empty());
+    }
+
+    #[traced_test]
+    #[test]
+    fn warn_fires_for_cache_control_bearing_request() {
+        // Arrange: a request carrying a top-level cache_control breakpoint.
+        let mut req = base_req();
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+
+        // Act
+        let _ = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: the drop diagnostic fired, consistent with the other
+        // cache-less egresses.
+        assert!(
+            logs_contain("cache_control dropped"),
+            "drop diagnostic must fire when cache_control is present"
+        );
+    }
+
+    #[traced_test]
+    #[test]
+    fn no_warn_for_clean_request() {
+        // Arrange: no cache_control -> no diagnostic.
+        let req = base_req();
+
+        // Act
+        let _ = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        assert!(
+            !logs_contain("cache_control dropped"),
+            "no drop diagnostic without a cache_control marker"
+        );
     }
 }

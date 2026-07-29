@@ -255,6 +255,7 @@ fn estimate_always_computed_from_profile() {
     let rates = Rates {
         input_per_mtok: Some(3.0),
         output_per_mtok: Some(15.0),
+        reasoning_per_mtok: None,
         cache_read_per_mtok: None,
         cache_write_5m_per_mtok: None,
         cache_write_1h_per_mtok: None,
@@ -492,4 +493,38 @@ fn select_capabilities_empty_means_all() {
 fn select_capabilities_rejects_unknown_token() {
     let err = select_capabilities(&["bogus".to_string()]).expect_err("unknown errors");
     assert!(err.contains("bogus"), "err: {err}");
+}
+
+/// `probe --capabilities` loads config via `load_effective_config_unvalidated`
+/// (see `run`) and surfaces any load error through the shared fail-safe
+/// `redact_config_load_error`. A malformed config whose failing parse line
+/// carries a `literal:` credential must not leak that secret to the terminal.
+#[test]
+fn capabilities_load_error_redacts_literal_secret() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg_path = dir.path().join("config.toml");
+    let malformed = "version = 3\n\
+         api_key_ref = \"literal:sk-live-LEAKEDSECRET42\"\n\
+         [server]\n\
+         host = \"127.0.0.1\"\n";
+    std::fs::write(&cfg_path, malformed).expect("write config.toml");
+
+    let raw = match crate::server::load_effective_config_unvalidated(&cfg_path) {
+        Ok(_) => panic!("an unknown-field config must fail the parse"),
+        Err(e) => e,
+    };
+    let redacted = crate::commands::parse_error_redaction::redact_config_load_error(&raw);
+
+    assert!(
+        raw.contains("LEAKEDSECRET42"),
+        "test premise: raw loader error must carry the secret; raw: {raw}"
+    );
+    assert!(
+        !redacted.contains("LEAKEDSECRET42"),
+        "probe capabilities path must not leak the secret; redacted: {redacted}"
+    );
+    assert!(
+        redacted.contains("TOML parse error"),
+        "triage info lost; redacted: {redacted}"
+    );
 }
