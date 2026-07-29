@@ -1,5 +1,5 @@
 {
-  "note": "Real bedrock-runtime InvokeModel 400 ValidationException captures (us-west-2, 2026-07-28, global anthropic claude opus). Bodies are byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
+  "note": "Real bedrock-runtime InvokeModel 400 ValidationException captures (2026-07-28, global anthropic claude opus). Bodies are byte-exact from the wire: the flat minimal {\"message\":...} shape with NO __type key. The exception discriminator rides in the x-amzn-ErrorType response header (recorded as error_type_header) and is lifted onto Error::Upstream.upstream_type as the bare, namespace-stripped name (lifted_type). Kept as a data file, never inline .rs literals.",
   "error_type_header": "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/",
   "lifted_type": "ValidationException",
   "templates": [
