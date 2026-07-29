@@ -43,7 +43,6 @@
 //! and it carries only normalized keys -- never a request body, a reasoning
 //! artifact, or an artifact id. Nothing in this module's API can accept
 //! one.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -56,7 +55,7 @@ use routectl_core::capability::{
 };
 
 use crate::learned_capability::{LearnedCapabilityRegistry, NegativeState};
-use crate::router::CapabilityLearnEvent;
+use crate::router::{CapabilityClearedEvent, CapabilityLearnEvent};
 
 /// Separator between the provider-level target key and the lane token
 /// inside a lane discriminant.
@@ -316,8 +315,14 @@ impl ReplayProbeGuard<'_> {
 
     /// The carried request SUCCEEDED: the pair replays cleanly. Drops any
     /// resident negative so continuity is re-enabled at once rather than
-    /// after the remaining decay. Returns whether an entry was cleared.
-    pub fn clear(mut self) -> bool {
+    /// after the remaining decay.
+    ///
+    /// Returns a [`CapabilityClearedEvent`] when a resident (lapsed) entry was
+    /// actually removed, so the caller rides the clear out on the dispatch meta
+    /// and a warm rebuild does not resurrect the negative from the ledger. A
+    /// carry that never had a resident entry (an absent pair admitted for its
+    /// first probe) clears nothing and returns `None`.
+    pub fn clear(mut self) -> Option<CapabilityClearedEvent> {
         self.settled = true;
         let cleared = self.registry.learned.remove_keyed(
             &self.key.lane_key,
@@ -332,8 +337,14 @@ impl ReplayProbeGuard<'_> {
                 capability_key = %self.key.capability_key,
                 "lapsed reasoning-replay negative cleared by a successful carry",
             );
+            Some(CapabilityClearedEvent {
+                state_key: self.key.lane_key.clone(),
+                capability_key: self.key.capability_key.clone(),
+                provider_kind: self.key.provider_kind.clone(),
+            })
+        } else {
+            None
         }
-        cleared
     }
 
     /// Settle WITHOUT learning: the stripped repair failed, or the request

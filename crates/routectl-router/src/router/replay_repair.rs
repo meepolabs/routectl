@@ -35,7 +35,7 @@ use routectl_core::{ChatRequest, ReplayScheme, Replayability, is_replayable, sch
 use crate::capability_strip::strip_replay_artifacts;
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
-use super::{CapabilityLearnEvent, DispatchTarget, Router};
+use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, Router};
 
 /// The carried-artifact admission for one dispatch target: the single-flight
 /// guards held while the optimistically-carried variant is in flight, the
@@ -88,13 +88,21 @@ impl ReplayCarryPlan<'_> {
             .collect()
     }
 
-    /// Settle without learning: the carried variant succeeded outright (the
-    /// pair works), or a repair did not confirm the negative. Dropping the
-    /// plan does the same; this names the intent at the call site.
-    pub(super) fn release(self) {
-        for guard in self.guards {
-            guard.release();
-        }
+    /// Phase two after the carried (unstripped) variant succeeded upstream:
+    /// the pair replays cleanly, so drop any resident (lapsed) negative for
+    /// every carried pair and return the cleared-event rows for
+    /// `meta.cleared_capabilities`, so the ledger records each clear and a warm
+    /// rebuild does not resurrect the negative. A pair that had no resident
+    /// entry (admitted for its first probe) clears nothing and emits no row.
+    ///
+    /// An unrelated failure instead settles by DROP: the plan is never
+    /// `take`n on an error path, so each guard's `Drop` releases its slot
+    /// without touching the resident entry.
+    pub(super) fn settle_success(self) -> Vec<CapabilityClearedEvent> {
+        self.guards
+            .into_iter()
+            .filter_map(ReplayProbeGuard::clear)
+            .collect()
     }
 }
 
