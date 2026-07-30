@@ -523,6 +523,13 @@ impl Provider for OpenAiCompatProvider {
             // never bleeds one choice's content into another choice's
             // suffix match.
             let mut accumulated_text: Vec<String> = Vec::new();
+            // Per-choice terminal-signal tracking for the no-`[DONE]` tail
+            // below, keyed by `choice.index`. Global tracking mis-handled
+            // `n > 1`: a sibling choice's `finish_reason` would mask a
+            // different choice whose tool-call args were still in flight at
+            // FIN, committing a truncated tool call as complete. Per-choice
+            // state flags that truncation instead.
+            let mut choice_tails: Vec<ChoiceTail> = Vec::new();
             while let Some(event_result) = event_stream.next().await {
                 let event = match event_result {
                     Ok(e) => e,
@@ -560,6 +567,22 @@ impl Provider for OpenAiCompatProvider {
                 match result {
                     Ok(None) => {}
                     Ok(Some(mut chunk)) => {
+                        // Mark terminal + tool-call state PER choice.index so
+                        // an `n > 1` stream where one choice finishes and a
+                        // sibling truncates mid tool-call is classified by
+                        // the truncated sibling, not masked by the finisher.
+                        for choice in &chunk.choices {
+                            if choice_carries_finish_reason(choice)
+                                && let Some(t) = choice_tail_mut(&mut choice_tails, choice.index)
+                            {
+                                t.saw_terminal = true;
+                            }
+                            if choice_carries_tool_call_delta(choice)
+                                && let Some(t) = choice_tail_mut(&mut choice_tails, choice.index)
+                            {
+                                t.saw_tool_call_delta = true;
+                            }
+                        }
                         // Only accumulate content text when stop-sequence
                         // detection is actually needed: skip the push_str
                         // when the caller sent no stop sequences, avoiding
@@ -601,12 +624,39 @@ impl Provider for OpenAiCompatProvider {
                     Err(e) => yield Err(e),
                 }
             }
-            // Normal stream exhaustion (upstream closed without [DONE]).
-            // Same flush logic as the [DONE] path above.
+            // Stream exhausted without a `data: [DONE]` terminator (the
+            // `[DONE]` path returns above). Flush any RawThinkTag pending
+            // buffer FIRST -- those held-back bytes are real visible
+            // content the client must receive regardless of truncation.
             if dialect == ReasoningDialect::RawThinkTag
                 && let Some(pending) = think_acc.take_pending() {
                     yield Ok(flush_pending_chunk(&pending));
                 }
+            // Then classify the tail: a clean FIN with neither `[DONE]`
+            // nor a `finish_reason` is truncation, not completion.
+            match classify_stream_tail(&choice_tails) {
+                StreamTail::Terminated => {}
+                StreamTail::TruncatedText => {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        "openai-compat stream closed without a terminal signal \
+                         ([DONE] or finish_reason); response may be truncated"
+                    );
+                }
+                StreamTail::TruncatedToolCall => {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        "openai-compat stream closed mid tool-call without a terminal \
+                         signal ([DONE] or finish_reason); tool-call arguments are \
+                         likely truncated"
+                    );
+                    yield Err(Error::Streaming(format!(
+                        "provider `{provider_id}`: upstream closed the stream without a \
+                         terminal signal ([DONE] or finish_reason) while tool-call \
+                         arguments were still accumulating; the tool call is likely truncated"
+                    )));
+                }
+            }
         };
 
         Ok(routectl_core::wrap_stream_with_summary(
@@ -690,6 +740,74 @@ fn flush_pending_chunk(text: &str) -> ChatChunk {
     }
 }
 
+/// True when this choice carries a terminal `finish_reason`. A
+/// `finish_reason` is a valid stream terminator even when the upstream
+/// never sends `data: [DONE]`.
+const fn choice_carries_finish_reason(choice: &routectl_core::schema::ChunkChoice) -> bool {
+    choice.finish_reason.is_some()
+}
+
+/// True when this choice carries a non-empty `tool_calls` delta. While
+/// these deltas are arriving the assistant is streaming tool-call
+/// arguments; a stream that ends here without a terminal signal for this
+/// choice leaves those arguments half-formed.
+fn choice_carries_tool_call_delta(choice: &routectl_core::schema::ChunkChoice) -> bool {
+    choice
+        .delta
+        .tool_calls
+        .as_ref()
+        .is_some_and(|t| !t.is_empty())
+}
+
+/// Classification of a stream that exhausted its event source WITHOUT a
+/// `data: [DONE]` terminator. The `[DONE]` path returns before the tail
+/// runs, so this only ever sees the no-`[DONE]` case; it decides whether
+/// a `finish_reason` still terminated the stream cleanly or the upstream
+/// closed mid-response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamTail {
+    /// A `finish_reason` terminal signal was seen; nothing extra to emit.
+    Terminated,
+    /// No terminal signal, and no tool-call arguments were in flight. A
+    /// truncated text response: surface a loud warn (parity with the
+    /// gemini egress) but do not error the stream.
+    TruncatedText,
+    /// No terminal signal while tool-call arguments were still
+    /// accumulating. The dangerous case: half-streamed arguments must not
+    /// be committed as complete, so the stream is errored.
+    TruncatedToolCall,
+}
+
+/// Per-choice terminal-signal state accumulated across a stream, keyed by
+/// `choice.index` (the vec index). Tracks whether a choice saw its own
+/// terminal `finish_reason` and whether it was streaming tool-call
+/// argument deltas.
+#[derive(Debug, Default, Clone, Copy)]
+struct ChoiceTail {
+    saw_terminal: bool,
+    saw_tool_call_delta: bool,
+}
+
+/// Classify a no-`[DONE]` stream tail from PER-CHOICE terminal state. The
+/// dangerous case dominates: if ANY choice was streaming tool-call
+/// arguments and never got its own terminal `finish_reason`, the tail is
+/// `TruncatedToolCall` even when a sibling choice finished cleanly -- the
+/// `n > 1` masking bug. Otherwise any observed choice (or an empty stream)
+/// that never saw a terminal signal is a possibly-truncated text response,
+/// and a stream where every observed choice terminated is clean.
+fn classify_stream_tail(tails: &[ChoiceTail]) -> StreamTail {
+    if tails
+        .iter()
+        .any(|t| t.saw_tool_call_delta && !t.saw_terminal)
+    {
+        StreamTail::TruncatedToolCall
+    } else if tails.is_empty() || tails.iter().any(|t| !t.saw_terminal) {
+        StreamTail::TruncatedText
+    } else {
+        StreamTail::Terminated
+    }
+}
+
 /// Upper bound on the per-choice stream accumulator index. A request's
 /// legitimate max index is n-1 where n (the `n` sampling param) is small;
 /// 128 is far above any real fan-out. An out-of-range `choice.index`
@@ -710,6 +828,21 @@ fn accumulate_choice_text(buffers: &mut Vec<String>, index: u32, text: &str) {
         buffers.resize(idx + 1, String::new());
     }
     buffers[idx].push_str(text);
+}
+
+/// Grow the per-choice terminal-state vec to cover `index` and return a
+/// mutable handle, or `None` when the index is at/above the hostile-upstream
+/// cap (mirrors `accumulate_choice_text`). Lazy expansion keeps the common
+/// n=1 case at a single entry.
+fn choice_tail_mut(tails: &mut Vec<ChoiceTail>, index: u32) -> Option<&mut ChoiceTail> {
+    let idx = index as usize;
+    if idx >= MAX_STREAM_CHOICES {
+        return None;
+    }
+    if tails.len() <= idx {
+        tails.resize_with(idx + 1, ChoiceTail::default);
+    }
+    Some(&mut tails[idx])
 }
 
 /// Ensure `body.stream_options.include_usage = true` on outgoing
@@ -942,13 +1075,209 @@ async fn read_capped_error_body(
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        MAX_STREAM_CHOICES, accumulate_choice_text, ensure_stream_options_include_usage,
+        ChoiceTail, MAX_STREAM_CHOICES, StreamTail, accumulate_choice_text,
+        choice_carries_finish_reason, choice_carries_tool_call_delta, choice_tail_mut,
+        classify_stream_tail, ensure_stream_options_include_usage,
         map_openai_compat_upstream_error, parse_openai_error_classifier,
     };
     use crate::http_client::body_cap_exceeded_message;
     use reqwest::header::HeaderMap;
     use routectl_core::Error;
+    use routectl_core::schema::{ChunkChoice, ChunkDelta};
     use serde_json::json;
+
+    /// A well-formed stream tail (every choice saw its own terminal
+    /// `finish_reason`) classifies as `Terminated` and emits nothing extra,
+    /// even when tool-call deltas were also present earlier.
+    #[test]
+    fn terminal_finish_reason_classifies_as_terminated() {
+        let terminated = [ChoiceTail {
+            saw_terminal: true,
+            saw_tool_call_delta: false,
+        }];
+        assert_eq!(classify_stream_tail(&terminated), StreamTail::Terminated);
+
+        let terminated_with_tc = [ChoiceTail {
+            saw_terminal: true,
+            saw_tool_call_delta: true,
+        }];
+        assert_eq!(
+            classify_stream_tail(&terminated_with_tc),
+            StreamTail::Terminated,
+            "a finish_reason terminates a choice cleanly regardless of tool-call activity"
+        );
+    }
+
+    /// A choice that ends with NO terminal signal while its tool-call
+    /// arguments were still accumulating is the dangerous case: classified
+    /// as `TruncatedToolCall` so the stream is errored.
+    #[test]
+    fn no_terminal_signal_mid_tool_call_classifies_as_truncated_tool_call() {
+        let tails = [ChoiceTail {
+            saw_terminal: false,
+            saw_tool_call_delta: true,
+        }];
+        assert_eq!(classify_stream_tail(&tails), StreamTail::TruncatedToolCall);
+    }
+
+    /// A choice that ends with no terminal signal and no tool-call activity
+    /// (and the empty-stream case) is a truncated text response: a loud
+    /// warn, not an error.
+    #[test]
+    fn no_terminal_signal_plain_text_classifies_as_truncated_text() {
+        let tails = [ChoiceTail {
+            saw_terminal: false,
+            saw_tool_call_delta: false,
+        }];
+        assert_eq!(classify_stream_tail(&tails), StreamTail::TruncatedText);
+        assert_eq!(
+            classify_stream_tail(&[]),
+            StreamTail::TruncatedText,
+            "a stream that FINs with no observed choice is treated as truncated text"
+        );
+    }
+
+    /// The `n > 1` regression: choice 0 finishes cleanly while choice 1
+    /// streams tool-call args and never gets its own `finish_reason`. The
+    /// per-choice tail must classify the tail as a truncated tool call even
+    /// though a sibling terminated -- the exact bug global tracking masked.
+    #[test]
+    fn sibling_choice_truncation_detected_with_n_gt_1() {
+        // Arrange: drive the same per-choice marking the stream loop uses.
+        let finish0 = ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        };
+        let toolcall1 = ChunkChoice {
+            index: 1,
+            delta: ChunkDelta {
+                tool_calls: Some(vec![
+                    json!({"index": 0, "function": {"arguments": "{\"pa"}}),
+                ]),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        };
+        let mut tails: Vec<ChoiceTail> = Vec::new();
+
+        // Act
+        for choice in [&finish0, &toolcall1] {
+            if choice_carries_finish_reason(choice)
+                && let Some(t) = choice_tail_mut(&mut tails, choice.index)
+            {
+                t.saw_terminal = true;
+            }
+            if choice_carries_tool_call_delta(choice)
+                && let Some(t) = choice_tail_mut(&mut tails, choice.index)
+            {
+                t.saw_tool_call_delta = true;
+            }
+        }
+
+        // Assert
+        assert_eq!(
+            classify_stream_tail(&tails),
+            StreamTail::TruncatedToolCall,
+            "a truncated sibling choice must not be masked by a finished sibling"
+        );
+    }
+
+    /// The finish-reason detector fires on a choice carrying a terminal
+    /// reason and is silent otherwise.
+    #[test]
+    fn choice_carries_finish_reason_detects_terminal_choice() {
+        let terminal = ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        };
+        assert!(choice_carries_finish_reason(&terminal));
+
+        let open = ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some("hi".into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        };
+        assert!(!choice_carries_finish_reason(&open));
+    }
+
+    /// The tool-call detector fires on a non-empty `tool_calls` delta and
+    /// stays silent for an absent or empty one.
+    #[test]
+    fn choice_carries_tool_call_delta_detects_accumulating_args() {
+        let with_tc = ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                tool_calls: Some(vec![json!({
+                    "index": 0,
+                    "function": {"arguments": "{\"pa"}
+                })]),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        };
+        assert!(choice_carries_tool_call_delta(&with_tc));
+
+        let empty_tc = ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                tool_calls: Some(vec![]),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        };
+        assert!(!choice_carries_tool_call_delta(&empty_tc));
+
+        let no_tc = ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some("text".into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        };
+        assert!(!choice_carries_tool_call_delta(&no_tc));
+    }
+
+    /// End-to-end over the accumulator bits for a single choice: a
+    /// well-formed tool-call stream (a terminal finish_reason arrived)
+    /// passes unchanged, while a stream whose tool-call args were still
+    /// accumulating at FIN is flagged as a truncated tool call.
+    #[test]
+    fn tool_call_stream_truncation_distinguished_by_terminal_signal() {
+        // Well-formed: a choice with a tool-call delta AND its finish_reason.
+        let terminated = [ChoiceTail {
+            saw_terminal: true,
+            saw_tool_call_delta: true,
+        }];
+        assert_eq!(
+            classify_stream_tail(&terminated),
+            StreamTail::Terminated,
+            "a tool-call stream with a terminal finish_reason must pass unchanged"
+        );
+
+        // Truncated: only the tool-call delta arrived, no finish_reason.
+        let truncated = [ChoiceTail {
+            saw_terminal: false,
+            saw_tool_call_delta: true,
+        }];
+        assert_eq!(
+            classify_stream_tail(&truncated),
+            StreamTail::TruncatedToolCall,
+            "a tool-call stream that FINs with no terminal signal must be flagged truncated"
+        );
+    }
 
     #[test]
     fn capped_error_body_preserves_status_without_echo() {
