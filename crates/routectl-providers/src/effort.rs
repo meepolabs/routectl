@@ -147,7 +147,7 @@ pub(crate) fn budget_from_level(level: &str) -> Option<u32> {
 ///   8193..=24576 -> high
 ///   24577..=32768 -> xhigh
 ///   32769..     -> max
-#[cfg(feature = "openai-responses")]
+#[cfg(any(feature = "gemini", feature = "openai-responses"))]
 pub(crate) const fn level_from_budget(budget: u32) -> &'static str {
     match budget {
         0 => "none",
