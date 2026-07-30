@@ -24,7 +24,11 @@ listed at the bottom of each crate.
   off the inbound `Authorization` header; never serialized to the wire) +
   `RoutectlInternal.stainless_headers: Vec<(String, String)>` (captured
   inbound `x-stainless-*` fingerprint headers for the forwarded leg; never
-  serialized to the wire)
+  serialized to the wire) +
+  `RoutectlInternal.responses_input_passthrough: Vec<ResponsesPassthroughItem>`
+  (unknown Responses input-item kinds preserved with a `modeled_prefix`
+  source-position index for order-preserving Responses-egress replay; never
+  serialized to the wire, never read by another egress)
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   unknown Anthropic SSE bytes (skip-serialized; preserves unknown
   content_block types verbatim through the canonical pipeline so Anthropic
@@ -304,8 +308,10 @@ listed at the bottom of each crate.
   egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the
   redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream ->
   routectl) emit sites
-- `src/retry_after.rs` -- parser for the standard HTTP `Retry-After` response
-  header (RFC 9110 delta-seconds or HTTP-date) plus `is_rate_limit_status`;
+- `src/retry_after.rs` -- parser for the upstream reset hint: the standard HTTP
+  `Retry-After` header (RFC 9110 delta-seconds or HTTP-date) plus the
+  non-standard `retry-after-ms` header (integer milliseconds, preferred when
+  present so a sub-second hint survives), plus `is_rate_limit_status`;
   every egress lifts the hint on a 429/503/529 and carries it on
   `Error::Upstream.retry_after` for the router to honor (the Codex
   `usage_limit_reached` `resets_at` / `resets_in_seconds` reset is parsed in
@@ -615,6 +621,8 @@ listed at the bottom of each crate.
   `crate::mantle::sign`, and `record_mantle_span_fields` stamps
   `lane`/`auth_mode`/`region` on the request span
 - `src/openai_responses/types.rs` -- request wire types: `ResponsesRequest`,
+  `ResponseInput` wrapper (`Item(ResponseInputItem)` | untagged
+  `Passthrough(Value)` re-emitting preserved unknown input kinds),
   `ResponseInputItem` union, `ResponsesTool` flat shape
 - `src/openai_responses/response_types.rs` -- response + SSE event wire types
   (`ResponsesResponse`, output-item union, stream events)
@@ -688,12 +696,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Authorization`) for the api-key mode; key resolved per request so a managed
   token source can rotate
 - `src/gemini/types.rs` -- Gemini wire types (`GeminiResponse`,
-  `Content`/`Part`, `ThinkingConfig`, `UsageMetadata` incl.
+  `Content`/`Part`, `ThinkingConfig` (`thinkingBudget` | `thinkingLevel`
+  oneof), `UsageMetadata` incl.
   `cachedContentTokenCount` / `thoughtsTokenCount`)
 - `src/gemini/request.rs` -- `ChatRequest` -> Gemini body: system ->
   `systemInstruction`, messages -> `contents`/`parts`, tools ->
-  `functionDeclarations`, `build_thinking_config` (budget verbatim / effort
-  table / dynamic `-1`, `includeThoughts`), `build_response_format`
+  `functionDeclarations`, `build_thinking_config` (Gemini-3+ ->
+  `thinkingLevel` string by effort, selected by model generation; older
+  -> numeric `thinkingBudget` verbatim / effort table / dynamic `-1`;
+  `includeThoughts`), `build_response_format`
   (json_schema / json_object -> `responseMimeType` + `responseSchema`),
   thought-part replay carrying `thoughtSignature`; `warn_dropped_cache_control`
   emits the drop-with-warn breadcrumb for caller `cache_control` markers
@@ -2369,7 +2380,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   shared two-key `forwarded_capture_armed` gate (the process's `MitmSeamNonce`
   value matches the inbound seam header AND
   `Router::has_forwarded_provider()`; a spoofed seam header with a
-  non-matching nonce is treated as seam-absent)
+  non-matching nonce is treated as seam-absent). `map_error` -> `error_response`
+  also echoes an `Error::Upstream.retry_after` reset hint onto a client-facing
+  `Retry-After` header (RFC 7231 integer seconds, sub-second hints rounded UP to
+  at least 1s) so a client SDK's own 429/503 backoff keeps the upstream hint
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /
@@ -2568,7 +2582,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/ingress/openai.rs` -- OpenAI Chat Completions ingress; lifts
   `role:"system"` and `role:"developer"` messages into `req.system`
   (preserving per-block `cache_control`), lifts function tools, strips
-  internal `matched_stop_sequence` on render. Tests: inline unit tests in this
+  internal `matched_stop_sequence` on render, and stamps the OpenAI
+  envelope on render (`object`, nullable `system_fingerprint`, `created`
+  on chunks; synthesizes `chatcmpl-<uuid>` id + unix `created` when the
+  upstream omitted them, stream-stable across chunks). Tests: inline unit tests in this
   file plus `tests/server.rs`, `tests/contract_ingress.rs`,
   `tests/cross_dialect_render.rs`, `tests/e2e_reasoning.rs`,
   `tests/replay_ingress.rs`
