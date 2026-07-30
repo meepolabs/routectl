@@ -242,9 +242,13 @@ async fn anthropic_non_stream_ok_body_bytes_are_stable_single_serialize() {
 async fn openai_non_stream_ok_body_bytes_are_stable_single_serialize() {
     use crate::ingress::openai::OpenAiIngress;
 
-    let body = OpenAiIngress
-        .render_response(ok_response_with_usage(11, 7))
-        .expect("openai render");
+    // Pin `created` explicitly: the OpenAI render synthesizes a live
+    // unix-seconds stamp when the upstream omitted it (0), which would
+    // make an exact-byte pin non-deterministic. A non-zero value is
+    // passed through verbatim.
+    let mut resp = ok_response_with_usage(11, 7);
+    resp.created = 1_700_000_000;
+    let body = OpenAiIngress.render_response(resp).expect("openai render");
     let resp = ok_json_response(body);
 
     assert_eq!(
@@ -254,7 +258,7 @@ async fn openai_non_stream_ok_body_bytes_are_stable_single_serialize() {
         "application/json",
     );
     let bytes = to_bytes(resp.into_body(), 8 * 1024).await.unwrap();
-    let expected = br#"{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"user"}}],"created":0,"id":"resp-1","model":"m","usage":{"completion_tokens":7,"prompt_tokens":11,"total_tokens":18}}"#;
+    let expected = br#"{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"user"}}],"created":1700000000,"id":"resp-1","model":"m","object":"chat.completion","system_fingerprint":null,"usage":{"completion_tokens":7,"prompt_tokens":11,"total_tokens":18}}"#;
     assert_eq!(
         bytes.as_ref(),
         expected.as_slice(),
@@ -384,6 +388,77 @@ async fn openai_envelope_unchanged_regression_pin() {
             .unwrap_or("")
             .contains("nonesuch")
     );
+}
+
+#[tokio::test]
+async fn map_error_upstream_echoes_retry_after_header_from_hint() {
+    // Arrange: a 429 upstream carrying a multi-second reset hint.
+    let err =
+        Error::upstream_with_retry_after("p", 429, "rate limited", Some(Duration::from_secs(30)));
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+
+    // Assert: the client response carries an integer-second Retry-After.
+    let hdr = resp
+        .headers()
+        .get(RETRY_AFTER)
+        .expect("client response must carry a Retry-After header");
+    assert_eq!(hdr.to_str().expect("ascii header"), "30");
+}
+
+#[tokio::test]
+async fn map_error_upstream_rounds_sub_second_hint_up_to_one_second() {
+    // Arrange: a sub-second hint (as from a `retry-after-ms` upstream
+    // header) must not floor to 0 on the second-granular Retry-After.
+    let err =
+        Error::upstream_with_retry_after("p", 503, "overloaded", Some(Duration::from_millis(250)));
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+
+    // Assert: rounded UP to at least 1s.
+    let hdr = resp
+        .headers()
+        .get(RETRY_AFTER)
+        .expect("sub-second hint must still yield a Retry-After header");
+    assert_eq!(hdr.to_str().expect("ascii header"), "1");
+}
+
+#[tokio::test]
+async fn map_error_upstream_omits_retry_after_header_without_hint() {
+    // Arrange: a rate-limit upstream with no parsed reset hint.
+    let err = Error::upstream("p", 429, "rate limited");
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+
+    // Assert: no header fabricated when the upstream sent no hint.
+    assert!(
+        resp.headers().get(RETRY_AFTER).is_none(),
+        "no Retry-After header without an upstream hint"
+    );
+}
+
+#[tokio::test]
+async fn map_error_upstream_omits_retry_after_header_on_zero_hint() {
+    // Arrange: a zero reset hint. Reachable from `retry-after-ms: 0`,
+    // `Retry-After: 0`, or a past HTTP-date clamped to zero -- all funnel
+    // to Some(Duration::ZERO). `Retry-After: 0` means "retry now", which
+    // contradicts a 429/503 backoff, so no header must be emitted.
+    for status in [429u16, 503u16] {
+        let err =
+            Error::upstream_with_retry_after("p", status, "rate limited", Some(Duration::ZERO));
+
+        // Act
+        let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+
+        // Assert: no Retry-After header on a zero hint.
+        assert!(
+            resp.headers().get(RETRY_AFTER).is_none(),
+            "zero hint must emit no Retry-After header (status {status})"
+        );
+    }
 }
 
 // -------- map_error: non-streaming upstream message sanitization ----

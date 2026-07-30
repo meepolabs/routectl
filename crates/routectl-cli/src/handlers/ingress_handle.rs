@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::{Body, Bytes};
+use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -367,6 +368,7 @@ pub(crate) fn render_unsupported_media_type(shape: ErrorEnvelopeShape) -> Respon
         "invalid_request_error",
         None,
         None,
+        None,
     )
 }
 
@@ -381,6 +383,7 @@ pub(crate) fn render_malformed_body(shape: ErrorEnvelopeShape) -> Response {
         "bad_request",
         "malformed JSON in request body",
         "invalid_request_error",
+        None,
         None,
         None,
     )
@@ -406,6 +409,7 @@ pub(crate) fn render_body_rejection(
         kind,
         &e.to_string(),
         "invalid_request_error",
+        None,
         None,
         None,
     )
@@ -1114,14 +1118,22 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
     // Lift the upstream classifier so an SDK that branches on
     // `error.type` / `error.code` keeps the upstream signal instead of
     // a generic collapse. Only `Error::Upstream` carries these; every
-    // other variant uses the static `type_str` mapping unchanged.
-    let (upstream_type, upstream_code) = match &e {
+    // other variant uses the static `type_str` mapping unchanged. The
+    // parsed `retry_after` reset hint (populated only on a rate-limit /
+    // overload upstream response) rides through to a client-facing
+    // `Retry-After` header so an SDK's own backoff keeps the hint.
+    let (upstream_type, upstream_code, retry_after) = match &e {
         Error::Upstream {
             upstream_type,
             upstream_code,
+            retry_after,
             ..
-        } => (upstream_type.as_deref(), upstream_code.as_deref()),
-        _ => (None, None),
+        } => (
+            upstream_type.as_deref(),
+            upstream_code.as_deref(),
+            *retry_after,
+        ),
+        _ => (None, None, None),
     };
     error_response(
         shape,
@@ -1131,6 +1143,7 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         type_str,
         upstream_type,
         upstream_code,
+        retry_after,
     )
 }
 
@@ -1239,6 +1252,14 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
 /// - Anthropic envelope: a captured upstream type that is already a
 ///   valid Anthropic-vocabulary member passes through verbatim;
 ///   otherwise the status-derived guess in `anthropic_error_type` wins.
+///
+/// `retry_after`, when present, is echoed onto the client response as an
+/// RFC 7231 `Retry-After` header (integer seconds) so a client SDK
+/// running its own 429 backoff keeps the upstream reset hint. A
+/// sub-second hint (e.g. from a `retry-after-ms` upstream header) rounds
+/// UP to at least 1s, since the header is second-granular. Only
+/// `Error::Upstream` on a rate-limit / overload path carries this value;
+/// every other caller passes `None`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn error_response(
     shape: ErrorEnvelopeShape,
@@ -1248,6 +1269,7 @@ pub(crate) fn error_response(
     code: &str,
     upstream_type: Option<&str>,
     upstream_code: Option<&str>,
+    retry_after: Option<Duration>,
 ) -> Response {
     let body: Value = match shape {
         ErrorEnvelopeShape::OpenAi => {
@@ -1271,7 +1293,31 @@ pub(crate) fn error_response(
             }
         }),
     };
-    (status, Json(body)).into_response()
+    let mut response = (status, Json(body)).into_response();
+    // Skip a zero hint: `Retry-After: 0` tells a client to retry
+    // immediately, which contradicts a 429/503 backoff. A zero is
+    // reachable from `retry-after-ms: 0`, `Retry-After: 0`, or a past
+    // HTTP-date clamped to zero, so gate the header on a non-zero duration.
+    if let Some(hint) = retry_after.filter(|d| !d.is_zero()) {
+        response.headers_mut().insert(
+            RETRY_AFTER,
+            HeaderValue::from(retry_after_header_secs(hint)),
+        );
+    }
+    response
+}
+
+/// Convert a reset [`Duration`] to the whole-second value carried by the
+/// second-granular RFC 7231 `Retry-After` header. A sub-second hint
+/// rounds UP (ceiling) so a `retry-after-ms` value like 250ms surfaces
+/// as `1` rather than being floored to `0` and losing the hint.
+const fn retry_after_header_secs(hint: Duration) -> u64 {
+    let secs = hint.as_secs();
+    if hint.subsec_nanos() > 0 {
+        secs + 1
+    } else {
+        secs
+    }
 }
 
 /// Map routectl's internal `err_type` tag (the second field in

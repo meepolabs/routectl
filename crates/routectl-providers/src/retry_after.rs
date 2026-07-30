@@ -1,7 +1,10 @@
 //! Parser for the standard HTTP `Retry-After` response header.
 //!
 //! Per RFC 9110 the header carries either a delta-seconds integer or an
-//! HTTP-date. This module extracts the indicated wait as a
+//! HTTP-date. OpenAI and Anthropic additionally emit a non-standard
+//! `retry-after-ms` header carrying an integer count of milliseconds,
+//! which this module prefers when present so a sub-second reset hint is
+//! not rounded up or lost. This module extracts the indicated wait as a
 //! [`std::time::Duration`]; the router and circuit breaker consume the
 //! parsed value (carried structurally on `Error::Upstream`) to park a
 //! provider after a rate-limit / overload response. The shared
@@ -13,15 +16,31 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset, Utc};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 
-/// Parse the `Retry-After` header into a wait [`Duration`].
+/// The non-standard millisecond-granular reset header emitted by OpenAI
+/// and Anthropic alongside the standard `Retry-After`. Carries an integer
+/// count of milliseconds, so it can express a sub-second wait the
+/// second-granular `Retry-After` rounds up or loses entirely.
+const RETRY_AFTER_MS: &str = "retry-after-ms";
+
+/// Parse an upstream reset hint into a wait [`Duration`].
 ///
-/// Handles both RFC 9110 forms:
-///   - delta-seconds: an integer `N` -> `Duration::from_secs(N)`.
-///   - HTTP-date: a date string -> `date - now`, clamped to
-///     `Duration::ZERO` when the date is already in the past.
+/// Reads two headers, finer-grained first:
+///   - `retry-after-ms`: an integer count of milliseconds ->
+///     [`Duration::from_millis`]. Preferred when present and parseable,
+///     since it can express a sub-second wait the second-granular
+///     `Retry-After` cannot.
+///   - `Retry-After` (RFC 9110), in either form:
+///       - delta-seconds: an integer `N` -> `Duration::from_secs(N)`.
+///       - HTTP-date: a date string -> `date - now`, clamped to
+///         `Duration::ZERO` when the date is already in the past.
 ///
-/// Returns `None` when the header is absent or neither form parses.
+/// When both `retry-after-ms` and `Retry-After` are present the finer
+/// `-ms` value wins; a malformed `-ms` value falls through to the
+/// standard header. Returns `None` when neither header yields a value.
 pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    if let Some(ms) = parse_retry_after_ms(headers) {
+        return Some(ms);
+    }
     let raw = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if raw.is_empty() {
         return None;
@@ -32,6 +51,19 @@ pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
         return Some(Duration::from_secs(secs));
     }
     parse_http_date_delta(raw)
+}
+
+/// Parse the `retry-after-ms` header into a sub-second-capable
+/// [`Duration`]. Returns `None` when the header is absent, empty, or not
+/// a bare non-negative integer, so the caller falls back to the standard
+/// `Retry-After` grammar.
+fn parse_retry_after_ms(headers: &HeaderMap) -> Option<Duration> {
+    let raw = headers.get(RETRY_AFTER_MS)?.to_str().ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let ms = raw.parse::<u64>().ok()?;
+    Some(Duration::from_millis(ms))
 }
 
 /// Report whether a reset hint is meaningful for the given HTTP status.
@@ -73,6 +105,46 @@ mod tests {
             HeaderValue::from_str(value).expect("header value"),
         );
         h
+    }
+
+    #[test]
+    fn parses_retry_after_ms_to_sub_second_duration() {
+        // Arrange: a millisecond-granular hint below one second.
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after-ms", HeaderValue::from_static("250"));
+
+        // Act
+        let got = parse_retry_after(&headers);
+
+        // Assert: preserved as a sub-second Duration, not rounded up.
+        assert_eq!(got, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn prefers_retry_after_ms_over_integer_seconds() {
+        // Arrange: both headers present; the -ms value is finer than the
+        // second-granular Retry-After (1500ms vs 2s).
+        let mut headers = headers_with("2");
+        headers.insert("retry-after-ms", HeaderValue::from_static("1500"));
+
+        // Act
+        let got = parse_retry_after(&headers);
+
+        // Assert: the finer -ms value wins.
+        assert_eq!(got, Some(Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn falls_back_to_retry_after_when_ms_is_garbage() {
+        // Arrange: an unparseable -ms value alongside a valid Retry-After.
+        let mut headers = headers_with("30");
+        headers.insert("retry-after-ms", HeaderValue::from_static("not-a-number"));
+
+        // Act
+        let got = parse_retry_after(&headers);
+
+        // Assert: malformed -ms falls through to the standard header.
+        assert_eq!(got, Some(Duration::from_secs(30)));
     }
 
     #[test]
