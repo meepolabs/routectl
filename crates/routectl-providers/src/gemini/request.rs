@@ -638,19 +638,84 @@ fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
 /// effort level.
 const THINKING_BUDGET_DYNAMIC: i32 = -1;
 
+/// First Gemini generation that replaced the numeric `thinkingBudget`
+/// with the qualitative `thinkingLevel` string in the wire oneof.
+const THINKING_LEVEL_MIN_GENERATION: u32 = 3;
+
+/// Parse the major generation number a Gemini model id expresses, e.g.
+/// `2` from `gemini-2.5-pro`, `3` from `gemini-3.5-flash` or
+/// `models/gemini-3.1-pro-preview`. Returns `None` when the id carries no
+/// `gemini-<n>` version segment (unversioned or foreign ids), so callers
+/// fall back to the legacy budget path. Reads only what the catalog id
+/// already expresses -- no hardcoded model list.
+fn gemini_generation(model: &str) -> Option<u32> {
+    let after = model.rsplit("gemini-").next()?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse::<u32>().ok()
+}
+
+/// True when the model's generation uses `thinkingLevel` (Gemini-3+)
+/// rather than the numeric `thinkingBudget`. Unknown / unversioned ids
+/// default to the legacy budget path.
+fn uses_thinking_level(model: &str) -> bool {
+    gemini_generation(model).is_some_and(|g| g >= THINKING_LEVEL_MIN_GENERATION)
+}
+
+/// Map a canonical effort token (or a budget-derived level) to the
+/// Gemini-3 `thinkingLevel` vocabulary (`minimal` | `low` | `medium` |
+/// `high`). The six canonical tokens collapse onto Gemini's four: `xhigh`
+/// and `max` saturate to `high`; `none` maps to the lowest `minimal`.
+/// Returns `None` for any token outside the canonical set so the caller
+/// omits the field and lets the model apply its default -- mirroring how
+/// the budget path drops an unrecognized effort.
+fn thinking_level_from_effort(effort: &str) -> Option<&'static str> {
+    match effort {
+        "none" | "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" | "xhigh" | "max" => Some("high"),
+        _ => None,
+    }
+}
+
 /// Map the canonical `reasoning` controls to Gemini's `thinkingConfig`.
 ///
+/// Selects the oneof arm by model generation:
+///   - Gemini-3+ -> `thinkingLevel` (string)
+///   - older     -> `thinkingBudget` (numeric)
+///
+/// Within each arm:
 ///   - `enabled: Some(false)`         -> None (reasoning explicitly off)
-///   - explicit `max_tokens` (budget) -> that budget verbatim
-///   - explicit `effort`              -> budget via the effort table
-///   - reasoning present otherwise    -> dynamic budget (-1)
+///   - explicit `max_tokens` (budget) -> budget verbatim / budget-derived level
+///   - explicit `effort`              -> level via the effort table
+///   - reasoning present otherwise    -> dynamic budget (-1) / omitted level
 ///
 /// `include_thoughts` is true whenever thinking is on and not excluded,
 /// so thought summaries stream back and map to canonical reasoning.
+/// Exactly one of `thinking_budget` / `thinking_level` is ever populated.
 fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
     let reasoning = req.reasoning.as_ref()?;
     if reasoning.enabled == Some(false) {
         return None;
+    }
+
+    let include_thoughts = Some(reasoning.exclude != Some(true));
+
+    if uses_thinking_level(&req.model) {
+        let thinking_level = if let Some(budget) = reasoning.max_tokens {
+            // Map an explicit numeric budget onto Gemini-3's level scale:
+            // budget -> canonical token -> Gemini level.
+            thinking_level_from_effort(crate::effort::level_from_budget(budget))
+        } else if let Some(effort) = reasoning.effort.as_deref() {
+            thinking_level_from_effort(effort)
+        } else {
+            None
+        };
+        return Some(ThinkingConfig {
+            thinking_budget: None,
+            thinking_level: thinking_level.map(str::to_string),
+            include_thoughts,
+        });
     }
 
     let thinking_budget = if let Some(budget) = reasoning.max_tokens {
@@ -664,11 +729,10 @@ fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
         Some(THINKING_BUDGET_DYNAMIC)
     };
 
-    let include_thoughts = reasoning.exclude != Some(true);
-
     Some(ThinkingConfig {
         thinking_budget,
-        include_thoughts: Some(include_thoughts),
+        thinking_level: None,
+        include_thoughts,
     })
 }
 
@@ -1361,6 +1425,163 @@ mod tests {
             .thinking_config
             .expect("thinking_config");
         assert_eq!(tc.include_thoughts, Some(false));
+    }
+
+    // ---------------------------------------------------------------------------
+    // thinkingLevel vs thinkingBudget by model generation (Gemini-3 oneof)
+    // ---------------------------------------------------------------------------
+
+    fn req_gen3_reasoning(r: routectl_core::ReasoningConfig) -> ChatRequest {
+        ChatRequest {
+            model: "gemini-3.5-flash".into(),
+            messages: vec![make_user("hi")].into(),
+            reasoning: Some(r),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gemini3_model_emits_thinking_level_not_budget() {
+        // Arrange: a Gemini-3 model with an effort level.
+        let req = req_gen3_reasoning(routectl_core::ReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+
+        // Act
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+
+        // Assert: level set, numeric budget absent.
+        assert_eq!(tc.thinking_level.as_deref(), Some("high"));
+        assert_eq!(tc.thinking_budget, None);
+    }
+
+    #[test]
+    fn older_gemini_model_still_emits_thinking_budget_not_level() {
+        // Arrange: a Gemini-2.5 model with the same effort.
+        let req = req_with_reasoning(routectl_core::ReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+
+        // Act
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+
+        // Assert: numeric budget set, level absent.
+        assert_eq!(tc.thinking_budget, Some(24576));
+        assert_eq!(tc.thinking_level, None);
+    }
+
+    #[test]
+    fn thinking_config_oneof_serializes_exactly_one_arm() {
+        // Arrange: a Gemini-3 request whose thinkingConfig must carry the
+        // level arm only, never the numeric budget.
+        let req = req_gen3_reasoning(routectl_core::ReasoningConfig {
+            effort: Some("medium".into()),
+            ..Default::default()
+        });
+
+        // Act: serialize the assembled body to the wire shape.
+        let body = translate("gemini:test", &req).expect("translate");
+        let value = serde_json::to_value(&body).expect("serialize");
+        let thinking = &value["generationConfig"]["thinkingConfig"];
+
+        // Assert: thinkingLevel present, thinkingBudget absent -- the oneof
+        // is never double-populated on the wire.
+        assert_eq!(thinking["thinkingLevel"], "medium");
+        assert!(
+            thinking.get("thinkingBudget").is_none(),
+            "budget arm must not serialize alongside level: {thinking}"
+        );
+    }
+
+    #[test]
+    fn gemini3_explicit_budget_maps_to_level() {
+        // Arrange: a Gemini-3 model given a numeric budget. Gemini-3 takes
+        // no numeric budget, so it is mapped onto the level scale (2048
+        // falls in the medium band).
+        let req = req_gen3_reasoning(routectl_core::ReasoningConfig {
+            max_tokens: Some(2048),
+            ..Default::default()
+        });
+
+        // Act
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+
+        // Assert
+        assert_eq!(tc.thinking_level.as_deref(), Some("medium"));
+        assert_eq!(tc.thinking_budget, None);
+    }
+
+    #[test]
+    fn gemini3_saturates_xhigh_and_max_to_high() {
+        for effort in ["xhigh", "max"] {
+            let req = req_gen3_reasoning(routectl_core::ReasoningConfig {
+                effort: Some(effort.into()),
+                ..Default::default()
+            });
+            let tc = translate("gemini:test", &req)
+                .expect("translate")
+                .generation_config
+                .expect("generation_config")
+                .thinking_config
+                .expect("thinking_config");
+            assert_eq!(
+                tc.thinking_level.as_deref(),
+                Some("high"),
+                "{effort} must saturate to high"
+            );
+            assert_eq!(tc.thinking_budget, None);
+        }
+    }
+
+    #[test]
+    fn gemini3_dynamic_reasoning_omits_both_arms() {
+        // Arrange: reasoning present but neither effort nor budget given.
+        // Gemini-3 has no dynamic-level sentinel, so both arms are omitted
+        // and the model applies its own default.
+        let req = req_gen3_reasoning(routectl_core::ReasoningConfig::default());
+
+        // Act
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+
+        // Assert
+        assert_eq!(tc.thinking_level, None);
+        assert_eq!(tc.thinking_budget, None);
+        assert_eq!(tc.include_thoughts, Some(true));
+    }
+
+    #[test]
+    fn gemini_generation_parsed_generically_from_id() {
+        // Bare parser: reads the generation the catalog id expresses, no
+        // hardcoded model list.
+        assert_eq!(gemini_generation("gemini-2.5-pro"), Some(2));
+        assert_eq!(gemini_generation("gemini-3.5-flash"), Some(3));
+        assert_eq!(gemini_generation("models/gemini-3.1-pro-preview"), Some(3));
+        assert_eq!(gemini_generation("gemini-pro"), None);
+        assert!(uses_thinking_level("gemini-3.5-flash"));
+        assert!(!uses_thinking_level("gemini-2.5-pro"));
+        assert!(!uses_thinking_level("gemini-pro"));
     }
 
     #[test]

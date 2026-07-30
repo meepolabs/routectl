@@ -175,13 +175,26 @@ pub struct GenerationConfig {
 }
 
 /// Thinking controls placed inside `generationConfig`.
+///
+/// `thinking_budget` and `thinking_level` are the two alternatives of the
+/// wire `thinkingConfig` oneof: older Gemini generations take a numeric
+/// budget, Gemini-3+ take a qualitative level string. Exactly one is ever
+/// populated at build time, so `skip_serializing_if` guarantees the wire
+/// carries at most one of them.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingConfig {
     /// Token budget for the model's internal reasoning. `-1` requests a
-    /// dynamic budget; `0` disables thinking on capable models.
+    /// dynamic budget; `0` disables thinking on capable models. Used for
+    /// pre-Gemini-3 generations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) thinking_budget: Option<i32>,
+
+    /// Qualitative reasoning level for Gemini-3+ generations, the string
+    /// alternative of the wire oneof. One of `minimal` | `low` | `medium`
+    /// | `high`. Never serialized alongside `thinking_budget`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking_level: Option<String>,
 
     /// When true, the model streams thought summaries (mapped to
     /// canonical reasoning) instead of hiding them.
