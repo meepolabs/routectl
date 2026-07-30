@@ -34,7 +34,19 @@ const DONE_SENTINEL: &str = "[DONE]";
 pub struct OpenAiIngress;
 
 #[derive(Debug, Default)]
-pub struct OpenAiStreamState;
+pub struct OpenAiStreamState {
+    /// Stable chat-completion id stamped on every chunk of the stream.
+    /// Seeded from the first upstream chunk carrying a non-empty id, or
+    /// minted `chatcmpl-<uuid>` when the upstream omits one, then held so
+    /// all chunks share a single id -- a client keying on id sees one
+    /// completion instead of a per-chunk collision on the empty string.
+    synth_id: Option<String>,
+    /// Stable unix-seconds creation stamp stamped on every chunk. Held
+    /// across the stream for the same reason as `synth_id`: the canonical
+    /// `ChatChunk` carries no `created`, and a strict SDK requires one
+    /// consistent value on `ChatCompletionChunk`.
+    created: Option<i64>,
+}
 
 impl IngressStreamState for OpenAiStreamState {
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -163,13 +175,13 @@ impl IngressAdapter for OpenAiIngress {
     }
 
     fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
-        Box::new(OpenAiStreamState)
+        Box::new(OpenAiStreamState::default())
     }
 
     fn render_chunk(
         &self,
         chunk: ChatChunk,
-        _state: &mut dyn IngressStreamState,
+        state: &mut dyn IngressStreamState,
     ) -> Result<Vec<SseEvent>> {
         // No tool_use dedup needed on the streaming path: the canonical
         // `ChunkDelta` has no `MessageContent::Parts` slot (`content` is
@@ -183,7 +195,17 @@ impl IngressAdapter for OpenAiIngress {
         // docs) and OpenAI Chat-Completions clients do not expect it on
         // streaming chunks.
         let chunk = strip_matched_stop_sequence_from_chunk(chunk);
-        let data = serde_json::to_string(&chunk)
+        let mut value = serde_json::to_value(&chunk)
+            .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
+        // Stamp the OpenAI streaming envelope a strict SDK requires on
+        // `ChatCompletionChunk`: `object:"chat.completion.chunk"`, a
+        // stream-stable `id`, a `created` stamp (the canonical chunk
+        // carries none), and a nullable `system_fingerprint`. The id and
+        // created are held on the stream state so every chunk shares one
+        // value. OpenAI-dialect only -- the Anthropic ingress renders
+        // chunks through its own module.
+        apply_openai_chunk_envelope(&mut value, openai_state_mut(state));
+        let data = serde_json::to_string(&value)
             .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
         Ok(vec![SseEvent::unnamed(data)])
     }
@@ -256,7 +278,126 @@ fn render_openai_response_value(resp: ChatResponse) -> Result<Value> {
     // the canonical type, so the Anthropic ingress keeps its own
     // vocabulary.
     surface_cached_tokens_in_usage(&mut value);
+    // Stamp the OpenAI Chat-Completions envelope literals a strict SDK
+    // (openai-python) and dialect peers require: `object`, a non-empty
+    // `id`, a non-zero `created`, and a (nullable) `system_fingerprint`.
+    // Kept here at the OpenAI-dialect render boundary, not on the
+    // dialect-neutral canonical `ChatResponse`, so the Anthropic ingress
+    // keeps its own wire shape (hub-and-spoke).
+    apply_openai_response_envelope(&mut value);
     Ok(value)
+}
+
+/// Downcast the generic stream state to this dialect's concrete state.
+/// Mirrors the Anthropic ingress's `anthropic_state_mut`.
+fn openai_state_mut(s: &mut dyn IngressStreamState) -> &mut OpenAiStreamState {
+    s.as_any_mut()
+        .downcast_mut::<OpenAiStreamState>()
+        .expect("OpenAiIngress::render_chunk got a non-OpenAI stream state")
+}
+
+/// Mint a `chatcmpl-<uuid>`-shaped id, matching the litellm convention an
+/// OpenAI client expects when it uses the id as a dedup / correlation key.
+fn synth_chat_id() -> String {
+    format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Current wall-clock time in unix seconds, the unit OpenAI's `created`
+/// field uses. Falls back to 0 only if the system clock is before the
+/// unix epoch (unreachable in practice).
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Replace an empty / absent `id` with a freshly minted `chatcmpl-<uuid>`
+/// so a bare canonical response (upstream omitted `id`, serializing as "")
+/// cannot collide as a client dedup key. A non-empty upstream id is kept.
+fn ensure_nonempty_id(obj: &mut Map<String, Value>) {
+    let empty = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty);
+    if empty {
+        obj.insert("id".into(), Value::from(synth_chat_id()));
+    }
+}
+
+/// Replace an absent / zero `created` with the current unix-seconds stamp,
+/// mirroring litellm minting a timestamp when the upstream omits it.
+fn ensure_created(obj: &mut Map<String, Value>) {
+    let absent = obj
+        .get("created")
+        .and_then(Value::as_i64)
+        .is_none_or(|c| c <= 0);
+    if absent {
+        obj.insert("created".into(), Value::from(unix_now_secs()));
+    }
+}
+
+/// Stamp the OpenAI Chat-Completions envelope onto a serialized
+/// `ChatResponse` body: `object:"chat.completion"`, a non-empty `id`, a
+/// non-zero `created`, and a `system_fingerprint` (mirrored from the
+/// upstream value when it rode through `extras`, else explicit `null` so
+/// the key a strict SDK reads is always present).
+fn apply_openai_response_envelope(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.insert("object".into(), Value::from("chat.completion"));
+    ensure_nonempty_id(obj);
+    ensure_created(obj);
+    obj.entry("system_fingerprint").or_insert(Value::Null);
+}
+
+/// Stamp the OpenAI streaming envelope onto a serialized `ChatChunk` body:
+/// `object:"chat.completion.chunk"`, a stream-stable `id`, a stream-stable
+/// `created`, and a nullable `system_fingerprint`. The id and created are
+/// coordinated through `state` so every chunk of one stream shares a single
+/// value (an SDK keying on either sees one completion, never a per-chunk
+/// mint). The first non-empty upstream chunk id SEEDS the held id; once
+/// set (seeded or minted), later chunk ids never overwrite it, so the
+/// stream exposes one stable id end to end.
+fn apply_openai_chunk_envelope(value: &mut Value, state: &mut OpenAiStreamState) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.insert("object".into(), Value::from("chat.completion.chunk"));
+
+    let wire_id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let id = match state.synth_id.clone() {
+        // Id already established for this stream (minted, or seeded from an
+        // earlier chunk's wire id): keep emitting it. A later chunk's wire
+        // id must NEVER overwrite it -- otherwise one stream would expose
+        // two different completion ids to a client correlating chunks by id.
+        Some(established) => established,
+        // First id seen for the stream: seed from the wire id when this
+        // chunk carries a non-empty one, else mint a synthetic id. Either
+        // way the value is held and reused for every later chunk.
+        None => {
+            let seed = wire_id.unwrap_or_else(synth_chat_id);
+            state.synth_id = Some(seed.clone());
+            seed
+        }
+    };
+    obj.insert("id".into(), Value::from(id));
+
+    let created = match state.created {
+        Some(c) => c,
+        None => {
+            let c = unix_now_secs();
+            state.created = Some(c);
+            c
+        }
+    };
+    obj.insert("created".into(), Value::from(created));
+
+    obj.entry("system_fingerprint").or_insert(Value::Null);
 }
 
 /// Pull every top-level body key NOT recognized as a canonical
@@ -988,6 +1129,297 @@ mod tests {
         assert_eq!(v["routectl_provider"], "test");
         // Suppress unused-import warnings.
         let _ = MessageContent::Text(String::new());
+    }
+
+    /// A rendered non-stream response must carry the OpenAI envelope
+    /// fields the openai-python SDK and dialect peers expect:
+    /// `object:"chat.completion"`, a `created` stamp, and a
+    /// `system_fingerprint` key (null when the upstream omitted it).
+    #[test]
+    fn render_response_carries_openai_envelope() {
+        // Arrange
+        let resp = ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "gpt-4o".into(),
+            created: 1_700_000_000,
+            choices: vec![],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+            upstream_meta: None,
+        };
+
+        // Act
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
+
+        // Assert
+        assert_eq!(v["object"], "chat.completion");
+        assert_eq!(v["created"], 1_700_000_000);
+        assert!(
+            v.as_object().unwrap().contains_key("system_fingerprint"),
+            "system_fingerprint key must be present: {v}"
+        );
+        assert!(v["system_fingerprint"].is_null());
+    }
+
+    /// When the upstream omitted `id` (serializes as "") and `created`
+    /// (serializes as 0), the render must mint a non-empty
+    /// `chatcmpl-<uuid>` id and a non-zero unix-seconds `created`, so an
+    /// empty id can never collide as a client dedup key.
+    #[test]
+    fn render_response_synthesizes_id_and_created_on_omission() {
+        // Arrange: canonical defaults leave id="" and created=0.
+        let resp = ChatResponse {
+            id: String::new(),
+            model: "gpt-4o".into(),
+            created: 0,
+            choices: vec![],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+            upstream_meta: None,
+        };
+
+        // Act
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
+
+        // Assert
+        let id = v["id"].as_str().unwrap();
+        assert!(id.starts_with("chatcmpl-"), "minted id shape: {id}");
+        assert!(id.len() > "chatcmpl-".len(), "minted id non-empty: {id}");
+        assert!(
+            v["created"].as_i64().unwrap() > 0,
+            "created must be minted non-zero: {v}"
+        );
+    }
+
+    /// An upstream `system_fingerprint` rides canonical `extras` (the
+    /// flatten catchall) and must be mirrored verbatim onto the wire, not
+    /// clobbered with null.
+    #[test]
+    fn render_response_mirrors_upstream_system_fingerprint() {
+        // Arrange
+        let mut extras = serde_json::Map::new();
+        extras.insert("system_fingerprint".into(), json!("fp_abc123"));
+        let resp = ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "gpt-4o".into(),
+            created: 1_700_000_000,
+            choices: vec![],
+            usage: None,
+            routectl_provider: None,
+            extras,
+            upstream_meta: None,
+        };
+
+        // Act
+        let v = OpenAiIngress.render_response_value(resp).unwrap();
+
+        // Assert
+        assert_eq!(v["system_fingerprint"], "fp_abc123");
+    }
+
+    /// A rendered streaming chunk must carry
+    /// `object:"chat.completion.chunk"` and a `created` stamp -- both
+    /// required by the openai-python SDK on `ChatCompletionChunk` and
+    /// absent from the canonical `ChatChunk`.
+    #[test]
+    fn render_chunk_carries_openai_chunk_envelope() {
+        // Arrange
+        let chunk = ChatChunk {
+            id: "chatcmpl-1".into(),
+            model: "gpt-4o".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: Some("hi".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        };
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+
+        // Act
+        let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
+
+        // Assert
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(payload["object"], "chat.completion.chunk");
+        assert!(
+            payload["created"].as_i64().unwrap() > 0,
+            "chunk created must be present and non-zero: {payload}"
+        );
+    }
+
+    /// When upstream chunks omit `id`, the render must mint one and reuse
+    /// it across every chunk of the stream (litellm mints a single id per
+    /// completion). Two id-less chunks through one state must serialize
+    /// the same minted id.
+    #[test]
+    fn render_chunk_synthesizes_stable_id_across_chunks() {
+        // Arrange: two chunks with empty ids sharing one stream state.
+        let make_chunk = || ChatChunk {
+            id: String::new(),
+            model: "gpt-4o".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: Some("x".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        };
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+
+        // Act
+        let first = OpenAiIngress
+            .render_chunk(make_chunk(), state.as_mut())
+            .unwrap();
+        let second = OpenAiIngress
+            .render_chunk(make_chunk(), state.as_mut())
+            .unwrap();
+
+        // Assert
+        let first_id = serde_json::from_str::<Value>(&first[0].data).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let second_id = serde_json::from_str::<Value>(&second[0].data).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            first_id.starts_with("chatcmpl-"),
+            "minted shape: {first_id}"
+        );
+        assert!(first_id.len() > "chatcmpl-".len());
+        assert_eq!(
+            first_id, second_id,
+            "minted id must be stable across the stream"
+        );
+    }
+
+    #[test]
+    fn render_chunk_ignores_later_wire_id_once_minted() {
+        // Arrange: chunk 0 is id-less (mints X); a later chunk carries a
+        // real upstream id. The established id must win on BOTH chunks so a
+        // client correlating by completion id never sees two ids.
+        let idless_chunk = || ChatChunk {
+            id: String::new(),
+            model: "gpt-4o".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: Some("x".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        };
+        let wire_chunk = || {
+            let mut c = idless_chunk();
+            c.id = "chatcmpl-upstream-999".into();
+            c
+        };
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+
+        // Act: chunk 0 id-less (mints), chunk 1 id-less, chunk 2 wire id.
+        let first = OpenAiIngress
+            .render_chunk(idless_chunk(), state.as_mut())
+            .unwrap();
+        let _second = OpenAiIngress
+            .render_chunk(idless_chunk(), state.as_mut())
+            .unwrap();
+        let third = OpenAiIngress
+            .render_chunk(wire_chunk(), state.as_mut())
+            .unwrap();
+
+        // Assert: the minted id (X) appears on the later wire-id chunk too.
+        let first_id = serde_json::from_str::<Value>(&first[0].data).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let third_id = serde_json::from_str::<Value>(&third[0].data).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            first_id.starts_with("chatcmpl-"),
+            "minted shape: {first_id}"
+        );
+        assert_ne!(
+            third_id, "chatcmpl-upstream-999",
+            "later wire id must not overwrite the established id"
+        );
+        assert_eq!(
+            first_id, third_id,
+            "established id must stay stable even when a later chunk carries a wire id"
+        );
+    }
+
+    /// The OpenAI envelope injection must NOT leak onto the Anthropic
+    /// ingress render (hub-and-spoke: the literals live at the OpenAI
+    /// seam, not on the canonical hub). An Anthropic-out response must
+    /// carry none of `object`/`chat.completion`/`system_fingerprint`.
+    #[test]
+    fn anthropic_ingress_render_carries_no_openai_envelope() {
+        use crate::ingress::anthropic::AnthropicIngress;
+
+        // Arrange: a canonical response with id/created omitted, the
+        // shape that triggers OpenAI synth on the sibling dialect.
+        let resp = ChatResponse {
+            id: String::new(),
+            model: "claude-sonnet-4".into(),
+            created: 0,
+            choices: vec![Choice {
+                logprobs: None,
+                index: 0,
+                message: Message {
+                    refusal: None,
+                    role: Role::Assistant,
+                    content: MessageContent::Text("hello".into()),
+                    reasoning: None,
+                    reasoning_details: Vec::new(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+            upstream_meta: None,
+        };
+
+        // Act
+        let v = AnthropicIngress.render_response_value(resp).unwrap();
+
+        // Assert: no OpenAI envelope literals leaked onto the Anthropic wire.
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("system_fingerprint"),
+            "no system_fingerprint on Anthropic wire: {v}"
+        );
+        assert_ne!(
+            v["object"], "chat.completion",
+            "no chat.completion object on Anthropic wire: {v}"
+        );
     }
 
     /// Build a canonical assistant message shaped like an Anthropic-shape
