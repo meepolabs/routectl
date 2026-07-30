@@ -16,7 +16,7 @@
 //!   - `reasoning`                      -> assistant `reasoning_details[]`
 //!   - unknown item kind                -> skipped with a WARN (never 500)
 //! - `tools`                            -> `tools[]` (ToolDef)
-//! - `tool_choice`                      -> `tool_choice` (verbatim Value)
+//! - `tool_choice`                      -> `tool_choice` (named-forcing shape normalized to nested)
 //! - `reasoning` (object)               -> `reasoning` (ReasoningConfig)
 //! - `max_output_tokens`                -> `max_tokens`
 //! - `text.format`                      -> `response_format`
@@ -114,12 +114,13 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         req.tools = build_tools(tools);
     }
 
-    // tool_choice -> canonical tool_choice (verbatim Value; egresses
-    // translate per-upstream, mirroring the openai chat ingress).
+    // tool_choice -> canonical tool_choice. The Responses wire uses a
+    // flat named-forcing shape; normalize it to the nested OpenAI form
+    // every egress mapper already consumes (see normalize_tool_choice).
     if let Some(tc) = obj.remove("tool_choice")
         && !tc.is_null()
     {
-        req.tool_choice = Some(tc);
+        req.tool_choice = Some(normalize_tool_choice(tc));
     }
 
     // reasoning object -> ReasoningConfig.
@@ -654,6 +655,31 @@ fn reasoning_detail(
 // ---------------------------------------------------------------------------
 // tools -> ToolDef[]
 // ---------------------------------------------------------------------------
+
+/// Normalize a Responses named-forcing `tool_choice` into the canonical
+/// nested form every egress mapper already consumes.
+///
+/// The Responses wire forces a named tool with the flat shape
+/// `{"type":"function","name":"X"}`. Canonical -- and the shape both the
+/// Anthropic and openai-compat egress mappers already translate
+/// successfully -- is the nested OpenAI form
+/// `{"type":"function","function":{"name":"X"}}`. Normalizing here means
+/// every egress sees one shape (the Responses egress reads
+/// `function.name` too, so its path is unaffected). Every other shape
+/// (bare strings, already-nested objects, unrecognized objects) passes
+/// through verbatim.
+fn normalize_tool_choice(tc: Value) -> Value {
+    let Value::Object(map) = &tc else {
+        return tc;
+    };
+    if map.get("type").and_then(Value::as_str) != Some("function") || map.contains_key("function") {
+        return tc;
+    }
+    match map.get("name").and_then(Value::as_str) {
+        Some(name) => serde_json::json!({"type": "function", "function": {"name": name}}),
+        None => tc,
+    }
+}
 
 /// Translate the Responses `tools` array into canonical `ToolDef`s. A
 /// flat Responses function tool (`{type:"function", name, description?,
