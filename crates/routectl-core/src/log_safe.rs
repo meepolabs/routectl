@@ -1055,6 +1055,14 @@ pub fn headers_to_json<'a>(
 ///                                not a credential, but an unguessable
 ///                                value whose whole purpose is staying
 ///                                out of anything a caller can observe.
+/// `api-key`                  -- Azure OpenAI api key.
+/// `cf-aig-authorization`     -- Cloudflare AI Gateway auth token.
+/// `ocp-apim-subscription-key`-- Azure API Management subscription key.
+/// `cf-access-jwt-assertion`  -- Cloudflare Access signed-JWT identity
+///                                assertion: a replayable bearer of the
+///                                caller's identity claims.
+/// `x-goog-iap-jwt-assertion` -- Google IAP signed-JWT identity
+///                                assertion: same replay/identity risk.
 const REDACT_HEADER_NAMES: &[&str] = &[
     "authorization",
     "x-api-key",
@@ -1063,6 +1071,11 @@ const REDACT_HEADER_NAMES: &[&str] = &[
     "set-cookie",
     "cookie",
     "x-routectl-mitm-proxied",
+    "api-key",
+    "cf-aig-authorization",
+    "ocp-apim-subscription-key",
+    "cf-access-jwt-assertion",
+    "x-goog-iap-jwt-assertion",
 ];
 
 /// `x-amz-*` sub-headers that are SIGNING METADATA, not secrets, and
@@ -1071,21 +1084,78 @@ const REDACT_HEADER_NAMES: &[&str] = &[
 /// `x-amz-security-token`, the STS session credential) is redacted.
 const X_AMZ_VISIBLE: &[&str] = &["x-amz-date", "x-amz-content-sha256"];
 
+/// OpenAI's operational QUOTA headers: numeric rate-limit limits, counts,
+/// and reset durations -- NOT secrets. `docs/LOGGING.md` promises they
+/// stay visible for operator triage. They carry the `token` substring, so
+/// they are allowlisted ahead of the credential pattern (which would
+/// otherwise redact them). Values are numbers/durations, never tokens.
+const X_RATELIMIT_TOKENS_VISIBLE: &[&str] = &[
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-tokens",
+];
+
 /// True if the given header name carries a secret value that a header
 /// trace MUST redact, in either direction. Case-insensitive --
 /// `Authorization`, `AUTHORIZATION`, and `authorization` all match.
 ///
-/// Beyond the fixed [`REDACT_HEADER_NAMES`] set, every `x-amz-`-prefixed
-/// header redacts EXCEPT the non-secret signing-metadata names in
-/// [`X_AMZ_VISIBLE`] (`x-amz-date`, `x-amz-content-sha256`), so the STS
-/// `x-amz-security-token` session credential never flows verbatim into a
-/// trace while the signing metadata stays operator-visible.
+/// Fail-CLOSED: beyond the fixed [`REDACT_HEADER_NAMES`] set and the
+/// `x-amz-` prefix rule, any header whose name matches the
+/// credential-shaped pattern in [`header_name_looks_credential`] also
+/// redacts, so an unlisted vendor credential (`x-vendor-secret`,
+/// `x-foo-token`, a `-key`-suffixed api key, a `*-jwt-*` / `*-assertion`
+/// identity assertion) never flows verbatim into a trace. Two
+/// visible-allowlists are checked FIRST and win over every redaction rule
+/// -- including the pattern: the non-secret [`X_AMZ_VISIBLE`] signing
+/// metadata (`x-amz-date`, `x-amz-content-sha256`) and the
+/// [`X_RATELIMIT_TOKENS_VISIBLE`] operational quota headers, both of which
+/// stay operator-visible.
 fn is_redact_header(name: &str) -> bool {
     let lc = name.to_ascii_lowercase();
+    if X_AMZ_VISIBLE.contains(&lc.as_str()) {
+        return false;
+    }
+    // OpenAI quota headers are non-secret numeric limits/counts/durations
+    // that must stay visible; allowlist them ahead of the credential
+    // pattern, which would otherwise redact them on the `token` substring.
+    if X_RATELIMIT_TOKENS_VISIBLE.contains(&lc.as_str()) {
+        return false;
+    }
     if REDACT_HEADER_NAMES.contains(&lc.as_str()) {
         return true;
     }
-    lc.starts_with("x-amz-") && !X_AMZ_VISIBLE.contains(&lc.as_str())
+    if lc.starts_with("x-amz-") {
+        return true;
+    }
+    header_name_looks_credential(&lc)
+}
+
+/// True if a lowercased header name is credential-SHAPED and so must
+/// redact under the fail-closed fallback, even when the exact name is not
+/// in [`REDACT_HEADER_NAMES`]. Errs toward over-redaction: a header trace
+/// is double-opt-in (`ROUTECTL_TRACE_HEADERS` + TRACE), so a benign header
+/// caught here costs an operator one masked value, while a missed
+/// credential leaks a live secret into log archives.
+///
+/// The `session` forms are the credential shapes (`session-key`,
+/// `session_key`, `sessionkey`) -- NOT bare `session`, which would mask
+/// the non-secret `x-claude-code-session-id` correlation header that must
+/// stay visible for the fixture-capture pipeline.
+fn header_name_looks_credential(lc: &str) -> bool {
+    lc.contains("authorization")
+        || lc.contains("authentication")
+        || lc.contains("api-key")
+        || lc.contains("apikey")
+        || lc.contains("api_key")
+        || lc.contains("token")
+        || lc.contains("secret")
+        || lc.contains("bearer")
+        || lc.contains("jwt")
+        || lc.contains("assertion")
+        || lc.contains("session-key")
+        || lc.contains("session_key")
+        || lc.contains("sessionkey")
+        || lc.ends_with("-key")
 }
 
 /// Replacement value for `Bearer <token>` Authorization headers. Keeps
