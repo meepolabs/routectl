@@ -4,14 +4,13 @@
 //!
 //! - `ToolDef::Custom(CustomTool)` -- canonical Anthropic-shape custom
 //!   tool with first-class `cache_control`, `defer_loading`, and
-//!   `strict`. The OpenAI ingress translates `{type: "function",
-//!   function: {...}}` into this variant at parse time (see
-//!   `lift_openai_function_tools` in `crates/routectl-cli/src/
-//!   ingress/openai.rs`, which uses `CustomTool::from_openai_function`)
-//!   so all egresses see a single representation for the hot-path
-//!   case. Library callers that bypass the ingress can rely on the
-//!   `anthropic-api` egress's belt-and-braces translation of the same
-//!   shape.
+//!   `strict`. The OpenAI `{type: "function", function: {...}}` shape
+//!   is NOT lifted into this variant at ingress: the OpenAI ingress
+//!   passes function tools through as `ToolDef::Other` verbatim (see
+//!   `crates/routectl-cli/src/ingress/openai.rs`). The reverse
+//!   translation lives on the egress leg -- the openai-compat egress
+//!   detects a `{type: "function", ...}` `Other` value via
+//!   `CustomTool::from_openai_function` and lifts it there.
 //! - `ToolDef::Other(Value)` -- forward-compat catchall. Anthropic
 //!   built-in tools (`bash_*`, `code_execution_*`, `web_search_*`),
 //!   server-side tools, and future shapes pass through verbatim. The
@@ -33,8 +32,9 @@ use crate::cache_control::CacheControl;
 #[derive(Debug, Clone)]
 pub enum ToolDef {
     /// Typed Anthropic-shape custom tool. The OpenAI `{type: "function",
-    /// function: {...}}` shape is lifted into this variant by the
-    /// OpenAI ingress so all egresses see a single representation.
+    /// function: {...}}` shape is NOT lifted here at ingress -- it passes
+    /// through as `Other` and is translated on the openai-compat egress
+    /// leg via `CustomTool::from_openai_function`.
     Custom(CustomTool),
     /// Forward-compat catchall for any other tool kind (Anthropic
     /// built-in tools, server-side tools, future wire shapes).
@@ -82,11 +82,12 @@ impl CustomTool {
     /// caller can fall through to `ToolDef::Other` for builtin / unknown
     /// tool types.
     ///
-    /// Used by the OpenAI ingress (`crates/routectl-cli/src/ingress/
-    /// openai.rs`) at parse time so all egresses see the canonical
-    /// representation. Direct callers that bypass an ingress can rely on
-    /// the `anthropic-api` egress's belt-and-braces translation of the
-    /// same shape.
+    /// Used by the openai-compat EGRESS
+    /// (`crates/routectl-providers/src/openai_compat/`) to recognize a
+    /// `ToolDef::Other` value that is already in OpenAI function shape
+    /// before forwarding it. The OpenAI ingress does NOT call this: it
+    /// leaves function tools as `ToolDef::Other` verbatim (see the module
+    /// docs).
     pub fn from_openai_function(v: &Value) -> Option<Self> {
         let obj = v.as_object()?;
         let is_function = obj.get("type").and_then(|t| t.as_str()) == Some("function");
