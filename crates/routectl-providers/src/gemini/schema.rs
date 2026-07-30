@@ -7,9 +7,14 @@
 //! subset before emit:
 //!
 //!   - `oneOf` -> `anyOf` (Gemini has no `oneOf`).
-//!   - Strip keywords Gemini's Schema proto rejects: `$schema`, `$ref`,
+//!   - Resolve an intra-document `$ref` (`#/$defs/X`, `#/definitions/X`) by
+//!     inlining its cleaned target so nested-model shape survives; peer
+//!     proxies do the same. Cyclic/self-referential refs terminate with a
+//!     bounded empty schema, and an unresolvable ref degrades to a drop.
+//!   - Strip keywords Gemini's Schema proto rejects: `$schema`,
 //!     `additionalProperties`, `$defs`/`definitions`, `allOf`, `not`,
-//!     `const`, `patternProperties`.
+//!     `const`, `patternProperties`. The `$defs`/`definitions` containers
+//!     never reach the wire; only their inlined ref targets do.
 //!   - Nullable: `type: [T, "null"]` -> `type: T` + `nullable: true`;
 //!     an explicit `nullable` is preserved.
 //!   - A multi-concrete-member `type` union (`["string","integer"]`) is
@@ -27,28 +32,109 @@
 //! Pure function of its input -- no logging, no mutation.
 
 use serde_json::{Map, Value};
+use std::collections::{HashMap, HashSet};
 
 /// Normalize a caller JSON Schema into the Gemini OpenAPI subset.
+///
+/// The top-level schema is treated as the ref document root: its
+/// `$defs`/`definitions` back any intra-document `$ref` encountered at any
+/// depth. Those defs are collected once here and threaded through the
+/// recursion so nested refs resolve against the document root.
 pub(super) fn clean_schema(schema: &Value) -> Value {
+    let defs = collect_defs(schema);
+    let mut visited = HashSet::new();
+    clean_value(schema, &defs, &mut visited)
+}
+
+/// Collect the root `$defs`/`definitions` object schemas into a lookup keyed
+/// by their JSON-pointer ref (`#/$defs/Name`, `#/definitions/Name`).
+fn collect_defs(schema: &Value) -> HashMap<String, Value> {
+    let mut defs = HashMap::new();
+    if let Value::Object(map) = schema {
+        for container in ["$defs", "definitions"] {
+            if let Some(Value::Object(entries)) = map.get(container) {
+                for (name, target) in entries {
+                    defs.insert(format!("#/{container}/{name}"), target.clone());
+                }
+            }
+        }
+    }
+    defs
+}
+
+fn clean_value(
+    schema: &Value,
+    defs: &HashMap<String, Value>,
+    visited: &mut HashSet<String>,
+) -> Value {
     match schema {
-        Value::Object(map) => clean_object(map),
-        Value::Array(items) => Value::Array(items.iter().map(clean_schema).collect()),
+        Value::Object(map) => clean_object(map, defs, visited),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|i| clean_value(i, defs, visited))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
 
-fn clean_object(map: &Map<String, Value>) -> Value {
+/// Resolve an intra-document `$ref` to its cleaned target, with path-based
+/// cycle protection. A revisited pointer (cycle) or a missing target yields
+/// `None`, degrading the ref site to a bounded terminal at the call site.
+fn resolve_ref(
+    pointer: &str,
+    defs: &HashMap<String, Value>,
+    visited: &mut HashSet<String>,
+) -> Option<Value> {
+    let decoded = decode_ref_pointer(pointer);
+    if visited.contains(&decoded) {
+        return None;
+    }
+    let target = defs.get(&decoded)?.clone();
+    visited.insert(decoded.clone());
+    let cleaned = clean_value(&target, defs, visited);
+    visited.remove(&decoded);
+    Some(cleaned)
+}
+
+/// Decode JSON Pointer escapes (RFC 6901) in a `$ref` so an escaped def name
+/// matches the raw key `collect_defs` stored: `~1` -> `/` and `~0` -> `~`,
+/// applied in that order so a literal `~1` written as `~01` is not mangled.
+/// Container segments (`$defs`/`definitions`) carry no escapable characters,
+/// so decoding the whole pointer reconstructs the raw-joined key.
+fn decode_ref_pointer(pointer: &str) -> String {
+    pointer.replace("~1", "/").replace("~0", "~")
+}
+
+fn clean_object(
+    map: &Map<String, Value>,
+    defs: &HashMap<String, Value>,
+    visited: &mut HashSet<String>,
+) -> Value {
     let mut out = Map::new();
+    // A resolvable `$ref` inlines its cleaned target as the base schema;
+    // sibling keywords (rare, per JSON Schema 2020-12) override it.
+    let mut inlined: Option<Map<String, Value>> = None;
     for (key, value) in map {
         match key.as_str() {
+            // Resolve intra-document refs by inlining; drop the `$ref`
+            // itself. An unresolvable or cyclic ref leaves `inlined` unset,
+            // degrading to the prior drop/empty behavior with no panic.
+            "$ref" => {
+                if let Value::String(pointer) = value
+                    && let Some(Value::Object(target)) = resolve_ref(pointer, defs, visited)
+                {
+                    inlined = Some(target);
+                }
+            }
             // Keywords Gemini's Schema proto rejects: drop them rather than
-            // pass through and 400. `$defs`/`definitions` only back `$ref`,
-            // which is also stripped, so they are dead weight. `allOf`/`not`/
-            // `const`/`patternProperties` have no Gemini equivalent; dropping
-            // loses the constraint (const loses the pin) but avoids a hard
-            // 400 on common pydantic/zod schemas.
+            // pass through and 400. `$defs`/`definitions` only back `$ref`
+            // and are inlined at ref sites, so the containers are dead weight
+            // on the wire. `allOf`/`not`/`const`/`patternProperties` have no
+            // Gemini equivalent; dropping loses the constraint (const loses
+            // the pin) but avoids a hard 400 on common pydantic/zod schemas.
             "$schema"
-            | "$ref"
             | "additionalProperties"
             | "$defs"
             | "definitions"
@@ -57,7 +143,7 @@ fn clean_object(map: &Map<String, Value>) -> Value {
             | "const"
             | "patternProperties" => {}
             "oneOf" | "anyOf" => {
-                out.insert("anyOf".to_string(), clean_schema(value));
+                out.insert("anyOf".to_string(), clean_value(value, defs, visited));
             }
             "type" => insert_type(&mut out, value),
             "enum" => {
@@ -74,11 +160,11 @@ fn clean_object(map: &Map<String, Value>) -> Value {
             // names, not keywords, so recurse per-value without keyword
             // interpretation.
             "properties" => {
-                out.insert(key.clone(), clean_schema_map(value));
+                out.insert(key.clone(), clean_schema_map(value, defs, visited));
             }
             // Genuinely schema-valued keywords: recurse as schemas.
             "items" | "prefixItems" => {
-                out.insert(key.clone(), clean_schema(value));
+                out.insert(key.clone(), clean_value(value, defs, visited));
             }
             // Literal-valued keywords (`default`, `example`, `examples`,
             // `title`, `description`) and any unrecognized keyword carry data
@@ -90,21 +176,33 @@ fn clean_object(map: &Map<String, Value>) -> Value {
             }
         }
     }
-    Value::Object(out)
+    match inlined {
+        Some(mut merged) => {
+            for (key, value) in out {
+                merged.insert(key, value);
+            }
+            Value::Object(merged)
+        }
+        None => Value::Object(out),
+    }
 }
 
 /// Recurse into a map whose keys are user-chosen names (property names)
 /// rather than JSON-Schema keywords: clean each value as a schema, leave the
 /// keys untouched.
-fn clean_schema_map(value: &Value) -> Value {
+fn clean_schema_map(
+    value: &Value,
+    defs: &HashMap<String, Value>,
+    visited: &mut HashSet<String>,
+) -> Value {
     match value {
         Value::Object(entries) => Value::Object(
             entries
                 .iter()
-                .map(|(name, schema)| (name.clone(), clean_schema(schema)))
+                .map(|(name, schema)| (name.clone(), clean_value(schema, defs, visited)))
                 .collect(),
         ),
-        other => clean_schema(other),
+        other => clean_value(other, defs, visited),
     }
 }
 
@@ -207,6 +305,8 @@ mod tests {
 
     #[test]
     fn schema_and_ref_and_additional_properties_are_stripped() {
+        // A `$ref` with no matching `$defs`/`definitions` target is
+        // unresolvable, so it degrades to a drop (no inline, no panic).
         // Arrange
         let schema = json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -350,7 +450,8 @@ mod tests {
 
     #[test]
     fn defs_and_definitions_are_stripped() {
-        // Arrange: $defs is dead weight once $ref is stripped, and its child
+        // Arrange: with no `$ref` pointing at them, the `$defs`/`definitions`
+        // containers are dead weight and never reach the wire; their child
         // keys are definition names, not keywords.
         let schema = json!({
             "type": "object",
@@ -365,6 +466,203 @@ mod tests {
         assert!(cleaned.get("$defs").is_none());
         assert!(cleaned.get("definitions").is_none());
         assert_eq!(cleaned["type"], "OBJECT");
+    }
+
+    #[test]
+    fn ref_to_defs_inlines_cleaned_target() {
+        // A property whose schema is `{"$ref": "#/$defs/X"}` emits X's
+        // inlined, cleaned object shape -- not an empty `{}`.
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "Address": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "city": {"type": "string"},
+                        "zip": {"type": ["string", "null"]}
+                    }
+                }
+            },
+            "properties": {
+                "home": {"$ref": "#/$defs/Address"}
+            }
+        });
+
+        // Act
+        let cleaned = clean_schema(&schema);
+
+        // Assert
+        let home = &cleaned["properties"]["home"];
+        assert!(home.get("$ref").is_none(), "$ref must be resolved away");
+        assert_eq!(home["type"], "OBJECT");
+        assert!(
+            home.get("additionalProperties").is_none(),
+            "inlined target must be cleaned too"
+        );
+        assert_eq!(home["properties"]["city"]["type"], "STRING");
+        assert_eq!(home["properties"]["zip"]["type"], "STRING");
+        assert_eq!(home["properties"]["zip"]["nullable"], true);
+        // The container itself never reaches the wire.
+        assert!(cleaned.get("$defs").is_none());
+    }
+
+    #[test]
+    fn ref_to_definitions_inlines_cleaned_target() {
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "definitions": {
+                "Tag": {"type": "string", "enum": [1, 2]}
+            },
+            "properties": {
+                "tag": {"$ref": "#/definitions/Tag"}
+            }
+        });
+
+        // Act
+        let cleaned = clean_schema(&schema);
+
+        // Assert
+        let tag = &cleaned["properties"]["tag"];
+        assert!(tag.get("$ref").is_none());
+        assert_eq!(tag["type"], "STRING");
+        assert_eq!(tag["enum"], json!(["1", "2"]));
+        assert!(cleaned.get("definitions").is_none());
+    }
+
+    #[test]
+    fn self_referential_ref_terminates_safely() {
+        // A def that references itself must not recurse forever; the cyclic
+        // ref site degrades to a bounded empty schema.
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "next": {"$ref": "#/$defs/Node"}
+                    }
+                }
+            },
+            "properties": {
+                "root": {"$ref": "#/$defs/Node"}
+            }
+        });
+
+        // Act
+        let cleaned = clean_schema(&schema);
+
+        // Assert
+        let root = &cleaned["properties"]["root"];
+        assert_eq!(root["type"], "OBJECT");
+        assert_eq!(root["properties"]["value"]["type"], "STRING");
+        // The self-reference terminates to a bounded empty schema.
+        assert_eq!(root["properties"]["next"], json!({}));
+    }
+
+    #[test]
+    fn mutually_recursive_refs_terminate_safely() {
+        // A -> B -> A cycle must terminate rather than blow the stack.
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "A": {
+                    "type": "object",
+                    "properties": {"b": {"$ref": "#/$defs/B"}}
+                },
+                "B": {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/A"}}
+                }
+            },
+            "properties": {
+                "start": {"$ref": "#/$defs/A"}
+            }
+        });
+
+        // Act
+        let cleaned = clean_schema(&schema);
+
+        // Assert
+        let start = &cleaned["properties"]["start"];
+        assert_eq!(start["type"], "OBJECT");
+        let b = &start["properties"]["b"];
+        assert_eq!(b["type"], "OBJECT");
+        // The back-edge A (already on the resolution path) terminates empty.
+        assert_eq!(b["properties"]["a"], json!({}));
+    }
+
+    #[test]
+    fn diamond_ref_inlines_at_each_site() {
+        // The same def referenced from two independent sites (not a cycle)
+        // inlines at both -- path-based cycle detection must not confuse a
+        // diamond for a loop.
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "Leaf": {"type": "string"}
+            },
+            "properties": {
+                "left": {"$ref": "#/$defs/Leaf"},
+                "right": {"$ref": "#/$defs/Leaf"}
+            }
+        });
+
+        // Act
+        let cleaned = clean_schema(&schema);
+
+        // Assert
+        assert_eq!(cleaned["properties"]["left"]["type"], "STRING");
+        assert_eq!(cleaned["properties"]["right"]["type"], "STRING");
+    }
+
+    #[test]
+    fn unresolvable_ref_degrades_to_empty() {
+        // A `$ref` with no matching target drops without panicking.
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "missing": {"$ref": "#/$defs/DoesNotExist"}
+            }
+        });
+
+        // Act
+        let cleaned = clean_schema(&schema);
+
+        // Assert
+        assert_eq!(cleaned["properties"]["missing"], json!({}));
+    }
+
+    #[test]
+    fn ref_with_escaped_pointer_tokens_resolves() {
+        // A def name containing `/` (escaped as `~1`) or `~` (escaped as `~0`)
+        // must resolve per RFC 6901, not fail lookup and degrade to `{}`.
+        // Arrange
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "A/B": {"type": "string"},
+                "C~D": {"type": "integer"}
+            },
+            "properties": {
+                "slash": {"$ref": "#/$defs/A~1B"},
+                "tilde": {"$ref": "#/$defs/C~0D"}
+            }
+        });
+
+        // Act
+        let cleaned = clean_schema(&schema);
+
+        // Assert: both escaped refs inline their cleaned targets.
+        assert_eq!(cleaned["properties"]["slash"]["type"], "STRING");
+        assert_eq!(cleaned["properties"]["tilde"]["type"], "INTEGER");
     }
 
     #[test]

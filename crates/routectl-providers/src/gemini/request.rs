@@ -33,7 +33,7 @@ pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContent
     warn_dropped_cache_control(provider_id, req);
     let system_instruction = build_system_instruction(req);
     let contents = build_contents(provider_id, req)?;
-    let (tools, tool_config) = build_tools_and_config(req);
+    let (tools, tool_config) = build_tools_and_config(provider_id, req);
     let generation_config = build_generation_config(req);
 
     Ok(GenerateContentRequest {
@@ -165,12 +165,14 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                 // the visible output, so the model can continue its prior
                 // chain-of-thought. Foreign-provider reasoning is skipped.
                 let mut parts = reasoning_details_to_thought_parts(&msg.reasoning_details);
+                // A functionCall can reach this turn from either tool-call
+                // shape: an Anthropic-canonical `ToolUse` content-part (handled
+                // in `content_to_parts`) or the OpenAI-shape `tool_calls` array.
                 parts.extend(content_to_parts(
                     provider_id,
                     &msg.content,
                     &tool_name_by_id,
                 )?);
-                // Assistant tool_calls -> functionCall parts.
                 if let Some(tool_calls_raw) = &msg.tool_calls {
                     for tc in tool_calls_raw {
                         if let Some(p) = tool_call_to_function_call_part(provider_id, tc)? {
@@ -178,6 +180,7 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                         }
                     }
                 }
+                inject_skip_signature_sentinel(&req.model, &mut parts);
                 if !parts.is_empty() {
                     contents.push(Content {
                         role: "model".into(),
@@ -504,14 +507,58 @@ fn tool_call_to_function_call_part(provider_id: &str, tc: &Value) -> Result<Opti
         );
         serde_json::json!({})
     });
-    Ok(Some(function_call_part(FunctionCallPart { name, args })))
+    // A native-Gemini tool turn round-trips a real thoughtSignature that the
+    // response translator captured directly onto the tool_call value. Preserve
+    // it verbatim so replay continues the model's chain-of-thought; foreign
+    // history has none, and the caller may inject the skip-validation sentinel.
+    let thought_signature = tc
+        .get("thought_signature")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(std::string::ToString::to_string);
+    let mut part = function_call_part(FunctionCallPart { name, args });
+    part.thought_signature = thought_signature;
+    Ok(Some(part))
 }
 
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
 
-fn build_tools_and_config(req: &ChatRequest) -> (Option<Vec<GeminiTool>>, Option<ToolConfig>) {
+/// Sentinel `thoughtSignature` that tells Gemini-3+ to skip signature
+/// validation on a replayed `functionCall` whose tool history originated from a
+/// non-Gemini provider (no genuine signature to preserve). Byte-identical to
+/// the value the tensorzero and adk-python gateways inject.
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR: &str = "skip_thought_signature_validator";
+
+/// Inject the skip-validation sentinel onto the FIRST `functionCall` part of a
+/// replayed model turn when the target is Gemini-3+ and that part carries no
+/// genuine captured signature.
+///
+/// Gemini-3+ validates a `thoughtSignature` on every replayed `functionCall`.
+/// Native-Gemini history carries a real signature (captured by the response
+/// translator onto the tool_call it round-trips); foreign history -- whether it
+/// arrived as an OpenAI-shape `tool_calls` array or an Anthropic-canonical
+/// `ToolUse` content-part -- carries none, so a single sentinel on the first
+/// functionCall of the turn lets Gemini accept the unsigned foreign call.
+/// Parallel calls after the first do not need it. Gemini-2 must NOT get the
+/// sentinel -- a synthetic signature there opens a new reject path. Operates on
+/// the fully-assembled parts so BOTH tool-call sources are covered by one pass.
+fn inject_skip_signature_sentinel(model: &str, parts: &mut [Part]) {
+    if gemini_generation(model).is_none_or(|g| g < THINKING_LEVEL_MIN_GENERATION) {
+        return;
+    }
+    if let Some(first_fc) = parts.iter_mut().find(|p| p.function_call.is_some())
+        && first_fc.thought_signature.is_none()
+    {
+        first_fc.thought_signature = Some(SKIP_THOUGHT_SIGNATURE_VALIDATOR.to_string());
+    }
+}
+
+fn build_tools_and_config(
+    provider_id: &str,
+    req: &ChatRequest,
+) -> (Option<Vec<GeminiTool>>, Option<ToolConfig>) {
     let tool_defs = match &req.tools {
         Some(t) if !t.is_empty() => t,
         _ => return (None, None),
@@ -530,18 +577,30 @@ fn build_tools_and_config(req: &ChatRequest) -> (Option<Vec<GeminiTool>>, Option
             ToolDef::Other(v) => {
                 // OpenAI-shape: {type:"function", function:{name,description,parameters}}
                 let func = v.get("function").unwrap_or(v);
-                let name = func
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                let name = func.get("name").and_then(Value::as_str).unwrap_or_default();
+                if name.is_empty() {
+                    // Hosted / unknown tool shape (web_search, file_search,
+                    // codex namespaces) carries no usable function name. Gemini
+                    // rejects unknown tool shapes, so forwarding verbatim would
+                    // turn a silent drop into a loud 400; an empty-named
+                    // declaration is a silently broken tool the model may call.
+                    // Skip with a structured WARN, mirroring openai-compat.
+                    let kind = v.get("type").and_then(Value::as_str).unwrap_or("unknown");
+                    tracing::warn!(
+                        provider = %provider_id,
+                        tool_type = %kind,
+                        "gemini: skipping tool def with no usable function name; \
+                         hosted / unknown tool shapes are not representable"
+                    );
+                    continue;
+                }
                 let description = func
                     .get("description")
                     .and_then(Value::as_str)
                     .map(std::string::ToString::to_string);
                 let parameters = func.get("parameters").map(clean_schema);
                 declarations.push(FunctionDeclaration {
-                    name,
+                    name: name.to_string(),
                     description,
                     parameters,
                 });
@@ -549,19 +608,36 @@ fn build_tools_and_config(req: &ChatRequest) -> (Option<Vec<GeminiTool>>, Option
         }
     }
 
-    let tools = if declarations.is_empty() {
-        None
-    } else {
-        Some(vec![GeminiTool {
-            function_declarations: declarations,
-        }])
-    };
+    if declarations.is_empty() {
+        // No usable declarations survive (e.g. every ToolDef was a nameless
+        // hosted-tool shape). Emitting a `toolConfig` with no `tools` makes
+        // Gemini reject the request ("Function calling config is set without
+        // function_declarations"), so omit BOTH. Warn only when a tool_choice
+        // was set, since that is the intent being dropped.
+        if req.tool_choice.is_some() {
+            tracing::warn!(
+                provider = %provider_id,
+                "gemini: no tool declarations survived; dropping tool_choice \
+                 (a toolConfig with no functionDeclarations is rejected)"
+            );
+        }
+        return (None, None);
+    }
 
-    let tool_config = build_tool_config(req.tool_choice.as_ref());
+    // Reconcile the choice against the declarations that actually survived.
+    let surviving_names: Vec<&str> = declarations.iter().map(|d| d.name.as_str()).collect();
+    let tool_config = build_tool_config(provider_id, req.tool_choice.as_ref(), &surviving_names);
+    let tools = Some(vec![GeminiTool {
+        function_declarations: declarations,
+    }]);
     (tools, tool_config)
 }
 
-fn build_tool_config(tool_choice: Option<&Value>) -> Option<ToolConfig> {
+fn build_tool_config(
+    provider_id: &str,
+    tool_choice: Option<&Value>,
+    surviving_names: &[&str],
+) -> Option<ToolConfig> {
     let choice = tool_choice?;
 
     let mode = if choice.is_string() {
@@ -592,6 +668,22 @@ fn build_tool_config(tool_choice: Option<&Value>) -> Option<ToolConfig> {
     } else {
         None
     };
+
+    // A forced tool_choice that names a tool with no surviving declaration
+    // would point Gemini at a function it never received. Drop the forcing
+    // (omit toolConfig, letting the model default to AUTO over the surviving
+    // tools) rather than emit a config Gemini rejects.
+    if let Some(names) = &allowed_function_names
+        && names.iter().any(|n| !surviving_names.contains(&n.as_str()))
+    {
+        tracing::warn!(
+            provider = %provider_id,
+            forced = ?names,
+            "gemini: tool_choice forced a tool with no surviving declaration; \
+             dropping the forcing"
+        );
+        return None;
+    }
 
     Some(ToolConfig {
         function_calling_config: FunctionCallingConfig {
@@ -1306,6 +1398,430 @@ mod tests {
         assert_eq!(params["properties"]["mode"]["anyOf"][0]["type"], "STRING");
         assert_eq!(params["properties"]["count"]["type"], "INTEGER");
         assert_eq!(params["properties"]["count"]["nullable"], true);
+    }
+
+    // ---------------------------------------------------------------------------
+    // nameless ToolDef::Other is skipped-with-warn, never emitted
+    // ---------------------------------------------------------------------------
+
+    fn req_with_tools(tools: Vec<routectl_core::ToolDef>) -> ChatRequest {
+        ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("go")].into(),
+            tools: Some(tools),
+            ..Default::default()
+        }
+    }
+
+    #[traced_test]
+    #[test]
+    fn nameless_other_tool_is_skipped_with_warn_not_emitted() {
+        use routectl_core::ToolDef;
+        // Arrange: a hosted-tool shape carrying no usable function name.
+        let req = req_with_tools(vec![ToolDef::Other(json!({"type": "web_search"}))]);
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: no tools emitted (the only def was skipped), and a WARN fired.
+        assert!(
+            body.tools.is_none(),
+            "a nameless tool def must not produce an empty-named declaration"
+        );
+        assert!(
+            logs_contain("skipping tool def with no usable function name"),
+            "the skip must be surfaced with a structured WARN"
+        );
+    }
+
+    #[test]
+    fn nameless_other_tool_does_not_starve_named_siblings() {
+        use routectl_core::{CustomTool, ToolDef};
+        // Arrange: a nameless hosted tool alongside a named Other and a Custom.
+        let req = req_with_tools(vec![
+            ToolDef::Other(json!({"type": "file_search"})),
+            ToolDef::Other(json!({
+                "type": "function",
+                "function": {"name": "lookup", "description": "d", "parameters": {"type": "object"}}
+            })),
+            ToolDef::Custom(CustomTool {
+                name: "calc".into(),
+                description: None,
+                input_schema: json!({"type": "object", "properties": {}}),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            }),
+        ]);
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: only the two named tools survive; the nameless one is gone.
+        let decls = &body.tools.expect("tools present")[0].function_declarations;
+        let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["lookup", "calc"]);
+        assert!(
+            !names.iter().any(|n| n.is_empty()),
+            "no empty-named declaration may be emitted"
+        );
+    }
+
+    #[test]
+    fn named_other_tool_still_emits_declaration_unchanged() {
+        use routectl_core::ToolDef;
+        // Arrange: a native OpenAI function-shape ToolDef::Other.
+        let req = req_with_tools(vec![ToolDef::Other(json!({
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "look up weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }
+        }))]);
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: the function-shape tool is preserved as a declaration.
+        let decl = &body.tools.expect("tools present")[0].function_declarations[0];
+        assert_eq!(decl.name, "get_weather");
+        assert_eq!(decl.description.as_deref(), Some("look up weather"));
+        assert!(decl.parameters.is_some());
+    }
+
+    // ---------------------------------------------------------------------------
+    // skip_thought_signature_validator sentinel + provenance
+    // ---------------------------------------------------------------------------
+
+    fn assistant_with_tool_calls(model: &str, tool_calls: Vec<Value>) -> ChatRequest {
+        ChatRequest {
+            model: model.into(),
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                refusal: None,
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(tool_calls),
+            }]
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn model_turn_function_parts(body: &GenerateContentRequest) -> Vec<&Part> {
+        body.contents
+            .iter()
+            .find(|c| c.role == "model")
+            .expect("model turn")
+            .parts
+            .iter()
+            .filter(|p| p.function_call.is_some())
+            .collect()
+    }
+
+    fn foreign_tool_call(name: &str) -> Value {
+        json!({
+            "id": format!("call_{name}"),
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"}
+        })
+    }
+
+    #[test]
+    fn gemini2_foreign_tool_history_gets_no_sentinel() {
+        // Arrange: foreign tool-call history replayed to a Gemini-2 target.
+        let req = assistant_with_tool_calls("gemini-2.5-pro", vec![foreign_tool_call("f")]);
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: no sentinel -- a synthetic signature on Gemini-2 risks a new
+        // reject path.
+        let parts = model_turn_function_parts(&body);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].thought_signature, None);
+    }
+
+    #[test]
+    fn gemini3_foreign_tool_history_gets_sentinel_on_first_call_only() {
+        // Arrange: two parallel foreign tool calls in one turn, Gemini-3 target.
+        let req = assistant_with_tool_calls(
+            "gemini-3.5-flash",
+            vec![foreign_tool_call("a"), foreign_tool_call("b")],
+        );
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: only the first functionCall carries the sentinel.
+        let parts = model_turn_function_parts(&body);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some(SKIP_THOUGHT_SIGNATURE_VALIDATOR)
+        );
+        assert_eq!(
+            parts[1].thought_signature, None,
+            "parallel calls after the first do not get the sentinel"
+        );
+    }
+
+    #[test]
+    fn gemini3_single_foreign_tool_call_gets_sentinel() {
+        // Arrange: a single foreign tool call, Gemini-3 target.
+        let req = assistant_with_tool_calls("gemini-3.5-flash", vec![foreign_tool_call("solo")]);
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        let parts = model_turn_function_parts(&body);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some(SKIP_THOUGHT_SIGNATURE_VALIDATOR)
+        );
+    }
+
+    #[test]
+    fn gemini3_native_signature_preserved_not_overwritten_by_sentinel() {
+        // Arrange: a native-Gemini tool turn whose signature was captured onto
+        // the tool_call by the response translator (round-tripped end to end):
+        // build a Gemini response with a functionCall part carrying a real
+        // thoughtSignature, translate it to canonical, and replay the resulting
+        // tool_calls to a Gemini-3 target.
+        use crate::gemini::response;
+        use crate::gemini::types::{
+            Candidate, GenerateContentResponse, ResponseContent, ResponseFunctionCall, ResponsePart,
+        };
+
+        let resp = GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    parts: vec![ResponsePart {
+                        text: None,
+                        function_call: Some(ResponseFunctionCall {
+                            name: "native_fn".into(),
+                            args: json!({"x": 1}),
+                        }),
+                        thought_signature: Some("real-sig-123".into()),
+                        ..Default::default()
+                    }],
+                    role: Some("model".into()),
+                }),
+                finish_reason: Some("STOP".into()),
+                index: 0,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: Some("r".into()),
+            prompt_feedback: None,
+        };
+        let canonical = response::translate("gemini:test", resp).expect("response translate");
+        let tool_calls = canonical.choices[0]
+            .message
+            .tool_calls
+            .clone()
+            .expect("tool_calls captured");
+
+        // Act: replay that captured history to a Gemini-3 target.
+        let req = assistant_with_tool_calls("gemini-3.5-flash", tool_calls);
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: the genuine signature survives verbatim; the sentinel never
+        // overwrites it.
+        let parts = model_turn_function_parts(&body);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].thought_signature.as_deref(), Some("real-sig-123"));
+    }
+
+    fn anthropic_tooluse_turn(model: &str) -> ChatRequest {
+        use routectl_core::{ContentPart, KnownContentPart};
+        ChatRequest {
+            model: model.into(),
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "get_weather".into(),
+                        input: json!({"city": "Paris"}),
+                        cache_control: None,
+                    },
+                )]),
+                refusal: None,
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn gemini3_anthropic_tooluse_content_part_gets_sentinel() {
+        // Anthropic-canonical assistant turns carry tool calls as ToolUse
+        // content-parts with `tool_calls: None`. That functionCall is foreign
+        // to Gemini and must get the skip-validation sentinel on Gemini-3.
+        let req = anthropic_tooluse_turn("gemini-3.5-flash");
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        let parts = model_turn_function_parts(&body);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0].function_call.as_ref().expect("fc").name,
+            "get_weather"
+        );
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some(SKIP_THOUGHT_SIGNATURE_VALIDATOR)
+        );
+    }
+
+    #[test]
+    fn gemini2_anthropic_tooluse_content_part_gets_no_sentinel() {
+        // The same foreign ToolUse content-part replayed to a Gemini-2 target
+        // must NOT get a synthetic signature.
+        let req = anthropic_tooluse_turn("gemini-2.5-pro");
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        let parts = model_turn_function_parts(&body);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].thought_signature, None);
+    }
+
+    #[test]
+    fn gemini3_native_signed_first_call_preserved_when_mixed_with_content() {
+        // A turn mixing a visible-text content part with a native-Gemini signed
+        // tool_call: the genuine signature on the first functionCall survives
+        // and the skip-validation sentinel never overwrites it.
+        let signed_call = json!({
+            "id": "call_native",
+            "type": "function",
+            "function": {"name": "native_fn", "arguments": "{}"},
+            "thought_signature": "real-sig-xyz"
+        });
+        let req = ChatRequest {
+            model: "gemini-3.5-flash".into(),
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("here goes".into()),
+                refusal: None,
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![signed_call]),
+            }]
+            .into(),
+            ..Default::default()
+        };
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        let parts = model_turn_function_parts(&body);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].thought_signature.as_deref(), Some("real-sig-xyz"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // toolConfig is never emitted without surviving declarations
+    // ---------------------------------------------------------------------------
+
+    fn nameless_tool_req_with_choice(choice: Value) -> ChatRequest {
+        use routectl_core::ToolDef;
+        ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("go")].into(),
+            tools: Some(vec![ToolDef::Other(json!({"type": "web_search"}))]),
+            tool_choice: Some(choice),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn all_tools_skipped_with_auto_choice_omits_tool_config() {
+        let req = nameless_tool_req_with_choice(json!("auto"));
+        let body = translate("gemini:test", &req).expect("translate ok");
+        assert!(body.tools.is_none());
+        assert!(
+            body.tool_config.is_none(),
+            "a toolConfig with no functionDeclarations is rejected by Gemini"
+        );
+    }
+
+    #[test]
+    fn all_tools_skipped_with_required_choice_omits_tool_config() {
+        let req = nameless_tool_req_with_choice(json!("required"));
+        let body = translate("gemini:test", &req).expect("translate ok");
+        assert!(body.tools.is_none());
+        assert!(
+            body.tool_config.is_none(),
+            "required must not force ANY-mode with no declarations"
+        );
+    }
+
+    #[test]
+    fn all_tools_skipped_with_named_choice_omits_tool_config() {
+        let req = nameless_tool_req_with_choice(
+            json!({"type": "function", "function": {"name": "web_search"}}),
+        );
+        let body = translate("gemini:test", &req).expect("translate ok");
+        assert!(body.tools.is_none());
+        assert!(body.tool_config.is_none());
+    }
+
+    fn single_custom_tool_req(choice: Value) -> ChatRequest {
+        use routectl_core::{CustomTool, ToolDef};
+        ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("go")].into(),
+            tools: Some(vec![ToolDef::Custom(CustomTool {
+                name: "calc".into(),
+                description: None,
+                input_schema: json!({"type": "object", "properties": {}}),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            })]),
+            tool_choice: Some(choice),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn forcing_a_skipped_tool_drops_the_forcing_but_keeps_survivor() {
+        // A survivor exists, but the forced name names a tool that is not among
+        // the surviving declarations: emit the survivor, drop the forcing.
+        let req = single_custom_tool_req(json!({"type": "function", "function": {"name": "gone"}}));
+        let body = translate("gemini:test", &req).expect("translate ok");
+        assert!(body.tools.is_some(), "the surviving tool is still emitted");
+        assert!(
+            body.tool_config.is_none(),
+            "forcing a tool with no surviving declaration must be dropped"
+        );
+    }
+
+    #[test]
+    fn forcing_a_surviving_tool_keeps_the_config() {
+        // Guard against over-dropping: a forced name that IS among survivors
+        // still produces ANY-mode with allowedFunctionNames.
+        let req = single_custom_tool_req(json!({"type": "function", "function": {"name": "calc"}}));
+        let body = translate("gemini:test", &req).expect("translate ok");
+        let tc = body.tool_config.expect("tool_config present");
+        assert_eq!(tc.function_calling_config.mode, "ANY");
+        assert_eq!(
+            tc.function_calling_config.allowed_function_names.as_deref(),
+            Some(["calc".to_string()].as_slice())
+        );
     }
 
     #[test]

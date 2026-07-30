@@ -57,7 +57,7 @@ use super::extras::{
     reconcile_sampling_params, resolve_max_tokens, strip_thinking_when_tool_choice_forces_use,
 };
 use super::messages::{normalize_replay_invariants, translate_messages};
-use super::tools::translate_tool_choice;
+use super::tools::{apply_parallel_tool_use, parallel_tool_calls_extra, translate_tool_choice};
 
 // Re-exports for callers outside this module. The Bedrock egress reuses
 // the canonical-side Anthropic-shape primitives via
@@ -404,6 +404,22 @@ pub(crate) fn normalize(
     let (temperature, top_p) =
         clamp_sampling_for_thinking(thinking.as_ref(), req.temperature, req.top_p);
 
+    // Fold the OpenAI-dialect `parallel_tool_calls` toggle (riding
+    // provider_extras) into Anthropic's native `disable_parallel_tool_use`
+    // on the translated tool_choice. `has_wire_tools` reflects the tools
+    // that actually ship (post `tool_choice="none"` suppression), so a
+    // suppressed request never synthesizes an `auto` carrier. The raw
+    // `parallel_tool_calls` key is stripped from the wire in the
+    // Anthropic managed-key path (`is_routectl_managed_key`).
+    let parallel = parallel_tool_calls_extra(req.provider_extras.as_ref());
+    let has_wire_tools = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let tool_choice = apply_parallel_tool_use(
+        id,
+        translate_tool_choice(req.tool_choice.as_ref(), has_tools),
+        parallel,
+        has_wire_tools,
+    );
+
     let ar = AnthropicRequest {
         model: req.model.clone(),
         messages: anthropic_messages,
@@ -416,7 +432,7 @@ pub(crate) fn normalize(
         stop_sequences: req.stop.clone(),
         stream: None, // caller sets this
         tools,
-        tool_choice: translate_tool_choice(req.tool_choice.as_ref(), has_tools),
+        tool_choice,
         cache_control: req.cache_control.clone(),
         anthropic_beta: filter_anthropic_betas(id, &req.anthropic_beta, allowed_betas).into_owned(),
     };
@@ -697,5 +713,125 @@ mod set_output_config_format_tests {
         obj.insert("output_config".into(), json!([1, 2, 3]));
         set_output_config_format(&mut obj, format());
         assert_eq!(obj["output_config"]["format"]["type"], "json_object");
+    }
+}
+
+// The OpenAI-dialect parallel_tool_calls toggle folds into
+// Anthropic's disable_parallel_tool_use on tool_choice, and the raw key
+// never reaches the assembled Anthropic body.
+#[cfg(test)]
+mod parallel_tool_calls_tests {
+    use super::normalize;
+    use routectl_core::{ChatRequest, Message, MessageContent, Role, ToolDef};
+    use serde_json::{Value, json};
+
+    fn tool_req(
+        tool_choice: Option<Value>,
+        provider_extras: Option<Value>,
+        with_tools: bool,
+    ) -> ChatRequest {
+        let tools = with_tools.then(|| {
+            vec![ToolDef::Other(json!({
+                "type": "function",
+                "function": {"name": "get_weather", "parameters": {"type": "object"}}
+            }))]
+        });
+        ChatRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            max_tokens: Some(1024),
+            tools,
+            tool_choice,
+            provider_extras,
+            ..Default::default()
+        }
+    }
+
+    fn run(req: &ChatRequest) -> Value {
+        normalize("anthropic:test", req, false, &[], false, None).unwrap()
+    }
+
+    #[test]
+    fn parallel_false_sets_disable_on_existing_choice() {
+        let req = tool_req(
+            Some(json!("get_weather")),
+            Some(json!({"parallel_tool_calls": false})),
+            true,
+        );
+        let body = run(&req);
+        assert_eq!(body["tool_choice"]["type"], "tool", "got: {body}");
+        assert_eq!(body["tool_choice"]["name"], "get_weather", "got: {body}");
+        assert_eq!(
+            body["tool_choice"]["disable_parallel_tool_use"], true,
+            "got: {body}"
+        );
+    }
+
+    #[test]
+    fn parallel_false_synthesizes_auto_when_no_choice_but_tools() {
+        let req = tool_req(None, Some(json!({"parallel_tool_calls": false})), true);
+        let body = run(&req);
+        assert_eq!(body["tool_choice"]["type"], "auto", "got: {body}");
+        assert_eq!(
+            body["tool_choice"]["disable_parallel_tool_use"], true,
+            "got: {body}"
+        );
+    }
+
+    #[test]
+    fn parallel_true_omits_disable_field() {
+        let req = tool_req(
+            Some(json!("auto")),
+            Some(json!({"parallel_tool_calls": true})),
+            true,
+        );
+        let body = run(&req);
+        assert_eq!(body["tool_choice"]["type"], "auto", "got: {body}");
+        assert!(
+            body["tool_choice"]
+                .get("disable_parallel_tool_use")
+                .is_none(),
+            "Some(true) must not add the field: {body}"
+        );
+    }
+
+    #[test]
+    fn absent_toggle_leaves_native_disable_untouched() {
+        // Anthropic-ingress round-trip carried disable_parallel_tool_use;
+        // no parallel_tool_calls key means we must not overwrite it.
+        let req = tool_req(
+            Some(json!({"type": "auto", "disable_parallel_tool_use": true})),
+            None,
+            true,
+        );
+        let body = run(&req);
+        assert_eq!(
+            body["tool_choice"]["disable_parallel_tool_use"], true,
+            "native value must survive: {body}"
+        );
+    }
+
+    #[test]
+    fn raw_parallel_tool_calls_key_never_on_body() {
+        let req = tool_req(
+            Some(json!("get_weather")),
+            Some(json!({"parallel_tool_calls": false})),
+            true,
+        );
+        let body = run(&req);
+        assert!(
+            body.get("parallel_tool_calls").is_none(),
+            "raw parallel_tool_calls must be stripped from the Anthropic wire: {body}"
+        );
     }
 }

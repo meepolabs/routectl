@@ -23,7 +23,7 @@ use routectl_core::{ChatRequest, is_canonical_request_key};
 
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
-use super::tools::{TOOL_CHOICE_TYPE_ANY, TOOL_CHOICE_TYPE_TOOL};
+use super::tools::{PARALLEL_TOOL_CALLS_KEY, TOOL_CHOICE_TYPE_ANY, TOOL_CHOICE_TYPE_TOOL};
 use super::types::{OutputConfig, ThinkingConfig};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
@@ -393,13 +393,19 @@ pub(super) fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&
 /// sub-field is reconciled post-merge in `reconcile_output_config_effort`
 /// when the model does not have `supports_adaptive_thinking=true` (Haiku,
 /// Sonnet -- Anthropic 400s on `effort` for them).
+///
+/// `parallel_tool_calls` is Anthropic-egress-local: the OpenAI-dialect
+/// toggle is consumed into `disable_parallel_tool_use` on `tool_choice`
+/// (see `tools::apply_parallel_tool_use`) and must not also reach the
+/// wire (invalid top-level Anthropic field). It is NOT on shared
+/// `reserved.rs` so the openai-compat egress keeps forwarding it verbatim.
 pub(super) fn is_routectl_managed_key(key: &str) -> bool {
     is_canonical_request_key(key)
         || matches!(
             key,
             // Anthropic-API-specific managed keys not on ChatRequest:
             // `thinking` is built from req.reasoning by this egress.
-            "thinking"
+            "thinking" | PARALLEL_TOOL_CALLS_KEY
         )
 }
 

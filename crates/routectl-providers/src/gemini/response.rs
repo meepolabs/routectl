@@ -168,14 +168,24 @@ fn walk_parts(provider_id: &str, parts: &[ResponsePart]) -> Result<WalkedParts> 
                     "{}".to_string()
                 }
             };
-            tool_calls.push(json!({
+            let mut call = json!({
                 "id": id,
                 "type": "function",
                 "function": {
                     "name": fc.name,
                     "arguments": args_str
                 }
-            }));
+            });
+            // Gemini attaches the thoughtSignature directly to the
+            // functionCall part (not a separate thought part). Preserve it on
+            // the synthesized tool_call so request-side replay can tell
+            // native-Gemini tool history (real signature) from foreign history
+            // (none) and never overwrites a genuine signature with the
+            // skip-validation sentinel.
+            if let Some(sig) = part.thought_signature.as_deref().filter(|s| !s.is_empty()) {
+                call["thought_signature"] = json!(sig);
+            }
+            tool_calls.push(call);
         }
     }
 
@@ -364,6 +374,83 @@ mod tests {
         let args: Value =
             serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args["city"], "Tokyo");
+    }
+
+    #[test]
+    fn function_call_signature_captured_onto_tool_call() {
+        // Arrange: a Gemini functionCall part carrying a thoughtSignature
+        // directly on the part (native-Gemini tool call).
+        let resp = GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    parts: vec![ResponsePart {
+                        text: None,
+                        function_call: Some(ResponseFunctionCall {
+                            name: "get_weather".into(),
+                            args: serde_json::json!({"city": "Tokyo"}),
+                        }),
+                        thought_signature: Some("fc-sig-7".into()),
+                        ..Default::default()
+                    }],
+                    role: Some("model".to_string()),
+                }),
+                finish_reason: Some("STOP".to_string()),
+                index: 0,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: None,
+            prompt_feedback: None,
+        };
+
+        // Act
+        let chat = translate("gemini:test", resp).expect("translate ok");
+
+        // Assert: the synthesized tool_call preserves the functionCall part's
+        // signature so request-side replay can tell native from foreign history.
+        let tool_calls = chat.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls present");
+        assert_eq!(tool_calls[0]["thought_signature"], "fc-sig-7");
+    }
+
+    #[test]
+    fn function_call_without_signature_omits_the_field() {
+        // Arrange: a functionCall part with no signature (foreign-shaped).
+        let resp = GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    parts: vec![ResponsePart {
+                        text: None,
+                        function_call: Some(ResponseFunctionCall {
+                            name: "f".into(),
+                            args: serde_json::json!({}),
+                        }),
+                        ..Default::default()
+                    }],
+                    role: Some("model".to_string()),
+                }),
+                finish_reason: Some("STOP".to_string()),
+                index: 0,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: None,
+            prompt_feedback: None,
+        };
+
+        // Act
+        let chat = translate("gemini:test", resp).expect("translate ok");
+
+        // Assert: no signature key is added when none was attached.
+        let tool_calls = chat.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls present");
+        assert!(tool_calls[0].get("thought_signature").is_none());
     }
 
     #[test]
