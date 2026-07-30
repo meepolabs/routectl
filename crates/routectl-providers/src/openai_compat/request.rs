@@ -578,6 +578,87 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "high");
     }
 
+    /// OpenRouter's native request shape IS the canonical `reasoning`
+    /// object, so the egress must re-emit it on the wire (effort +
+    /// budget survive the round-trip). Without this the request envelope's
+    /// unconditional `reasoning` strip drops all reasoning control for
+    /// OpenRouter with no signal.
+    #[test]
+    fn openrouter_emits_canonical_reasoning_object() {
+        let mut req = simple_req("anthropic/claude-sonnet-4-5");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("high".into()),
+            exclude: Some(true),
+            ..Default::default()
+        });
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenRouter,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        let reasoning = body
+            .get("reasoning")
+            .and_then(|v| v.as_object())
+            .expect("OpenRouter must re-emit the reasoning object");
+        assert_eq!(reasoning["effort"], "high");
+        assert_eq!(reasoning["exclude"], true);
+        // The `reasoning_effort` scalar is the OpenAI-dialect shape, not
+        // OpenRouter's; it must NOT leak onto the OpenRouter wire.
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "OpenRouter must not emit the OpenAI-shape reasoning_effort scalar, got: {body}"
+        );
+    }
+
+    /// A non-OpenRouter openai-compat dialect (plain Chat Completions)
+    /// still strips the canonical `reasoning` object -- these hosts 400
+    /// on the unknown key.
+    #[test]
+    fn passthrough_strips_canonical_reasoning_object() {
+        let mut req = simple_req("some-model");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            body.get("reasoning").is_none(),
+            "non-OpenRouter dialects must strip the reasoning object, got: {body}"
+        );
+    }
+
+    /// An OpenRouter request with no reasoning config must not gain an
+    /// empty `reasoning: {}` key -- an all-None config is a no-op.
+    #[test]
+    fn openrouter_omits_reasoning_when_config_absent() {
+        let req = simple_req("anthropic/claude-sonnet-4-5");
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenRouter,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            body.get("reasoning").is_none(),
+            "absent reasoning config must not produce an empty reasoning key, got: {body}"
+        );
+    }
+
     #[test]
     fn deepseek_drops_sampling_for_reasoner() {
         let req = simple_req("deepseek-reasoner");
