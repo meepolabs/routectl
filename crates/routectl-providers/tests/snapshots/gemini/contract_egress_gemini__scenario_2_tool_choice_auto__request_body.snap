@@ -30,13 +30,13 @@ expression: body
           "parameters": {
             "properties": {
               "location": {
-                "type": "string"
+                "type": "STRING"
               }
             },
             "required": [
               "location"
             ],
-            "type": "object"
+            "type": "OBJECT"
           }
         }
       ]

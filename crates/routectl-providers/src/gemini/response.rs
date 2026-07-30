@@ -211,12 +211,15 @@ fn thought_detail(text: &str, signature: Option<&str>, index: u32) -> ReasoningD
 /// Map Gemini's `finishReason` to the canonical finish_reason string.
 ///
 /// Safety / policy tokens (`SAFETY`, `RECITATION`, `PROHIBITED_CONTENT`,
-/// `BLOCKLIST`, `SPII`, `IMAGE_SAFETY`, `LANGUAGE`) map to `content_filter`;
-/// tool-protocol failures (`MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`,
-/// `TOO_MANY_TOOL_CALLS`) map to `error`. `OTHER` and any token this map does
-/// not know are deliberately left as `stop` -- labelling a non-policy
-/// termination as `content_filter` would be wrong -- and the fallthrough
-/// emits a DEBUG naming the token so a newly minted Google token surfaces.
+/// `BLOCKLIST`, `SPII`, `IMAGE_SAFETY`, `LANGUAGE`) map to `content_filter`.
+/// Tool-protocol failures (`MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`,
+/// `TOO_MANY_TOOL_CALLS`) map to `tool_calls` when the candidate carried
+/// tool-call parts (handled by the early `has_tool_calls` return), else
+/// `stop`: `error` is not a valid OpenAI finish_reason and no peer emits it.
+/// `OTHER` and any token this map does not know are deliberately left as
+/// `stop` -- labelling a non-policy termination as `content_filter` would be
+/// wrong -- and the fallthrough emits a DEBUG naming the token so a newly
+/// minted Google token surfaces.
 pub(super) fn map_finish_reason(
     gemini_reason: Option<&str>,
     has_tool_calls: bool,
@@ -233,7 +236,10 @@ pub(super) fn map_finish_reason(
         "MAX_TOKENS" => "length",
         "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "BLOCKLIST" | "SPII" | "IMAGE_SAFETY"
         | "LANGUAGE" => "content_filter",
-        "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "TOO_MANY_TOOL_CALLS" => "error",
+        // Tool-protocol failures with no tool-call parts: `stop` is the
+        // conservative spec-valid default (content-aware `tool_calls` is
+        // already returned by the `has_tool_calls` guard above).
+        "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "TOO_MANY_TOOL_CALLS" => "stop",
         other => {
             tracing::debug!(
                 finish_reason = %other,
@@ -396,7 +402,7 @@ mod tests {
     fn finish_reason_malformed_function_call() {
         assert_eq!(
             map_finish_reason(Some("MALFORMED_FUNCTION_CALL"), false).as_deref(),
-            Some("error")
+            Some("stop")
         );
     }
 
@@ -420,7 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_error_tokens_map_to_error() {
+    fn tool_protocol_tokens_never_map_to_error() {
+        // `error` is not a valid OpenAI finish_reason. Without tool-call
+        // parts these tool-protocol failures fall back to `stop`.
         for token in [
             "MALFORMED_FUNCTION_CALL",
             "UNEXPECTED_TOOL_CALL",
@@ -428,8 +436,25 @@ mod tests {
         ] {
             assert_eq!(
                 map_finish_reason(Some(token), false).as_deref(),
-                Some("error"),
-                "token {token} should map to error"
+                Some("stop"),
+                "token {token} must map to stop, never error"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_protocol_tokens_map_to_tool_calls_when_parts_present() {
+        // Content-aware: a candidate that carried tool-call parts reports
+        // tool_calls even under a tool-protocol finish token.
+        for token in [
+            "MALFORMED_FUNCTION_CALL",
+            "UNEXPECTED_TOOL_CALL",
+            "TOO_MANY_TOOL_CALLS",
+        ] {
+            assert_eq!(
+                map_finish_reason(Some(token), true).as_deref(),
+                Some("tool_calls"),
+                "token {token} with tool parts should map to tool_calls"
             );
         }
     }

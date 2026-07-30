@@ -26,6 +26,7 @@ pub(crate) mod auth;
 pub(crate) mod cloudcode;
 pub(crate) mod request;
 pub(crate) mod response;
+pub(crate) mod schema;
 pub(crate) mod sse;
 pub(crate) mod types;
 
