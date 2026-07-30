@@ -613,15 +613,36 @@ fn tool_choice_string_passes_through_verbatim() {
 }
 
 #[test]
-fn tool_choice_named_function_object_passes_through_verbatim() {
-    // Arrange
-    let tc = json!({"type": "function", "name": "get_weather"});
+fn tool_choice_flat_named_function_normalizes_to_nested() {
+    // Arrange -- the Responses wire forces a named tool with the flat
+    // {type:function, name:X} shape.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "tool_choice": {"type": "function", "name": "get_weather"},
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert -- ingress normalizes to the nested OpenAI form both egress
+    // mappers already consume.
+    assert_eq!(
+        req.tool_choice,
+        Some(json!({"type": "function", "function": {"name": "get_weather"}}))
+    );
+}
+
+#[test]
+fn tool_choice_nested_named_function_passes_through_verbatim() {
+    // Arrange -- an already-nested named forcing choice.
+    let tc = json!({"type": "function", "function": {"name": "get_weather"}});
     let body = json!({ "model": "m", "input": "hi", "tool_choice": tc });
 
     // Act
     let req = parse(body);
 
-    // Assert
+    // Assert -- normalization is a no-op on the canonical shape.
     assert_eq!(req.tool_choice, Some(tc));
 }
 
