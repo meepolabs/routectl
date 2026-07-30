@@ -636,6 +636,9 @@ fn map_gemini_upstream_error(
         upstream_type,
         upstream_code,
     )
+    .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
+        headers,
+    ))
 }
 
 // ---------------------------------------------------------------------------

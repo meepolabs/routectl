@@ -78,6 +78,20 @@ pub(crate) mod upstream_log;
 ))]
 pub(crate) mod retry_after;
 
+// Shared lifter for the upstream provider correlation id (`x-request-id` /
+// `x-oai-request-id` / `cf-ray`) off a response header map. Same feature
+// gate + crate-internal visibility as `retry_after`: provider egresses call
+// it directly at the error seam, and the router only ever sees the lifted
+// id via `Error::Upstream`.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+pub(crate) mod upstream_request_id;
+
 // Shared tool-call id charset sanitizer. Anthropic and Bedrock Converse
 // require `tool_use.id` to match `^[a-zA-Z0-9_-]+$`; an OpenAI-origin id
 // with `.`/`:`/`/` 400s the upstream. Applied at every id-emit site and

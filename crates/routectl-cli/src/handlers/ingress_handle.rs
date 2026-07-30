@@ -39,6 +39,13 @@ use crate::server::request_id::RequestId;
 
 const DISABLE_FALLBACKS_HEADER: &str = "x-routectl-disable-fallbacks";
 
+/// Client-facing response header carrying the upstream provider's own
+/// correlation id (lifted from `x-request-id` / `x-oai-request-id` /
+/// `cf-ray` on the upstream error response). Emitted only when the mapped
+/// `Error::Upstream` carried one, so a caller can quote it to vendor
+/// support when correlating a failed request.
+const UPSTREAM_REQUEST_ID_HEADER: &str = "x-upstream-request-id";
+
 /// Inbound header that claude-code stamps with its logical session id.
 /// Read ONLY for the pure-proxy admission gate's header-presence check
 /// (`session_id_of` below, consumed by `enforce_pure_proxy_admission`).
@@ -369,6 +376,8 @@ pub(crate) fn render_unsupported_media_type(shape: ErrorEnvelopeShape) -> Respon
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -383,6 +392,8 @@ pub(crate) fn render_malformed_body(shape: ErrorEnvelopeShape) -> Response {
         "bad_request",
         "malformed JSON in request body",
         "invalid_request_error",
+        None,
+        None,
         None,
         None,
         None,
@@ -409,6 +420,8 @@ pub(crate) fn render_body_rejection(
         kind,
         &e.to_string(),
         "invalid_request_error",
+        None,
+        None,
         None,
         None,
         None,
@@ -915,26 +928,33 @@ async fn drive_stream<A: IngressAdapter>(
 
 /// Map a routectl `Error` to a short, client-safe summary suitable
 /// for inclusion in the streaming-error wire payload. STRIPPED of
-/// provider names, upstream response bodies, and any other internal
-/// tells so the wire bytes never leak secrets-store identifiers,
-/// deploy hostnames, tokens, or attacker-controlled upstream content.
+/// provider names, the raw upstream response body, and any other
+/// internal tells so the wire bytes never leak secrets-store
+/// identifiers, deploy hostnames, tokens, or attacker-controlled
+/// upstream content.
 ///
-/// The `body_excerpt` from `Error::Upstream` is intentionally
-/// dropped: it can carry attacker-controlled bytes that, even after
-/// `sanitize_for_log`, can leak per-tenant existence info or
-/// upstream-side rate limit hints we don't want to forward.
-/// Operators reading routectl logs still see the sanitized detail and
-/// error class on the same path's ERROR line; the full raw upstream
-/// body is available at DEBUG via `debug_upstream_error_body` on the
-/// egress side -- the wire bytes are the only place this short summary
-/// shows up.
+/// The raw `body` from `Error::Upstream` is never forwarded verbatim:
+/// it can carry attacker-controlled bytes that leak per-tenant
+/// existence info or upstream-side rate limit hints. What IS surfaced
+/// is the upstream's own top-level `error.message` (or `error.type`),
+/// PARSED and length-bounded through the same `upstream_error_detail`
+/// extractor the non-streaming path uses -- the exact client-safe
+/// string `map_error` already returns, never a sibling key or the raw
+/// dump. Falls back to a status-only summary when the body carries no
+/// such message. Operators reading routectl logs still see the
+/// sanitized detail and error class on the same path's ERROR line; the
+/// full raw upstream body is available at DEBUG via
+/// `debug_upstream_error_body` on the egress side.
 ///
 /// Used only on the streaming-error path (`render_error_eos`). The
 /// non-streaming path goes through `map_error`, which carries
 /// caller-actionable validation detail and is appropriate to surface.
 fn sanitize_stream_error_for_client(e: &Error) -> String {
     match e {
-        Error::Upstream { status, .. } => format!("upstream stream error (HTTP {status})"),
+        Error::Upstream { status, body, .. } => match upstream_error_detail(body) {
+            Some(detail) => format!("upstream stream error (HTTP {status}): {detail}"),
+            None => format!("upstream stream error (HTTP {status})"),
+        },
         _ => "upstream stream error".to_string(),
     }
 }
@@ -1122,18 +1142,29 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
     // parsed `retry_after` reset hint (populated only on a rate-limit /
     // overload upstream response) rides through to a client-facing
     // `Retry-After` header so an SDK's own backoff keeps the hint.
-    let (upstream_type, upstream_code, retry_after) = match &e {
+    let (upstream_type, upstream_code, retry_after, upstream_request_id) = match &e {
         Error::Upstream {
             upstream_type,
             upstream_code,
             retry_after,
+            upstream_request_id,
             ..
         } => (
             upstream_type.as_deref(),
             upstream_code.as_deref(),
             *retry_after,
+            upstream_request_id.as_deref(),
         ),
-        _ => (None, None, None),
+        _ => (None, None, None, None),
+    };
+    // Surface the upstream's own `error.param` (the offending request
+    // parameter name an OpenAI-dialect 400 carries) so a strict client
+    // reads the same field the upstream authored. Only `Error::Upstream`
+    // can carry one; every other class leaves it absent so the envelope
+    // emits `param: null`.
+    let upstream_param = match &e {
+        Error::Upstream { body, .. } => upstream_error_param(body),
+        _ => None,
     };
     error_response(
         shape,
@@ -1144,6 +1175,8 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         upstream_type,
         upstream_code,
         retry_after,
+        upstream_request_id,
+        upstream_param.as_deref(),
     )
 }
 
@@ -1187,6 +1220,22 @@ fn upstream_error_detail(body: &str) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| err_obj.get("type").and_then(Value::as_str))?;
     Some(bound_upstream_detail(detail))
+}
+
+/// Extract the upstream's own top-level `error.param` from a JSON error
+/// body -- the offending request parameter name an OpenAI-dialect 400
+/// carries (e.g. `"temperature"`). Returns `None` for non-JSON bodies,
+/// a missing/`null` `param`, or a non-string value, so the OpenAI
+/// envelope emits `param: null` unless the upstream genuinely named one.
+///
+/// Length-bounded through the same [`bound_upstream_detail`] cap the
+/// message extractor uses: a real `param` is a short field name, but a
+/// proxied or abusive envelope could otherwise reflect an oversized
+/// string verbatim.
+fn upstream_error_param(body: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(body).ok()?;
+    let param = parsed.get("error")?.get("param")?.as_str()?;
+    Some(bound_upstream_detail(param))
 }
 
 /// Upper bound on the upstream-authored detail surfaced verbatim in a
@@ -1260,6 +1309,19 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
 /// UP to at least 1s, since the header is second-granular. Only
 /// `Error::Upstream` on a rate-limit / overload path carries this value;
 /// every other caller passes `None`.
+///
+/// `upstream_request_id`, when present, is echoed onto the client response
+/// as an `x-upstream-request-id` header so a caller can quote the upstream
+/// provider's own correlation id to vendor support. Only `Error::Upstream`
+/// built from an upstream HTTP response carries it; every other caller
+/// passes `None`.
+///
+/// `upstream_param`, when present, is the upstream's own OpenAI-dialect
+/// `error.param` (the offending request parameter name). It populates the
+/// OpenAI envelope's `param` field so a strict client reads the value the
+/// upstream authored; `None` emits `param: null`. The Anthropic envelope
+/// has no `param` field and ignores it. Only `Error::Upstream` can carry
+/// one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn error_response(
     shape: ErrorEnvelopeShape,
@@ -1270,6 +1332,8 @@ pub(crate) fn error_response(
     upstream_type: Option<&str>,
     upstream_code: Option<&str>,
     retry_after: Option<Duration>,
+    upstream_request_id: Option<&str>,
+    upstream_param: Option<&str>,
 ) -> Response {
     let body: Value = match shape {
         ErrorEnvelopeShape::OpenAi => {
@@ -1277,10 +1341,18 @@ pub(crate) fn error_response(
             // routectl tags when the upstream sent none.
             let out_type = upstream_type.unwrap_or(err_type);
             let out_code = upstream_code.or(upstream_type).unwrap_or(code);
+            // Real OpenAI and litellm always emit the nullable `param`
+            // key. routectl forwards the upstream's own `param` when a
+            // proxied upstream error named the offending request
+            // parameter, and `null` otherwise; the key always exists so a
+            // strict client deserializing against the OpenAI error schema
+            // does not trip on a missing field.
+            let out_param = upstream_param.map_or(Value::Null, |p| Value::String(p.to_string()));
             json!({
                 "error": {
                     "message": message,
                     "type": out_type,
+                    "param": out_param,
                     "code": out_code,
                 }
             })
@@ -1303,6 +1375,16 @@ pub(crate) fn error_response(
             RETRY_AFTER,
             HeaderValue::from(retry_after_header_secs(hint)),
         );
+    }
+    // Echo the upstream provider's correlation id when the mapped error
+    // carried one. A non-empty id that fails `HeaderValue` construction
+    // (control bytes) is dropped rather than aborting the response.
+    if let Some(id) = upstream_request_id.filter(|s| !s.is_empty())
+        && let Ok(value) = HeaderValue::from_str(id)
+    {
+        response
+            .headers_mut()
+            .insert(UPSTREAM_REQUEST_ID_HEADER, value);
     }
     response
 }
@@ -1335,9 +1417,11 @@ const fn retry_after_header_secs(hint: Duration) -> u64 {
 /// valid Anthropic-vocabulary member, prefer it verbatim over the
 /// status-derived guess so stream + non-stream agree and the upstream
 /// signal survives. Otherwise the status table decides: `upstream_error`
-/// at 401/403/413 maps to `authentication_error` / `permission_error` /
+/// at 401/402/403/404/413 maps to `authentication_error` /
+/// `billing_error` / `permission_error` / `not_found_error` /
 /// `request_too_large`, 429 to `rate_limit_error`, 503/529 to
-/// `overloaded_error`, and everything else falls back to `api_error`.
+/// `overloaded_error`, 504 to `timeout_error`, and everything else falls
+/// back to `api_error`.
 pub(crate) fn anthropic_error_type(
     err_type: &str,
     status: StatusCode,
@@ -1354,10 +1438,13 @@ pub(crate) fn anthropic_error_type(
         ) => "invalid_request_error",
         ("auth_error" | "authentication_error", _) => "authentication_error",
         ("upstream_error", 401) => "authentication_error",
+        ("upstream_error", 402) => "billing_error",
         ("upstream_error", 403) => "permission_error",
+        ("upstream_error", 404) => "not_found_error",
         ("upstream_error", 413) => "request_too_large",
         ("upstream_error", 429) => "rate_limit_error",
         ("upstream_error", 503 | 529) => "overloaded_error",
+        ("upstream_error", 504) => "timeout_error",
         ("upstream_error" | "streaming_error" | "bad_gateway", _) => "api_error",
         (_, _) => "api_error",
     }

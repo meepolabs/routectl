@@ -597,7 +597,7 @@ pub fn is_bedrock_validation_exception(err: &Error) -> bool {
         Error::Upstream {
             upstream_type: Some(t),
             ..
-        } if t == BEDROCK_VALIDATION_EXCEPTION_TYPE
+        } if &**t == BEDROCK_VALIDATION_EXCEPTION_TYPE
     )
 }
 

@@ -12,6 +12,12 @@ use thiserror::Error;
 /// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+// `Error` is returned pervasively as `Result<_, Error>`, so its size is the
+// success slot's size too. The three upstream diagnostic strings are
+// `Box<str>` (16 bytes) rather than `String` (24) to keep the enum within
+// clippy's 128-byte `result_large_err` threshold without a lint suppression.
+const _: () = assert!(std::mem::size_of::<Error>() <= 128);
+
 /// The crate-wide error type spanning caller errors, configuration
 /// failures, upstream/provider failures, and unexpected runtime faults.
 /// The HTTP boundary maps each variant to a status and a client-safe
@@ -48,11 +54,20 @@ pub enum Error {
         /// SDK that branches on `error.type` keeps the upstream signal
         /// instead of a generic collapse. `None` when the upstream sent
         /// no parseable type. NOT surfaced in the Display string.
-        upstream_type: Option<String>,
+        upstream_type: Option<Box<str>>,
         /// The upstream error code (`error.code` on the OpenAI error
         /// envelope; numeric codes are stringified). `None` when absent.
         /// NOT surfaced in the Display string.
-        upstream_code: Option<String>,
+        upstream_code: Option<Box<str>>,
+        /// The upstream provider's own correlation id lifted from the
+        /// response headers (first present of `x-request-id`,
+        /// `x-oai-request-id`, `cf-ray`). Surfaced by the ingress on a
+        /// client-facing `x-upstream-request-id` header so a caller can
+        /// quote it to vendor support when correlating a failed request.
+        /// `None` when the upstream sent no such header or the error was
+        /// built without an upstream HTTP response. NOT surfaced in the
+        /// Display string.
+        upstream_request_id: Option<Box<str>>,
     },
 
     /// Request could not be normalized into the canonical shape for the
@@ -154,6 +169,7 @@ impl fmt::Debug for Error {
                 retry_after,
                 upstream_type,
                 upstream_code,
+                upstream_request_id,
             } => f
                 .debug_struct("Upstream")
                 .field("provider", provider)
@@ -163,6 +179,7 @@ impl fmt::Debug for Error {
                 .field("retry_after", retry_after)
                 .field("upstream_type", upstream_type)
                 .field("upstream_code", upstream_code)
+                .field("upstream_request_id", upstream_request_id)
                 .finish(),
             Self::NormalizeRequest(a, b) => {
                 f.debug_tuple("NormalizeRequest").field(a).field(b).finish()
@@ -216,6 +233,7 @@ impl Error {
             retry_after: None,
             upstream_type: None,
             upstream_code: None,
+            upstream_request_id: None,
         }
     }
 
@@ -236,6 +254,7 @@ impl Error {
             retry_after,
             upstream_type: None,
             upstream_code: None,
+            upstream_request_id: None,
         }
     }
 
@@ -259,9 +278,29 @@ impl Error {
             status,
             body: body.into(),
             retry_after,
-            upstream_type,
-            upstream_code,
+            upstream_type: upstream_type.map(Into::into),
+            upstream_code: upstream_code.map(Into::into),
+            upstream_request_id: None,
         }
+    }
+
+    /// Attach an upstream provider correlation id (lifted from the response
+    /// headers) to an `Upstream` error, returning the updated error. A no-op
+    /// on any other variant, so a mapper can chain it unconditionally after
+    /// building the error. Pass `None` to leave the id unset. Kept as a
+    /// post-construction step (rather than a parameter on every `Upstream`
+    /// constructor) so only the mappers that read an upstream HTTP response
+    /// populate it; every other construction site stays `None` untouched.
+    #[must_use]
+    pub fn with_upstream_request_id(mut self, id: Option<String>) -> Self {
+        if let Self::Upstream {
+            upstream_request_id,
+            ..
+        } = &mut self
+        {
+            *upstream_request_id = id.map(Into::into);
+        }
+        self
     }
 
     /// Construct a `NormalizeRequest` error for the named provider.
@@ -382,5 +421,41 @@ mod tests {
     fn non_upstream_variant_debug_unchanged() {
         let err = Error::Validation("bad field".to_string());
         assert_eq!(format!("{err:?}"), "Validation(\"bad field\")");
+    }
+
+    #[test]
+    fn with_upstream_request_id_sets_field_on_upstream() {
+        // Arrange
+        let err = Error::upstream("test", 429, "rate limited");
+
+        // Act
+        let err = err.with_upstream_request_id(Some("req-123".to_string()));
+
+        // Assert
+        match err {
+            Error::Upstream {
+                upstream_request_id,
+                ..
+            } => {
+                assert_eq!(upstream_request_id.as_deref(), Some("req-123"));
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_upstream_request_id_defaults_none_and_is_noop_off_variant() {
+        // Arrange: the plain ctor leaves the id unset.
+        match Error::upstream("test", 500, "boom") {
+            Error::Upstream {
+                upstream_request_id,
+                ..
+            } => assert!(upstream_request_id.is_none(), "ctor must default to None"),
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+
+        // Act + Assert: chaining on a non-Upstream variant is a no-op.
+        let other = Error::Validation("bad".to_string()).with_upstream_request_id(Some("x".into()));
+        assert_eq!(format!("{other:?}"), "Validation(\"bad\")");
     }
 }

@@ -122,7 +122,7 @@ pub(crate) fn render_pure_proxy_rejection(
     };
     let message = pure_proxy_rejection_message(reason);
     error_response(
-        shape, status, err_type, &message, err_type, None, None, None,
+        shape, status, err_type, &message, err_type, None, None, None, None, None,
     )
 }
 

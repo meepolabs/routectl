@@ -666,6 +666,9 @@ fn map_responses_upstream_error(
         upstream_type,
         upstream_code,
     )
+    .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
+        headers,
+    ))
 }
 
 /// Read a Responses-API upstream error body under the shared response-body
