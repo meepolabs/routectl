@@ -72,6 +72,16 @@ const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// is dropped.
 const MAX_CONCURRENT_CONNECTIONS: usize = 256;
 
+/// How often the accept loop flushes a [`ProxyMetrics`] snapshot to
+/// `tracing` while the proxy is running. The counters are write-only
+/// without a periodic emission: a front-proxy runs for hours, so a
+/// shutdown-only flush would surface nothing during a live session.
+/// This fires on the accept loop's own timer, once per interval -- never
+/// on the per-request or per-connection path -- and the counters are
+/// flushed once more at graceful shutdown so a session shorter than one
+/// interval still surfaces its totals.
+const METRICS_SNAPSHOT_INTERVAL: Duration = Duration::from_mins(1);
+
 /// The `host:port` a client's CONNECT request asked to tunnel to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectTarget {
@@ -385,14 +395,24 @@ async fn run_listener(
     mut shutdown: watch::Receiver<()>,
 ) {
     let connection_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    // Skip the immediate first tick `interval` would otherwise fire at
+    // t=0 (an all-zero snapshot at startup carries no signal).
+    let mut snapshot_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + METRICS_SNAPSHOT_INTERVAL,
+        METRICS_SNAPSHOT_INTERVAL,
+    );
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
+                ctx.metrics.log_snapshot();
                 tracing::info!(
                     target: "routectl_cli::proxy::listener",
                     "MITM proxy listener shutting down"
                 );
                 return;
+            }
+            _ = snapshot_tick.tick() => {
+                ctx.metrics.log_snapshot();
             }
             accepted = listener.accept() => {
                 match accepted {
@@ -1084,6 +1104,52 @@ mod tests {
             .await
             .expect("listener must stop within 2s of the shutdown signal")
             .expect("listener task must not panic");
+    }
+
+    #[tokio::test]
+    async fn run_listener_flushes_a_metrics_snapshot_at_graceful_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
+        let reinject_server = MockServer::start().await;
+        let upstream_server = MockServer::start().await;
+        let ctx = test_ctx(
+            Url::parse(&reinject_server.uri()).unwrap(),
+            Url::parse(&upstream_server.uri()).unwrap(),
+        );
+        // Seed a counter so the flushed snapshot carries a non-zero value
+        // and the assertion proves the shared instance's totals reach it.
+        ctx.metrics
+            .incr_request(Leg::Inference, ResultClass::Success, PathClass::Inference);
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        // Flip shutdown before driving the loop so `run_listener` takes
+        // its shutdown branch on the first poll and returns ON THIS
+        // THREAD -- `with_capture` only sees events emitted on the calling
+        // thread, never on a spawned task.
+        shutdown_tx.send(()).unwrap();
+
+        let ((), events) = routectl_testkit::with_capture(run_listener(
+            proxy_listener,
+            acceptor,
+            ctx,
+            Arc::from("api.anthropic.com"),
+            shutdown_rx,
+        ))
+        .await;
+
+        let snapshot = events
+            .iter()
+            .find(|event| {
+                event.target == "routectl_cli::proxy::metrics"
+                    && event.message == "proxy metrics snapshot"
+            })
+            .expect("graceful shutdown must flush a proxy metrics snapshot");
+        assert_eq!(
+            snapshot.field("rc_proxy_requests_total"),
+            Some("1"),
+            "the flushed snapshot must carry the shared instance's accumulated total"
+        );
     }
 
     /// Assembly-level proof of the slowloris guard: a client that
