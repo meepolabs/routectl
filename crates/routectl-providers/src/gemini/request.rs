@@ -10,6 +10,8 @@
 //!     carrying `functionResponse` parts. Gemini receives tool results as a
 //!     user turn (not a separate "tool" role).
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
@@ -17,6 +19,7 @@ use routectl_core::{ChatRequest, ReasoningDetail, Result};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
 use super::GEMINI_FORMAT;
+use super::schema::clean_schema;
 use super::types::{
     Content, FunctionCallPart, FunctionCallingConfig, FunctionDeclaration, FunctionResponsePart,
     GeminiTool, GenerateContentRequest, GenerationConfig, InlineData, Part, SystemInstruction,
@@ -140,6 +143,7 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
 
 fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> {
     let mut contents: Vec<Content> = Vec::new();
+    let tool_name_by_id = build_tool_call_name_index(req);
 
     for msg in &*req.messages {
         match msg.role {
@@ -147,7 +151,7 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                 // Lifted into systemInstruction above; skip here.
             }
             Role::User => {
-                let parts = content_to_parts(provider_id, &msg.content)?;
+                let parts = content_to_parts(provider_id, &msg.content, &tool_name_by_id)?;
                 if !parts.is_empty() {
                     contents.push(Content {
                         role: "user".into(),
@@ -161,7 +165,11 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                 // the visible output, so the model can continue its prior
                 // chain-of-thought. Foreign-provider reasoning is skipped.
                 let mut parts = reasoning_details_to_thought_parts(&msg.reasoning_details);
-                parts.extend(content_to_parts(provider_id, &msg.content)?);
+                parts.extend(content_to_parts(
+                    provider_id,
+                    &msg.content,
+                    &tool_name_by_id,
+                )?);
                 // Assistant tool_calls -> functionCall parts.
                 if let Some(tool_calls_raw) = &msg.tool_calls {
                     for tc in tool_calls_raw {
@@ -181,7 +189,16 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                 // Tool results come back as a user-turn functionResponse.
                 // Gemini does not have a separate "tool" role -- the
                 // tool result is a user turn carrying functionResponse parts.
-                let tool_name = msg.name.clone().unwrap_or_default();
+                // Gemini correlates functionResponse -> functionCall BY NAME,
+                // but OpenAI tool-role / Anthropic tool_result messages carry
+                // only a correlation id, not the tool name. Recover the name
+                // from the prior assistant tool call keyed on that id.
+                let tool_name = recover_tool_name(
+                    provider_id,
+                    msg.tool_call_id.as_deref(),
+                    &tool_name_by_id,
+                    msg.name.as_deref(),
+                );
                 let response_content = match &msg.content {
                     MessageContent::Text(t) => {
                         serde_json::json!({"content": t})
@@ -207,7 +224,80 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
     Ok(contents)
 }
 
-fn content_to_parts(provider_id: &str, content: &MessageContent) -> Result<Vec<Part>> {
+/// Build a `correlation-id -> tool-name` index over every tool call in the
+/// request. Gemini keys `functionResponse` on the tool NAME, but cross-dialect
+/// tool loops (OpenAI tool-role, Anthropic tool_result) carry only the
+/// correlation id on the result message. Both assistant tool-call shapes are
+/// indexed: the OpenAI `tool_calls` array (`{id, function:{name}}`) and
+/// Anthropic `tool_use` content blocks (`{id, name}`).
+fn build_tool_call_name_index(req: &ChatRequest) -> HashMap<String, String> {
+    let mut index: HashMap<String, String> = HashMap::new();
+    for msg in &*req.messages {
+        if !matches!(msg.role, Role::Assistant) {
+            continue;
+        }
+        if let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                let id = tc.get("id").and_then(Value::as_str);
+                let name = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str);
+                if let (Some(id), Some(name)) = (id, name)
+                    && !id.is_empty()
+                    && !name.is_empty()
+                {
+                    index
+                        .entry(id.to_string())
+                        .or_insert_with(|| name.to_string());
+                }
+            }
+        }
+        if let MessageContent::Parts(parts) = &msg.content {
+            for part in parts {
+                if let ContentPart::Known(KnownContentPart::ToolUse { id, name, .. }) = part
+                    && !id.is_empty()
+                    && !name.is_empty()
+                {
+                    index.entry(id.clone()).or_insert_with(|| name.clone());
+                }
+            }
+        }
+    }
+    index
+}
+
+/// Resolve the Gemini `functionResponse.name` for a tool-result message.
+/// Prefer a name recovered from the prior tool call keyed on the correlation
+/// id; fall back to any name the ingress carried; last, an empty name with a
+/// WARN (Gemini cannot correlate a nameless functionResponse).
+fn recover_tool_name(
+    provider_id: &str,
+    correlation_id: Option<&str>,
+    tool_name_by_id: &HashMap<String, String>,
+    carried_name: Option<&str>,
+) -> String {
+    if let Some(id) = correlation_id
+        && let Some(name) = tool_name_by_id.get(id)
+    {
+        return name.clone();
+    }
+    if let Some(name) = carried_name.filter(|n| !n.is_empty()) {
+        return name.to_string();
+    }
+    tracing::warn!(
+        provider = %provider_id,
+        correlation_id = %correlation_id.unwrap_or_default(),
+        "gemini: could not recover tool name for functionResponse; Gemini may fail to correlate"
+    );
+    String::new()
+}
+
+fn content_to_parts(
+    provider_id: &str,
+    content: &MessageContent,
+    tool_name_by_id: &HashMap<String, String>,
+) -> Result<Vec<Part>> {
     match content {
         MessageContent::Text(t) => {
             if t.is_empty() {
@@ -219,7 +309,7 @@ fn content_to_parts(provider_id: &str, content: &MessageContent) -> Result<Vec<P
         MessageContent::Parts(parts) => {
             let mut out = Vec::new();
             for p in parts {
-                if let Some(part) = content_part_to_part(provider_id, p)? {
+                if let Some(part) = content_part_to_part(provider_id, p, tool_name_by_id)? {
                     out.push(part);
                 }
             }
@@ -229,7 +319,11 @@ fn content_to_parts(provider_id: &str, content: &MessageContent) -> Result<Vec<P
     }
 }
 
-fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<Part>> {
+fn content_part_to_part(
+    provider_id: &str,
+    part: &ContentPart,
+    tool_name_by_id: &HashMap<String, String>,
+) -> Result<Option<Part>> {
     match part {
         ContentPart::Known(known) => match known {
             KnownContentPart::Text { text, .. } => Ok(Some(text_part(text.clone()))),
@@ -287,13 +381,20 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
             }
             KnownContentPart::ToolResult {
                 content,
-                tool_use_id: _,
+                tool_use_id,
                 ..
             } => {
-                // ToolResult in a parts array -> treat as functionResponse.
-                // We carry the content as the response body.
+                // ToolResult in a parts array -> functionResponse. Gemini
+                // correlates by name, which the block does not carry; recover
+                // it from the prior tool call keyed on tool_use_id.
+                let name = recover_tool_name(
+                    provider_id,
+                    Some(tool_use_id.as_str()),
+                    tool_name_by_id,
+                    None,
+                );
                 Ok(Some(function_response_part(FunctionResponsePart {
-                    name: String::new(),
+                    name,
                     response: content.clone(),
                 })))
             }
@@ -423,7 +524,7 @@ fn build_tools_and_config(req: &ChatRequest) -> (Option<Vec<GeminiTool>>, Option
                 declarations.push(FunctionDeclaration {
                     name: custom.name.clone(),
                     description: custom.description.clone(),
-                    parameters: Some(custom.input_schema.clone()),
+                    parameters: Some(clean_schema(&custom.input_schema)),
                 });
             }
             ToolDef::Other(v) => {
@@ -438,7 +539,7 @@ fn build_tools_and_config(req: &ChatRequest) -> (Option<Vec<GeminiTool>>, Option
                     .get("description")
                     .and_then(Value::as_str)
                     .map(std::string::ToString::to_string);
-                let parameters = func.get("parameters").cloned();
+                let parameters = func.get("parameters").map(clean_schema);
                 declarations.push(FunctionDeclaration {
                     name,
                     description,
@@ -903,6 +1004,176 @@ mod tests {
     }
 
     #[test]
+    fn nameless_tool_result_recovers_name_from_prior_openai_tool_call() {
+        // Arrange: an OpenAI-shape assistant tool_call carrying the name +
+        // id, followed by a tool-role result that omits the name (only the
+        // tool_call_id survives cross-dialect).
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Null,
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![json!({
+                "id": "call_42",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"}
+            })]),
+        };
+        let tool_result = Message {
+            role: Role::Tool,
+            content: MessageContent::Text("sunny".into()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: Some("call_42".into()),
+            tool_calls: None,
+        };
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("weather?"), assistant, tool_result].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: the functionResponse recovered the name by id match.
+        let tool_turn = body.contents.last().expect("tool result turn");
+        let fr = tool_turn.parts[0]
+            .function_response
+            .as_ref()
+            .expect("function_response part");
+        assert_eq!(fr.name, "get_weather");
+    }
+
+    #[test]
+    fn nameless_tool_result_recovers_name_from_prior_anthropic_tool_use() {
+        use routectl_core::{ContentPart, KnownContentPart};
+        // Arrange: an Anthropic-shape assistant tool_use block (id + name)
+        // followed by a tool-role result keyed only on tool_call_id.
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::ToolUse {
+                id: "toolu_7".into(),
+                name: "lookup".into(),
+                input: json!({}),
+                cache_control: None,
+            })]),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let tool_result = Message {
+            role: Role::Tool,
+            content: MessageContent::Text("42".into()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: Some("toolu_7".into()),
+            tool_calls: None,
+        };
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("q"), assistant, tool_result].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        let tool_turn = body.contents.last().expect("tool result turn");
+        let fr = tool_turn.parts[0]
+            .function_response
+            .as_ref()
+            .expect("function_response part");
+        assert_eq!(fr.name, "lookup");
+    }
+
+    #[test]
+    fn tool_result_falls_back_to_empty_name_when_no_match() {
+        // Arrange: a tool result whose id matches no prior tool call and
+        // carries no name -- Gemini cannot correlate; name stays empty.
+        let tool_result = Message {
+            role: Role::Tool,
+            content: MessageContent::Text("orphan".into()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: Some("unknown_id".into()),
+            tool_calls: None,
+        };
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![tool_result].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        let fr = body.contents[0].parts[0]
+            .function_response
+            .as_ref()
+            .expect("function_response part");
+        assert_eq!(fr.name, "");
+    }
+
+    #[test]
+    fn tool_result_prefers_recovered_name_over_carried_name() {
+        // Arrange: id match wins over any name the ingress happened to carry.
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Null,
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![json!({
+                "id": "call_9",
+                "type": "function",
+                "function": {"name": "canonical_name", "arguments": "{}"}
+            })]),
+        };
+        let tool_result = Message {
+            role: Role::Tool,
+            content: MessageContent::Text("x".into()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: Some("stale_name".into()),
+            tool_call_id: Some("call_9".into()),
+            tool_calls: None,
+        };
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("q"), assistant, tool_result].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        let fr = body.contents.last().unwrap().parts[0]
+            .function_response
+            .as_ref()
+            .expect("function_response part");
+        assert_eq!(fr.name, "canonical_name");
+    }
+
+    #[test]
     fn tools_become_function_declarations() {
         use routectl_core::{CustomTool, ToolDef};
         let req = ChatRequest {
@@ -927,6 +1198,50 @@ mod tests {
             tools[0].function_declarations[0].description.as_deref(),
             Some("does stuff")
         );
+    }
+
+    #[test]
+    fn custom_tool_parameters_are_gemini_cleaned() {
+        use routectl_core::{CustomTool, ToolDef};
+        // Arrange: a caller schema carrying constructs Gemini rejects raw.
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("go")].into(),
+            tools: Some(vec![ToolDef::Custom(CustomTool {
+                name: "f".into(),
+                description: None,
+                input_schema: json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "mode": {"oneOf": [{"type": "string"}]},
+                        "count": {"type": ["integer", "null"]}
+                    }
+                }),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            })]),
+            ..Default::default()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert: the emitted parameters are in the Gemini subset.
+        let params = body.tools.expect("tools")[0].function_declarations[0]
+            .parameters
+            .clone()
+            .expect("parameters");
+        assert!(params.get("$schema").is_none());
+        assert!(params.get("additionalProperties").is_none());
+        assert_eq!(params["type"], "OBJECT");
+        assert!(params["properties"]["mode"].get("oneOf").is_none());
+        assert_eq!(params["properties"]["mode"]["anyOf"][0]["type"], "STRING");
+        assert_eq!(params["properties"]["count"]["type"], "INTEGER");
+        assert_eq!(params["properties"]["count"]["nullable"], true);
     }
 
     #[test]

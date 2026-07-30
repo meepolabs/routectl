@@ -699,6 +699,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   emits the drop-with-warn breadcrumb for caller `cache_control` markers
   (Gemini has no breakpoint surface), matching the openai-compat/responses
   egresses
+- `src/gemini/schema.rs` -- `clean_schema`: pure JSON-Schema -> Gemini
+  OpenAPI-subset cleaner for tool `parameters` (oneOf -> anyOf, strip
+  `$schema`/`$ref`/`additionalProperties`, nullable-union lift, numeric-enum
+  coercion, uppercased `type`), recursing nested objects/arrays/combinators
 - `src/gemini/response.rs` -- Gemini response -> canonical `ChatResponse`;
   `translate_usage` maps `cachedContentTokenCount` ->
   `cache_read_input_tokens` and `thoughtsTokenCount` -> `reasoning_tokens`
