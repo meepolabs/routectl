@@ -1688,6 +1688,133 @@ fn redact_cookie_and_set_cookie_redacted() {
 }
 
 #[test]
+fn redact_vendor_named_credential_headers_redacted() {
+    // The Azure OpenAI (`api-key`), Cloudflare AI Gateway
+    // (`cf-aig-authorization`), and Azure APIM (`ocp-apim-subscription-key`)
+    // credentials each ride on their own explicit name and must collapse to
+    // the bare marker, case-insensitively, on the pure-proxy forward path.
+    for name in [
+        "api-key",
+        "API-Key",
+        "cf-aig-authorization",
+        "CF-AIG-Authorization",
+        "ocp-apim-subscription-key",
+        "Ocp-Apim-Subscription-Key",
+    ] {
+        let mut headers = super::headers_to_json([(name, b"vendor-secret-not-real".as_slice())]);
+        super::redact_header_values(&mut headers);
+        let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(
+            pair[1].as_str(),
+            Some("[REDACTED]"),
+            "{name} should redact to bare [REDACTED]"
+        );
+    }
+}
+
+#[test]
+fn redact_pattern_fallback_catches_unlisted_credential_headers() {
+    // Fail-closed: a vendor credential whose name is in NO explicit list
+    // still redacts because its name is credential-shaped (contains
+    // `secret` / `token`, or ends in `-key`).
+    for name in [
+        "x-vendor-secret",
+        "x-foo-token",
+        "x-custom-api-key",
+        "x-tenant-session-key",
+    ] {
+        let mut headers = super::headers_to_json([(name, b"unlisted-cred-not-real".as_slice())]);
+        super::redact_header_values(&mut headers);
+        let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(
+            pair[1].as_str(),
+            Some("[REDACTED]"),
+            "{name} should redact via the credential-name pattern fallback"
+        );
+    }
+}
+
+#[test]
+fn redact_pattern_fallback_leaves_benign_headers_verbatim() {
+    // The pattern fallback must NOT mask operational headers: `content-type`
+    // is not credential-shaped, and `x-claude-code-session-id` carries a
+    // correlation id (bare `session`, not a `session-key` credential form)
+    // the fixture-capture pipeline needs verbatim.
+    let mut headers = super::headers_to_json([
+        ("content-type", b"application/json".as_slice()),
+        ("x-claude-code-session-id", b"corr-id-visible".as_slice()),
+    ]);
+    super::redact_header_values(&mut headers);
+    let arr = headers.as_array().unwrap();
+    assert_eq!(arr[0][0].as_str(), Some("content-type"));
+    assert_eq!(arr[0][1].as_str(), Some("application/json"));
+    assert_eq!(arr[1][0].as_str(), Some("x-claude-code-session-id"));
+    assert_eq!(arr[1][1].as_str(), Some("corr-id-visible"));
+}
+
+#[test]
+fn redact_visible_allowlist_wins_over_credential_pattern() {
+    // The `x-amz-` signing-metadata allowlist is checked before the
+    // credential-name pattern, so `x-amz-date` stays verbatim even though a
+    // future pattern token could otherwise match; the alongside
+    // `x-amz-security-token` still redacts via the `x-amz-` prefix rule.
+    let mut headers = super::headers_to_json([
+        ("x-amz-date", b"20260730T000000Z".as_slice()),
+        (
+            "x-amz-content-sha256",
+            b"e3b0c44298fc1c149afbf4c8996fb924".as_slice(),
+        ),
+        ("x-amz-security-token", b"STSTOKEN".as_slice()),
+    ]);
+    super::redact_header_values(&mut headers);
+    let arr = headers.as_array().unwrap();
+    assert_eq!(arr[0][1].as_str(), Some("20260730T000000Z"));
+    assert_eq!(arr[1][1].as_str(), Some("e3b0c44298fc1c149afbf4c8996fb924"));
+    assert_eq!(arr[2][1].as_str(), Some("[REDACTED]"));
+}
+
+#[test]
+fn redact_signed_jwt_assertion_headers() {
+    // Fail-closed for signed-JWT identity assertions: behind Cloudflare
+    // Access / Google IAP these carry a replayable signed JWT plus
+    // identity claims and must never persist in a trace. Covered by both
+    // the explicit name list and the `jwt` / `assertion` pattern tokens.
+    for name in [
+        "cf-access-jwt-assertion",
+        "CF-Access-Jwt-Assertion",
+        "x-goog-iap-jwt-assertion",
+        "x-vendor-jwt",
+        "x-custom-assertion",
+    ] {
+        let mut headers = super::headers_to_json([(name, b"eyJhbGciOi-not-real".as_slice())]);
+        super::redact_header_values(&mut headers);
+        let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(
+            pair[1].as_str(),
+            Some("[REDACTED]"),
+            "{name} must redact (signed-JWT assertion / identity bearer)"
+        );
+    }
+}
+
+#[test]
+fn redact_leaves_ratelimit_token_quota_headers_visible() {
+    // OpenAI's operational quota headers carry numeric limits/counts/
+    // durations, not secrets; docs/LOGGING.md promises they stay visible.
+    // They must survive the `token` substring in the credential pattern.
+    let mut headers = super::headers_to_json([
+        ("x-ratelimit-limit-tokens", b"30000".as_slice()),
+        ("x-ratelimit-remaining-tokens", b"29875".as_slice()),
+        ("X-RateLimit-Reset-Tokens", b"6ms".as_slice()),
+    ]);
+    super::redact_header_values(&mut headers);
+    let arr = headers.as_array().unwrap();
+    assert_eq!(arr[0][1].as_str(), Some("30000"));
+    assert_eq!(arr[1][1].as_str(), Some("29875"));
+    assert_eq!(arr[2][1].as_str(), Some("6ms"));
+}
+
+#[test]
 fn redact_header_value_no_panic_when_byte_7_is_continuation_byte() {
     // Six ASCII digits followed by a 2-byte char places a UTF-8
     // continuation byte at index 7, so a naive `value[..7]` slice would
