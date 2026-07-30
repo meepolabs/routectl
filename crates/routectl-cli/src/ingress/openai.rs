@@ -195,6 +195,10 @@ impl IngressAdapter for OpenAiIngress {
         // docs) and OpenAI Chat-Completions clients do not expect it on
         // streaming chunks.
         let chunk = strip_matched_stop_sequence_from_chunk(chunk);
+        // Normalize any non-spec upstream stop value to a valid OpenAI
+        // finish_reason (see `map_openai_finish_reason`). OpenAI-out
+        // only -- the Anthropic ingress keeps the raw stop_reason.
+        let chunk = normalize_finish_reason_in_chunk(chunk);
         let mut value = serde_json::to_value(&chunk)
             .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
         // Stamp the OpenAI streaming envelope a strict SDK requires on
@@ -266,6 +270,11 @@ fn render_openai_response_value(resp: ChatResponse) -> Result<Value> {
     // Anthropic ingress. OpenAI Chat-Completions clients do not
     // expect it and some SDKs error or forward it unexpectedly.
     let resp = strip_matched_stop_sequence_from_response(resp);
+    // Normalize any non-spec upstream stop value to a valid OpenAI
+    // finish_reason (see `map_openai_finish_reason`). OpenAI-out only:
+    // the Anthropic ingress renders through its own module and keeps the
+    // raw stop_reason claude-code depends on.
+    let resp = normalize_finish_reason_in_response(resp);
     let mut value = serde_json::to_value(&resp)
         .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
     // Surface Anthropic/Bedrock cache-read counts under the standard
@@ -577,6 +586,74 @@ fn strip_matched_stop_sequence_from_response(mut resp: ChatResponse) -> ChatResp
 fn strip_matched_stop_sequence_from_chunk(mut chunk: ChatChunk) -> ChatChunk {
     for choice in &mut chunk.choices {
         choice.matched_stop_sequence = None;
+    }
+    chunk
+}
+
+/// The `finish_reason` values an OpenAI Chat-Completions client accepts.
+/// Any canonical stop value outside this set is non-spec on the
+/// OpenAI-out wire and no OpenAI SDK expects it.
+const OPENAI_VALID_FINISH_REASONS: &[&str] = &[
+    "stop",
+    "length",
+    "tool_calls",
+    "content_filter",
+    "function_call",
+];
+
+/// Map a canonical stop value to a valid OpenAI `finish_reason` for the
+/// OpenAI-out render.
+///
+/// The canonical `finish_reason` carries upstream stop reasons verbatim
+/// when they have no OpenAI overlap: Anthropic `refusal` / `pause_turn` /
+/// `model_context_window_exceeded` and Bedrock Converse
+/// `guardrail_intervened` / `content_filtered` all reach this render raw.
+/// Emitting them as `finish_reason` surfaces a value no OpenAI SDK
+/// recognizes. Normalize them here, at the OpenAI-dialect render seam,
+/// so the Anthropic ingress keeps the raw stop_reason claude-code needs.
+///
+/// Returns `Some(mapped)` only when a rewrite is required; an
+/// already-valid value returns `None` and is left untouched.
+///
+/// Mapping:
+///   `refusal` / `guardrail_intervened` / `content_filtered` -> `content_filter`
+///   `model_context_window_exceeded`                         -> `length`
+///   any other non-spec value (`pause_turn`, unknown)        -> `stop`
+fn map_openai_finish_reason(reason: &str) -> Option<&'static str> {
+    if OPENAI_VALID_FINISH_REASONS.contains(&reason) {
+        return None;
+    }
+    Some(match reason {
+        "refusal" | "guardrail_intervened" | "content_filtered" => "content_filter",
+        "model_context_window_exceeded" => "length",
+        _ => "stop",
+    })
+}
+
+/// Rewrite every non-spec `Choice.finish_reason` in a `ChatResponse` to a
+/// valid OpenAI value via `map_openai_finish_reason`. Already-valid
+/// values pass through untouched.
+fn normalize_finish_reason_in_response(mut resp: ChatResponse) -> ChatResponse {
+    for choice in &mut resp.choices {
+        if let Some(reason) = choice.finish_reason.as_deref()
+            && let Some(mapped) = map_openai_finish_reason(reason)
+        {
+            choice.finish_reason = Some(mapped.to_string());
+        }
+    }
+    resp
+}
+
+/// Rewrite every non-spec `ChunkChoice.finish_reason` in a `ChatChunk` to
+/// a valid OpenAI value. Streaming analog of
+/// `normalize_finish_reason_in_response`.
+fn normalize_finish_reason_in_chunk(mut chunk: ChatChunk) -> ChatChunk {
+    for choice in &mut chunk.choices {
+        if let Some(reason) = choice.finish_reason.as_deref()
+            && let Some(mapped) = map_openai_finish_reason(reason)
+        {
+            choice.finish_reason = Some(mapped.to_string());
+        }
     }
     chunk
 }
@@ -2146,5 +2223,138 @@ mod tests {
             "no cache tokens must not emit prompt_tokens_details: {}",
             v["usage"]
         );
+    }
+
+    fn finish_reason_response(reason: &str) -> ChatResponse {
+        ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "claude-sonnet-4".into(),
+            created: 1700000000,
+            choices: vec![Choice {
+                logprobs: None,
+                index: 0,
+                message: Message {
+                    refusal: None,
+                    role: Role::Assistant,
+                    content: MessageContent::Text("done".into()),
+                    reasoning: None,
+                    reasoning_details: Vec::new(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some(reason.into()),
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+            upstream_meta: None,
+        }
+    }
+
+    /// Non-spec upstream stop values (Anthropic `refusal` /
+    /// `pause_turn` / `model_context_window_exceeded`, Bedrock Converse
+    /// `guardrail_intervened` / `content_filtered`) must be normalized to
+    /// a valid OpenAI `finish_reason` on the OpenAI-out render so no SDK
+    /// sees a value it does not expect.
+    #[test]
+    fn render_response_normalizes_non_spec_finish_reason() {
+        // Arrange: each non-spec value paired with its expected OpenAI map.
+        let cases = [
+            ("refusal", "content_filter"),
+            ("guardrail_intervened", "content_filter"),
+            ("content_filtered", "content_filter"),
+            ("model_context_window_exceeded", "length"),
+            ("pause_turn", "stop"),
+            ("some_future_reason", "stop"),
+            ("stop_sequence", "stop"),
+        ];
+
+        for (raw, expected) in cases {
+            // Act
+            let v = OpenAiIngress
+                .render_response_value(finish_reason_response(raw))
+                .unwrap();
+
+            // Assert
+            assert_eq!(
+                v["choices"][0]["finish_reason"], expected,
+                "{raw} must map to {expected} on the OpenAI-out render"
+            );
+        }
+    }
+
+    /// Already-valid OpenAI `finish_reason` values pass through the
+    /// normalization untouched.
+    #[test]
+    fn render_response_passes_valid_finish_reason_through() {
+        // Arrange
+        for valid in [
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "function_call",
+        ] {
+            // Act
+            let v = OpenAiIngress
+                .render_response_value(finish_reason_response(valid))
+                .unwrap();
+
+            // Assert
+            assert_eq!(
+                v["choices"][0]["finish_reason"], valid,
+                "valid finish_reason {valid} must pass through untouched"
+            );
+        }
+    }
+
+    /// Streaming analog: a non-spec `finish_reason` on a chunk is
+    /// normalized to a valid OpenAI value on the OpenAI-out render.
+    #[test]
+    fn render_chunk_normalizes_non_spec_finish_reason() {
+        // Arrange
+        let chunk = ChatChunk {
+            id: "chatcmpl-1".into(),
+            model: "claude-sonnet-4".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: None,
+                    ..Default::default()
+                },
+                finish_reason: Some("model_context_window_exceeded".into()),
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        };
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+
+        // Act
+        let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
+
+        // Assert
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(payload["choices"][0]["finish_reason"], "length");
+    }
+
+    /// The finish_reason normalization is OpenAI-out only: the Anthropic
+    /// ingress render must still emit the raw upstream `stop_reason`
+    /// (`refusal`) that claude-code depends on.
+    #[test]
+    fn anthropic_ingress_render_keeps_raw_finish_reason() {
+        use crate::ingress::anthropic::AnthropicIngress;
+
+        // Arrange
+        let resp = finish_reason_response("refusal");
+
+        // Act
+        let v = AnthropicIngress.render_response_value(resp).unwrap();
+
+        // Assert: the Anthropic wire keeps the raw stop_reason, unmapped.
+        assert_eq!(v["stop_reason"], "refusal");
     }
 }
