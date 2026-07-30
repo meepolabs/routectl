@@ -770,6 +770,10 @@ async fn read_anthropic_error(
     } else {
         None
     };
+    // Lift the upstream correlation id from the same pre-body-read headers
+    // (ungated: an id is useful for vendor-support correlation on any error
+    // status, not just rate limits). Captured before `resp` is moved below.
+    let upstream_request_id = crate::upstream_request_id::parse_upstream_request_id(resp.headers());
     let content_length = resp.content_length();
     let (bytes, hit_cap) = match crate::http_client::read_body_capped(
         resp,
@@ -844,7 +848,8 @@ async fn read_anthropic_error(
             retry_after,
             upstream_type,
             upstream_code,
-        );
+        )
+        .with_upstream_request_id(upstream_request_id);
         return (msg, err);
     }
     // The client-facing message prefers the Anthropic `/error/message`. On
@@ -884,7 +889,8 @@ async fn read_anthropic_error(
         retry_after,
         upstream_type,
         upstream_code,
-    );
+    )
+    .with_upstream_request_id(upstream_request_id);
     (msg, err)
 }
 

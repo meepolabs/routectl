@@ -189,7 +189,11 @@ listed at the bottom of each crate.
   (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...)
   and `Result` alias; `Error::Upstream` carries a structural `retry_after:
   Option<Duration>` (populated only on a rate-limit/overload reset hint) plus
-  the `upstream_with_retry_after` ctor; `Debug` is hand-written (not derived)
+  `upstream_type`/`upstream_code`/`upstream_request_id` diagnostic fields
+  (all `Option<Box<str>>` -- kept small so a `const _` assert holds
+  `size_of::<Error>() <= 128`, the `Result` success-slot size) and the
+  `upstream_with_retry_after` / `with_upstream_request_id` ctors; `Debug` is
+  hand-written (not derived)
   so `Error::Upstream`'s `body` renders as a bounded `body_excerpt` (capped at
   `MAX_LOG_BODY_EXCERPT` chars) + `body_len` marker -- every `?e` log sink is
   bounded from one place even where the request-fault body runs to
@@ -335,6 +339,10 @@ listed at the bottom of each crate.
   `tool_result` correlators stay equal
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures
   (401/403-vs-other auth-warn split) across egresses
+- `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
+  lifts the upstream provider's correlation id (first of `x-request-id` /
+  `x-oai-request-id` / `cf-ray`) off an error response so the ingress can
+  echo it on a client-facing `x-upstream-request-id` header
 - `src/anthropic_error.rs` -- shared Anthropic `error.type` ->
   synthetic-status mapping (`anthropic_error_type_to_status`; unknown tokens
   -> 502) consumed by `anthropic_api/sse.rs` and `bedrock/eventstream.rs` so

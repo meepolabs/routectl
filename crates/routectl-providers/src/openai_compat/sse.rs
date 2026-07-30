@@ -82,7 +82,9 @@ pub fn parse_event(
 /// of treating it as a malformed ChatChunk. A `null` or empty-object
 /// `error` field is not an envelope and returns `None`. Status defaults
 /// to 502 when `error.code` is absent or non-numeric; message defaults
-/// to a generic string. Shared by `parse_event` and `process`.
+/// to a generic string. The upstream `error.type` / `error.code`
+/// classifier is lifted onto the error so the surfaced fault matches what
+/// the non-streaming path carries. Shared by `parse_event` and `process`.
 fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
     let err = val.get("error")?;
     // Some gateways (LiteLLM, some vLLM/OpenRouter proxies) attach a
@@ -104,7 +106,21 @@ fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
         .and_then(|v| v.as_str())
         .unwrap_or("upstream error in stream")
         .to_string();
-    Some(Error::upstream(id, status, message))
+    // Lift the upstream classifier so the mid-stream error surfaces the
+    // same `error.type` / `error.code` the non-streaming path carries. The
+    // ingress stream-error class reads these to keep the upstream signal
+    // instead of collapsing to a generic bucket; the message stays in the
+    // error body, matching what the non-stream path surfaces. No new log
+    // is emitted here -- the raw frame is never widened onto a log line.
+    let (upstream_type, upstream_code) = super::classify_error_value(val);
+    Some(Error::upstream_full(
+        id,
+        status,
+        message,
+        None,
+        upstream_type,
+        upstream_code,
+    ))
 }
 
 /// Lift OpenAI/DeepSeek usage sub-bags into canonical typed slots and
@@ -1131,6 +1147,43 @@ mod tests {
                 assert!(
                     body.contains("forbidden by content policy"),
                     "error body must carry the upstream message, got: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A mid-stream error frame carrying an `error.type` / `error.code`
+    /// classifier must lift both onto the surfaced `Error::Upstream` (and
+    /// keep the message in the body), matching what the non-streaming path
+    /// carries. Before the fix the mid-frame error dropped type/code, so
+    /// the ingress stream-error class collapsed to a generic bucket.
+    #[test]
+    fn mid_stream_error_envelope_lifts_type_and_code() {
+        let raw = json!({
+            "error": {
+                "type": "rate_limit_exceeded",
+                "code": "slow_down",
+                "message": "too many requests"
+            }
+        })
+        .to_string();
+        let err = parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                body,
+                ..
+            } => {
+                // Non-numeric code -> 502 default; type/code lifted.
+                assert_eq!(status, 502);
+                assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(upstream_code.as_deref(), Some("slow_down"));
+                assert!(
+                    body.contains("too many requests"),
+                    "the upstream message text must reach the error body, got: {body}"
                 );
             }
             other => panic!("expected Error::Upstream, got: {other:?}"),

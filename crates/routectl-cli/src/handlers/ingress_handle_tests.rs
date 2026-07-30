@@ -383,11 +383,199 @@ async fn openai_envelope_unchanged_regression_pin() {
     assert_eq!(body["error"]["type"], "unknown_alias");
     assert_eq!(body["error"]["code"], "unknown_alias");
     assert!(
+        body["error"].get("param").is_some() && body["error"]["param"].is_null(),
+        "OpenAI envelope carries the nullable `param` key (null when routectl names no offending parameter)"
+    );
+    assert!(
         body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("nonesuch")
     );
+}
+
+#[tokio::test]
+async fn openai_envelope_upstream_error_carries_null_param() {
+    // Arrange: an upstream error rendered on the OpenAI dialect. Real
+    // OpenAI / litellm always emit `param`; routectl has no offending
+    // request parameter to name at the proxy boundary, so it is null.
+    let err = Error::upstream("p", 400, "bad request");
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    assert!(
+        body["error"].get("param").is_some(),
+        "the OpenAI error envelope must always carry the `param` key"
+    );
+    assert!(
+        body["error"]["param"].is_null(),
+        "`param` is null when routectl names no offending parameter"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_envelope_never_carries_param() {
+    // The Anthropic error envelope has no `param` field; FIX 1 is
+    // OpenAI-dialect-only and must not cross-contaminate.
+    let err = Error::upstream("p", 400, "bad request");
+
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    let body = body_to_value(resp).await;
+
+    assert!(
+        body["error"].get("param").is_none(),
+        "the Anthropic error envelope must not gain a `param` field"
+    );
+}
+
+#[tokio::test]
+async fn openai_envelope_forwards_upstream_param_when_present() {
+    // Arrange: a proxied OpenAI 400 whose upstream body named the
+    // offending request parameter. routectl must forward that param
+    // rather than collapsing it to null.
+    let err = Error::Upstream {
+        provider: "openai_prod".into(),
+        status: 400,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        upstream_request_id: None,
+        body: "{\"error\":{\"type\":\"invalid_request_error\",\
+               \"message\":\"unsupported value\",\"param\":\"temperature\"}}"
+            .into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    assert_eq!(
+        body["error"]["param"], "temperature",
+        "upstream-supplied param must be forwarded"
+    );
+}
+
+#[tokio::test]
+async fn openai_envelope_param_null_when_upstream_omits_it() {
+    // Arrange: an upstream JSON error body with no `param` key. The
+    // envelope must emit `param: null`, not fabricate one.
+    let err = Error::Upstream {
+        provider: "openai_prod".into(),
+        status: 400,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        upstream_request_id: None,
+        body: "{\"error\":{\"type\":\"invalid_request_error\",\
+               \"message\":\"bad request\"}}"
+            .into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    assert!(
+        body["error"].get("param").is_some() && body["error"]["param"].is_null(),
+        "param is null when the upstream named no offending parameter"
+    );
+}
+
+#[tokio::test]
+async fn openai_envelope_param_null_for_non_upstream_error() {
+    // Arrange: a non-upstream error can never carry an upstream param.
+    let err = Error::Validation("bad input".into());
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    assert!(
+        body["error"].get("param").is_some() && body["error"]["param"].is_null(),
+        "non-upstream errors emit param: null"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_envelope_ignores_upstream_param() {
+    // The Anthropic envelope has no `param` field even when the upstream
+    // body carried one.
+    let err = Error::Upstream {
+        provider: "p".into(),
+        status: 400,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        upstream_request_id: None,
+        body: "{\"error\":{\"message\":\"bad\",\"param\":\"temperature\"}}".into(),
+    };
+
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    let body = body_to_value(resp).await;
+
+    assert!(
+        body["error"].get("param").is_none(),
+        "the Anthropic envelope must not surface a param field"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_envelope_402_404_504_map_to_documented_types() {
+    // FIX 2: 402/404/504 must no longer fold into the generic api_error.
+    // Anthropic error-type spellings per its published error docs.
+    let cases = [
+        (402u16, "billing_error"),
+        (404u16, "not_found_error"),
+        (504u16, "timeout_error"),
+    ];
+    for (status, expected_type) in cases {
+        // Arrange
+        let err = Error::upstream("p", status, "upstream failure");
+
+        // Act
+        let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+        let http_status = resp.status().as_u16();
+        let body = body_to_value(resp).await;
+
+        // Assert
+        assert_eq!(http_status, status, "HTTP status preserved for {status}");
+        assert_eq!(body["type"], "error");
+        assert_eq!(
+            body["error"]["type"], expected_type,
+            "status {status} must map to {expected_type}, not api_error"
+        );
+    }
+}
+
+#[tokio::test]
+async fn anthropic_envelope_existing_mappings_intact_and_other_statuses_api_error() {
+    // FIX 2 must leave the existing ladder untouched and keep the
+    // api_error fallback for statuses outside the ladder.
+    let cases = [
+        (401u16, "authentication_error"),
+        (403u16, "permission_error"),
+        (413u16, "request_too_large"),
+        (429u16, "rate_limit_error"),
+        (503u16, "overloaded_error"),
+        (529u16, "overloaded_error"),
+        (502u16, "api_error"),
+        (500u16, "api_error"),
+    ];
+    for (status, expected_type) in cases {
+        let err = Error::upstream("p", status, "upstream failure");
+        let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+        let body = body_to_value(resp).await;
+        assert_eq!(
+            body["error"]["type"], expected_type,
+            "status {status} must still map to {expected_type}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -461,6 +649,38 @@ async fn map_error_upstream_omits_retry_after_header_on_zero_hint() {
     }
 }
 
+#[tokio::test]
+async fn map_error_upstream_emits_correlation_id_header_when_present() {
+    // Arrange: an upstream error carrying the provider's correlation id.
+    let err =
+        Error::upstream("p", 500, "boom").with_upstream_request_id(Some("req-abc-123".to_string()));
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+
+    // Assert: the id rides through on x-upstream-request-id.
+    let hdr = resp
+        .headers()
+        .get(UPSTREAM_REQUEST_ID_HEADER)
+        .expect("client response must carry the upstream correlation id");
+    assert_eq!(hdr.to_str().expect("ascii header"), "req-abc-123");
+}
+
+#[tokio::test]
+async fn map_error_upstream_omits_correlation_id_header_when_absent() {
+    // Arrange: an upstream error with no lifted correlation id.
+    let err = Error::upstream("p", 500, "boom");
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+
+    // Assert: no header fabricated when the upstream sent none.
+    assert!(
+        resp.headers().get(UPSTREAM_REQUEST_ID_HEADER).is_none(),
+        "no x-upstream-request-id header without a lifted id"
+    );
+}
+
 // -------- map_error: non-streaming upstream message sanitization ----
 //
 // The non-streaming `map_error` path must not leak the internal
@@ -482,6 +702,7 @@ async fn map_error_upstream_strips_provider_name_and_raw_body() {
         retry_after: None,
         upstream_type: None,
         upstream_code: None,
+        upstream_request_id: None,
         body: "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"},\
                \"internal_quota\":\"tenant-12345 exceeded 4000/min\"}"
             .into(),
@@ -523,6 +744,7 @@ async fn map_error_upstream_surfaces_top_level_error_message_from_json_body() {
         retry_after: None,
         upstream_type: None,
         upstream_code: None,
+        upstream_request_id: None,
         body: "{\"error\":{\"type\":\"invalid_request_error\",\
                \"message\":\"max_tokens is too large\"}}"
             .into(),
@@ -560,6 +782,7 @@ async fn map_error_upstream_non_json_body_yields_status_only_message() {
         retry_after: None,
         upstream_type: None,
         upstream_code: None,
+        upstream_request_id: None,
         body: "<html><body>upstream-host-name gateway timeout</body></html>".into(),
     };
 
@@ -597,6 +820,7 @@ async fn map_error_upstream_anthropic_envelope_also_sanitizes_message() {
         retry_after: None,
         upstream_type: None,
         upstream_code: None,
+        upstream_request_id: None,
         body: "{\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"},\
                \"x-internal\":\"tenant-99 burst\"}"
             .into(),
@@ -722,6 +946,7 @@ async fn map_error_surfaces_anthropic_thinking_block_message_to_client() {
         retry_after: None,
         upstream_type: Some("invalid_request_error".into()),
         upstream_code: None,
+        upstream_request_id: None,
         body: raw.into(),
     };
 
@@ -757,6 +982,7 @@ async fn map_error_non_json_upstream_body_stays_status_only() {
         retry_after: None,
         upstream_type: None,
         upstream_code: None,
+        upstream_request_id: None,
         body: "<html>upstream-host gateway timeout</html>".into(),
     };
 
@@ -978,6 +1204,112 @@ fn sanitize_stream_error_uses_generic_message_for_streaming_kind() {
     assert_eq!(safe, "upstream stream error");
     assert!(!safe.contains("anthropic"));
     assert!(!safe.contains("overloaded"));
+}
+
+#[test]
+fn sanitize_stream_error_surfaces_top_level_error_message_like_non_stream() {
+    // Arrange: a mid-stream upstream fault whose body carries the
+    // upstream's own top-level `error.message`. The stream sanitizer
+    // must surface that same short, bounded classifier the non-stream
+    // path does -- while still dropping the provider name and any
+    // sibling body keys.
+    let body = "{\"error\":{\"type\":\"invalid_request_error\",\
+                \"message\":\"max_tokens is too large\"},\
+                \"internal_quota\":\"tenant-12345 exceeded\"}";
+    let err = Error::Upstream {
+        provider: "openai_prod".into(),
+        status: 400,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        upstream_request_id: None,
+        body: body.into(),
+    };
+
+    // Act
+    let safe = sanitize_stream_error_for_client(&err);
+
+    // Assert: the same client-safe extractor output as the non-stream
+    // path, only the leading kind tag differs.
+    assert_eq!(
+        safe,
+        sanitize_upstream_for_client(400, body).replace("upstream error", "upstream stream error"),
+        "stream detail matches the non-stream extractor output"
+    );
+    assert!(
+        safe.contains("max_tokens is too large"),
+        "upstream top-level error.message surfaced on the stream path: {safe:?}"
+    );
+    assert!(safe.contains("400"), "HTTP status preserved: {safe:?}");
+    assert!(
+        !safe.contains("openai_prod"),
+        "provider config name must not leak: {safe:?}"
+    );
+    assert!(
+        !safe.contains("tenant-12345"),
+        "raw sibling body keys must not leak: {safe:?}"
+    );
+    assert!(
+        !safe.contains("internal_quota"),
+        "raw sibling body keys must not leak: {safe:?}"
+    );
+}
+
+#[test]
+fn sanitize_stream_error_falls_back_to_status_only_without_message() {
+    // Arrange: a non-JSON body has no top-level error.message to
+    // surface, so the stream sanitizer falls back to status-only and
+    // never forwards the raw body.
+    let err = Error::Upstream {
+        provider: "bedrock_prod".into(),
+        status: 502,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        upstream_request_id: None,
+        body: "<html><body>upstream-host-name gateway timeout</body></html>".into(),
+    };
+
+    // Act
+    let safe = sanitize_stream_error_for_client(&err);
+
+    // Assert
+    assert_eq!(safe, "upstream stream error (HTTP 502)");
+    assert!(
+        !safe.contains("upstream-host-name"),
+        "raw non-JSON body must not leak: {safe:?}"
+    );
+}
+
+#[test]
+fn sanitize_stream_error_does_not_forward_oversized_raw_body() {
+    // Arrange: an abusive/proxied envelope with an oversized top-level
+    // error.message. The stream path must bound it exactly as the
+    // non-stream path does -- never reflect the full body verbatim.
+    let huge = "A".repeat(MAX_UPSTREAM_DETAIL_CHARS + 500);
+    let err = Error::Upstream {
+        provider: "p".into(),
+        status: 400,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        upstream_request_id: None,
+        body: format!("{{\"error\":{{\"message\":\"{huge}\"}}}}"),
+    };
+
+    // Act
+    let safe = sanitize_stream_error_for_client(&err);
+
+    // Assert: bounded, with the truncation marker; not the full body.
+    assert!(
+        safe.chars().count() < huge.chars().count(),
+        "oversized message must be bounded, not forwarded verbatim: len {}",
+        safe.chars().count()
+    );
+    assert!(
+        safe.contains("... [truncated]"),
+        "bounded detail carries the truncation marker: {safe:?}"
+    );
 }
 
 // -------- render_stream_task: mid-stream upstream error path --------
@@ -4124,6 +4456,7 @@ mod pre_change_ingress_contract {
                 "error": {
                     "message": msg,
                     "type": expected_type,
+                    "param": Value::Null,
                     "code": "invalid_request_error",
                 }
             }),

@@ -153,12 +153,12 @@ impl StreamErrorClass {
                 )
                 .to_string();
                 let openai_type = upstream_type
-                    .clone()
-                    .unwrap_or_else(|| anthropic_type.clone());
+                    .as_deref()
+                    .map_or_else(|| anthropic_type.clone(), str::to_string);
                 let openai_code = upstream_code
-                    .clone()
-                    .or_else(|| upstream_type.clone())
-                    .unwrap_or_else(|| anthropic_type.clone());
+                    .as_deref()
+                    .or(upstream_type.as_deref())
+                    .map_or_else(|| anthropic_type.clone(), str::to_string);
                 Self {
                     anthropic_type,
                     openai_type,

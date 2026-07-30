@@ -208,7 +208,7 @@ pub(super) fn is_project_mismatch(err: &Error) -> bool {
     matches!(
         err,
         Error::Upstream { upstream_type: Some(t), .. }
-            if t == "PERMISSION_DENIED" || t == "NOT_FOUND"
+            if &**t == "PERMISSION_DENIED" || &**t == "NOT_FOUND"
     )
 }
 
@@ -249,6 +249,9 @@ fn map_onboarding_error(
         upstream_type,
         upstream_code,
     )
+    .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
+        headers,
+    ))
 }
 
 /// POST `loadCodeAssist` and return the parsed JSON response. The caller

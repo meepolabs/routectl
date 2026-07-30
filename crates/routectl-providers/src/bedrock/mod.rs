@@ -443,6 +443,8 @@ impl Provider for BedrockProvider {
             } else {
                 None
             };
+            let upstream_request_id =
+                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
             let (prefix, hit_cap, upstream_type, upstream_code) =
                 read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
             return Err(build_client_error(
@@ -453,7 +455,8 @@ impl Provider for BedrockProvider {
                 hit_cap,
                 upstream_type,
                 upstream_code,
-            ));
+            )
+            .with_upstream_request_id(upstream_request_id));
         }
 
         // Dir 3: upstream response headers, read BEFORE the body read
@@ -537,6 +540,8 @@ impl Provider for BedrockProvider {
             } else {
                 None
             };
+            let upstream_request_id =
+                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
             let (prefix, hit_cap, upstream_type, upstream_code) =
                 read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
             return Err(build_client_error(
@@ -547,7 +552,8 @@ impl Provider for BedrockProvider {
                 hit_cap,
                 upstream_type,
                 upstream_code,
-            ));
+            )
+            .with_upstream_request_id(upstream_request_id));
         }
 
         // Dir 3: upstream response headers, read BEFORE `resp` is moved

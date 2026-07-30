@@ -386,6 +386,11 @@ impl Provider for OpenAiCompatProvider {
         // read moves `resp`. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
         let content_length = resp.content_length();
+        // Cloned BEFORE the capped read consumes `resp`: an inline
+        // `{"error":{...}}` envelope on a 2xx body routes through the same
+        // mapper the non-2xx path uses, which reads these for the
+        // rate-limit-gated `retry_after`.
+        let response_headers = resp.headers().clone();
         let (body_bytes, hit_cap) =
             crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
                 .await
@@ -408,6 +413,20 @@ impl Provider for OpenAiCompatProvider {
         }
         let raw: Value = serde_json::from_slice(&body_bytes)
             .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
+
+        // An OpenRouter-style inline `{"error":{...}}` envelope can arrive
+        // in a 200-OK body. Classify it here BEFORE normalize so it surfaces
+        // as an upstream error instead of landing in extras (or hard-failing
+        // the deserialize on absent `choices`). Mirrors the streaming
+        // mid-frame detection and reuses the same mapper as the non-2xx path.
+        if let Some(err) = detect_inline_error_2xx(
+            &self.cfg.id,
+            &raw,
+            &response_headers,
+            &String::from_utf8_lossy(&body_bytes),
+        ) {
+            return Err(err);
+        }
 
         // Trace the raw upstream body BEFORE normalization
         // mutates it (`coalesce_reasoning_content_in_response`
@@ -898,9 +917,16 @@ fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
 /// (`"context_length_exceeded"`) and a numeric one. The full body is
 /// NOT logged here -- the caller's debug/warn lines already cover that.
 fn parse_openai_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
-    let Ok(v) = serde_json::from_str::<Value>(body_text) else {
-        return (None, None);
-    };
+    serde_json::from_str::<Value>(body_text).map_or((None, None), |v| classify_error_value(&v))
+}
+
+/// Lift the OpenAI-shape error classifier (`error.type` / `error.code`)
+/// from an already-parsed value. `code` is stringified because the wire
+/// admits both a string code (`"context_length_exceeded"`) and a numeric
+/// one. Single source of truth shared by `parse_openai_error_classifier`
+/// (the non-2xx mapper), the 2xx inline-error detection, and the streaming
+/// mid-frame detection so all three surface the same classifier tokens.
+pub(super) fn classify_error_value(v: &Value) -> (Option<String>, Option<String>) {
     let upstream_type = v
         .pointer("/error/type")
         .and_then(|t| t.as_str())
@@ -1027,6 +1053,47 @@ fn map_openai_compat_upstream_error(
         upstream_type,
         upstream_code,
     )
+    .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
+        headers,
+    ))
+}
+
+/// Detect a top-level `{"error":{...}}` envelope returned inside a
+/// non-error (2xx) NON-streaming HTTP body -- the OpenRouter-style inline
+/// error some hosts return with a 200 status instead of a 4xx/5xx.
+/// Mirrors the streaming path's mid-stream error-frame detection and
+/// routes a detected envelope through the SAME canonical mapper the
+/// non-2xx status path uses, so the surfaced `Error::Upstream` carries an
+/// identical status / type / code / message treatment. Returns `None` for
+/// a well-formed body (no `error` key, or a null / empty `error` sentinel
+/// that LiteLLM and some proxies attach to healthy responses) so a normal
+/// 2xx response with `choices` is unaffected.
+///
+/// The HTTP status is derived from a numeric `error.code` when present (an
+/// inline error carries no failing HTTP status of its own), defaulting to
+/// 502 -- the same rule the streaming mid-frame detection applies.
+fn detect_inline_error_2xx(
+    provider_id: &str,
+    raw: &Value,
+    headers: &HeaderMap,
+    body_text: &str,
+) -> Option<Error> {
+    let err = raw.get("error")?;
+    if err.is_null() || err.as_object().is_some_and(serde_json::Map::is_empty) {
+        return None;
+    }
+    let status = raw
+        .pointer("/error/code")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(502);
+    Some(map_openai_compat_upstream_error(
+        provider_id,
+        status,
+        headers,
+        body_text,
+        false,
+    ))
 }
 
 /// Read an openai-compat upstream error body under the shared response-body
@@ -1077,7 +1144,7 @@ mod helper_tests {
     use super::{
         ChoiceTail, MAX_STREAM_CHOICES, StreamTail, accumulate_choice_text,
         choice_carries_finish_reason, choice_carries_tool_call_delta, choice_tail_mut,
-        classify_stream_tail, ensure_stream_options_include_usage,
+        classify_stream_tail, detect_inline_error_2xx, ensure_stream_options_include_usage,
         map_openai_compat_upstream_error, parse_openai_error_classifier,
     };
     use crate::http_client::body_cap_exceeded_message;
@@ -1769,6 +1836,87 @@ mod helper_tests {
                 other => panic!("expected Error::Upstream, got: {other:?}"),
             }
         }
+    }
+
+    /// A 200-OK non-streaming body carrying a top-level `{"error":{...}}`
+    /// envelope (OpenRouter-style inline error) must surface as an
+    /// `Error::Upstream` with the status / type / code / message the
+    /// non-2xx path would produce -- not flow into normalize.
+    #[test]
+    fn inline_error_on_2xx_body_surfaces_as_upstream() {
+        // Arrange: a 200-OK body whose only top-level content is an error
+        // envelope with a string code.
+        let body = r#"{"error":{"type":"rate_limit_exceeded","code":"slow_down","message":"upstream is rate limiting"}}"#;
+        let raw: serde_json::Value = serde_json::from_str(body).unwrap();
+
+        // Act
+        let err = detect_inline_error_2xx("p", &raw, &HeaderMap::new(), body)
+            .expect("inline error envelope must be detected");
+
+        // Assert
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                body,
+                ..
+            } => {
+                // A string code carries no numeric HTTP status -> 502 default.
+                assert_eq!(status, 502);
+                assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(upstream_code.as_deref(), Some("slow_down"));
+                assert!(
+                    body.contains("upstream is rate limiting"),
+                    "the raw envelope (with the upstream message) must reach .body, got: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A numeric `error.code` on the inline 2xx envelope is treated as the
+    /// HTTP status (mirroring the streaming mid-frame rule), so the
+    /// surfaced status is preserved rather than collapsed to 502.
+    #[test]
+    fn inline_error_on_2xx_body_derives_status_from_numeric_code() {
+        let body = r#"{"error":{"type":"server_error","code":503,"message":"overloaded"}}"#;
+        let raw: serde_json::Value = serde_json::from_str(body).unwrap();
+
+        let err = detect_inline_error_2xx("p", &raw, &HeaderMap::new(), body)
+            .expect("inline error envelope must be detected");
+
+        match err {
+            Error::Upstream { status, .. } => assert_eq!(status, 503),
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A well-formed 200-OK response carrying `choices` (and no top-level
+    /// `error`, or only a null / empty `error` sentinel) is unaffected:
+    /// detection returns `None` so the body flows into normalize.
+    #[test]
+    fn well_formed_2xx_body_is_not_flagged_as_inline_error() {
+        // A normal completion body.
+        let ok = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}]
+        });
+        assert!(detect_inline_error_2xx("p", &ok, &HeaderMap::new(), "").is_none());
+
+        // A healthy body carrying a null `error` sentinel (LiteLLM shape).
+        let null_err = serde_json::json!({
+            "choices": [{"index": 0, "message": {"content": "hi"}}],
+            "error": null
+        });
+        assert!(detect_inline_error_2xx("p", &null_err, &HeaderMap::new(), "").is_none());
+
+        // A healthy body carrying an empty `error: {}` sentinel.
+        let empty_err = serde_json::json!({
+            "choices": [{"index": 0, "message": {"content": "hi"}}],
+            "error": {}
+        });
+        assert!(detect_inline_error_2xx("p", &empty_err, &HeaderMap::new(), "").is_none());
     }
 
     #[test]
