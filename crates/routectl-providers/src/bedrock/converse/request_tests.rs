@@ -594,7 +594,12 @@ fn tool_message_with_id_emits_user_role_with_tool_result() {
         })
         .expect("expected synthesized tool_result message");
     assert_eq!(tool_msg["role"], "user");
-    let tool_result = &tool_msg["content"][0]["toolResult"];
+    let tool_result = tool_msg["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|b| b.get("toolResult"))
+        .expect("toolResult block");
     assert_eq!(tool_result["toolUseId"], "toolu_X");
     assert_eq!(tool_result["content"][0]["text"], "4");
 }

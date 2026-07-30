@@ -348,7 +348,12 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
                 .is_some_and(|c| c.iter().any(|b| b.get("toolResult").is_some()))
         })
         .expect("expected synthesized tool_result message");
-    let arr = tool_msg["content"][0]["toolResult"]["content"]
+    let arr = tool_msg["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|b| b.get("toolResult"))
+        .expect("toolResult block")["content"]
         .as_array()
         .unwrap();
     assert_eq!(arr.len(), 2, "got {body}");
@@ -406,7 +411,12 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
                 .is_some_and(|c| c.iter().any(|b| b.get("toolResult").is_some()))
         })
         .expect("expected synthesized tool_result message");
-    let arr = tool_msg["content"][0]["toolResult"]["content"]
+    let arr = tool_msg["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|b| b.get("toolResult"))
+        .expect("toolResult block")["content"]
         .as_array()
         .unwrap();
     assert_eq!(arr.len(), 1, "got {body}");

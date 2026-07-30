@@ -37,6 +37,11 @@ use super::types::{
 /// vec is empty (canonical Null content, or every typed Part dropped
 /// during translation) are skipped entirely -- AWS Converse rejects
 /// `content: []` with "Member must have at least 1 element."
+///
+/// Adjacent turns that translate to the same Converse role are coalesced
+/// into one message (see `push_or_coalesce`): parallel tool results each
+/// synthesize a user turn, and Converse 400s on consecutive same-role
+/// turns.
 pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<ConverseMessage>> {
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
     for msg in messages {
@@ -58,10 +63,7 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
                     );
                     continue;
                 }
-                out.push(ConverseMessage {
-                    role: "user".to_string(),
-                    content: blocks,
-                });
+                push_or_coalesce(&mut out, "user", blocks);
             }
             Role::Assistant => {
                 let blocks = build_assistant_content_blocks(id, msg)?;
@@ -73,15 +75,38 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
                     );
                     continue;
                 }
-                out.push(ConverseMessage {
-                    role: "assistant".to_string(),
-                    content: blocks,
-                });
+                push_or_coalesce(&mut out, "assistant", blocks);
             }
-            Role::Tool => out.push(build_tool_message(msg)?),
+            Role::Tool => {
+                let tool_msg = build_tool_message(msg)?;
+                push_or_coalesce(&mut out, "user", tool_msg.content);
+            }
         }
     }
     Ok(out)
+}
+
+/// Append a translated turn's content to `out`, merging into the
+/// previous message when it carries the same role. AWS Converse requires
+/// strict user/assistant alternation and 400s on consecutive same-role
+/// turns; N parallel tool results (each a synthesized user turn) would
+/// otherwise emit N consecutive user messages. Merging preserves block
+/// order and each `toolResult` block's tool-use correlation id.
+fn push_or_coalesce(
+    out: &mut Vec<ConverseMessage>,
+    role: &str,
+    mut blocks: Vec<ConverseContentBlock>,
+) {
+    if let Some(last) = out.last_mut()
+        && last.role == role
+    {
+        last.content.append(&mut blocks);
+        return;
+    }
+    out.push(ConverseMessage {
+        role: role.to_string(),
+        content: blocks,
+    });
 }
 
 /// AWS Converse requires a companion `{text}` block in any message
@@ -1972,5 +1997,170 @@ mod tests {
             document["source"]["bytes"], already,
             "Parts path double-encoded a base64 source: {document}"
         );
+    }
+
+    fn assistant_two_tool_calls() -> Message {
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Null,
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![
+                json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
+                }),
+                json!({
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "get_time", "arguments": "{\"tz\":\"PST\"}"},
+                }),
+            ]),
+        }
+    }
+
+    fn tool_result_msg(id: &str, text: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some(id.into()),
+            tool_calls: None,
+        }
+    }
+
+    /// Two parallel tool results (consecutive Role::Tool turns) coalesce
+    /// into a SINGLE Converse user message carrying both toolResult blocks
+    /// in order -- Converse 400s on consecutive same-role turns.
+    #[test]
+    fn parallel_tool_results_coalesce_into_one_user_turn() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            assistant_two_tool_calls(),
+            tool_result_msg("call_1", "sunny"),
+            tool_result_msg("call_2", "noon"),
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert -- exactly one user turn follows the assistant turn, and it
+        // carries both toolResult blocks in submission order.
+        let tool_turns: Vec<&ConverseMessage> = result
+            .iter()
+            .filter(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ConverseContentBlock::ToolResult { .. }))
+            })
+            .collect();
+        assert_eq!(
+            tool_turns.len(),
+            1,
+            "the two tool results must coalesce into one Converse message, got: {result:?}"
+        );
+        let ids: Vec<&str> = tool_turns[0]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ConverseContentBlock::ToolResult { tool_result } => {
+                    Some(tool_result.tool_use_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["call_1", "call_2"],
+            "both toolResult blocks must survive in order with correlation ids preserved"
+        );
+    }
+
+    /// Roles must strictly alternate across an interleaved
+    /// assistant/tool/user sequence: coalescing the two tool turns yields
+    /// assistant -> user -> assistant, never two consecutive user turns.
+    #[test]
+    fn interleaved_assistant_tool_user_still_alternates() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            assistant_two_tool_calls(),
+            tool_result_msg("call_1", "sunny"),
+            tool_result_msg("call_2", "noon"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("all set".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert -- no two adjacent messages share a role.
+        let roles: Vec<&str> = result.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "assistant"],
+            "roles must strictly alternate after coalescing, got: {roles:?}"
+        );
+    }
+
+    /// A single tool result after an assistant turn is unchanged: it still
+    /// produces exactly one user message with one toolResult block.
+    #[test]
+    fn single_tool_result_unchanged() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
+                })]),
+            },
+            tool_result_msg("call_1", "sunny"),
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert -- one user turn carrying exactly one toolResult block.
+        let tool_turns: Vec<&ConverseMessage> = result
+            .iter()
+            .filter(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ConverseContentBlock::ToolResult { .. }))
+            })
+            .collect();
+        assert_eq!(tool_turns.len(), 1, "single tool result -> one user turn");
+        let block_count = tool_turns[0]
+            .content
+            .iter()
+            .filter(|b| matches!(b, ConverseContentBlock::ToolResult { .. }))
+            .count();
+        assert_eq!(block_count, 1, "exactly one toolResult block expected");
     }
 }
