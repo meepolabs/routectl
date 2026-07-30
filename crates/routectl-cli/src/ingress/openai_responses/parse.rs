@@ -14,7 +14,8 @@
 //!   - `function_call`                  -> assistant `tool_calls[]`
 //!   - `function_call_output`           -> `Role::Tool` message
 //!   - `reasoning`                      -> assistant `reasoning_details[]`
-//!   - unknown item kind                -> skipped with a WARN (never 500)
+//!   - unknown item kind                -> preserved verbatim for a
+//!     same-dialect Responses egress to replay (never 500)
 //! - `tools`                            -> `tools[]` (ToolDef)
 //! - `tool_choice`                      -> `tool_choice` (named-forcing shape normalized to nested)
 //! - `reasoning` (object)               -> `reasoning` (ReasoningConfig)
@@ -38,7 +39,8 @@ use serde_json::{Map, Value};
 
 use routectl_core::{
     ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningConfig,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
+    ReasoningDetail, ReasoningDetailKind, ResponsesPassthroughItem, Result, Role, SystemContent,
+    ToolDef,
 };
 
 use crate::ingress::read_alias_header;
@@ -100,9 +102,16 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         req.system = Some(system);
     }
 
-    // input -> messages[].
+    // input -> messages[]. Unmodeled item kinds are captured verbatim
+    // into routectl_internal for a same-dialect Responses egress replay
+    // (see build_messages) rather than dropped.
     if let Some(input) = obj.remove("input") {
-        req.messages = build_messages(input).into();
+        let ParsedInput {
+            messages,
+            passthrough,
+        } = build_messages(input);
+        req.messages = messages.into();
+        req.routectl_internal.responses_input_passthrough = passthrough;
     }
 
     // Lift in-array system/developer messages into req.system so loose
@@ -244,14 +253,28 @@ fn take_instructions(obj: &mut Map<String, Value>) -> Option<SystemContent> {
 // input -> messages[]
 // ---------------------------------------------------------------------------
 
+/// The result of walking a Responses `input` field: the canonical
+/// conversation turns plus any `input[]` items whose `type` this ingress
+/// does not model. The unmodeled items are carried verbatim so a
+/// same-dialect Responses egress can replay them (see the passthrough
+/// note on [`build_messages_from_items`]).
+struct ParsedInput {
+    messages: Vec<Message>,
+    passthrough: Vec<ResponsesPassthroughItem>,
+}
+
 /// Turn the Responses `input` field into canonical `messages[]`. `input`
 /// is either a bare string (one user message) or an array of tagged
 /// items. Tool calls collected from `function_call` items attach to the
 /// most recent assistant message so the canonical assistant turn carries
-/// its `tool_calls`.
-fn build_messages(input: Value) -> Vec<Message> {
+/// its `tool_calls`. Item kinds this ingress does not model are captured
+/// into `ParsedInput::passthrough` rather than dropped.
+fn build_messages(input: Value) -> ParsedInput {
     match input {
-        Value::String(text) => vec![user_text_message(text)],
+        Value::String(text) => ParsedInput {
+            messages: vec![user_text_message(text)],
+            passthrough: Vec::new(),
+        },
         Value::Array(items) => build_messages_from_items(items),
         // Any other shape is unusable as conversation input; degrade to
         // an empty message list rather than panicking. The request will
@@ -262,13 +285,22 @@ fn build_messages(input: Value) -> Vec<Message> {
                 kind = %value_type_name(&other),
                 "openai-responses ingress: `input` is neither a string nor an array; ignoring"
             );
-            Vec::new()
+            ParsedInput {
+                messages: Vec::new(),
+                passthrough: Vec::new(),
+            }
         }
     }
 }
 
-fn build_messages_from_items(items: Vec<Value>) -> Vec<Message> {
+fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
     let mut messages: Vec<Message> = Vec::with_capacity(items.len());
+    let mut passthrough: Vec<ResponsesPassthroughItem> = Vec::new();
+    // Count of modeled (non-passthrough) input items seen so far. Recorded
+    // on each preserved item as its "modeled-prefix index" so the Responses
+    // egress can splice the item back at its original conversation position
+    // instead of appending it after every modeled item.
+    let mut modeled_prefix: usize = 0;
     for item in items {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
@@ -276,25 +308,54 @@ fn build_messages_from_items(items: Vec<Value>) -> Vec<Message> {
             // Responses API treats a `{role, content}` object as an
             // implicit message. Handle the empty-kind case as a message
             // when it carries a role.
-            "message" => push_message_item(&mut messages, &item),
-            "" if item.get("role").is_some() => push_message_item(&mut messages, &item),
-            "function_call" => attach_function_call(&mut messages, &item),
-            "function_call_output" => messages.push(function_call_output_message(&item)),
-            "reasoning" => attach_reasoning(&mut messages, &item),
+            "message" => {
+                push_message_item(&mut messages, &item);
+                modeled_prefix += 1;
+            }
+            "" if item.get("role").is_some() => {
+                push_message_item(&mut messages, &item);
+                modeled_prefix += 1;
+            }
+            "function_call" => {
+                attach_function_call(&mut messages, &item);
+                modeled_prefix += 1;
+            }
+            "function_call_output" => {
+                messages.push(function_call_output_message(&item));
+                modeled_prefix += 1;
+            }
+            "reasoning" => {
+                attach_reasoning(&mut messages, &item);
+                modeled_prefix += 1;
+            }
             other => {
-                // Unknown item kind: degrade gracefully. Never panic,
-                // never error -- the known items still parse. (Acceptance
-                // C3.) `other` is client-controlled, so sanitize before it
-                // reaches a structured log field (log-injection guard, per
-                // routectl_core::log_safe).
-                tracing::warn!(
+                // Unmodeled item kind: preserve it verbatim for a
+                // same-dialect Responses egress to replay, mirroring how
+                // unknown CONTENT blocks survive as `ContentPart::Other`.
+                // codex's native kinds (local_shell_call,
+                // custom_tool_call(_output), tool_search_call,
+                // agent_message, ...) would otherwise vanish on replay and
+                // degrade multi-turn context. Never panic, never error --
+                // the known items still parse. `other` is client-controlled,
+                // so sanitize it before it reaches a structured log field
+                // (log-injection guard, per routectl_core::log_safe). Logged
+                // at debug: these kinds appear on every codex turn, so a
+                // WARN would spam a normal session.
+                tracing::debug!(
                     item_kind = %routectl_core::sanitize_for_log(other),
-                    "openai-responses ingress: skipping unknown input item kind"
+                    "openai-responses ingress: preserving unmodeled input item kind for round-trip replay"
                 );
+                passthrough.push(ResponsesPassthroughItem {
+                    modeled_prefix,
+                    item,
+                });
             }
         }
     }
-    messages
+    ParsedInput {
+        messages,
+        passthrough,
+    }
 }
 
 /// Build a `message` input item into a canonical `Message`. Maps

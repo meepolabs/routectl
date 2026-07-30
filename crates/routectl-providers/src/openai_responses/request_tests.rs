@@ -8,7 +8,8 @@ use serde_json::{Value, from_value, json};
 
 use routectl_core::{
     ChatRequest, ContentPart, CustomTool, KnownContentPart, Message, MessageContent,
-    ReasoningConfig, Role, SystemBlock, SystemContent, ToolDef, cache_control::CacheControl,
+    ReasoningConfig, ResponsesPassthroughItem, Role, SystemBlock, SystemContent, ToolDef,
+    cache_control::CacheControl,
 };
 
 use super::translate;
@@ -357,6 +358,42 @@ fn tool_def_other_passes_through_verbatim() {
 
     // Assert: passthrough verbatim
     assert_eq!(v["tools"], json!([builtin]));
+}
+
+#[test]
+fn passthrough_item_preserves_original_source_order() {
+    // Arrange: inbound was [message, local_shell_call, message]; the
+    // Responses ingress captured the unmodeled item with modeled_prefix=1
+    // (one modeled item preceded it). The egress must re-emit it BETWEEN
+    // the two messages, not shoved after both.
+    let mut req = req_with(vec![
+        user_text("first"),
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Text("second".into()),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    ]);
+    req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+        modeled_prefix: 1,
+        item: json!({"type": "local_shell_call", "id": "lsc_1"}),
+    }];
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: order is message, local_shell_call, message -- NOT
+    // message, message, local_shell_call.
+    let input = v["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 3, "got: {v}");
+    assert_eq!(input[0]["role"], "user", "got: {v}");
+    assert_eq!(input[1]["type"], "local_shell_call", "got: {v}");
+    assert_eq!(input[2]["role"], "assistant", "got: {v}");
 }
 
 #[test]

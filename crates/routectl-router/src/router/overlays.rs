@@ -85,6 +85,14 @@ pub(super) fn apply_layered_overlays(
     // across or they reset to empty on the 2nd chain attempt -- which would
     // let routectl's minted fingerprint win on a retry.
     let captured_stainless_headers = std::mem::take(&mut req.routectl_internal.stainless_headers);
+    // Preserve the ingress-captured unmodeled Responses input items: like
+    // `stainless_headers`, they are inbound-request data (verbatim
+    // codex-only `input[]` kinds the Responses egress replays), not a
+    // per-model knob, so the per-attempt rebuild from `Default::default()`
+    // must carry them across or they reset to empty on the 2nd chain
+    // attempt -- silently reintroducing the drop this field exists to fix.
+    let captured_responses_input_passthrough =
+        std::mem::take(&mut req.routectl_internal.responses_input_passthrough);
     let mut internal = RoutectlInternal::default();
     internal.reasoning_dialect = target.reasoning_dialect.map(std::convert::Into::into);
     internal.history_reasoning = target.history_reasoning.map(std::convert::Into::into);
@@ -94,6 +102,7 @@ pub(super) fn apply_layered_overlays(
     internal.inbound_session_key = captured_inbound_session_key;
     internal.forwarded_bearer = captured_forwarded_bearer;
     internal.stainless_headers = captured_stainless_headers;
+    internal.responses_input_passthrough = captured_responses_input_passthrough;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
