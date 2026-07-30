@@ -896,7 +896,7 @@ fn handled_fields_do_not_leak_into_provider_extras() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unknown_input_item_kind_skipped_without_error() {
+fn unknown_input_item_kind_preserved_without_error() {
     // Arrange: a bogus item kind sits between two valid items.
     let body = json!({
         "model": "m",
@@ -911,10 +911,17 @@ fn unknown_input_item_kind_skipped_without_error() {
     // Act: must not error, must not panic.
     let req = parse(body);
 
-    // Assert: the two known items parse; the unknown one is dropped.
+    // Assert: the two known items parse as messages; the unmodeled one is
+    // captured verbatim for a Responses egress to replay (not dropped).
     assert_eq!(req.messages.len(), 2);
     assert!(matches!(&req.messages[0].content, MessageContent::Text(t) if t == "before"));
     assert!(matches!(&req.messages[1].content, MessageContent::Text(t) if t == "after"));
+    let passthrough = &req.routectl_internal.responses_input_passthrough;
+    assert_eq!(passthrough.len(), 1, "unmodeled item must be preserved");
+    assert_eq!(passthrough[0].item["type"], "totally_made_up_item");
+    assert_eq!(passthrough[0].item["weird"], "payload");
+    // One modeled message preceded it inbound, so its splice index is 1.
+    assert_eq!(passthrough[0].modeled_prefix, 1);
 }
 
 #[test]
@@ -974,6 +981,137 @@ fn previous_response_id_null_is_accepted() {
     // Act / Assert: parses cleanly.
     let req = parse(body);
     assert_eq!(req.messages.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// unmodeled input-item passthrough (ingress -> Responses egress round-trip)
+// ---------------------------------------------------------------------------
+
+/// Drive a canonical request through the Responses EGRESS and return the
+/// serialized wire body. Same public entry the contract egress test uses
+/// (`Provider::normalize_request`), so this exercises the real
+/// ingress -> canonical -> egress path end to end.
+fn responses_egress_body(req: &ChatRequest) -> serde_json::Value {
+    use routectl_core::Provider;
+    use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
+
+    OpenAiResponsesProvider::new(OpenAiResponsesConfig::new(
+        "openai-responses:test",
+        "literal:test",
+    ))
+    .normalize_request(req)
+    .expect("responses egress normalize")
+}
+
+#[test]
+fn unmodeled_input_item_kinds_round_trip_through_responses_egress() {
+    // Arrange: a codex-shaped Responses request interleaving a modeled
+    // message with the codex-native item kinds this hub does not model.
+    let body = json!({
+        "model": "gpt-5-codex",
+        "input": [
+            {"type": "message", "role": "user", "content": "run it"},
+            {"type": "local_shell_call", "id": "lsc_1",
+             "action": {"type": "exec", "command": ["ls", "-la"]}},
+            {"type": "custom_tool_call", "call_id": "ctc_1",
+             "name": "grep", "input": "needle"},
+            {"type": "custom_tool_call_output", "call_id": "ctc_1",
+             "output": "haystack"},
+            {"type": "tool_search_call", "id": "tsc_1", "query": "docs"},
+            {"type": "agent_message", "id": "am_1", "content": "internal note"}
+        ]
+    });
+
+    // Act: ingress -> canonical -> egress wire body.
+    let req = parse(body);
+    let out = responses_egress_body(&req);
+
+    // Assert: every unmodeled kind survives verbatim in the egress input[].
+    let input = out["input"].as_array().expect("egress input array");
+    let kinds: Vec<&str> = input
+        .iter()
+        .filter_map(|i| i.get("type").and_then(serde_json::Value::as_str))
+        .collect();
+    for kind in [
+        "local_shell_call",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "tool_search_call",
+        "agent_message",
+    ] {
+        assert!(
+            kinds.contains(&kind),
+            "kind {kind} must round-trip through the Responses egress; got {kinds:?}"
+        );
+    }
+
+    // The modeled user turn is still emitted (known kinds unaffected).
+    assert!(
+        kinds.contains(&"message"),
+        "the modeled user message must still be emitted; got {kinds:?}"
+    );
+
+    // A preserved item's inner payload is forwarded byte-for-byte.
+    let lsc = input
+        .iter()
+        .find(|i| i["type"] == "local_shell_call")
+        .expect("local_shell_call present");
+    assert_eq!(lsc["id"], "lsc_1");
+    assert_eq!(lsc["action"]["command"][0], "ls");
+    assert_eq!(lsc["action"]["command"][1], "-la");
+}
+
+#[test]
+fn preserved_items_keep_relative_order_on_egress() {
+    // Arrange: two unmodeled kinds in a fixed order.
+    let body = json!({
+        "model": "m",
+        "input": [
+            {"type": "custom_tool_call", "call_id": "c1", "name": "a", "input": "x"},
+            {"type": "custom_tool_call_output", "call_id": "c1", "output": "y"}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+    let out = responses_egress_body(&req);
+
+    // Assert: the call precedes its output on the wire.
+    let input = out["input"].as_array().expect("egress input array");
+    let call_idx = input
+        .iter()
+        .position(|i| i["type"] == "custom_tool_call")
+        .expect("custom_tool_call present");
+    let out_idx = input
+        .iter()
+        .position(|i| i["type"] == "custom_tool_call_output")
+        .expect("custom_tool_call_output present");
+    assert!(
+        call_idx < out_idx,
+        "preserved items must keep inbound relative order"
+    );
+}
+
+#[test]
+fn known_kinds_produce_no_passthrough() {
+    // Arrange: only modeled kinds -- nothing to preserve.
+    let body = json!({
+        "model": "m",
+        "input": [
+            {"type": "message", "role": "user", "content": "hi"},
+            {"type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert: no items diverted to passthrough.
+    assert!(
+        req.routectl_internal.responses_input_passthrough.is_empty(),
+        "modeled kinds must not populate the passthrough carrier"
+    );
 }
 
 #[test]

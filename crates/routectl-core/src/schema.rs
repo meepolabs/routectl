@@ -198,6 +198,20 @@ pub enum RequestProvenance {
     OpenaiIngress,
 }
 
+/// One preserved Responses `input[]` item plus the number of MODELED
+/// (non-passthrough) input items that preceded it in the inbound array.
+/// The Responses egress splices each entry back in after that many
+/// modeled egress items so a preserved codex-only item keeps its
+/// original conversation position instead of being shoved to the tail.
+#[derive(Debug, Clone)]
+pub struct ResponsesPassthroughItem {
+    /// Count of modeled input items that appeared before this one in the
+    /// inbound `input[]` array (the "modeled-prefix index").
+    pub modeled_prefix: usize,
+    /// The unmodeled Responses item, forwarded verbatim.
+    pub item: Value,
+}
+
 /// Transport-internal carrier for resolved-model knobs the dispatch
 /// layer hands to the egress without bouncing through the wire. In
 /// practice it carries resolved per-model CONFIG values (reasoning
@@ -333,6 +347,27 @@ pub struct RoutectlInternal {
     /// that build a `ChatRequest` directly (no ingress in the loop).
     /// Pure observability metadata -- never serialized to any upstream.
     pub provenance: RequestProvenance,
+
+    /// Responses `input[]` items whose `type` this hub does not model,
+    /// captured verbatim by the OpenAI Responses ingress. The OpenAI
+    /// Responses egress re-emits each entry unchanged so a codex
+    /// multi-turn conversation round-trips its native item kinds
+    /// (`local_shell_call`, `custom_tool_call(_output)`,
+    /// `tool_search_call`, `agent_message`, ...) instead of losing them
+    /// on replay. This is the item-level analogue of
+    /// `ContentPart::Other`, which preserves unmodeled CONTENT blocks.
+    ///
+    /// Preserve-and-passthrough only: ONLY the Responses egress reads
+    /// this, and it forwards the raw JSON verbatim -- no cross-dialect
+    /// translation. Every other egress ignores the field, so a
+    /// codex-only kind never corrupts a non-Responses upstream body.
+    /// Each entry carries the count of MODELED input items that preceded
+    /// it inbound (`modeled_prefix`), so the egress splices it back into
+    /// its original conversation position instead of appending every
+    /// preserved item to the tail. Like `claude_code_headers` this is
+    /// inbound-request data, not a per-model knob; empty for library
+    /// consumers and for every non-Responses ingress.
+    pub responses_input_passthrough: Vec<ResponsesPassthroughItem>,
 
     /// INBOUND per-conversation key captured by the Anthropic ingress
     /// from the `x-claude-code-session-id` request header, falling back

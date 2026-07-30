@@ -38,7 +38,7 @@ pub struct ResponsesRequest {
     // prompt" by the server.
     pub(crate) instructions: String,
 
-    pub(crate) input: Vec<ResponseInputItem>,
+    pub(crate) input: Vec<ResponseInput>,
 
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) tools: Vec<ResponsesTool>,
@@ -81,6 +81,23 @@ pub struct ResponsesRequest {
 // ---------------------------------------------------------------------------
 // Input items
 // ---------------------------------------------------------------------------
+
+/// One entry in the `input` array. Either a modeled [`ResponseInputItem`]
+/// (built from the canonical `messages[]`) or a `Passthrough` raw value:
+/// a Responses item kind this hub does not model, captured verbatim by
+/// the Responses ingress and replayed here unchanged so a codex
+/// multi-turn conversation round-trips its native item kinds. Untagged so
+/// a modeled item serializes exactly as its own tagged shape (byte-stable
+/// with existing snapshots) and a passthrough serializes as its raw JSON.
+/// Mirrors the `ResponsesTool::Other` forward-compat catchall.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ResponseInput {
+    /// A modeled input item translated from the canonical request.
+    Item(ResponseInputItem),
+    /// An unmodeled Responses `input[]` item, forwarded verbatim.
+    Passthrough(Value),
+}
 
 /// One entry in the `input` array. Tagged-union shape: every variant
 /// emits a top-level `type` discriminant. Maps to the codex
