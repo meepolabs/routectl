@@ -639,6 +639,89 @@ fn tool_message_without_id_returns_err() {
 }
 
 #[test]
+fn openai_shape_tool_history_without_tools_backfills_dummy_tool() {
+    // Arrange: an OpenAI-shape transcript -- assistant `tool_calls` plus a
+    // Role::Tool result -- carries tool blocks that only exist on the wire
+    // after translation, NOT on any canonical `req.tools` (which is None).
+    // Bedrock rejects such a request unless toolConfig offers a tool, so a
+    // single reserved dummy toolSpec must be backfilled.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![
+            user_msg("calc 2+2"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "calc", "arguments": "{\"expr\":\"2+2\"}"}
+                })]),
+            },
+            Message {
+                refusal: None,
+                role: Role::Tool,
+                content: MessageContent::Text("4".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("call_1".into()),
+                tool_calls: None,
+            },
+        ]
+        .into(),
+        // No tools on the canonical request -- detection must read the
+        // TRANSLATED Converse messages, not `req.tools`.
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    let tools = body["toolConfig"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "expected one dummy toolSpec; got {body}");
+    let spec = &tools[0]["toolSpec"];
+    assert_eq!(spec["name"], "routectl__history_compat_noop");
+    assert_eq!(
+        spec["description"],
+        "history compatibility only; do not call"
+    );
+    assert_eq!(
+        spec["inputSchema"]["json"],
+        json!({"type": "object", "properties": {}})
+    );
+    // The dummy must not force tool use.
+    assert!(
+        body["toolConfig"].get("toolChoice").is_none(),
+        "dummy backfill must leave toolChoice auto/absent; got {body}"
+    );
+}
+
+#[test]
+fn no_tools_and_no_tool_history_emits_no_tool_config() {
+    // Arrange: a plain transcript with no tools and no tool blocks must
+    // NOT get a false-positive dummy backfill.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hello")].into(),
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    assert!(
+        body.get("toolConfig").is_none(),
+        "no tools + no history must emit no toolConfig; got {body}"
+    );
+}
+
+#[test]
 fn document_content_block_translates_to_aws_document_block() {
     // Arrange: canonical Document part in a user turn produces an
     // AWS `{document: {format, name, source: {bytes}}}` block. AWS

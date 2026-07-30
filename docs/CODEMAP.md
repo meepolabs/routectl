@@ -773,7 +773,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
   messages (per-role dispatch, cachePoint interleave)
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
-  `toolConfig` ({auto/any/tool} union)
+  `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
+  when the translated transcript references tool blocks but no tools survive
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
   (thinking, anthropic_beta, cache_control, output_config)
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
@@ -3390,6 +3391,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/responses_ingress.rs` -- `/v1/responses` end-to-end (Responses body
   -> openai-compat upstream -> Responses-shaped completion,
   `previous_response_id` -> 400, `store:true` accepted, listener auth)
+- `tests/tool_choice_egress_e2e.rs` -- chained tool_choice path: a flat
+  Responses `{type:function,name:X}` through the `/v1/responses` ingress
+  reaches the Anthropic egress as `{type:tool,name:X}` and the openai-compat
+  egress as `{type:function,function:{name:X}}` (asserts the upstream body)
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`
   shape per ingress
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` ->

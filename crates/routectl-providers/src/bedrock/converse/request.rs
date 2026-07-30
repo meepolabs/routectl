@@ -65,7 +65,7 @@ const RESPONSE_FIELD_PATHS: &[&str] = &["/stop_sequence"];
 pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseRequest> {
     let system = build_system(req);
     let messages = build_messages(&cfg.id, &req.messages)?;
-    let tool_config = build_tool_config(&cfg.id, req)?;
+    let tool_config = build_tool_config(&cfg.id, req, &messages)?;
     // Reach into the post-translation toolChoice so build_additional_fields
     // can decide whether to strip thinking. Done here (not inside
     // build_additional_fields) so the extras module stays the single

@@ -213,7 +213,8 @@ impl GeminiStreamState {
             let call_index = self.next_call_index;
             self.next_call_index += 1;
             let args_str = serde_json::to_string(&fc.args).unwrap_or_else(|_| "{}".to_string());
-            out.push(self.tool_chunk(&fc.name, call_index, args_str));
+            let signature = part.thought_signature.as_deref().filter(|s| !s.is_empty());
+            out.push(self.tool_chunk(&fc.name, call_index, args_str, signature));
         }
 
         out
@@ -258,13 +259,27 @@ impl GeminiStreamState {
         })
     }
 
-    fn tool_chunk(&self, name: &str, call_index: u32, args: String) -> ChatChunk {
-        let tool_call_delta: Value = json!({
+    fn tool_chunk(
+        &self,
+        name: &str,
+        call_index: u32,
+        args: String,
+        signature: Option<&str>,
+    ) -> ChatChunk {
+        let mut tool_call_delta: Value = json!({
             "index": call_index,
             "id": format!("call_{call_index}"),
             "type": "function",
             "function": {"name": name, "arguments": args}
         });
+        // A native Gemini-3 functionCall carries its thoughtSignature on the
+        // part; preserve it on the tool-call delta with the same key and
+        // placement the non-stream path uses (response.rs), so a streamed call
+        // round-trips to replay as native rather than being misclassified as
+        // foreign and wrongly given the skip-validation sentinel.
+        if let Some(sig) = signature {
+            tool_call_delta["thought_signature"] = json!(sig);
+        }
         self.chunk_with_delta(ChunkDelta {
             tool_calls: Some(vec![tool_call_delta]),
             ..Default::default()

@@ -123,6 +123,43 @@ fn function_call_part_streams_tool_call_delta() {
 }
 
 #[test]
+fn function_call_signature_threads_into_tool_delta() {
+    // A native Gemini-3 streamed functionCall carries its thoughtSignature on
+    // the part; it must ride the tool-call delta so replay round-trips native.
+    let mut state = GeminiStreamState::default();
+    let mut part = fc_part("get_weather", serde_json::json!({"city": "Paris"}));
+    part.thought_signature = Some("stream-sig-1".to_string());
+    let chunks = state
+        .parse_event(PID, event(vec![part], None, None))
+        .expect("parse ok");
+
+    let tc = chunks
+        .iter()
+        .find_map(|c| c.choices[0].delta.tool_calls.as_ref())
+        .expect("a tool_calls delta");
+    assert_eq!(tc[0]["thought_signature"], "stream-sig-1");
+}
+
+#[test]
+fn function_call_without_signature_omits_field_in_tool_delta() {
+    // A chunk with no signature must not add the key -- preserving the
+    // passthrough shape and letting replay treat it as foreign.
+    let mut state = GeminiStreamState::default();
+    let chunks = state
+        .parse_event(
+            PID,
+            event(vec![fc_part("f", serde_json::json!({}))], None, None),
+        )
+        .expect("parse ok");
+
+    let tc = chunks
+        .iter()
+        .find_map(|c| c.choices[0].delta.tool_calls.as_ref())
+        .expect("a tool_calls delta");
+    assert!(tc[0].get("thought_signature").is_none());
+}
+
+#[test]
 fn two_function_calls_get_dense_indices() {
     let mut state = GeminiStreamState::default();
     let chunks = state

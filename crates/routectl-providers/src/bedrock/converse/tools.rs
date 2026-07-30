@@ -17,15 +17,32 @@ use crate::anthropic_api::request::translate_tool;
 use crate::anthropic_api::types::AnthropicTool;
 
 use super::types::{
-    CachePoint, ConverseInputSchema, ConverseSpecificTool, ConverseToolChoice, ConverseToolDef,
-    ConverseToolSpec, EmptyObject, ToolConfig,
+    CachePoint, ConverseContentBlock, ConverseInputSchema, ConverseMessage, ConverseSpecificTool,
+    ConverseToolChoice, ConverseToolDef, ConverseToolSpec, EmptyObject, ToolConfig,
 };
 
+/// Reserved name for the dummy tool injected to satisfy Bedrock's
+/// tool-history validation. The double-underscore prefix keeps it clear
+/// of caller-supplied tool names (a caller tool named exactly this would
+/// be a deliberate collision, not an accident).
+const HISTORY_COMPAT_TOOL_NAME: &str = "routectl__history_compat_noop";
+
 /// Translate `req.tools` + `req.tool_choice` into AWS `toolConfig`.
+///
 /// Returns Ok(None) when there's nothing to send (no tools, or
 /// `tool_choice == "none"`); cache_point siblings are interleaved
 /// adjacent to their owning tool spec.
-pub(super) fn build_tool_config(_id: &str, req: &ChatRequest) -> Result<Option<ToolConfig>> {
+///
+/// `messages` is the already-translated Converse transcript. When it
+/// references tool blocks on the wire (`toolUse` AND `toolResult`) but no
+/// usable tool defs survive, a single reserved dummy `toolSpec` is
+/// injected: Bedrock rejects a request whose transcript carries tool
+/// blocks unless `toolConfig` offers at least one tool.
+pub(super) fn build_tool_config(
+    id: &str,
+    req: &ChatRequest,
+    messages: &[ConverseMessage],
+) -> Result<Option<ToolConfig>> {
     // Mirror the Anthropic egress: `tool_choice == "none"` strips both
     // tools and tool_choice on the Converse wire too. Converse has no
     // native "none" mode, and shipping tools without tool_choice would
@@ -33,26 +50,83 @@ pub(super) fn build_tool_config(_id: &str, req: &ChatRequest) -> Result<Option<T
     // object `{"type":"none"}` shapes must suppress -- AWS Converse
     // defaults to `auto` when `toolChoice` is absent but `tools` is
     // present, so emitting tools-without-toolChoice would let the
-    // model call tools the caller forbade.
-    let suppress_tools = is_tool_choice_none(req.tool_choice.as_ref());
-
-    let canonical_tools = match (suppress_tools, req.tools.as_ref()) {
-        (true, _) | (_, None) => return Ok(None),
-        (false, Some(t)) if t.is_empty() => return Ok(None),
-        (false, Some(t)) => t,
-    };
-
-    let mut tools: Vec<ConverseToolDef> = Vec::with_capacity(canonical_tools.len());
-    for td in canonical_tools {
-        append_tool_with_cache_point(_id, td, &mut tools);
-    }
-    if tools.is_empty() {
-        // Every tool was an Anthropic builtin; absence is the cleaner
-        // wire shape than `tools: []`.
+    // model call tools the caller forbade. A `"none"` caller explicitly
+    // forbade tools, so the dummy backfill never runs under it.
+    if is_tool_choice_none(req.tool_choice.as_ref()) {
         return Ok(None);
     }
-    let tool_choice = translate_tool_choice(_id, req.tool_choice.as_ref());
+
+    let tools: Vec<ConverseToolDef> = match req.tools.as_ref() {
+        Some(canonical) => {
+            let mut out = Vec::with_capacity(canonical.len());
+            for td in canonical {
+                append_tool_with_cache_point(id, td, &mut out);
+            }
+            out
+        }
+        None => Vec::new(),
+    };
+
+    if tools.is_empty() {
+        // No usable tool defs survived (none supplied, an empty list, or
+        // every entry was an Anthropic builtin that dropped). If the
+        // translated transcript still references tool blocks on the wire,
+        // backfill exactly one reserved dummy so Bedrock accepts the
+        // history; otherwise absence is the cleaner wire shape.
+        if has_wire_tool_history(messages) {
+            tracing::warn!(
+                provider = id,
+                "injecting reserved dummy toolSpec: Converse transcript references \
+                 tool blocks but the request offers no tools"
+            );
+            return Ok(Some(dummy_tool_config()));
+        }
+        return Ok(None);
+    }
+    let tool_choice = translate_tool_choice(id, req.tool_choice.as_ref());
     Ok(Some(ToolConfig { tools, tool_choice }))
+}
+
+/// True when the translated Converse transcript references tool blocks on
+/// the wire: BOTH a `toolUse` (assistant asked to call) AND a
+/// `toolResult` (result echoed back) must be present. Requiring both
+/// keeps the trigger tight -- a lone stray block does not fire the
+/// model-visible dummy backfill.
+fn has_wire_tool_history(messages: &[ConverseMessage]) -> bool {
+    let mut saw_use = false;
+    let mut saw_result = false;
+    for msg in messages {
+        for block in &msg.content {
+            match block {
+                ConverseContentBlock::ToolUse { .. } => saw_use = true,
+                ConverseContentBlock::ToolResult { .. } => saw_result = true,
+                _ => {}
+            }
+        }
+        if saw_use && saw_result {
+            return true;
+        }
+    }
+    false
+}
+
+/// The reserved dummy tool config: one `toolSpec` with a do-not-call
+/// description and an empty-object input schema. `tool_choice` is left
+/// absent so Converse defaults to `auto` -- the model MAY ignore the
+/// dummy; a forcing choice would compel a nonsensical call.
+fn dummy_tool_config() -> ToolConfig {
+    ToolConfig {
+        tools: vec![ConverseToolDef::Spec {
+            tool_spec: ConverseToolSpec {
+                name: HISTORY_COMPAT_TOOL_NAME.to_string(),
+                description: Some("history compatibility only; do not call".to_string()),
+                input_schema: ConverseInputSchema {
+                    json: serde_json::json!({"type": "object", "properties": {}}),
+                },
+            },
+        }],
+        tool_choice: None,
+    }
 }
 
 /// True when the caller's tool_choice means "do not call tools" --
@@ -269,5 +343,202 @@ fn translate_typed_tool_choice(
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use routectl_core::CustomTool;
+    use serde_json::json;
+    use tracing_test::traced_test;
+
+    use super::super::types::{ConverseMessage, ConverseToolResult, ConverseToolUse};
+
+    const ID: &str = "bedrock:test-converse";
+
+    fn tool_use_msg() -> ConverseMessage {
+        ConverseMessage {
+            role: "assistant".to_string(),
+            content: vec![ConverseContentBlock::ToolUse {
+                tool_use: ConverseToolUse {
+                    tool_use_id: "tu_1".to_string(),
+                    name: "calc".to_string(),
+                    input: json!({"expr": "2+2"}),
+                },
+            }],
+        }
+    }
+
+    fn tool_result_msg() -> ConverseMessage {
+        ConverseMessage {
+            role: "user".to_string(),
+            content: vec![ConverseContentBlock::ToolResult {
+                tool_result: ConverseToolResult {
+                    tool_use_id: "tu_1".to_string(),
+                    content: vec![],
+                    status: None,
+                },
+            }],
+        }
+    }
+
+    fn plain_msg() -> ConverseMessage {
+        ConverseMessage {
+            role: "user".to_string(),
+            content: vec![ConverseContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        }
+    }
+
+    fn wire_history() -> Vec<ConverseMessage> {
+        vec![tool_use_msg(), tool_result_msg()]
+    }
+
+    fn req(tool_choice: Option<Value>) -> ChatRequest {
+        ChatRequest {
+            tool_choice,
+            ..Default::default()
+        }
+    }
+
+    fn custom_tool() -> ToolDef {
+        ToolDef::Custom(CustomTool {
+            name: "get_weather".to_string(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        })
+    }
+
+    #[test]
+    fn injects_dummy_when_wire_history_but_no_tools() {
+        // Arrange
+        let request = req(None);
+        let messages = wire_history();
+
+        // Act
+        let cfg = build_tool_config(ID, &request, &messages).unwrap().unwrap();
+
+        // Assert: exactly one dummy toolSpec, auto/absent tool_choice.
+        assert_eq!(cfg.tools.len(), 1);
+        assert!(cfg.tool_choice.is_none(), "dummy must not force tool use");
+        let ConverseToolDef::Spec { tool_spec } = &cfg.tools[0] else {
+            panic!("expected a toolSpec entry");
+        };
+        assert_eq!(tool_spec.name, HISTORY_COMPAT_TOOL_NAME);
+        assert_eq!(
+            tool_spec.description.as_deref(),
+            Some("history compatibility only; do not call")
+        );
+        assert_eq!(
+            tool_spec.input_schema.json,
+            json!({"type": "object", "properties": {}})
+        );
+    }
+
+    #[test]
+    fn dummy_serializes_to_expected_wire_shape() {
+        // Arrange
+        let cfg = build_tool_config(ID, &req(None), &wire_history())
+            .unwrap()
+            .unwrap();
+
+        // Act
+        let v = serde_json::to_value(&cfg).unwrap();
+
+        // Assert
+        assert_eq!(
+            v,
+            json!({
+                "tools": [{
+                    "toolSpec": {
+                        "name": HISTORY_COMPAT_TOOL_NAME,
+                        "description": "history compatibility only; do not call",
+                        "inputSchema": {"json": {"type": "object", "properties": {}}}
+                    }
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn no_dummy_when_real_tools_present() {
+        // Arrange: real tools plus wire history -- real tools win.
+        let request = ChatRequest {
+            tools: Some(vec![custom_tool()]),
+            ..Default::default()
+        };
+
+        // Act
+        let cfg = build_tool_config(ID, &request, &wire_history())
+            .unwrap()
+            .unwrap();
+
+        // Assert
+        assert_eq!(cfg.tools.len(), 1);
+        let ConverseToolDef::Spec { tool_spec } = &cfg.tools[0] else {
+            panic!("expected a toolSpec entry");
+        };
+        assert_eq!(tool_spec.name, "get_weather");
+    }
+
+    #[test]
+    fn no_dummy_when_tool_choice_none_bare() {
+        let cfg = build_tool_config(ID, &req(Some(json!("none"))), &wire_history()).unwrap();
+        assert!(cfg.is_none(), "bare-string none suppresses the dummy");
+    }
+
+    #[test]
+    fn no_dummy_when_tool_choice_none_object() {
+        let cfg =
+            build_tool_config(ID, &req(Some(json!({"type": "none"}))), &wire_history()).unwrap();
+        assert!(cfg.is_none(), "object-shape none suppresses the dummy");
+    }
+
+    #[test]
+    fn no_dummy_when_no_wire_history() {
+        // Arrange: no tools, and a transcript with no tool blocks.
+        let messages = vec![plain_msg()];
+
+        // Act
+        let cfg = build_tool_config(ID, &req(None), &messages).unwrap();
+
+        // Assert
+        assert!(cfg.is_none(), "no history means no false-positive dummy");
+    }
+
+    #[test]
+    fn no_dummy_when_only_tool_use_present() {
+        // Arrange: a lone toolUse with no matching toolResult must not fire
+        // the model-visible backfill -- the trigger requires both.
+        let messages = vec![tool_use_msg(), plain_msg()];
+
+        // Act
+        let cfg = build_tool_config(ID, &req(None), &messages).unwrap();
+
+        // Assert
+        assert!(cfg.is_none());
+    }
+
+    #[test]
+    fn no_dummy_when_only_tool_result_present() {
+        let messages = vec![plain_msg(), tool_result_msg()];
+        let cfg = build_tool_config(ID, &req(None), &messages).unwrap();
+        assert!(cfg.is_none());
+    }
+
+    #[traced_test]
+    #[test]
+    fn warns_on_dummy_injection() {
+        // Act
+        let _ = build_tool_config(ID, &req(None), &wire_history()).unwrap();
+
+        // Assert: a WARN fires, carrying the provider id and no tool args.
+        assert!(logs_contain("injecting reserved dummy toolSpec"));
     }
 }
