@@ -19,6 +19,228 @@ use super::dialect::ReasoningDialect;
 use super::util::build_reasoning_detail;
 
 // ---------------------------------------------------------------------------
+// Streamed tool-call id synthesis
+// ---------------------------------------------------------------------------
+
+/// Per-stream synthesizer for missing streamed tool-call ids.
+///
+/// INVARIANT: every streamed OpenAI-shape `tool_call` must carry a
+/// non-empty `id` so the downstream openai->anthropic pairing (which
+/// keys the follow-up `tool_result` on the emitted id) is not orphaned.
+/// Some upstreams stream an indexed tool_call with no id at all; this
+/// synthesizes a stable one.
+///
+/// Scheme (matches the non-streaming `crate::tool_calls::normalize_tool_calls`
+/// fallback so the two paths cannot drift): the first delta of a
+/// `(choice.index, tool_call.index)` key that arrives id-less mints
+/// `call_{tool_call_index}` (choice 0) or `call_{choice}_{tool_call_index}`
+/// (choice > 0, so cross-choice ids never collide when `n > 1`); every
+/// later delta of that key reuses it. A key whose first delta already
+/// carried a non-empty id is left untouched (its later id-less argument
+/// deltas keep the verbatim passthrough shape).
+///
+/// Every id that reaches the wire -- real upstream ids and minted ids
+/// alike -- is RESERVED against its owning `(choice.index, tool_call.index)`
+/// slot. Reservation makes two failure modes impossible:
+///   - Once a slot has emitted an id, that id is STABLE: a late real id
+///     arriving after a mint (or after an earlier real id) never replaces
+///     the value the client already saw, so a single call never emits two
+///     different ids across its deltas.
+///   - A mint that would collide with an id already reserved by a
+///     DIFFERENT slot picks a unique alternative instead; a real upstream
+///     id that collides with a different slot's reserved id is genuinely
+///     ambiguous and fails the stream rather than mispairing a
+///     `tool_result` onto the wrong call.
+#[derive(Debug, Default)]
+pub(crate) struct StreamedToolCallIds {
+    slots: std::collections::HashMap<(u32, u32), IdSlot>,
+    /// Every id emitted on the wire -> the slot that owns it. Guards
+    /// against a mint or a real id colliding with a different slot's id.
+    reserved: std::collections::HashMap<String, (u32, u32)>,
+    /// Monotonic disambiguation counter for the rare mint collision.
+    mint_seq: u64,
+}
+
+#[derive(Debug)]
+enum IdSlot {
+    /// The first delta for this key carried a non-empty upstream id.
+    Upstream,
+    /// No upstream id arrived first; this id was minted and is reused.
+    Minted(String),
+}
+
+impl StreamedToolCallIds {
+    /// Fill in a stable id on every id-less streamed `tool_call` in
+    /// `chunk`, mutating the chunk in place before it is yielded.
+    ///
+    /// Returns `Err(Error::Streaming)` when a tool_call cannot be paired
+    /// safely: an id-less call whose `index` is not a valid `u32`, or a
+    /// real upstream id that collides with an id already reserved by a
+    /// different slot. A hard stream error beats routing a `tool_result`
+    /// to the wrong call.
+    pub(crate) fn fill_missing_ids(
+        &mut self,
+        provider_id: &str,
+        chunk: &mut ChatChunk,
+    ) -> Result<()> {
+        for choice in &mut chunk.choices {
+            let choice_index = choice.index;
+            let Some(tool_calls) = choice.delta.tool_calls.as_mut() else {
+                continue;
+            };
+            for tc in tool_calls.iter_mut() {
+                let index = parse_tool_call_index(tc);
+                let real_id = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+
+                if let Some(id) = real_id {
+                    // A tool_call that already carries an id is untouched
+                    // regardless of `index`; only track it when the index
+                    // is usable as a slot key.
+                    let Some(tc_index) = index else {
+                        continue;
+                    };
+                    self.apply_real_id(provider_id, choice_index, tc_index, tc, id)?;
+                    continue;
+                }
+
+                // Id-less: the `(choice, index)` slot key must be exact --
+                // a missing / negative / non-numeric / out-of-range index
+                // cannot silently collapse to 0 and mispair two distinct
+                // id-less calls onto the same synthesized id.
+                let Some(tc_index) = index else {
+                    return Err(Error::Streaming(format!(
+                        "provider `{provider_id}`: id-less streamed tool_call has a \
+                         missing or non-u32 `index`; cannot synthesize a stable id"
+                    )));
+                };
+                self.apply_missing_id(provider_id, choice_index, tc_index, tc);
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle a `tool_call` delta that arrived with a non-empty upstream id.
+    fn apply_real_id(
+        &mut self,
+        provider_id: &str,
+        choice_index: u32,
+        tc_index: u32,
+        tc: &mut Value,
+        id: String,
+    ) -> Result<()> {
+        let key = (choice_index, tc_index);
+        match self.slots.get(&key) {
+            // The slot already established an upstream id; keep passing the
+            // verbatim shape through (the client already has it).
+            Some(IdSlot::Upstream) => Ok(()),
+            // The slot minted an id first and the client already saw it; a
+            // late real id must NOT replace it, so overwrite this delta back
+            // to the established minted id.
+            Some(IdSlot::Minted(minted)) => {
+                set_tool_call_id(tc, minted);
+                Ok(())
+            }
+            // First delta for this slot. Reserve the real id, failing the
+            // stream if a different slot already owns it (mispairing risk).
+            None => {
+                if self.reserved_by_other(&id, key) {
+                    return Err(Error::Streaming(format!(
+                        "provider `{provider_id}`: streamed tool_call id `{id}` collides \
+                         with an id already reserved for a different call; cannot pair safely"
+                    )));
+                }
+                self.reserved.insert(id, key);
+                self.slots.insert(key, IdSlot::Upstream);
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle an id-less `tool_call` delta whose `index` is a valid `u32`.
+    fn apply_missing_id(
+        &mut self,
+        provider_id: &str,
+        choice_index: u32,
+        tc_index: u32,
+        tc: &mut Value,
+    ) {
+        let key = (choice_index, tc_index);
+        match self.slots.get(&key) {
+            // First delta established an upstream id; the client already has
+            // it, so later id-less deltas pass through untouched.
+            Some(IdSlot::Upstream) => {}
+            Some(IdSlot::Minted(id)) => set_tool_call_id(tc, id),
+            None => {
+                let id = self.mint_unique_id(choice_index, tc_index, key);
+                tracing::debug!(
+                    provider = %provider_id,
+                    choice_index,
+                    tool_call_index = tc_index,
+                    generated_id = %id,
+                    "openai-compat: synthesized missing streamed tool_call id"
+                );
+                set_tool_call_id(tc, &id);
+                self.reserved.insert(id.clone(), key);
+                self.slots.insert(key, IdSlot::Minted(id));
+            }
+        }
+    }
+
+    /// True when `id` is already reserved by a slot other than `key`.
+    fn reserved_by_other(&self, id: &str, key: (u32, u32)) -> bool {
+        matches!(self.reserved.get(id), Some(owner) if *owner != key)
+    }
+
+    /// Mint the scheme id for the slot; if a different slot already reserved
+    /// it, derive a guaranteed-unique alternative rather than colliding.
+    fn mint_unique_id(&mut self, choice_index: u32, tc_index: u32, key: (u32, u32)) -> String {
+        let base = mint_id(choice_index, tc_index);
+        if !self.reserved_by_other(&base, key) {
+            return base;
+        }
+        loop {
+            self.mint_seq += 1;
+            let candidate = format!("{base}_{}", self.mint_seq);
+            if !self.reserved.contains_key(&candidate) {
+                return candidate;
+            }
+        }
+    }
+}
+
+/// Parse a streamed `tool_call`'s `index` as a `u32`. Returns `None` for a
+/// missing, negative, non-numeric, or out-of-range `index` -- there is no
+/// fallback to 0, so an id-less call with a bad index is rejected upstream
+/// instead of colliding on slot `(choice, 0)`.
+fn parse_tool_call_index(tool_call: &Value) -> Option<u32> {
+    tool_call
+        .get("index")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+/// Mint a stable synthesized id. Choice 0 uses the non-streaming
+/// `call_{index}` form verbatim; a non-zero choice encodes the choice
+/// index so cross-choice ids stay distinct when `n > 1`.
+fn mint_id(choice_index: u32, tool_call_index: u32) -> String {
+    if choice_index == 0 {
+        format!("call_{tool_call_index}")
+    } else {
+        format!("call_{choice_index}_{tool_call_index}")
+    }
+}
+
+fn set_tool_call_id(tool_call: &mut Value, id: &str) {
+    if let Some(obj) = tool_call.as_object_mut() {
+        obj.insert("id".to_string(), Value::String(id.to_string()));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stateless path
 // ---------------------------------------------------------------------------
 
@@ -515,7 +737,328 @@ fn longest_partial_tag_suffix(s: &str, tag: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_core::schema::ChunkChoice;
     use serde_json::json;
+
+    // --- Streamed tool-call id synthesis (StreamedToolCallIds) ---
+
+    fn tool_call_chunk(choices: Vec<(u32, Vec<Value>)>) -> ChatChunk {
+        ChatChunk {
+            id: "chunk-1".into(),
+            model: "test".into(),
+            choices: choices
+                .into_iter()
+                .map(|(index, tool_calls)| ChunkChoice {
+                    index,
+                    delta: ChunkDelta {
+                        tool_calls: Some(tool_calls),
+                        ..Default::default()
+                    },
+                    finish_reason: None,
+                    matched_stop_sequence: None,
+                })
+                .collect(),
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        }
+    }
+
+    fn tool_call_id(chunk: &ChatChunk, choice: usize, call: usize) -> Option<String> {
+        chunk.choices[choice].delta.tool_calls.as_ref()?[call]
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// An id-less indexed streamed tool_call gets a stable synthesized
+    /// id on its first delta, and every later delta of the same key
+    /// reuses that exact id (so the openai->anthropic pairing keys on
+    /// one stable value across the whole tool call).
+    #[test]
+    fn streamed_tool_call_without_id_gets_synthesized_id_reused_across_deltas() {
+        let mut ids = StreamedToolCallIds::default();
+
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "type": "function",
+                        "function": {"name": "calc", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
+
+        // A later argument-only delta for the same key carries no id and
+        // must be backfilled with the SAME synthesized id.
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "function": {"arguments": "{\"x\":1}"}})],
+        )]);
+        ids.fill_missing_ids("p", &mut second).unwrap();
+        assert_eq!(tool_call_id(&second, 0, 0).as_deref(), Some("call_0"));
+    }
+
+    /// A streamed tool_call whose first delta already carries an id is
+    /// untouched; its later id-less argument deltas stay id-less (the
+    /// verbatim passthrough shape), so real-id streams are unchanged.
+    #[test]
+    fn streamed_tool_call_with_upstream_id_is_untouched() {
+        let mut ids = StreamedToolCallIds::default();
+
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![
+                json!({"index": 0, "id": "call_upstream", "type": "function",
+                        "function": {"name": "calc", "arguments": ""}}),
+            ],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_upstream"));
+
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "function": {"arguments": "{}"}})],
+        )]);
+        ids.fill_missing_ids("p", &mut second).unwrap();
+        // Left id-less -- the client already has the id from the first delta.
+        assert_eq!(tool_call_id(&second, 0, 0), None);
+    }
+
+    /// Two id-less tool_calls at the same tool-call index but different
+    /// choices (an `n > 1` response) get DISTINCT synthesized ids so
+    /// cross-choice ids never collide.
+    #[test]
+    fn idless_tool_calls_across_choices_get_distinct_ids() {
+        let mut ids = StreamedToolCallIds::default();
+        let mut chunk = tool_call_chunk(vec![
+            (
+                0,
+                vec![json!({"index": 0, "function": {"name": "a", "arguments": ""}})],
+            ),
+            (
+                1,
+                vec![json!({"index": 0, "function": {"name": "b", "arguments": ""}})],
+            ),
+        ]);
+        ids.fill_missing_ids("p", &mut chunk).unwrap();
+        let id0 = tool_call_id(&chunk, 0, 0);
+        let id1 = tool_call_id(&chunk, 1, 0);
+        assert_eq!(id0.as_deref(), Some("call_0"));
+        assert_eq!(id1.as_deref(), Some("call_1_0"));
+        assert_ne!(id0, id1, "cross-choice synthesized ids must be distinct");
+    }
+
+    /// The streamed synthesis scheme matches the non-streaming
+    /// `normalize_tool_calls` empty-id fallback, so the two paths cannot
+    /// drift.
+    #[test]
+    fn synthesized_streamed_id_matches_non_streaming_scheme() {
+        let mut ids = StreamedToolCallIds::default();
+        let mut chunk = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "function": {"name": "calc", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut chunk).unwrap();
+        let streamed = tool_call_id(&chunk, 0, 0).expect("synthesized id");
+
+        // Non-streaming path: an empty-id tool_call at array position 0.
+        let non_streaming = crate::tool_calls::normalize_tool_calls(
+            "p",
+            &[json!({"type": "function", "function": {"name": "calc", "arguments": "{}"}})],
+        );
+        assert_eq!(streamed, non_streaming[0].id);
+        assert_eq!(streamed, "call_0");
+    }
+
+    /// A chunk with no tool_calls (the common content delta) is left
+    /// untouched by the synthesizer.
+    #[test]
+    fn content_only_chunk_is_untouched_by_synthesizer() {
+        let mut ids = StreamedToolCallIds::default();
+        let mut chunk = ChatChunk {
+            id: "c".into(),
+            model: "m".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: Some("hi".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        };
+        ids.fill_missing_ids("p", &mut chunk).unwrap();
+        assert!(chunk.choices[0].delta.tool_calls.is_none());
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+    }
+
+    /// A real upstream id seen FIRST for one slot must not later be
+    /// re-minted onto a different id-less slot: when a subsequent id-less
+    /// slot's scheme id would equal that reserved real id, the synthesizer
+    /// picks a unique alternative instead of colliding.
+    #[test]
+    fn real_id_reserved_before_a_colliding_synthesized_id_is_minted() {
+        let mut ids = StreamedToolCallIds::default();
+
+        // Slot (0,1) carries the real upstream id "call_0" first.
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 1, "id": "call_0", "type": "function",
+                        "function": {"name": "a", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
+
+        // Slot (0,0) is id-less: its scheme id would be "call_0", already
+        // reserved by (0,1). It must mint a distinct id, not collide.
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "function": {"name": "b", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut second).unwrap();
+        let minted = tool_call_id(&second, 0, 0).expect("id-less slot minted an id");
+        assert_ne!(
+            minted, "call_0",
+            "mint must not collide with a reserved real id"
+        );
+    }
+
+    /// A slot whose first delta is id-less mints an id the client sees; a
+    /// LATER delta for the SAME slot that carries a real upstream id must
+    /// NOT replace the minted id -- the call keeps emitting one stable id
+    /// across all its deltas.
+    #[test]
+    fn late_real_id_for_a_minted_slot_keeps_the_established_id() {
+        let mut ids = StreamedToolCallIds::default();
+
+        // First delta id-less: mints "call_0".
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "type": "function",
+                        "function": {"name": "calc", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
+
+        // Later delta for the same slot now carries a real id; it must be
+        // overwritten back to the established minted id.
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "id": "call_real_late",
+                        "function": {"arguments": "{}"}})],
+        )]);
+        ids.fill_missing_ids("p", &mut second).unwrap();
+        assert_eq!(tool_call_id(&second, 0, 0).as_deref(), Some("call_0"));
+    }
+
+    /// A real upstream id that collides with an id ALREADY minted for a
+    /// different slot is genuinely ambiguous (two calls would pair on one
+    /// id): the stream fails hard rather than mispairing a tool_result.
+    #[test]
+    fn real_id_colliding_with_a_prior_synthesized_id_fails_the_stream() {
+        let mut ids = StreamedToolCallIds::default();
+
+        // Slot (0,0) is id-less: mints "call_0".
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "function": {"name": "a", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
+
+        // A different slot (0,1) now carries the real id "call_0".
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 1, "id": "call_0", "type": "function",
+                        "function": {"name": "b", "arguments": ""}})],
+        )]);
+        let err = ids
+            .fill_missing_ids("p", &mut second)
+            .expect_err("ambiguous id collision must fail the stream");
+        match err {
+            Error::Streaming(msg) => assert!(
+                msg.contains("collides"),
+                "error must name the collision, got: {msg}"
+            ),
+            other => panic!("expected Error::Streaming, got: {other:?}"),
+        }
+    }
+
+    /// An id-less streamed tool_call with a MISSING `index` cannot form a
+    /// slot key; it must fail the stream rather than collapse to slot 0.
+    #[test]
+    fn idless_tool_call_missing_index_fails_the_stream() {
+        let mut ids = StreamedToolCallIds::default();
+        let mut chunk = tool_call_chunk(vec![(
+            0,
+            vec![json!({"type": "function", "function": {"name": "a", "arguments": ""}})],
+        )]);
+        let err = ids
+            .fill_missing_ids("p", &mut chunk)
+            .expect_err("missing index must fail the stream");
+        assert!(matches!(err, Error::Streaming(_)));
+    }
+
+    /// An id-less streamed tool_call with a non-u32 `index` (negative,
+    /// fractional, or out-of-range) must fail the stream, not fall back to 0.
+    #[test]
+    fn idless_tool_call_non_u32_index_fails_the_stream() {
+        for bad_index in [
+            json!(-1),
+            json!(1.5),
+            json!("0"),
+            json!(u64::from(u32::MAX) + 1),
+        ] {
+            let mut ids = StreamedToolCallIds::default();
+            let mut chunk = tool_call_chunk(vec![(
+                0,
+                vec![json!({"index": bad_index,
+                            "function": {"name": "a", "arguments": ""}})],
+            )]);
+            let err = ids
+                .fill_missing_ids("p", &mut chunk)
+                .expect_err("non-u32 index must fail the stream");
+            assert!(matches!(err, Error::Streaming(_)), "index {bad_index:?}");
+        }
+    }
+
+    /// Two distinct id-less tool_calls with valid distinct indices get
+    /// distinct synthesized ids (no collapse onto slot 0).
+    #[test]
+    fn two_idless_tool_calls_with_distinct_indices_get_distinct_ids() {
+        let mut ids = StreamedToolCallIds::default();
+        let mut chunk = tool_call_chunk(vec![(
+            0,
+            vec![
+                json!({"index": 0, "function": {"name": "a", "arguments": ""}}),
+                json!({"index": 1, "function": {"name": "b", "arguments": ""}}),
+            ],
+        )]);
+        ids.fill_missing_ids("p", &mut chunk).unwrap();
+        let id0 = tool_call_id(&chunk, 0, 0);
+        let id1 = tool_call_id(&chunk, 0, 1);
+        assert_eq!(id0.as_deref(), Some("call_0"));
+        assert_eq!(id1.as_deref(), Some("call_1"));
+        assert_ne!(id0, id1, "distinct indices must yield distinct ids");
+    }
+
+    /// A tool_call that already carries an id is untouched regardless of a
+    /// missing / malformed `index` -- the index guard applies only to
+    /// id-less calls.
+    #[test]
+    fn tool_call_with_id_and_bad_index_is_untouched() {
+        let mut ids = StreamedToolCallIds::default();
+        let mut chunk = tool_call_chunk(vec![(
+            0,
+            vec![json!({"id": "call_kept", "type": "function",
+                        "function": {"name": "a", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut chunk).unwrap();
+        assert_eq!(tool_call_id(&chunk, 0, 0).as_deref(), Some("call_kept"));
+    }
 
     fn delta_chunk(content: Option<&str>, reasoning_content: Option<&str>) -> String {
         let mut delta = json!({});

@@ -116,8 +116,8 @@ pub struct ResponsesStreamState {
     /// Dense counter for `reasoning_details[].index`.
     next_detail_index: u32,
     /// True once `response.created` has been processed; used to emit
-    /// the empty role chunk exactly once (parity with anthropic_api's
-    /// message_start signal).
+    /// the opening `delta.role="assistant"` chunk exactly once per
+    /// stream, before any content delta.
     created_emitted: bool,
     /// Sticky flag: set to `true` the first time `handle_item_added`
     /// sees a `function_call` item, and never reset for the lifetime
@@ -204,9 +204,10 @@ impl ResponsesStreamState {
             return Vec::new();
         }
         self.created_emitted = true;
-        // Parity with anthropic_api `message_start`: emit an empty
-        // role chunk so OpenAI SSE clients see the start-of-stream
-        // signal before any content deltas.
+        // Opening role chunk: an OpenAI-Chat stream opens with a single
+        // `delta.role="assistant"` chunk before any content delta. Emitted
+        // once per stream (guarded by `created_emitted`), matching every
+        // peer egress lane.
         vec![ChatChunk {
             id: self.response_id.clone(),
             model: self.model.clone(),

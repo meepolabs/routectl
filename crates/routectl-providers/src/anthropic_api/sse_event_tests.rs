@@ -88,3 +88,72 @@ fn ping_event_remains_ok_none() {
         .unwrap();
     assert!(got.is_none(), "ping must be Ok(None), got: {got:?}");
 }
+
+const MESSAGE_START: &str = r#"{
+    "type":"message_start",
+    "message": {
+        "id": "msg_01",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "model": "claude-opus-4-7",
+        "stop_reason": null,
+        "stop_sequence": null,
+        "usage": {"input_tokens": 5, "output_tokens": 0}
+    }
+}"#;
+
+/// The Anthropic stream opens with a single `delta.role="assistant"`
+/// chunk at `message_start`, before any content -- matching every peer
+/// egress lane. The non-final chunk omits `usage` and `finish_reason`.
+#[test]
+fn anthropic_stream_opens_with_role_chunk() {
+    let mut state = SseState::default();
+    let chunk = state
+        .parse_event("test-anthropic", MESSAGE_START)
+        .unwrap()
+        .expect("message_start must emit the opening role chunk");
+    let delta = &chunk.choices[0].delta;
+    assert!(matches!(delta.role, Some(routectl_core::Role::Assistant)));
+    assert!(delta.content.is_none());
+    assert!(chunk.usage.is_none());
+    assert!(chunk.choices[0].finish_reason.is_none());
+
+    // The serialized shape must omit usage/finish_reason so the
+    // non-final opening chunk keeps the usage:null / finish_reason:null
+    // omission the peer lanes rely on.
+    let json = serde_json::to_value(&chunk).unwrap();
+    assert!(json.get("usage").is_none(), "usage must be omitted: {json}");
+    assert!(
+        json["choices"][0].get("finish_reason").is_none(),
+        "finish_reason must be omitted: {json}"
+    );
+}
+
+/// A stream that errors before `message_start` yields NO role chunk:
+/// the error surfaces and `role_emitted` was never set.
+#[test]
+fn anthropic_no_role_chunk_when_error_before_message_start() {
+    let mut state = SseState::default();
+    let payload = r#"{"type":"error","error":{"type":"overloaded_error","message":"slow"}}"#;
+    let err = state.parse_event("test-anthropic", payload);
+    assert!(err.is_err(), "error event must surface as Err");
+    assert!(
+        !state.role_emitted,
+        "no role chunk may be emitted before message_start"
+    );
+}
+
+/// A malformed upstream repeating `message_start` must not emit a second
+/// role chunk -- the opening role chunk fires exactly once per stream.
+#[test]
+fn anthropic_role_chunk_emitted_once() {
+    let mut state = SseState::default();
+    let first = state.parse_event("test-anthropic", MESSAGE_START).unwrap();
+    let second = state.parse_event("test-anthropic", MESSAGE_START).unwrap();
+    assert!(first.is_some(), "first message_start emits the role chunk");
+    assert!(
+        second.is_none(),
+        "a repeated message_start must not emit a second role chunk"
+    );
+}

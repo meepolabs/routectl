@@ -38,7 +38,7 @@
 //! are handled with the same warn-or-error policy as the openai-compat
 //! egress.
 
-mod eventstream;
+pub(crate) mod eventstream;
 mod extras;
 mod messages;
 mod request;

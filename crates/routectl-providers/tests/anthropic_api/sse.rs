@@ -35,9 +35,15 @@ fn sse_full_stream_sequence() {
         }
     }
 
+    // The stream opens with the role chunk (delta.role="assistant").
+    assert!(matches!(
+        chunks[0].choices[0].delta.role,
+        Some(routectl_core::Role::Assistant)
+    ));
+
     // Live thinking-string chunk: carries `reasoning` only. NO
     // structured ReasoningDetail (deferred to terminal chunk).
-    let live = &chunks[0];
+    let live = &chunks[1];
     let live_delta = &live.choices[0].delta;
     assert_eq!(live_delta.reasoning.as_deref(), Some("Let me think..."));
     assert!(
@@ -47,7 +53,7 @@ fn sse_full_stream_sequence() {
 
     // Terminal aggregated detail at content_block_stop: ONE entry
     // with BOTH text and signature.
-    let terminal = &chunks[1];
+    let terminal = &chunks[2];
     let terminal_delta = &terminal.choices[0].delta;
     assert!(
         terminal_delta.reasoning.is_none(),
@@ -59,7 +65,7 @@ fn sse_full_stream_sequence() {
     assert_eq!(detail.payload["signature"], "sig_xyz789");
 
     // Text content chunk follows.
-    let text_chunk = &chunks[2];
+    let text_chunk = &chunks[3];
     assert_eq!(
         text_chunk.choices[0].delta.content.as_deref(),
         Some("Hello world!")
@@ -99,9 +105,10 @@ fn sse_thinking_block_without_signature_emits_empty_signature() {
             chunks.push(c);
         }
     }
-    // [0] live string chunk
-    // [1] terminal aggregated detail
-    let terminal = &chunks[1];
+    // [0] role chunk
+    // [1] live string chunk
+    // [2] terminal aggregated detail
+    let terminal = &chunks[2];
     let detail = &terminal.choices[0].delta.reasoning_details[0];
     assert_eq!(detail.payload["text"], "thoughts");
     assert_eq!(detail.payload["signature"], "");
@@ -158,8 +165,8 @@ fn sse_tool_use_delta_emits_tool_calls() {
         }
     }
 
-    // Tool delta chunk
-    let tool_chunk = &chunks[0];
+    // Tool delta chunk (chunks[0] is the opening role chunk).
+    let tool_chunk = &chunks[1];
     let tool_calls = tool_chunk.choices[0].delta.tool_calls.as_ref().unwrap();
     assert_eq!(tool_calls[0]["function"]["name"], "search");
     assert_eq!(tool_calls[0]["function"]["arguments"], "{\"q\":\"rust\"}");

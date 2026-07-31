@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result,
+    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result, Role,
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -149,6 +149,11 @@ pub struct SseState {
     /// chunk (pre-first-chunk vs post-first-chunk fidelity loss); the
     /// degrade-to-drop behavior itself is identical either way.
     pub(super) canonical_chunk_emitted: bool,
+    /// Set once the opening `delta.role="assistant"` chunk has been
+    /// emitted (at `message_start`). Guards the once-per-stream
+    /// invariant so a malformed upstream repeating `message_start`
+    /// cannot emit a second role chunk.
+    pub(super) role_emitted: bool,
     /// Thinking blocks completed since the last tool_use block (or since
     /// the start of the turn). Accumulates across `content_block_stop`
     /// events for Thinking blocks; CLEARED at each `ContentBlockStart::ToolUse`
@@ -250,7 +255,18 @@ impl SseState {
                         }),
                     });
                 }
-                Ok(None)
+                // Opening role chunk: an OpenAI-Chat stream opens with
+                // a single `delta.role="assistant"` chunk before any
+                // content, matching every peer egress lane. Emitted at
+                // the structural stream open (`message_start`) only, so a
+                // stream that errors before `message_start` yields no role
+                // chunk. Guarded to fire exactly once.
+                if self.role_emitted {
+                    Ok(None)
+                } else {
+                    self.role_emitted = true;
+                    Ok(Some(self.role_chunk()))
+                }
             }
 
             SseEvent::ContentBlockStart {
@@ -659,6 +675,28 @@ impl SseState {
     // ------------------------------------------------------------------
     // Chunk constructors
     // ------------------------------------------------------------------
+
+    /// Opening chunk carrying only `delta.role="assistant"`. Non-final,
+    /// so `usage` and `finish_reason` stay absent (both skip-serialize
+    /// when None), matching the peer lanes' opening chunk shape.
+    fn role_chunk(&self) -> ChatChunk {
+        ChatChunk {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    role: Some(Role::Assistant),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        }
+    }
 
     fn make_text_chunk(&self, text: String) -> ChatChunk {
         ChatChunk {

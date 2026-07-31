@@ -189,13 +189,11 @@ async fn stream_upstream_meta_is_none_without_unified_headers() {
 }
 
 #[tokio::test]
-async fn stream_silently_drops_upstream_meta_when_no_canonical_chunk_yields() {
-    // Arrange: an SSE body of only message_start + message_stop, with
-    // no content_block / delta events. Both arms return Ok(None) (the
-    // pending_opaque safety-net flush does not fire because no unknown
-    // block was opened), so the stream yields ZERO canonical chunks.
-    // The unified-header carrier has no first chunk to attach to and is
-    // intentionally dropped -- this pins the documented contract.
+async fn stream_opening_role_chunk_carries_upstream_meta_without_content() {
+    // Arrange: an SSE body of only message_start + message_stop, with no
+    // content_block / delta events. The stream still opens with the
+    // canonical role chunk at message_start, so the unified-header
+    // carrier attaches to that first chunk instead of being dropped.
     let mock_server = MockServer::start().await;
     let sse_body = concat!(
         "event: message_start\n",
@@ -224,15 +222,21 @@ async fn stream_silently_drops_upstream_meta_when_no_canonical_chunk_yields() {
         chunks.push(result.unwrap());
     }
 
-    // Assert: zero canonical chunks yielded, so no chunk carries the
-    // unified-quota carrier -- it is silently dropped.
-    assert!(
-        chunks.is_empty(),
-        "message_start + message_stop with no content must yield zero canonical chunks, got: {chunks:?}"
+    // Assert: the opening role chunk is the single yielded chunk and it
+    // carries the unified-quota carrier (the response head is where the
+    // headers are available).
+    assert_eq!(
+        chunks.len(),
+        1,
+        "message_start + message_stop with no content yields the opening role chunk, got: {chunks:?}"
     );
+    assert!(matches!(
+        chunks[0].choices[0].delta.role,
+        Some(routectl_core::Role::Assistant)
+    ));
     assert!(
-        chunks.iter().all(|c| c.upstream_meta.is_none()),
-        "upstream_meta must be silently dropped when no chunk exists to carry it"
+        chunks[0].upstream_meta.is_some(),
+        "the opening role chunk must carry the unified-quota meta from the response head"
     );
 }
 

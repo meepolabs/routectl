@@ -34,15 +34,36 @@ fn run(event_type: &str, payload: &str, state: &mut ConverseStreamState) -> Vec<
 }
 
 #[test]
-fn message_start_emits_no_chunk() {
+fn bedrock_converse_stream_opens_with_role_chunk() {
     // Arrange
     let mut state = ConverseStreamState::default();
 
     // Act
     let chunks = run("messageStart", r#"{"role":"assistant"}"#, &mut state);
 
+    // Assert: a single opening role chunk in first position, no content.
+    assert_eq!(chunks.len(), 1);
+    let delta = &chunks[0].choices[0].delta;
+    assert!(matches!(delta.role, Some(Role::Assistant)));
+    assert!(delta.content.is_none());
+    assert!(chunks[0].usage.is_none());
+    assert!(chunks[0].choices[0].finish_reason.is_none());
+}
+
+/// A malformed upstream repeating `messageStart` must not emit a second
+/// role chunk -- the opening role chunk fires exactly once per stream.
+#[test]
+fn bedrock_converse_role_chunk_emitted_once() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let first = run("messageStart", r#"{"role":"assistant"}"#, &mut state);
+    let second = run("messageStart", r#"{"role":"assistant"}"#, &mut state);
+
     // Assert
-    assert!(chunks.is_empty());
+    assert_eq!(first.len(), 1);
+    assert!(second.is_empty());
 }
 
 #[test]

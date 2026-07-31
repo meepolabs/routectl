@@ -185,3 +185,14 @@ pub mod openai_responses;
 
 #[cfg(feature = "gemini")]
 pub mod gemini;
+
+// Cross-lane guard for the opening-role-chunk contract. Needs all four
+// role-emitting egress lanes compiled in.
+#[cfg(all(
+    test,
+    feature = "gemini",
+    feature = "openai-responses",
+    feature = "anthropic-api",
+    feature = "bedrock"
+))]
+mod streaming_role_parity_tests;

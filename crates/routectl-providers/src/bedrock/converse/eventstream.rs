@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result,
+    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -85,10 +85,15 @@ enum BlockState {
 
 /// Persistent state across all frames in one ConverseStream response.
 #[derive(Debug, Default)]
-struct ConverseStreamState {
+pub struct ConverseStreamState {
     blocks: HashMap<u32, BlockState>,
     next_call_index: u32,
     next_detail_index: u32,
+    /// Set once the opening `delta.role="assistant"` chunk has been
+    /// emitted (at `messageStart`). Guards the once-per-stream invariant
+    /// so a malformed upstream repeating `messageStart` cannot emit a
+    /// second role chunk.
+    role_emitted: bool,
     /// Captured at messageStop; emitted on the closing chunk. AWS
     /// emits messageStop before metadata, so we hold onto the value
     /// until metadata flushes (or until end-of-stream if metadata
@@ -151,7 +156,7 @@ where
 /// Translate one decoded Converse-stream frame to zero-or-more canonical
 /// `ChatChunk`s. Separate from `stream()` so unit tests can drive the
 /// decoder synchronously without spinning up a futures runtime.
-fn handle_converse_frame(
+pub fn handle_converse_frame(
     provider_id: &str,
     message: Message,
     state: &mut ConverseStreamState,
@@ -163,12 +168,20 @@ fn handle_converse_frame(
 
     match event_type.as_str() {
         "messageStart" => {
-            // Role only -- no content yet. Nothing to emit; the OpenAI
-            // wire shape doesn't have a "role assigned" event. We still
-            // parse the payload so a malformed start surfaces as a
+            // Parse the payload so a malformed start surfaces as a
             // streaming error rather than a silent skip.
             let _: StreamMessageStart = parse_payload(provider_id, payload, "messageStart")?;
-            Ok(vec![])
+            // Opening role chunk: an OpenAI-Chat stream opens with a
+            // single `delta.role="assistant"` chunk before any content,
+            // matching every peer egress lane. Emitted at the structural
+            // stream open (`messageStart`) only -- a stream that errors
+            // before it yields no role chunk. Guarded to fire once.
+            if state.role_emitted {
+                Ok(vec![])
+            } else {
+                state.role_emitted = true;
+                Ok(vec![role_chunk()])
+            }
         }
         "contentBlockStart" => {
             let ev: StreamContentBlockStart =
@@ -479,6 +492,30 @@ fn build_closing_chunk(
             matched_stop_sequence,
         }],
         usage: usage_delta,
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    }
+}
+
+/// Opening chunk carrying only `delta.role="assistant"`. Non-final, so
+/// `usage` and `finish_reason` stay absent (both skip-serialize when
+/// None), matching the peer lanes' opening chunk shape. id/model are
+/// empty like every other Converse-stream chunk (the ingress stamps the
+/// stream-stable envelope).
+fn role_chunk() -> ChatChunk {
+    ChatChunk {
+        id: String::new(),
+        model: String::new(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                role: Some(Role::Assistant),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        usage: None,
         opaque_events: Vec::new(),
         upstream_meta: None,
     }

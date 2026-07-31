@@ -224,7 +224,7 @@ mod scenario_7_basic_stream_sequence {
         // would still produce "Hello world" + finish_reason "stop"
         // and slip past the field-shape assertions below.
         // Expected mapping from the canned SSE body:
-        //   message_start         -> 0 (id/model captured for later chunks)
+        //   message_start         -> 1 (opening delta.role="assistant" chunk)
         //   content_block_start   -> 0 (block opens)
         //   content_block_delta x2 -> 2 (one per text fragment)
         //   content_block_stop    -> 0 (block closes)
@@ -232,8 +232,16 @@ mod scenario_7_basic_stream_sequence {
         //   message_stop          -> 0 (end-of-stream marker)
         assert_eq!(
             chunks.len(),
-            3,
-            "anthropic egress must emit exactly 3 chunks for this fixture (2 deltas + terminal); chunks: {chunks:?}"
+            4,
+            "anthropic egress must emit exactly 4 chunks for this fixture (role + 2 deltas + terminal); chunks: {chunks:?}"
+        );
+        // The stream opens with a single role chunk in first position.
+        assert!(
+            matches!(
+                chunks[0].choices[0].delta.role,
+                Some(routectl_core::Role::Assistant)
+            ),
+            "anthropic egress must open with a delta.role=assistant chunk; chunks: {chunks:?}"
         );
         // Text deltas reassemble in order.
         assert_eq!(
