@@ -40,8 +40,10 @@ use super::util::build_reasoning_detail;
 /// deltas keep the verbatim passthrough shape).
 ///
 /// Every id that reaches the wire -- real upstream ids and minted ids
-/// alike -- is RESERVED against its owning `(choice.index, tool_call.index)`
-/// slot. Reservation makes two failure modes impossible:
+/// alike -- is RESERVED. A real id keyed by a usable `(choice, index)`
+/// reserves against that slot; a real id whose `index` is malformed keys
+/// no slot but is still reserved by value so it participates in collision
+/// detection. Reservation makes two failure modes impossible:
 ///   - Once a slot has emitted an id, that id is STABLE: a late real id
 ///     arriving after a mint (or after an earlier real id) never replaces
 ///     the value the client already saw, so a single call never emits two
@@ -54,17 +56,23 @@ use super::util::build_reasoning_detail;
 #[derive(Debug, Default)]
 pub(crate) struct StreamedToolCallIds {
     slots: std::collections::HashMap<(u32, u32), IdSlot>,
-    /// Every id emitted on the wire -> the slot that owns it. Guards
-    /// against a mint or a real id colliding with a different slot's id.
-    reserved: std::collections::HashMap<String, (u32, u32)>,
+    /// Every id emitted on the wire -> the slot that owns it. `Some(key)`
+    /// is a keyed `(choice, index)` slot (real or minted); `None` is a
+    /// real upstream id whose `index` was malformed, so it has no slot
+    /// key but must still block a later mint and fail a later keyed id
+    /// that would duplicate it. Guards against a mint or a real id
+    /// colliding with a different slot's id.
+    reserved: std::collections::HashMap<String, Option<(u32, u32)>>,
     /// Monotonic disambiguation counter for the rare mint collision.
     mint_seq: u64,
 }
 
 #[derive(Debug)]
 enum IdSlot {
-    /// The first delta for this key carried a non-empty upstream id.
-    Upstream,
+    /// The first delta for this key carried a non-empty upstream id,
+    /// stored so a late delta carrying a DIFFERENT id is overwritten back
+    /// to the value the client already saw.
+    Upstream(String),
     /// No upstream id arrived first; this id was minted and is reused.
     Minted(String),
 }
@@ -98,12 +106,17 @@ impl StreamedToolCallIds {
 
                 if let Some(id) = real_id {
                     // A tool_call that already carries an id is untouched
-                    // regardless of `index`; only track it when the index
-                    // is usable as a slot key.
-                    let Some(tc_index) = index else {
-                        continue;
-                    };
-                    self.apply_real_id(provider_id, choice_index, tc_index, tc, id)?;
+                    // regardless of `index`. A usable index keys a slot; a
+                    // malformed index cannot key a slot but the id still
+                    // reaches the wire, so reserve it by value to keep it in
+                    // collision detection (block a later mint, fail a later
+                    // keyed id that would duplicate it).
+                    match index {
+                        Some(tc_index) => {
+                            self.apply_real_id(provider_id, choice_index, tc_index, tc, id)?;
+                        }
+                        None => self.reserve_wire_id(provider_id, id)?,
+                    }
                     continue;
                 }
 
@@ -134,14 +147,11 @@ impl StreamedToolCallIds {
     ) -> Result<()> {
         let key = (choice_index, tc_index);
         match self.slots.get(&key) {
-            // The slot already established an upstream id; keep passing the
-            // verbatim shape through (the client already has it).
-            Some(IdSlot::Upstream) => Ok(()),
-            // The slot minted an id first and the client already saw it; a
-            // late real id must NOT replace it, so overwrite this delta back
-            // to the established minted id.
-            Some(IdSlot::Minted(minted)) => {
-                set_tool_call_id(tc, minted);
+            // The slot already established an id (real or minted) that the
+            // client saw; a late delta carrying a DIFFERENT id must NOT
+            // replace it, so overwrite this delta back to the established id.
+            Some(IdSlot::Upstream(established) | IdSlot::Minted(established)) => {
+                set_tool_call_id(tc, established);
                 Ok(())
             }
             // First delta for this slot. Reserve the real id, failing the
@@ -153,8 +163,30 @@ impl StreamedToolCallIds {
                          with an id already reserved for a different call; cannot pair safely"
                     )));
                 }
-                self.reserved.insert(id, key);
-                self.slots.insert(key, IdSlot::Upstream);
+                self.reserved.insert(id.clone(), Some(key));
+                self.slots.insert(key, IdSlot::Upstream(id));
+                Ok(())
+            }
+        }
+    }
+
+    /// Reserve a real upstream id that arrived with a malformed `index` and
+    /// so cannot key a slot. The id still reaches the wire verbatim, so it
+    /// must participate in collision detection: fail the stream if a keyed
+    /// slot already owns this exact id (mispairing risk); otherwise record
+    /// it slot-less so a later mint disambiguates and a later keyed id that
+    /// would duplicate it fails. A repeat of the same slot-less id is
+    /// idempotent -- the client already saw it and it passes through
+    /// unchanged.
+    fn reserve_wire_id(&mut self, provider_id: &str, id: String) -> Result<()> {
+        match self.reserved.get(&id) {
+            Some(Some(_)) => Err(Error::Streaming(format!(
+                "provider `{provider_id}`: streamed tool_call id `{id}` collides \
+                 with an id already reserved for a different call; cannot pair safely"
+            ))),
+            Some(None) => Ok(()),
+            None => {
+                self.reserved.insert(id, None);
                 Ok(())
             }
         }
@@ -172,7 +204,7 @@ impl StreamedToolCallIds {
         match self.slots.get(&key) {
             // First delta established an upstream id; the client already has
             // it, so later id-less deltas pass through untouched.
-            Some(IdSlot::Upstream) => {}
+            Some(IdSlot::Upstream(_)) => {}
             Some(IdSlot::Minted(id)) => set_tool_call_id(tc, id),
             None => {
                 let id = self.mint_unique_id(choice_index, tc_index, key);
@@ -184,15 +216,16 @@ impl StreamedToolCallIds {
                     "openai-compat: synthesized missing streamed tool_call id"
                 );
                 set_tool_call_id(tc, &id);
-                self.reserved.insert(id.clone(), key);
+                self.reserved.insert(id.clone(), Some(key));
                 self.slots.insert(key, IdSlot::Minted(id));
             }
         }
     }
 
-    /// True when `id` is already reserved by a slot other than `key`.
+    /// True when `id` is already reserved by a slot other than `key` (a
+    /// different keyed slot, or a slot-less real id).
     fn reserved_by_other(&self, id: &str, key: (u32, u32)) -> bool {
-        matches!(self.reserved.get(id), Some(owner) if *owner != key)
+        matches!(self.reserved.get(id), Some(owner) if *owner != Some(key))
     }
 
     /// Mint the scheme id for the slot; if a different slot already reserved
@@ -985,6 +1018,126 @@ mod tests {
             ),
             other => panic!("expected Error::Streaming, got: {other:?}"),
         }
+    }
+
+    /// A slot whose first delta carried a real upstream id keeps that id
+    /// stable: a LATER delta for the SAME slot that carries a DIFFERENT
+    /// real id must be overwritten back to the established id, so the call
+    /// never emits two different ids across its deltas.
+    #[test]
+    fn real_id_slot_keeps_its_id_against_a_late_differing_real_id() {
+        let mut ids = StreamedToolCallIds::default();
+
+        // First delta establishes the real id "call_first" for slot (0,0).
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "id": "call_first", "type": "function",
+                        "function": {"name": "calc", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_first"));
+
+        // A later delta for the same slot carries a different real id; it
+        // must be overwritten back to the established id.
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "id": "call_changed",
+                        "function": {"arguments": "{}"}})],
+        )]);
+        ids.fill_missing_ids("p", &mut second).unwrap();
+        assert_eq!(tool_call_id(&second, 0, 0).as_deref(), Some("call_first"));
+    }
+
+    /// Two DIFFERENT slots that both carry the same real upstream id are
+    /// genuinely ambiguous (a tool_result would pair on one id shared by
+    /// two calls): the stream fails hard rather than mispairing.
+    #[test]
+    fn real_id_colliding_with_a_prior_real_id_on_a_different_slot_fails_the_stream() {
+        let mut ids = StreamedToolCallIds::default();
+
+        // Slot (0,0) carries the real id "call_dup".
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "id": "call_dup", "type": "function",
+                        "function": {"name": "a", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_dup"));
+
+        // A different slot (0,1) carries the SAME real id "call_dup".
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 1, "id": "call_dup", "type": "function",
+                        "function": {"name": "b", "arguments": ""}})],
+        )]);
+        let err = ids
+            .fill_missing_ids("p", &mut second)
+            .expect_err("duplicate real id on a different slot must fail the stream");
+        match err {
+            Error::Streaming(msg) => assert!(
+                msg.contains("collides"),
+                "error must name the collision, got: {msg}"
+            ),
+            other => panic!("expected Error::Streaming, got: {other:?}"),
+        }
+    }
+
+    /// A real upstream id whose `index` is malformed cannot key a slot, but
+    /// it still reaches the wire and must be reserved by value: a later
+    /// id-less slot whose scheme id would equal that reserved real id mints
+    /// a distinct id instead of colliding.
+    #[test]
+    fn real_id_with_malformed_index_is_reserved_against_a_later_mint() {
+        let mut ids = StreamedToolCallIds::default();
+
+        // A real id "call_0" arrives with a missing index -> no slot key,
+        // reserved by value, passed through verbatim.
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"id": "call_0", "type": "function",
+                        "function": {"name": "a", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
+
+        // Slot (0,0) is id-less: its scheme id "call_0" is already reserved
+        // by the malformed real id, so it must mint a distinct id.
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "function": {"name": "b", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut second).unwrap();
+        let minted = tool_call_id(&second, 0, 0).expect("id-less slot minted an id");
+        assert_ne!(
+            minted, "call_0",
+            "mint must not collide with a reserved malformed-index real id"
+        );
+    }
+
+    /// A real upstream id whose `index` is malformed still fails the stream
+    /// when it duplicates an id a keyed slot already owns (mispairing risk).
+    #[test]
+    fn real_id_with_malformed_index_colliding_with_a_keyed_slot_fails_the_stream() {
+        let mut ids = StreamedToolCallIds::default();
+
+        // Slot (0,0) mints "call_0".
+        let mut first = tool_call_chunk(vec![(
+            0,
+            vec![json!({"index": 0, "function": {"name": "a", "arguments": ""}})],
+        )]);
+        ids.fill_missing_ids("p", &mut first).unwrap();
+        assert_eq!(tool_call_id(&first, 0, 0).as_deref(), Some("call_0"));
+
+        // A malformed-index real id duplicating that minted id must fail.
+        let mut second = tool_call_chunk(vec![(
+            0,
+            vec![json!({"id": "call_0", "type": "function",
+                        "function": {"name": "b", "arguments": ""}})],
+        )]);
+        let err = ids
+            .fill_missing_ids("p", &mut second)
+            .expect_err("malformed real id duplicating a keyed slot must fail");
+        assert!(matches!(err, Error::Streaming(_)));
     }
 
     /// An id-less streamed tool_call with a MISSING `index` cannot form a

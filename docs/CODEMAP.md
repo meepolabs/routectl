@@ -1395,7 +1395,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `rate_limit_reset_hint` clamps an `Error::Upstream.retry_after` to the
   configured ceiling and folds a small reset into the next sleep (a larger
   reset parks the provider via the breaker instead). `run_with_timeout`,
-  `wrap_with_breaker_accounting`, and `try_stream_with_first_chunk` wrap each
+  `wrap_with_breaker_accounting`, and `try_stream_with_first_content` (buffers
+  content-free leading chunks -- a `delta.role` opener, id/model metadata --
+  until the first content-bearing chunk per `is_content_bearing`, so the
+  fallback boundary is first CONTENT, not stream-open) wrap each
   attempt; `policy_for` + `compose_attempt_policy` resolve the per-attempt
   policy. Failure-class routing threads
   `routectl_core::failure_class::classify` through every error arm:

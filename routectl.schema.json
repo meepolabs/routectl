@@ -1758,7 +1758,7 @@
         },
         "stream_first_byte_timeout_ms": {
           "default": 600000,
-          "description": "First-byte timeout for streaming responses. If the upstream\nhasn't emitted any bytes in this window, the stream is\nabandoned and (if no chunk has been delivered yet) the next\nprovider in the chain is tried.",
+          "description": "First-content timeout for streaming responses. If the upstream\nhasn't emitted a content-bearing chunk in this window, the stream\nis abandoned and (if no content has been delivered yet) the next\nprovider in the chain is tried. Content-free leading chunks (a\n`delta.role` opener, id/model metadata) neither reset nor satisfy\nthis timeout.",
           "format": "uint64",
           "minimum": 0,
           "type": [

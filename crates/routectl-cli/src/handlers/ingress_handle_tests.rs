@@ -2806,6 +2806,112 @@ async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row()
     );
 }
 
+/// A `DispatchFut` that never resolves and records its own drop, so a test can
+/// prove the warm task CANCELLED (dropped) the pending dispatch -- releasing
+/// the upstream request and any half-open probe slot the future holds -- rather
+/// than polling it to the first-content timeout.
+struct DropTrackingPendingDispatch {
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::future::Future for DropTrackingPendingDispatch {
+    type Output = routectl_router::DispatchedStream;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for DropTrackingPendingDispatch {
+    fn drop(&mut self) {
+        self.dropped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Regression: the content-commit boundary keeps the router dispatch PENDING
+/// through content-free leading chunks (role, metadata) until the first real
+/// content chunk. On warm-hold, a client that disconnects during that extended
+/// pre-content window must be detected while the dispatch is still pending --
+/// the warm task must cancel the dispatch and finalize `client_disconnect`
+/// promptly, NOT wait out the full first-content timeout and record
+/// `upstream_error`. Cancelling by DROPPING the pending future releases the
+/// upstream request + probe slot, and taking the un-finalized exit means the
+/// breaker/probe are never debited.
+#[tokio::test]
+async fn warm_render_cancels_pending_dispatch_on_client_disconnect_before_content() {
+    use crate::ingress::anthropic::AnthropicIngress;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Arrange: warm-hold with a dispatch that never resolves (models a
+    // provider that emits leading role/metadata then hangs -- from the CLI's
+    // vantage the content-boundary rule keeps this future pending).
+    let dropped = Arc::new(AtomicBool::new(false));
+    let fut: DispatchFut = Box::pin(DropTrackingPendingDispatch {
+        dropped: Arc::clone(&dropped),
+    });
+    let router = k_test_router();
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-warm-disco");
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 5,
+        model: "m".into(),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+
+    // Act: spawn the warm task, drain the early frame (Anthropic flushes
+    // message_start before awaiting the dispatch), then drop the receiver to
+    // model the client hanging up while the dispatch is still pending.
+    let (rows, events) = routectl_testkit::with_capture(async move {
+        let handle = tokio::spawn(warm_render_task(
+            fut,
+            AnthropicIngress,
+            capture,
+            tx,
+            router,
+            None,
+            stream_ctx,
+        ));
+        rx.recv().await.expect("early frame before disconnect");
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("warm task must return promptly after client disconnect")
+            .expect("warm task panicked");
+        rig.flush_and_read().await
+    })
+    .await;
+
+    // Assert: the pending dispatch was dropped (upstream + probe slot released).
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the pending dispatch must be cancelled (dropped), not polled to timeout"
+    );
+    // Exactly one row, finalized as client_disconnect (not upstream_error) with
+    // no stage marker -- the RAII Drop path, so no breaker/probe debit.
+    assert_eq!(rows.len(), 1, "exactly one usage row");
+    assert_eq!(
+        rows[0].outcome, "client_disconnect",
+        "a disconnect during the pending pre-content window finalizes client_disconnect"
+    );
+    assert_eq!(
+        rows[0].stream_stage, None,
+        "client cancel is not an upstream stage failure -- no pre_content_dispatch marker"
+    );
+
+    // Exactly one DEBUG disconnect breadcrumb from the warm-hold select arm.
+    let disconnects: Vec<&routectl_testkit::CapturedEvent> = events
+        .iter()
+        .filter(|e| e.field("reason") == Some("client_disconnected"))
+        .collect();
+    assert_eq!(disconnects.len(), 1, "exactly one disconnect breadcrumb");
+    assert_eq!(disconnects[0].level, tracing::Level::DEBUG);
+}
+
 /// Grace-expiry SELECTION: a dispatch that never resolves must make the grace
 /// timer elapse and COMMIT the SSE `Response` (warm-hold), rather than block
 /// the handler. Uses paused time so the grace deadline auto-advances.

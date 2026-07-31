@@ -95,6 +95,15 @@ impl Provider for HealthySeat {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let chunk = ChatChunk {
             id: format!("ok-{}", self.id),
+            choices: vec![routectl_core::ChunkChoice {
+                index: 0,
+                delta: routectl_core::ChunkDelta {
+                    content: Some("ok".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
             ..Default::default()
         };
         Ok(futures::stream::once(async move { Ok(chunk) }).boxed())
