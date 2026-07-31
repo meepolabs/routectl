@@ -31,6 +31,10 @@ use super::types::{
 /// The config's `id` is used only for error attribution.
 pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
     warn_dropped_cache_control(provider_id, req);
+    // Responses-dialect reasoning context/mode has no Gemini home (it is
+    // dropped as a managed key in merge_payload_extras); WARN once so the
+    // loss isn't silent.
+    crate::responses_reasoning_guard::warn_dropped_reasoning_dialect(provider_id, req);
     let system_instruction = build_system_instruction(req);
     let contents = build_contents(provider_id, req)?;
     let (tools, tool_config) = build_tools_and_config(provider_id, req);
@@ -2187,6 +2191,34 @@ mod tests {
             model_turn.parts.last().unwrap().text.as_deref(),
             Some("the answer")
         );
+    }
+
+    #[test]
+    #[traced_test]
+    fn responses_reasoning_context_mode_dropped_and_warns() {
+        // A Responses-ingress request carrying reasoning context/mode routed
+        // to the Gemini egress does NOT emit them and warns once.
+        let mut req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")].into(),
+            ..Default::default()
+        };
+        req.provider_extras = Some(json!({"reasoning": {"context": "all_turns", "mode": "pro"}}));
+
+        let r = translate("gemini:test", &req).expect("translate");
+        let body = serde_json::to_value(&r).unwrap();
+        // Merge the remainder as the real path does; managed key -> dropped.
+        let mut body = body;
+        merge_payload_extras(
+            "gemini:test",
+            &mut body,
+            req.provider_extras.as_ref().unwrap(),
+        );
+
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("context").is_none());
+        assert!(body.get("mode").is_none());
+        assert!(logs_contain("reasoning context/mode dropped"));
     }
 
     #[test]

@@ -292,7 +292,7 @@ listed at the bottom of each crate.
   `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
-  `retry_after`
+  `retry_after`, `responses_reasoning_guard`
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin
   and User-Agent override; also owns the response-body cap cluster shared by
@@ -331,6 +331,11 @@ listed at the bottom of each crate.
 - `src/system_filter.rs` -- shared predicate + strip helper for the Claude
   Code billing/attribution system block; used by the egresses before
   forwarding upstream
+- `src/responses_reasoning_guard.rs` -- shared leak-guard
+  (`warn_dropped_reasoning_dialect`): one WARN per request (no field values)
+  when a non-Responses egress (openai-compat/openrouter, anthropic-api,
+  gemini) drops the OpenAI-Responses-dialect `reasoning.context` /
+  `reasoning.mode` carried through `provider_extras["reasoning"]`
 - `src/claude_signing.rs` -- byte-level re-signer for the billing-header
   checksum; re-signs an existing billing block in place after egress body
   mutations
@@ -660,7 +665,12 @@ listed at the bottom of each crate.
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
   `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key
-  provider_extras allowlist; ChatgptOauth + BedrockMantle `store=false` lock
+  provider_extras allowlist; ChatgptOauth + BedrockMantle `store=false` lock.
+  `apply_reasoning` sets `effort` from the canonical value, defaults `summary`
+  to `"auto"` only when the caller set none, and overlays the Responses-dialect
+  remainder (`summary`/`context`/`mode`/future) carried in
+  `provider_extras["reasoning"]`; summary/context/mode are independently
+  emission-worthy, an explicit `enabled:false` (no effort) still omits
 - `src/openai_responses/response.rs` -- Responses response -> canonical
   (output walk, finish_reason from status, usage); stamps
   `lane_format_tag(auth_kind)` on every emitted reasoning detail
@@ -2627,8 +2637,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `function_call` / `function_call_output` / `reasoning`) into `messages[]`,
   lifts `instructions`->`system`, `max_output_tokens`->`max_tokens`,
   `text.format`->`response_format`; forward-compat sweep into
-  `provider_extras`. Statefulness contract: `previous_response_id` -> 400;
-  `store:true` (no prior id) accepted with WARN (persistence ignored)
+  `provider_extras`. `reasoning.effort` lifts to canonical `ReasoningConfig`;
+  the reasoning remainder (`summary`/`context`/`mode`/future) is stashed under
+  `provider_extras["reasoning"]` (closed enums `summary`/`context` validated ->
+  local 400 on an out-of-range value, `mode` open passthrough). Statefulness
+  contract: `previous_response_id` -> 400; `store:true` (no prior id) accepted
+  with WARN (persistence ignored)
 - `src/ingress/openai_responses/render.rs` -- canonical `ChatResponse` ->
   Responses response body (`object:"response"`, `status`, `output[]` of
   message / function_call / reasoning items)

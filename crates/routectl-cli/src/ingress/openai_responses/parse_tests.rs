@@ -29,6 +29,12 @@ fn parse_with_headers(headers: &HeaderMap, body: serde_json::Value) -> ChatReque
         .expect("request should parse")
 }
 
+fn parse_err(body: serde_json::Value) -> Error {
+    ResponsesIngress
+        .parse_request_value(&HeaderMap::new(), body)
+        .expect_err("request should be rejected")
+}
+
 fn alias_headers(value: &str) -> HeaderMap {
     let mut h = HeaderMap::new();
     h.insert(
@@ -667,9 +673,11 @@ fn reasoning_object_maps_effort_to_reasoning_config() {
 }
 
 #[test]
-fn reasoning_object_without_effort_yields_no_config() {
-    // Arrange: a summary-only reasoning object carries nothing canonical
-    // models, so reasoning stays None.
+fn reasoning_summary_only_carries_to_provider_extras() {
+    // Arrange: a summary-only reasoning object carries no effort, so the
+    // canonical ReasoningConfig stays None -- but the summary must survive
+    // under provider_extras["reasoning"] for the Responses egress to re-emit
+    // (the historical drop was the confirmed bug).
     let body = json!({
         "model": "m",
         "input": "hi",
@@ -681,6 +689,180 @@ fn reasoning_object_without_effort_yields_no_config() {
 
     // Assert
     assert!(req.reasoning.is_none());
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"summary": "auto"})
+    );
+}
+
+#[test]
+fn reasoning_effort_lifts_and_summary_carries_together() {
+    // Arrange: effort lifts into canonical config; the summary rides along
+    // in the provider_extras remainder (effort is stripped out of it).
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"effort": "high", "summary": "concise"}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert_eq!(
+        req.reasoning.as_ref().unwrap().effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"summary": "concise"})
+    );
+}
+
+#[test]
+fn reasoning_context_and_mode_carry_to_provider_extras() {
+    // Arrange: context (closed enum) and mode (open string) both survive
+    // the ingress under the reasoning remainder.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"effort": "medium", "context": "all_turns", "mode": "pro"}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert_eq!(
+        req.reasoning.as_ref().unwrap().effort.as_deref(),
+        Some("medium")
+    );
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"context": "all_turns", "mode": "pro"})
+    );
+}
+
+#[test]
+fn reasoning_arbitrary_mode_string_passes_through_unvalidated() {
+    // Arrange: mode is an intentionally open enum on the Responses schema;
+    // an unrecognized value must pass through, not 400.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"mode": "some-future-mode"}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"mode": "some-future-mode"})
+    );
+}
+
+#[test]
+fn reasoning_non_string_mode_bool_is_rejected() {
+    // Arrange: mode's value is open, but its TYPE must be a string. A bool
+    // would forward to a guaranteed upstream 400, so reject it locally.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"mode": false}
+    });
+
+    // Act
+    let err = parse_err(body);
+
+    // Assert
+    assert!(
+        matches!(err, Error::Validation(_)),
+        "expected local 400 for a non-string mode, got {err:?}"
+    );
+}
+
+#[test]
+fn reasoning_non_string_mode_number_is_rejected() {
+    // Arrange: a numeric mode is likewise a type error, not an open-enum
+    // value.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"mode": 123}
+    });
+
+    // Act
+    let err = parse_err(body);
+
+    // Assert
+    assert!(
+        matches!(err, Error::Validation(_)),
+        "expected local 400 for a numeric mode, got {err:?}"
+    );
+}
+
+#[test]
+fn reasoning_null_summary_is_treated_as_unset() {
+    // Arrange: a null summary means "unset" -- it must not carry to the
+    // egress (where it would block the "auto" default) nor 400.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"effort": "high", "summary": null, "context": "all_turns"}
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert: effort lifts; only the non-null context remains.
+    assert_eq!(
+        req.reasoning.as_ref().unwrap().effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        req.provider_extras.unwrap()["reasoning"],
+        json!({"context": "all_turns"})
+    );
+}
+
+#[test]
+fn reasoning_invalid_summary_value_is_rejected() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"summary": "verbose"}
+    });
+
+    // Act
+    let err = parse_err(body);
+
+    // Assert: local 400, not clamped or forwarded.
+    assert!(
+        matches!(err, Error::Validation(_)),
+        "expected 400, got {err:?}"
+    );
+}
+
+#[test]
+fn reasoning_invalid_context_value_is_rejected() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "reasoning": {"context": "everything"}
+    });
+
+    // Act
+    let err = parse_err(body);
+
+    // Assert
+    assert!(
+        matches!(err, Error::Validation(_)),
+        "expected 400, got {err:?}"
+    );
 }
 
 #[test]
@@ -1111,6 +1293,95 @@ fn known_kinds_produce_no_passthrough() {
     assert!(
         req.routectl_internal.responses_input_passthrough.is_empty(),
         "modeled kinds must not populate the passthrough carrier"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// reasoning sub-key fidelity (ingress -> Responses egress wire)
+//
+// These drive each accepted summary/context value, a mode-only request, and
+// a full effort+summary+context+mode request THROUGH the ingress into the
+// canonical request and then out the real Responses egress, asserting the
+// emitted wire `reasoning` object -- not by hand-constructing
+// provider_extras. This closes the passthrough loop end to end.
+// ---------------------------------------------------------------------------
+
+/// Drive a Responses `reasoning` object through the ingress and back out the
+/// Responses egress, returning the emitted wire `reasoning` object.
+fn ingress_to_egress_reasoning(reasoning: serde_json::Value) -> serde_json::Value {
+    let body = json!({ "model": "gpt-5-codex", "input": "hi", "reasoning": reasoning });
+    let req = parse(body);
+    let out = responses_egress_body(&req);
+    out["reasoning"].clone()
+}
+
+#[test]
+fn each_accepted_summary_value_reaches_the_wire_from_ingress() {
+    for summary in ["auto", "concise", "detailed"] {
+        // Act
+        let wire = ingress_to_egress_reasoning(json!({"effort": "high", "summary": summary}));
+
+        // Assert: the caller-set summary survives verbatim onto the wire.
+        assert_eq!(
+            wire,
+            json!({"effort": "high", "summary": summary}),
+            "summary {summary} must reach the wire from ingress; got: {wire}"
+        );
+    }
+}
+
+#[test]
+fn each_accepted_context_value_reaches_the_wire_from_ingress() {
+    for context in ["auto", "current_turn", "all_turns"] {
+        // Act
+        let wire = ingress_to_egress_reasoning(json!({"effort": "high", "context": context}));
+
+        // Assert: context rides onto the wire alongside the defaulted summary.
+        assert_eq!(
+            wire,
+            json!({"effort": "high", "summary": "auto", "context": context}),
+            "context {context} must reach the wire from ingress; got: {wire}"
+        );
+    }
+}
+
+#[test]
+fn mode_only_request_still_emits_reasoning_object_on_the_wire() {
+    // Arrange/Act: a mode-only reasoning object (no effort/summary/context)
+    // driven ingress -> egress.
+    let wire = ingress_to_egress_reasoning(json!({"mode": "pro"}));
+
+    // Assert: a reasoning object is emitted carrying the mode (summary
+    // defaults to auto since the caller set none).
+    assert_eq!(
+        wire,
+        json!({"summary": "auto", "mode": "pro"}),
+        "a mode-only request must still emit a reasoning object; got: {wire}"
+    );
+}
+
+#[test]
+fn full_reasoning_request_round_trips_ingress_to_egress_byte_for_byte() {
+    // Arrange/Act: a full reasoning request exercises every knob at once --
+    // effort lifts into canonical, summary/context/mode ride the remainder,
+    // and the egress must reassemble the exact wire object.
+    let wire = ingress_to_egress_reasoning(json!({
+        "effort": "high",
+        "summary": "detailed",
+        "context": "all_turns",
+        "mode": "pro"
+    }));
+
+    // Assert: the emitted wire object matches the inbound shape byte-for-byte.
+    assert_eq!(
+        wire,
+        json!({
+            "effort": "high",
+            "summary": "detailed",
+            "context": "all_turns",
+            "mode": "pro"
+        }),
+        "the full reasoning request must round-trip byte-for-byte; got: {wire}"
     );
 }
 

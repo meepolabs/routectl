@@ -18,6 +18,17 @@
 #[cfg(feature = "openai-compat")]
 pub(crate) mod model_profile;
 
+// Shared leak-guard: WARN once when a non-Responses egress drops the
+// OpenAI-Responses-dialect `reasoning.context` / `reasoning.mode` carried
+// through `provider_extras["reasoning"]`. Gated on the egresses that drop
+// it (every non-Responses HTTP egress that merges provider_extras).
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "gemini"
+))]
+pub(crate) mod responses_reasoning_guard;
+
 pub(crate) mod http_client;
 
 // Shared single-shot reachability probe for the HTTP-based egresses
