@@ -68,7 +68,8 @@ impl IngressAdapter for OpenAiIngress {
         // bytes. The pre-deserialization Value mutations below
         // (`reasoning_content` coalescing, `max_completion_tokens`
         // rename, `developer` role rewrite, `reasoning_effort` promotion,
-        // unknown-field sweep) are load-bearing forward-compat surface,
+        // `systemPrompt` alias promotion, unknown-field sweep) are
+        // load-bearing forward-compat surface,
         // so this dialect stays Value-based -- neutral vs the prior
         // extractor-owned parse. A top-level syntax error surfaces as
         // `Error::Json` (the handler renders it as a 400 malformed body).
@@ -120,6 +121,16 @@ impl IngressAdapter for OpenAiIngress {
         // is never composed. Promote it into `reasoning.effort` here, then
         // drop the top-level key so it never survives serde or the sweep.
         normalize_reasoning_effort(&mut body);
+        // Cursor-style clients set the system prompt via a top-level
+        // `systemPrompt` string. `ChatRequest` has no such field, and
+        // `is_canonical_request_key` returns false for it, so without this
+        // the key is swept into `provider_extras` and merged VERBATIM onto
+        // the openai-compat wire: the prompt is ignored AND strict hosts
+        // reject the request with `Unsupported parameter(s): systemPrompt`.
+        // Promote it into canonical `system` and drop the alias key. Runs
+        // before the sweep, so a non-string alias is rejected here rather
+        // than silently forwarded.
+        normalize_system_prompt_alias(&mut body)?;
 
         // Forward-compat sweep: pull every top-level key NOT on
         // `ChatRequest` into `provider_extras` so OpenAI clients
@@ -576,7 +587,63 @@ fn normalize_reasoning_effort(body: &mut Value) {
     }
 }
 
-/// Strip `matched_stop_sequence` from every `Choice` in a `ChatResponse`.
+/// Promote the Cursor-style top-level `systemPrompt` string into the
+/// canonical `system` field before serde deserialization, and drop the
+/// alias key unconditionally so it can never reach a strict host verbatim.
+///
+/// ADMISSION RULE for any future alias arm: a top-level key is promoted
+/// to canonical `system` iff it is a well-known system-prompt alias
+/// carrying a flat string that maps 1:1 to `req.system` with zero
+/// semantic translation. Anything needing translation, or any key that
+/// also carries transcript meaning in its own dialect, stays out. In
+/// particular `instructions` is NOT admitted: it is a real
+/// Responses-dialect field, so honoring it here would make a Responses
+/// body posted to `/v1/chat/completions` silently half-work (system
+/// lifted, `input` ignored) instead of failing loudly.
+///
+/// Rules (the alias key is removed UNCONDITIONALLY, for every value
+/// type, before any promotion decision -- the sweep strips unknown keys
+/// from the body before serde runs, so anything left here lands in
+/// `provider_extras` and is merged verbatim onto the openai-compat wire):
+/// - No `systemPrompt`: no-op.
+/// - String alias, `system` absent: the alias becomes canonical `system`.
+/// - String alias, `system` present: the explicit canonical value wins.
+/// - Non-string alias: rejected with `Error::Validation`. Silently
+///   dropping a system prompt is the failure this normalizer exists to
+///   prevent, so a shape this ingress cannot map is a local 400.
+///
+/// `role: "system"` / `role: "developer"` messages are untouched here:
+/// they append to whatever this leaves behind via `lift_system_messages`.
+fn normalize_system_prompt_alias(body: &mut Value) -> Result<()> {
+    let Some(obj) = body.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(alias) = obj.remove("systemPrompt") else {
+        return Ok(());
+    };
+    if !alias.is_string() {
+        return Err(Error::Validation(
+            "openai ingress: `systemPrompt` must be a string".into(),
+        ));
+    }
+    // Never log the prompt content -- the alias name alone is enough to
+    // explain the shape change during triage. A successful compatibility
+    // normalization is not a warning.
+    if obj.contains_key("system") {
+        tracing::debug!(
+            alias = "systemPrompt",
+            "openai ingress: dropped system-prompt alias in favor of explicit canonical system"
+        );
+    } else {
+        obj.insert("system".into(), alias);
+        tracing::debug!(
+            alias = "systemPrompt",
+            "openai ingress: promoted system-prompt alias to canonical system"
+        );
+    }
+    Ok(())
+}
+
 /// This is an Anthropic-internal field set by the egress to thread the
 /// matched stop sequence back to the Anthropic ingress via the canonical
 /// layer. OpenAI Chat-Completions clients do not expect it and some SDKs
@@ -1098,6 +1165,364 @@ mod tests {
             Some(SystemContent::Text(s)) => assert_eq!(s, "primary\nsecondary"),
             other => panic!("expected concat, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn openai_ingress_lifts_system_prompt_alias_into_canonical_system() {
+        // Arrange: Cursor-style top-level alias, no canonical `system`.
+        let body = json!({
+            "model": "gpt-4o",
+            "systemPrompt": "you are terse",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "you are terse"),
+            other => panic!("expected SystemContent::Text, got {other:?}"),
+        }
+        let leaked = req
+            .provider_extras
+            .as_ref()
+            .and_then(|v| v.get("systemPrompt"));
+        assert!(leaked.is_none(), "systemPrompt must not leak: {leaked:?}");
+    }
+
+    /// Precedence: an explicit canonical `system` beats the alias. The
+    /// alias key is still removed -- were it swept into provider_extras it
+    /// would be merged verbatim onto the openai-compat wire and strict
+    /// hosts reject the unknown parameter.
+    #[test]
+    fn openai_ingress_explicit_system_beats_alias_and_alias_never_reaches_provider_extras() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "system": "canonical wins",
+            "systemPrompt": "alias loses",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "canonical wins"),
+            other => panic!("expected SystemContent::Text, got {other:?}"),
+        }
+        let leaked = req
+            .provider_extras
+            .as_ref()
+            .and_then(|v| v.get("systemPrompt"));
+        assert!(
+            leaked.is_none(),
+            "the losing alias must still be removed: {leaked:?}"
+        );
+    }
+
+    /// The alias becomes the canonical system, then `role: system`
+    /// messages append to it via the untouched lift -- nothing is
+    /// silently dropped.
+    #[test]
+    fn openai_ingress_appends_role_system_messages_after_system_prompt_alias() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "systemPrompt": "primary",
+            "messages": [
+                {"role": "system", "content": "secondary"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "primary\nsecondary"),
+            other => panic!("expected concat, got {other:?}"),
+        }
+        assert_eq!(req.messages.len(), 1);
+        assert!(matches!(req.messages[0].role, Role::User));
+    }
+
+    /// Only a flat string maps 1:1 to canonical `system`. A non-string
+    /// alias is rejected locally rather than dropped: the key is removed
+    /// from the body before the sweep runs, so a silent drop would lose
+    /// the caller's system prompt with no signal.
+    #[test]
+    fn openai_ingress_rejects_object_valued_system_prompt_alias() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "systemPrompt": {"text": "structured, not a flat string"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        let err = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .expect_err("an object-valued alias must be rejected");
+
+        // Assert
+        match err {
+            Error::Validation(msg) => assert!(
+                msg.contains("systemPrompt"),
+                "message names the rejected field: {msg}"
+            ),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_ingress_rejects_number_valued_system_prompt_alias() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "systemPrompt": 7,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        let err = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .expect_err("a number-valued alias must be rejected");
+
+        // Assert
+        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+    }
+
+    /// The rejection path must not be reachable via `provider_extras`
+    /// either: the alias is removed before the sweep, so no branch can
+    /// leave it behind for verbatim egress merging.
+    #[test]
+    fn openai_ingress_strips_non_string_alias_before_the_forward_compat_sweep() {
+        // Arrange
+        let mut body = json!({
+            "model": "gpt-4o",
+            "systemPrompt": {"text": "structured"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        let err = normalize_system_prompt_alias(&mut body)
+            .expect_err("a non-string alias must be rejected");
+
+        // Assert
+        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        let extras = sweep_unknown_top_level_fields(&mut body);
+        assert!(
+            !extras.contains_key("systemPrompt"),
+            "the alias must be gone before the sweep: {extras:?}"
+        );
+        assert!(body.get("systemPrompt").is_none(), "body: {body}");
+    }
+
+    /// Multiple `role: system` messages all append, in order, after the
+    /// alias-derived canonical system -- none is dropped.
+    #[test]
+    fn openai_ingress_appends_every_role_system_message_after_the_alias() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "systemPrompt": "primary",
+            "messages": [
+                {"role": "system", "content": "second"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "third"}
+            ]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "primary\nsecond\nthird"),
+            other => panic!("expected ordered concat, got {other:?}"),
+        }
+        assert_eq!(req.messages.len(), 1);
+        assert!(matches!(req.messages[0].role, Role::User));
+    }
+
+    /// All three sources at once: the explicit canonical `system` wins the
+    /// alias precedence check, `role: system` messages still append to it,
+    /// and the alias never reaches `provider_extras`.
+    #[test]
+    fn openai_ingress_explicit_system_beats_alias_while_messages_still_append() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "system": "canonical",
+            "systemPrompt": "alias loses",
+            "messages": [
+                {"role": "system", "content": "lifted"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "canonical\nlifted"),
+            other => panic!("expected concat, got {other:?}"),
+        }
+        let leaked = req
+            .provider_extras
+            .as_ref()
+            .and_then(|v| v.get("systemPrompt"));
+        assert!(leaked.is_none(), "alias must not leak: {leaked:?}");
+    }
+
+    /// A Responses-dialect body misrouted to `/v1/chat/completions` must
+    /// fail loudly. `ChatRequest.messages` is required, so the body has no
+    /// way to half-work (system lifted from `instructions`, `input`
+    /// silently ignored, no turns). Pinned so it cannot regress.
+    #[test]
+    fn openai_ingress_rejects_a_responses_shaped_body_with_no_messages() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-5",
+            "instructions": "you are terse",
+            "input": "hi"
+        });
+
+        // Act
+        let err = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .expect_err("a Chat body without `messages` must be rejected");
+
+        // Assert
+        match err {
+            Error::Validation(msg) => assert!(
+                msg.contains("messages"),
+                "message names the missing field: {msg}"
+            ),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    /// Drive the full ingress -> openai-compat egress path and return the
+    /// upstream-bound wire body. `merge_extras` forwards `provider_extras`
+    /// verbatim, so this is where an alias surviving the ingress would
+    /// become the strict-host `Unsupported parameter(s)` rejection.
+    fn openai_compat_egress_body(body: Value) -> Value {
+        use routectl_core::Provider;
+        use routectl_providers::openai_compat::{
+            HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
+        };
+
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .expect("openai ingress parse");
+        OpenAiCompatProvider::new(OpenAiCompatConfig {
+            id: "openai-compat:test".into(),
+            base_url: "https://example.invalid/v1".into(),
+            api_key: "test-key".into(),
+            header_extras: Vec::new(),
+            payload_extras: None,
+            reasoning_dialect: ReasoningDialect::OpenAi,
+            history_reasoning: HistoryReasoning::Auto,
+            user_agent: None,
+            strict_translation: false,
+            disable_stream_include_usage: false,
+            mantle: None,
+        })
+        .normalize_request(&req)
+        .expect("openai-compat egress normalize")
+    }
+
+    #[test]
+    fn system_prompt_alias_never_reaches_the_openai_compat_wire() {
+        // Arrange: every accepted precedence branch of the alias.
+        let branches = [
+            json!({
+                "model": "gpt-4o",
+                "systemPrompt": "promoted",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            json!({
+                "model": "gpt-4o",
+                "system": "canonical",
+                "systemPrompt": "alias loses",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            json!({
+                "model": "gpt-4o",
+                "systemPrompt": "primary",
+                "messages": [
+                    {"role": "system", "content": "second"},
+                    {"role": "user", "content": "hi"}
+                ]
+            }),
+        ];
+
+        for body in branches {
+            // Act
+            let wire = openai_compat_egress_body(body.clone());
+
+            // Assert
+            assert!(
+                wire.get("systemPrompt").is_none(),
+                "alias reached the wire for {body}: {wire}"
+            );
+            let system_text = wire["messages"][0]["content"]
+                .as_str()
+                .expect("system-voice message opens the wire transcript");
+            assert!(
+                !system_text.is_empty(),
+                "the system prompt must survive as a message: {wire}"
+            );
+        }
+    }
+
+    /// `instructions` is a real Responses-dialect field, deliberately NOT
+    /// admitted as a Chat system-prompt alias: honoring it would make a
+    /// Responses body posted here silently half-work (system lifted,
+    /// `input` ignored) instead of failing loudly. It stays an unknown
+    /// top-level field and rides the forward-compat sweep.
+    #[test]
+    fn openai_ingress_does_not_treat_instructions_as_a_system_prompt() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "instructions": "you are terse",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        assert!(
+            req.system.is_none(),
+            "instructions must not become canonical system: {:?}",
+            req.system
+        );
+        let swept = req
+            .provider_extras
+            .as_ref()
+            .and_then(|v| v.get("instructions"))
+            .expect("instructions swept into provider_extras");
+        assert_eq!(swept, "you are terse");
     }
 
     #[test]

@@ -2604,7 +2604,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   live context meter until the terminal `message_delta` overwrites it
 - `src/ingress/openai.rs` -- OpenAI Chat Completions ingress; lifts
   `role:"system"` and `role:"developer"` messages into `req.system`
-  (preserving per-block `cache_control`), lifts function tools, strips
+  (preserving per-block `cache_control`), promotes the Cursor-style
+  top-level `systemPrompt` alias into canonical `system` (explicit
+  `system` wins; the alias key is always removed so it never reaches
+  `provider_extras`; a non-string alias is a local `Error::Validation`
+  rather than a silent drop), lifts function tools, strips
   internal `matched_stop_sequence` on render, and stamps the OpenAI
   envelope on render (`object`, nullable `system_fingerprint`, `created`
   on chunks; synthesizes `chatcmpl-<uuid>` id + unix `created` when the
