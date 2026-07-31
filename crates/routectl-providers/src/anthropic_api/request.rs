@@ -294,6 +294,11 @@ pub(crate) fn normalize(
         &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
     >,
 ) -> Result<Value> {
+    // Responses-dialect reasoning context/mode has no Anthropic home (it is
+    // dropped as a managed key in merge_provider_extras); WARN once so the
+    // loss isn't silent.
+    crate::responses_reasoning_guard::warn_dropped_reasoning_dialect(id, req);
+
     // Anthropic's wire requires every tool_result carry the
     // `tool_use_id` of the tool_use it answers; missing ids are
     // rejected upfront (always, independent of history_reasoning).
@@ -530,6 +535,49 @@ mod effort_ratio_parity_tests;
 
 // response_format honoring: the canonical OpenAI-shape structured-output
 // directive maps onto Anthropic's output_config.format.
+#[cfg(test)]
+mod reasoning_leak_guard_tests {
+    use super::normalize;
+    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use serde_json::json;
+    use tracing_test::traced_test;
+
+    fn user_req() -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    #[traced_test]
+    fn responses_reasoning_context_mode_dropped_and_warns() {
+        // A Responses-ingress request carrying reasoning context/mode routed
+        // to the Anthropic egress does NOT emit them and warns once.
+        let mut req = user_req();
+        req.provider_extras = Some(json!({"reasoning": {"context": "all_turns", "mode": "pro"}}));
+
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("context").is_none());
+        assert!(body.get("mode").is_none());
+        assert!(logs_contain("reasoning context/mode dropped"));
+    }
+}
+
 #[cfg(test)]
 mod response_format_tests {
     use super::normalize;

@@ -541,6 +541,225 @@ fn reasoning_explicit_effort_wins_over_budget() {
 }
 
 #[test]
+fn reasoning_overlay_effort_never_overrides_computed_effort() {
+    // Arrange: a stray effort in the reasoning remainder (e.g. from
+    // operator payload_extras) must NOT win over the computed canonical
+    // effort -- the typed field is authoritative.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+    req.provider_extras = Some(json!({"reasoning": {"effort": "low", "summary": "concise"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: computed "high" wins; the overlay effort is dropped.
+    assert_eq!(
+        v["reasoning"],
+        json!({"effort": "high", "summary": "concise"})
+    );
+}
+
+#[test]
+fn reasoning_summary_verbosity_survives_roundtrip() {
+    // Arrange: the ingress stashed a caller-set summary in the reasoning
+    // remainder; the egress must emit it verbatim (not force "auto").
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+    req.provider_extras = Some(json!({"reasoning": {"summary": "concise"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(
+        v["reasoning"],
+        json!({"effort": "high", "summary": "concise"})
+    );
+}
+
+#[test]
+fn reasoning_context_and_mode_survive_roundtrip() {
+    // Arrange: context (closed enum) + mode (open string) ride through the
+    // reasoning remainder onto the wire alongside the computed effort.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("medium".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+    req.provider_extras = Some(json!({"reasoning": {"context": "all_turns", "mode": "pro"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: summary defaults to auto (caller set none); context/mode carry.
+    assert_eq!(
+        v["reasoning"],
+        json!({"effort": "medium", "summary": "auto", "context": "all_turns", "mode": "pro"})
+    );
+}
+
+#[test]
+fn reasoning_absent_summary_defaults_to_auto() {
+    // Arrange: no caller summary, effort present -> summary defaults auto.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("low".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["reasoning"], json!({"effort": "low", "summary": "auto"}));
+}
+
+#[test]
+fn reasoning_summary_only_still_emits_reasoning_object() {
+    // Arrange: a summary-only request (no effort/enabled/budget) must still
+    // emit a reasoning object -- the emission guard used to early-return.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"reasoning": {"summary": "detailed"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: no effort field (none computed); summary carries verbatim.
+    assert_eq!(v["reasoning"], json!({"summary": "detailed"}));
+}
+
+#[test]
+fn reasoning_context_only_still_emits_reasoning_object() {
+    // Arrange: context-only request still emits reasoning with defaulted
+    // summary.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"reasoning": {"context": "current_turn"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(
+        v["reasoning"],
+        json!({"summary": "auto", "context": "current_turn"})
+    );
+}
+
+#[test]
+fn reasoning_explicit_disable_omits_even_with_remainder() {
+    // Arrange: canonical enabled:false wins -- reasoning is omitted even
+    // though a summary rode along in provider_extras.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: None,
+        max_tokens: None,
+        exclude: None,
+        enabled: Some(false),
+    });
+    req.provider_extras = Some(json!({"reasoning": {"summary": "concise"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(v.get("reasoning").is_none());
+}
+
+#[test]
+fn reasoning_explicit_disable_omits_even_with_explicit_effort() {
+    // Arrange: enabled:false paired with an explicit effort. The disable
+    // wins unconditionally -- a computed effort must NOT resurrect the
+    // reasoning object.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: Some(false),
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(
+        v.get("reasoning").is_none(),
+        "enabled:false must omit reasoning even with an explicit effort; got: {v}"
+    );
+}
+
+#[test]
+fn reasoning_explicit_disable_omits_even_with_budget() {
+    // Arrange: enabled:false paired with a budget (which would otherwise map
+    // to an effort band). The disable still wins and omits reasoning.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: None,
+        max_tokens: Some(8192),
+        exclude: None,
+        enabled: Some(false),
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(
+        v.get("reasoning").is_none(),
+        "enabled:false must omit reasoning even with a budget; got: {v}"
+    );
+}
+
+#[test]
+fn reasoning_explicit_disable_omits_even_with_context_overlay() {
+    // Arrange: enabled:false paired with a context overlay (a Responses
+    // sub-key riding in provider_extras). The disable beats the overlay.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("medium".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: Some(false),
+    });
+    req.provider_extras = Some(json!({"reasoning": {"context": "all_turns"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(
+        v.get("reasoning").is_none(),
+        "enabled:false must omit reasoning even with an effort + overlay; got: {v}"
+    );
+}
+
+#[test]
+fn no_reasoning_controls_omits_reasoning_object() {
+    // Arrange: no canonical reasoning and no remainder -> no reasoning key.
+    let req = req_with(vec![user_text("ping")]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(v.get("reasoning").is_none());
+}
+
+#[test]
 fn provider_extras_prompt_cache_key_forwards() {
     // Arrange
     let mut req = req_with(vec![user_text("ping")]);

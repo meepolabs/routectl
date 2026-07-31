@@ -17,7 +17,7 @@
 //! for the input-item union.
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 // ---------------------------------------------------------------------------
 // Top-level request body
@@ -279,16 +279,21 @@ pub enum ResponsesFunctionTag {
 // Reasoning + text controls
 // ---------------------------------------------------------------------------
 
-/// Reasoning controls on the Responses API. Mirrors codex's
-/// `Reasoning` struct: `effort` is the canonical knob, `summary` is a
-/// constant `"auto"` so the server emits summary deltas back to the
-/// client. routectl maps `req.reasoning.effort` directly into this.
+/// Reasoning controls on the Responses API. `effort` is the canonical
+/// knob; `summary` defaults to `"auto"` (so the server emits summary
+/// deltas) unless the caller supplied one. `extra` carries the remaining
+/// Responses-dialect sub-keys (`context`, `mode`, any future field) that
+/// the Responses ingress stashed in `provider_extras["reasoning"]`; they
+/// have no canonical `ReasoningConfig` home and are flattened back onto
+/// the wire object here. Empty when the caller supplied none.
 #[derive(Debug, Serialize)]
 pub struct ResponsesReasoning {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) summary: Option<String>,
+    #[serde(flatten)]
+    pub(crate) extra: Map<String, Value>,
 }
 
 /// Free-form passthrough for the `text` field on the Responses API.
@@ -507,6 +512,7 @@ mod tests {
         let r = ResponsesReasoning {
             effort: Some("high".into()),
             summary: None,
+            extra: Map::new(),
         };
 
         // Act
@@ -514,6 +520,34 @@ mod tests {
 
         // Assert
         assert_eq!(v, json!({"effort": "high"}));
+    }
+
+    #[test]
+    fn reasoning_controls_flatten_context_and_mode() {
+        // Arrange -- context/mode carried through provider_extras land as
+        // siblings of effort/summary on the wire.
+        let mut extra = Map::new();
+        extra.insert("context".into(), json!("all_turns"));
+        extra.insert("mode".into(), json!("pro"));
+        let r = ResponsesReasoning {
+            effort: Some("high".into()),
+            summary: Some("concise".into()),
+            extra,
+        };
+
+        // Act
+        let v = serde_json::to_value(&r).unwrap();
+
+        // Assert
+        assert_eq!(
+            v,
+            json!({
+                "effort": "high",
+                "summary": "concise",
+                "context": "all_turns",
+                "mode": "pro"
+            })
+        );
     }
 
     #[test]

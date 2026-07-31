@@ -132,12 +132,19 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         req.tool_choice = Some(normalize_tool_choice(tc));
     }
 
-    // reasoning object -> ReasoningConfig.
-    if let Some(reasoning) = obj.remove("reasoning")
-        && let Some(cfg) = build_reasoning(&reasoning)
-    {
-        req.reasoning = Some(cfg);
-    }
+    // reasoning object -> ReasoningConfig (effort) + a provider_extras
+    // remainder carrying the Responses-dialect sub-keys (summary/context/
+    // mode/any future field) canonical ReasoningConfig does not model.
+    // Mirrors the text/text_without_format remainder handling below; the
+    // remainder is merged into provider_extras after the sweep.
+    let reasoning_remainder = match obj.remove("reasoning") {
+        Some(reasoning) => {
+            let (cfg, remainder) = build_reasoning(reasoning)?;
+            req.reasoning = cfg;
+            remainder
+        }
+        None => None,
+    };
 
     // max_output_tokens -> max_tokens.
     if let Some(max) = obj.remove("max_output_tokens").and_then(|v| v.as_u64()) {
@@ -180,6 +187,12 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     // survive the boundary even though "text" is a handled top-level key.
     if let Some(rem) = text_remainder {
         extras.insert("text".into(), Value::Object(rem));
+    }
+    // Merge the reasoning remainder (summary/context/mode/future) so the
+    // Responses egress can re-emit it; every non-Responses egress drops it
+    // as a routectl-managed key (leak-guard lives on those egresses).
+    if let Some(rem) = reasoning_remainder {
+        extras.insert("reasoning".into(), Value::Object(rem));
     }
     if !extras.is_empty() {
         req.provider_extras = Some(Value::Object(extras));
@@ -795,21 +808,76 @@ fn custom_tool_from_responses_function(tool: &Value) -> Option<routectl_core::Cu
 // reasoning object -> ReasoningConfig
 // ---------------------------------------------------------------------------
 
-/// Invert the egress `extras::apply_reasoning`: a Responses `reasoning`
-/// object carries `effort` (and a `summary` mode routectl does not model
-/// canonically). Lift `effort` into `ReasoningConfig.effort`. Returns
-/// None when the object carries nothing canonical models.
-fn build_reasoning(reasoning: &Value) -> Option<ReasoningConfig> {
-    let obj = reasoning.as_object()?;
+/// The split of a Responses `reasoning` object: the canonical config
+/// (effort only) and the Responses-dialect remainder destined for
+/// `provider_extras["reasoning"]`.
+type ReasoningSplit = (Option<ReasoningConfig>, Option<Map<String, Value>>);
+
+/// Split a Responses `reasoning` object into (canonical config, remainder).
+///
+/// `effort` lifts into `ReasoningConfig.effort` -- the single knob canonical
+/// models. Every other sub-key (`summary`, `context`, `mode`, any future
+/// field) is a Responses-dialect control with no canonical home; it is
+/// returned as a remainder map the caller stashes under
+/// `provider_extras["reasoning"]` so the Responses egress can re-emit it.
+/// The closed enums `summary` and `context` are validated here: an
+/// out-of-range value is a local 400 rather than a clamp/substitute or a
+/// forwarded guaranteed-upstream-400. `mode` is an OPEN enum -- its VALUE is
+/// unconstrained -- but its TYPE is checked: a non-string `mode` is a local
+/// 400 (it would otherwise forward to a guaranteed upstream 400). Returns
+/// `(None, None)` when the value is not an object.
+fn build_reasoning(reasoning: Value) -> Result<ReasoningSplit> {
+    let mut obj = match reasoning {
+        Value::Object(m) => m,
+        _ => return Ok((None, None)),
+    };
+
+    validate_reasoning_enum(&obj, "summary", &["auto", "concise", "detailed"])?;
+    validate_reasoning_enum(&obj, "context", &["auto", "current_turn", "all_turns"])?;
+    validate_reasoning_string(&obj, "mode")?;
+
     let effort = obj
-        .get("effort")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    effort.as_ref()?;
-    Some(ReasoningConfig {
-        effort,
+        .remove("effort")
+        .and_then(|v| v.as_str().map(str::to_string));
+    let cfg = effort.map(|e| ReasoningConfig {
+        effort: Some(e),
         ..Default::default()
-    })
+    });
+
+    // A null-valued sub-key means "unset" -- drop it so it neither rides
+    // to the egress nor blocks the egress "auto" summary default.
+    obj.retain(|_, v| !v.is_null());
+    let remainder = if obj.is_empty() { None } else { Some(obj) };
+    Ok((cfg, remainder))
+}
+
+/// Validate a closed-enum reasoning sub-key. Absent / null passes (the
+/// field is optional). A present value MUST be one of `allowed`; anything
+/// else -- a wrong string or a non-string -- is a local 400 so routectl
+/// rejects deterministically instead of clamping or forwarding.
+fn validate_reasoning_enum(obj: &Map<String, Value>, key: &str, allowed: &[&str]) -> Result<()> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(s)) if allowed.contains(&s.as_str()) => Ok(()),
+        Some(_) => Err(Error::Validation(format!(
+            "openai-responses ingress: reasoning.{key} must be one of [{}]",
+            allowed.join(", ")
+        ))),
+    }
+}
+
+/// Validate an OPEN-enum reasoning sub-key: its value is unconstrained, but
+/// its TYPE must be a string. Absent / null passes (the field is optional).
+/// A present non-string (bool, number, array, object) is a local 400 --
+/// forwarding it would only earn a guaranteed upstream 400, so reject
+/// deterministically here while leaving the string's value untouched.
+fn validate_reasoning_string(obj: &Map<String, Value>, key: &str) -> Result<()> {
+    match obj.get(key) {
+        None | Some(Value::Null | Value::String(_)) => Ok(()),
+        Some(_) => Err(Error::Validation(format!(
+            "openai-responses ingress: reasoning.{key} must be a string"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------

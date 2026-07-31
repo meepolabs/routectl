@@ -48,6 +48,11 @@ pub fn normalize(
     // can't carry. Default mode warns + continues; strict mode 400s.
     check_dropped_anthropic_fields(id, req, strict_translation)?;
 
+    // Responses-dialect reasoning context/mode has no openai-compat home
+    // (it is dropped with `reasoning` below); WARN once so the loss isn't
+    // silent.
+    crate::responses_reasoning_guard::warn_dropped_reasoning_dialect(id, req);
+
     let mut body =
         serde_json::to_value(req).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
@@ -864,6 +869,53 @@ mod tests {
         .unwrap();
         assert_eq!(body["custom_key"], "custom_val");
         assert!(body.get("provider_extras").is_none());
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn responses_reasoning_remainder_dropped_and_warns() {
+        // A Responses-ingress request carrying reasoning summary/context/mode
+        // routed to an openai-compat egress must NOT emit those keys on the
+        // wire, and the context/mode drop warns once.
+        let mut req = simple_req("gpt-4o");
+        req.provider_extras = Some(json!({
+            "reasoning": {"summary": "concise", "context": "all_turns", "mode": "pro"}
+        }));
+        let body = normalize(
+            "openrouter:test",
+            &req,
+            ReasoningDialect::OpenRouter,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        // The reasoning remainder is dropped, not smuggled onto the wire.
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("summary").is_none());
+        assert!(body.get("context").is_none());
+        assert!(body.get("mode").is_none());
+        assert!(logs_contain("reasoning context/mode dropped"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn responses_reasoning_summary_only_does_not_warn() {
+        // A summary-only remainder is a soft downgrade; dropping it must not
+        // fire the context/mode leak WARN.
+        let mut req = simple_req("gpt-4o");
+        req.provider_extras = Some(json!({"reasoning": {"summary": "concise"}}));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(body.get("reasoning").is_none());
+        assert!(!logs_contain("reasoning context/mode dropped"));
     }
 
     #[test]

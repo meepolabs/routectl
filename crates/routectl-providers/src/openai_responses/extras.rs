@@ -2,9 +2,12 @@
 //! API egress.
 //!
 //! Reasoning translation:
-//! - `req.reasoning.effort` -> `reasoning.{effort, summary: "auto"}`
-//!   ("auto" matches codex's default summary mode so the server emits
-//!   reasoning_summary deltas back on stream).
+//! - `req.reasoning.effort` -> `reasoning.effort`.
+//! - `reasoning.summary` defaults to `"auto"` (so the server emits
+//!   reasoning_summary deltas back on stream) UNLESS the caller supplied
+//!   one via `provider_extras["reasoning"].summary`.
+//! - `reasoning.context` / `reasoning.mode` / any future Responses-dialect
+//!   sub-key ride through `provider_extras["reasoning"]` onto the wire.
 //! - `req.reasoning.max_tokens` -> mapped to the nearest `effort` band
 //!   via the effort<->budget table when no explicit effort is set. The
 //!   Responses reasoning surface has no budget knob; an explicit effort
@@ -22,7 +25,7 @@
 //! preserves that behavior to avoid the upstream rejecting the request
 //! for a policy mismatch.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use routectl_core::ChatRequest;
 
@@ -30,43 +33,86 @@ use super::AuthKind;
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
 use crate::effort::{clamp_effort_to_supported, level_from_budget};
 
-/// Set `request.reasoning` from `req.reasoning`. Effort maps to the
-/// `effort` field; the `summary` mode is hardcoded to "auto" to match
-/// codex's default and ensure the server emits reasoning_summary
-/// deltas back to the client.
+/// Set `request.reasoning` from `req.reasoning` plus the Responses-dialect
+/// remainder the ingress stashed under `provider_extras["reasoning"]`.
+///
+/// `effort` comes from the computed canonical value; `summary` defaults to
+/// `"auto"` ONLY when the caller supplied none (a caller value wins).
+/// `context` / `mode` / any future sub-key ride through the overlay onto
+/// the wire object. summary / context / mode are independently meaningful:
+/// a summary-only, context-only, or mode-only request still emits a
+/// reasoning object. An explicit canonical `enabled: false` WINS
+/// unconditionally and omits reasoning entirely -- regardless of any
+/// computed effort, budget, or overlay sub-key.
 pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest) {
-    let Some(r) = req.reasoning.as_ref() else {
-        return;
-    };
+    let overlay = responses_reasoning_overlay(req);
 
-    // Explicit effort wins. When no effort is set but a budget is, map
-    // the budget to the nearest effort band (the Responses API takes
-    // effort, not a budget) rather than dropping it.
-    let effort = match r.effort.as_deref() {
-        Some(e) => {
-            Some(clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).into_owned())
+    let (effort, enabled, budget) = match req.reasoning.as_ref() {
+        Some(r) => {
+            // Explicit effort wins. When no effort is set but a budget is,
+            // map the budget to the nearest effort band (the Responses API
+            // takes effort, not a budget) rather than dropping it.
+            let effort = match r.effort.as_deref() {
+                Some(e) => Some(
+                    clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).into_owned(),
+                ),
+                None => r.max_tokens.map(|budget| {
+                    let level = level_from_budget(budget);
+                    clamp_effort_to_supported(level, &req.routectl_internal.effort_levels)
+                        .into_owned()
+                }),
+            };
+            (effort, r.enabled, r.max_tokens)
         }
-        None => r.max_tokens.map(|budget| {
-            let level = level_from_budget(budget);
-            clamp_effort_to_supported(level, &req.routectl_internal.effort_levels).into_owned()
-        }),
+        None => (None, None, None),
     };
-    let enabled = r.enabled;
 
-    // If reasoning is explicitly disabled and no effort is set, leave
-    // request.reasoning at None so the field is omitted on the wire.
-    if effort.is_none() && enabled == Some(false) {
+    // Explicit disable wins unconditionally: `enabled: false` is the caller
+    // turning reasoning off, so it beats a computed effort, a budget-derived
+    // effort, and any provider_extras["reasoning"] overlay sub-key.
+    if enabled == Some(false) {
         return;
     }
-    // Likewise when nothing usable is present.
-    if effort.is_none() && enabled.is_none() && r.max_tokens.is_none() {
+    // Nothing to emit: no effort, no enable flag, no budget, no caller
+    // sub-key. A summary-only / context-only / mode-only request DOES emit
+    // because `overlay` is `Some`.
+    if effort.is_none() && enabled.is_none() && budget.is_none() && overlay.is_none() {
         return;
     }
+
+    let mut extra = overlay.unwrap_or_default();
+    // `effort` is owned by the typed field / computed canonical value; drop
+    // any overlay copy so it can never override it through the flatten.
+    extra.remove("effort");
+    // summary: a caller value wins; default to "auto" only when unset.
+    let summary = match extra.remove("summary") {
+        Some(Value::String(s)) => Some(s),
+        Some(other) => {
+            extra.insert("summary".into(), other);
+            None
+        }
+        None => Some("auto".into()),
+    };
 
     request.reasoning = Some(ResponsesReasoning {
         effort,
-        summary: Some("auto".into()),
+        summary,
+        extra,
     });
+}
+
+/// The Responses-dialect reasoning remainder the ingress stashed under
+/// `provider_extras["reasoning"]` (summary/context/mode/future). Returns
+/// `None` when absent or empty so it never forces an otherwise-omitted
+/// reasoning object into existence.
+fn responses_reasoning_overlay(req: &ChatRequest) -> Option<Map<String, Value>> {
+    req.provider_extras
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("reasoning"))
+        .and_then(|v| v.as_object())
+        .filter(|m| !m.is_empty())
+        .cloned()
 }
 
 /// Layer canonical `req.provider_extras` into the Responses request.
