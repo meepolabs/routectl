@@ -80,7 +80,18 @@ impl Provider for ModelSpyProvider {
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.seen.lock().push(req.model.clone());
         Ok(Box::pin(futures::stream::once(async {
-            Ok(ChatChunk::default())
+            Ok(ChatChunk {
+                choices: vec![routectl_core::ChunkChoice {
+                    index: 0,
+                    delta: routectl_core::ChunkDelta {
+                        content: Some("ok".into()),
+                        ..Default::default()
+                    },
+                    finish_reason: None,
+                    matched_stop_sequence: None,
+                }],
+                ..Default::default()
+            })
         })))
     }
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {

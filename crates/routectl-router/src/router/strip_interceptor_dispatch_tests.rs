@@ -73,7 +73,15 @@ impl Provider for ProbeProvider {
             Ok(ChatChunk {
                 id: "c0".into(),
                 model: "m".into(),
-                choices: vec![],
+                choices: vec![routectl_core::ChunkChoice {
+                    index: 0,
+                    delta: routectl_core::ChunkDelta {
+                        content: Some("ok".into()),
+                        ..Default::default()
+                    },
+                    finish_reason: None,
+                    matched_stop_sequence: None,
+                }],
                 usage: None,
                 opaque_events: Vec::new(),
                 upstream_meta: None,

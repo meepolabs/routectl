@@ -62,7 +62,21 @@ impl Provider for RecordingProvider {
     }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(futures::stream::once(async move { Ok(ChatChunk::default()) }).boxed())
+        Ok(futures::stream::once(async move {
+            Ok(ChatChunk {
+                choices: vec![routectl_core::ChunkChoice {
+                    index: 0,
+                    delta: routectl_core::ChunkDelta {
+                        content: Some("ok".into()),
+                        ..Default::default()
+                    },
+                    finish_reason: None,
+                    matched_stop_sequence: None,
+                }],
+                ..Default::default()
+            })
+        })
+        .boxed())
     }
     async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
         self.calls.fetch_add(1, Ordering::SeqCst);

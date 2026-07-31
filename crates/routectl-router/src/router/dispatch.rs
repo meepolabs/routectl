@@ -920,9 +920,11 @@ impl Router {
     }
 
     /// Streaming counterpart. Fallback only happens BEFORE the first
-    /// chunk reaches us; once the upstream has emitted a chunk,
-    /// mid-stream errors propagate. Gate checks (rate limit / breaker)
-    /// run before the upstream is touched.
+    /// CONTENT chunk reaches the client; once the upstream has emitted
+    /// content, mid-stream errors propagate. Leading content-free chunks
+    /// (a `delta.role` opener, id/model metadata) are buffered and do not
+    /// commit the provider. Gate checks (rate limit / breaker) run before
+    /// the upstream is touched.
     #[must_use]
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn stream_with_options(
@@ -1111,11 +1113,11 @@ impl Router {
                 target.stream_first_byte_timeout_ms,
             );
             // Per-target one-shot auth-recovery: a 401 from the
-            // first-chunk attempt triggers on_auth_failure (forced
+            // pre-content attempt triggers on_auth_failure (forced
             // refresh through the OAuth store's per-provider mutex)
             // and exactly one retry. Streams don't have their own
             // retry policy (mid-stream errors propagate), and this
-            // recovery only covers the PRE-FIRST-CHUNK window --
+            // recovery only covers the PRE-CONTENT window --
             // once `wrap_with_breaker_accounting` is wrapping a live
             // stream, a 401 surfacing as a mid-stream chunk error
             // propagates to the caller without auth-recovery (rare
@@ -1158,19 +1160,19 @@ impl Router {
 
                 // Gate granted Allow. Capture NOW whether this dispatch
                 // claimed the half-open probe slot: only a probe's first
-                // chunk should close + release the breaker at the Ok arm
-                // below. Reading the flag at first-chunk time instead
+                // CONTENT chunk should close + release the breaker at the Ok
+                // arm below. Reading the flag at first-content time instead
                 // would race a concurrent dispatch.
                 let was_half_open_probe = self.is_half_open_probe(state_key);
                 // Cancellation backstop (see ProbeSlotGuard): free the
                 // half-open probe slot if this future is dropped before an
                 // outcome arm settles it (e.g. consumer disconnect during the
-                // first-chunk wait against a hung upstream). Re-reads the same
+                // pre-content wait against a hung upstream). Re-reads the same
                 // flag as `was_half_open_probe` above; both reads are
                 // consistent under the single-probe invariant.
                 let mut probe_guard = self.probe_slot_guard(state_key);
 
-                let r = try_stream_with_first_chunk(
+                let r = try_stream_with_first_content(
                     provider_name,
                     model,
                     provider.clone(),
@@ -1182,29 +1184,31 @@ impl Router {
                 meta.attempt_count += 1;
                 match r {
                     Ok(stream) => {
-                        // A half-open PROBE that produced a first chunk has
+                        // A half-open PROBE that produced first CONTENT has
                         // proven the upstream live -- close the breaker NOW
                         // (release the single probe slot) rather than
                         // holding it for the whole stream duration, which
                         // would lock out all concurrent requests to this
-                        // model until the stream ends. Gate this on
-                        // `was_half_open_probe`: for a HEALTHY (closed)
-                        // breaker the first chunk must NOT reset the failure
-                        // counter, or mid-stream errors could never
+                        // model until the stream ends. A leading content-free
+                        // role chunk does NOT reach here: the Ok arm fires
+                        // only once `try_stream_with_first_content` has seen
+                        // content. Gate this on `was_half_open_probe`: for a
+                        // HEALTHY (closed) breaker first content must NOT reset
+                        // the failure counter, or mid-stream errors could never
                         // accumulate toward the threshold (each stream's
-                        // first-chunk reset would zero the count).
+                        // first-content reset would zero the count).
                         //
                         // Closing here clears the half-open flag, so a
                         // mid-stream failure recorded by the wrap below is
                         // counted as a normal failure accumulating toward
-                        // `circuit_failures` -- a probe that delivered one
-                        // chunk then errors does NOT get a special immediate
+                        // `circuit_failures` -- a probe that delivered
+                        // content then errors does NOT get a special immediate
                         // re-trip. With circuit_failures = 1 a single
                         // post-close mid-stream error re-quarantines at once
                         // (fast-flap); with >= 2 a still-degraded upstream
-                        // may serve up to that many first-chunk-then-error
+                        // may serve up to that many content-then-error
                         // streams before re-opening -- the throughput-vs-
-                        // quarantine tradeoff of closing on the first chunk
+                        // quarantine tradeoff of closing on first content
                         // (see runtime_state.rs).
                         let state = self.state.get(state_key).cloned();
                         if was_half_open_probe && let Some(st) = state.as_ref() {
@@ -1214,7 +1218,7 @@ impl Router {
                         // BreakerAccounting owns the tail. Disarm so a drop here
                         // does not free a slot a later probe may hold.
                         probe_guard.disarm();
-                        // A first chunk proves the capability is not rejected:
+                        // First content proves the capability is not rejected:
                         // clear any learned negative this dispatch re-probed,
                         // and ride each clear out on the meta so the ledger
                         // records it and a warm rebuild does not resurrect it.
@@ -1240,8 +1244,8 @@ impl Router {
                             Err(e) => Err(e),
                         });
                         // Settle the replay carry (see `complete_inner`): a
-                        // stripped repair reaching a first chunk confirms the
-                        // negative (commit); a carried first chunk proves the
+                        // stripped repair reaching first content confirms the
+                        // negative (commit); carried content proves the
                         // pair works, so clear any resident (lapsed) negative
                         // and ride each clear out on the meta.
                         if let Some(plan) = replay_plan.take() {
@@ -1293,7 +1297,7 @@ impl Router {
                         // target's `use_forwarded_credential`, not
                         // request-global bearer presence (see
                         // `complete_inner` for the full rationale). This
-                        // is the pre-first-chunk window; a mid-stream error
+                        // is the pre-content window; a mid-stream error
                         // never reaches here (it rides the wrapped stream).
                         // Release the half-open slot without a breaker debit.
                         if target.use_forwarded_credential
@@ -1308,7 +1312,7 @@ impl Router {
                             return Err(e);
                         }
                         // Auth-401 single-flight refresh + retry once
-                        // (pre-first-chunk only). A refresh failure means
+                        // (pre-content only). A refresh failure means
                         // the OAuth identity is dead; surface it without
                         // walking the chain, but first release any half-open
                         // probe slot this attempt claimed at the gate or the
@@ -1321,7 +1325,7 @@ impl Router {
                                 provider = provider_name,
                                 model = %target.nickname.as_deref().unwrap_or(""),
                                 attempt = attempts_made,
-                                "stream 401 pre-first-chunk; refreshing auth and retrying once",
+                                "stream 401 pre-content; refreshing auth and retrying once",
                             );
                             if let Err(refresh_err) = provider.on_auth_failure().await {
                                 self.release_probe_slot(state_key);
@@ -2039,8 +2043,8 @@ async fn run_with_timeout(
 /// completion (None / EOS) and records ONE failure on the first error
 /// that bubbles out of the stream. Subsequent errors do not double-count.
 ///
-/// For a half-open PROBE the call site already closed the breaker on the
-/// first chunk, so a mid-stream failure here re-trips it and a
+/// For a half-open PROBE the call site already closed the breaker on
+/// first content, so a mid-stream failure here re-trips it and a
 /// clean completion / consumer cancellation is a benign re-zeroing of the
 /// just-closed breaker. For a HEALTHY (closed) breaker the call site did
 /// NOT touch the breaker, so this wrap is where mid-stream failures
@@ -2096,7 +2100,7 @@ fn wrap_with_breaker_accounting(
         fn drop(&mut self) {
             // Clean completion OR consumer cancellation before any error:
             // both record success. For a probe stream the breaker is
-            // already closed (call-site first-chunk close), so this is a
+            // already closed (call-site first-content close), so this is a
             // no-op re-zeroing; for a healthy-breaker stream this resets
             // any accumulated failure count on a fully-consumed success.
             if !self.settled {
@@ -2121,19 +2125,62 @@ fn wrap_with_breaker_accounting(
     Box::pin(s)
 }
 
-/// Open the upstream stream and pull the first chunk. If that initial step
-/// fails with a fallbackable error, return it so the caller can try the next
-/// provider. If the first chunk arrives, return a `BoxStream` that yields it
-/// followed by the rest of the upstream stream -- mid-stream errors propagate.
+/// Upper bound on the content-free leading chunks buffered while waiting
+/// for the first content-bearing one. A healthy stream opens with at most
+/// a handful of metadata chunks (a role delta, an id/model stamp); a stream
+/// that exceeds this before emitting content is treated as a pre-content
+/// failure rather than buffering unboundedly.
+const MAX_PRECONTENT_CHUNKS: usize = 8;
+
+/// True when `chunk` carries client-visible generated content: non-empty
+/// text or reasoning text, typed reasoning blocks, tool-call requests, or
+/// opaque SSE blocks. Content-free metadata -- a leading role delta,
+/// id/model/upstream_meta stamps, a usage-only tail, a bare finish_reason,
+/// or empty choices -- returns false: those are not the content-commit
+/// boundary and may still be followed by a fallback to a sibling provider.
 ///
-/// `policy.stream_first_byte_timeout_ms` (when set) caps the wait for the
-/// stream-open + first-chunk arrival; expiry surfaces as a status-0
+/// Opaque carriers count as content: they are client-visible unknown block
+/// data that cannot be mixed with a different provider's output, so once one
+/// arrives the provider is committed exactly as a text chunk commits it.
+fn is_content_bearing(chunk: &ChatChunk) -> bool {
+    if !chunk.opaque_events.is_empty() {
+        return true;
+    }
+    chunk.choices.iter().any(|choice| {
+        let delta = &choice.delta;
+        delta.content.as_deref().is_some_and(|t| !t.is_empty())
+            || delta.reasoning.as_deref().is_some_and(|t| !t.is_empty())
+            || !delta.reasoning_details.is_empty()
+            || delta
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+    })
+}
+
+/// Open the upstream stream and pull chunks until the first CONTENT-bearing
+/// one (see `is_content_bearing`). The hard non-retry boundary is first
+/// content, not stream-open: leading content-free chunks (a `delta.role`
+/// opener, id/model metadata) are buffered, so a fallbackable error, EOS, or
+/// buffer overflow in the [stream-open, first-content] window still walks to
+/// the next provider. If a content chunk arrives, return a `BoxStream` that
+/// yields the buffered metadata (in order, upstream_meta preserved), then the
+/// first content chunk, then the rest of the upstream stream -- mid-stream
+/// errors propagate.
+///
+/// The buffer is never exposed to the client before content commits: the API
+/// cannot both surface those chunks and re-enter the outer fallback loop.
+///
+/// `policy.stream_first_byte_timeout_ms` (when set) caps the wait for
+/// stream-open PLUS the entire pre-content pull loop, so leading content-free
+/// chunks neither reset nor satisfy it -- a role-then-hang still trips the
+/// first-content timeout and falls over. Expiry surfaces as a status-0
 /// upstream error which is fallbackable per `should_fallback`.
 ///
 /// Also emits a debug-level first-activity log the moment the upstream
-/// response headers arrive, ahead of the first-chunk wait below (M4:
+/// response headers arrive, ahead of the pre-content pull below (M4:
 /// see the `attempt_start` comment inside).
-async fn try_stream_with_first_chunk(
+async fn try_stream_with_first_content(
     provider_name: &str,
     upstream_model: &str,
     provider: Arc<dyn Provider>,
@@ -2176,25 +2223,51 @@ async fn try_stream_with_first_chunk(
             elapsed_ms = attempt_start.elapsed().as_millis() as u64,
             "stream first-activity: upstream response headers received",
         );
-        match upstream.next().await {
-            Some(Ok(first)) => {
-                let merged = futures::stream::once(async move { Ok(first) }).chain(upstream);
-                Ok(merged.boxed())
+        // Buffer content-free leading chunks (role opener, id/model
+        // metadata) until the first content-bearing one. Bounded: a
+        // stream that never produces content must not buffer forever.
+        let mut buffered: Vec<ChatChunk> = Vec::new();
+        loop {
+            match upstream.next().await {
+                Some(Ok(chunk)) if is_content_bearing(&chunk) => {
+                    // Commit: buffered metadata (order + upstream_meta
+                    // preserved) -> first content -> upstream tail.
+                    let head = std::mem::take(&mut buffered);
+                    let merged = futures::stream::iter(head.into_iter().map(Ok))
+                        .chain(futures::stream::once(async move { Ok(chunk) }))
+                        .chain(upstream);
+                    return Ok(merged.boxed());
+                }
+                Some(Ok(chunk)) => {
+                    if buffered.len() >= MAX_PRECONTENT_CHUNKS {
+                        // Buffer overflow before any content: a
+                        // pre-content failure. Discard the buffer (nothing
+                        // reached the client) and fall over. Fallbackable
+                        // per `should_fallback`; the breaker records it.
+                        return Err(Error::Streaming(format!(
+                            "{provider_name} emitted more than {MAX_PRECONTENT_CHUNKS} \
+                             content-free chunks before any content",
+                        )));
+                    }
+                    buffered.push(chunk);
+                }
+                Some(Err(e)) => return Err(e),
+                // Upstream ended before any content (empty stream, or only
+                // content-free chunks). This is NOT a successful empty
+                // completion -- a healthy provider always emits content
+                // (even a role opener is followed by content or an error).
+                // Discard the buffer and treat as a fallbackable streaming
+                // error so the chain walks to the next provider AND the
+                // breaker records a failed probe. Without this, an upstream
+                // that closes before producing content would be reported as
+                // a successful completion to both the client and the
+                // router's health accounting.
+                None => {
+                    return Err(Error::Streaming(format!(
+                        "{provider_name} stream closed before any content arrived",
+                    )));
+                }
             }
-            Some(Err(e)) => Err(e),
-            // Upstream returned an empty stream (stream() returned Ok
-            // but no chunk ever arrived). This is NOT a successful
-            // empty completion -- a healthy provider always emits at
-            // least one chunk (even just a usage tail). Treat as a
-            // fallbackable streaming error so the chain walks to the
-            // next provider AND the breaker records a failed probe.
-            // Without this, an upstream that closes the connection
-            // before producing any data would be reported as a
-            // successful completion to both the client and the
-            // router's health accounting.
-            None => Err(Error::Streaming(format!(
-                "{provider_name} stream closed before any chunk arrived",
-            ))),
         }
     };
 
@@ -2605,6 +2678,10 @@ mod provider_remap_tests;
 #[cfg(all(test, feature = "bedrock"))]
 #[path = "bedrock_class_remap_tests.rs"]
 mod bedrock_class_remap_tests;
+
+#[cfg(test)]
+#[path = "content_commit_boundary_tests.rs"]
+mod content_commit_boundary_tests;
 
 #[cfg(test)]
 #[path = "context_reduction_dispatch_tests.rs"]

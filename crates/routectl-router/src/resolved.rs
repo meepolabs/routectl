@@ -206,9 +206,11 @@ impl ResolvedModel {
     }
 
     /// Set the per-model `stream_first_byte_timeout_ms` override.
-    /// Wins over per-provider and global resolution. A value of 0 is
-    /// an operator-error sentinel (every stream would time out before
-    /// the first chunk arrived); flagged in debug builds.
+    /// Wins over per-provider and global resolution. Caps the wait for
+    /// the first content-bearing chunk (content-free leading chunks do
+    /// not satisfy it). A value of 0 is an operator-error sentinel
+    /// (every stream would time out before content arrived); flagged in
+    /// debug builds.
     pub fn with_stream_first_byte_timeout_ms(mut self, ms: u64) -> Self {
         debug_assert!(
             ms > 0,

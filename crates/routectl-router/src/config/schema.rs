@@ -2548,10 +2548,12 @@ pub struct RetryPolicy {
     /// and treats expiry as a network error (status 0, retryable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
-    /// First-byte timeout for streaming responses. If the upstream
-    /// hasn't emitted any bytes in this window, the stream is
-    /// abandoned and (if no chunk has been delivered yet) the next
-    /// provider in the chain is tried.
+    /// First-content timeout for streaming responses. If the upstream
+    /// hasn't emitted a content-bearing chunk in this window, the stream
+    /// is abandoned and (if no content has been delivered yet) the next
+    /// provider in the chain is tried. Content-free leading chunks (a
+    /// `delta.role` opener, id/model metadata) neither reset nor satisfy
+    /// this timeout.
     #[serde(
         default = "default_stream_first_byte_timeout_ms",
         skip_serializing_if = "Option::is_none"

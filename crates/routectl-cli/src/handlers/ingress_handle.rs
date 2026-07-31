@@ -682,11 +682,14 @@ fn build_sse_response(rx: tokio::sync::mpsc::Receiver<SseEvent>, egress_id: &str
 ///
 /// `observe_meta` + the dispatch-error finalize live HERE (not in the
 /// handler) because the future resolves inside this task. The Drop
-/// `client_disconnect` fallback is reserved for a genuine hangup -- the only
-/// un-finalized exit is a `tx.send` failure before the dispatch resolved
-/// (the client vanished before we could flush the head).
+/// `client_disconnect` fallback covers the genuine-hangup exits: a
+/// `tx.send` failure before the dispatch resolved (the client vanished
+/// before we could flush the head), and a client disconnect detected
+/// while awaiting the still-pending dispatch (the pre-content window the
+/// content-commit boundary keeps open). Both drop the guard un-finalized
+/// so Drop stamps `client_disconnect`.
 async fn warm_render_task<A: IngressAdapter>(
-    fut: DispatchFut,
+    mut fut: DispatchFut,
     adapter: A,
     mut capture: UsageCapture,
     tx: tokio::sync::mpsc::Sender<SseEvent>,
@@ -709,8 +712,32 @@ async fn warm_render_task<A: IngressAdapter>(
         // is 200 regardless of how the pending dispatch resolves.
         capture.mark_stream_http_committed();
     }
-    // Now await the SAME dispatch that outran the grace window.
-    let dispatched = fut.await;
+    // Now await the SAME dispatch that outran the grace window, but race it
+    // against a client disconnect. The dispatch stays pending through any
+    // content-free leading chunks (role, metadata) until the first real
+    // content chunk, so a provider that emits leading frames then hangs keeps
+    // this future pending for the whole pre-content window. A client that
+    // hangs up during that window must be detected HERE -- the `tx.closed()`
+    // watch inside `drive_stream` is only reached AFTER the dispatch resolves.
+    // On disconnect: drop the pending dispatch (releasing the upstream request
+    // and any half-open probe slot the future holds) and return WITHOUT
+    // finalizing, so the RAII guard's Drop stamps `client_disconnect` -- never
+    // an `upstream_error` from waiting out the full first-content timeout, and
+    // never a breaker/probe debit (the dispatch never resolves to an error).
+    // Biased + `tx.closed()` first matches the `drive_stream` select so both
+    // paths react to the same disconnect signal identically.
+    let dispatched = tokio::select! {
+        biased;
+        () = tx.closed() => {
+            tracing::debug!(
+                target: "routectl_cli::handlers::ingress_handle",
+                reason = "client_disconnected",
+                "client disconnected before first content; cancelling pending dispatch"
+            );
+            return;
+        }
+        dispatched = &mut fut => dispatched,
+    };
     capture.observe_meta(
         &dispatched.meta,
         router.catalog_version(),

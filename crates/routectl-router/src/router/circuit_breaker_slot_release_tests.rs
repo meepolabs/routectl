@@ -253,15 +253,52 @@ async fn probe_fast_fail_does_not_permanently_lock_breaker() {
     );
 }
 
-/// Streaming provider whose first chunk always arrives, after which
+/// Streaming provider whose first chunk carries content, after which
 /// the stream either completes cleanly (`mid_stream_error = false`)
 /// or yields one error frame (`mid_stream_error = true`). Lets the
-/// first-chunk-close tests separate the call-site close (on the
-/// first chunk) from the wrap's mid-stream accounting.
+/// first-content-close tests separate the call-site close (on the
+/// first content chunk) from the wrap's mid-stream accounting.
 struct FirstChunkProvider {
     id: String,
     mid_stream_error: bool,
     stream_calls: Arc<AtomicUsize>,
+}
+
+/// A content-bearing chunk (non-empty text delta) carrying `id`. The
+/// content-based commit boundary keys on this: a metadata-only chunk
+/// would not commit the provider.
+fn content_chunk(id: &str) -> ChatChunk {
+    ChatChunk {
+        id: id.into(),
+        choices: vec![routectl_core::ChunkChoice {
+            index: 0,
+            delta: routectl_core::ChunkDelta {
+                content: Some("ok".into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        ..Default::default()
+    }
+}
+
+/// A content-free chunk carrying only a leading `delta.role` (the
+/// OpenAI-Chat stream opener). Not the commit boundary: it must be
+/// buffered until content arrives, never close a half-open breaker.
+fn role_chunk() -> ChatChunk {
+    ChatChunk {
+        choices: vec![routectl_core::ChunkChoice {
+            index: 0,
+            delta: routectl_core::ChunkDelta {
+                role: Some(routectl_core::Role::Assistant),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        ..Default::default()
+    }
 }
 
 #[async_trait]
@@ -281,19 +318,13 @@ impl Provider for FirstChunkProvider {
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
         let id = self.id.clone();
-        let first = ChatChunk {
-            id: "c0".into(),
-            ..Default::default()
-        };
+        let first = content_chunk("c0");
         if self.mid_stream_error {
             let err = Error::upstream(&id, 503, "mid-stream boom");
             let s = futures::stream::iter(vec![Ok(first), Err(err)]);
             Ok(s.boxed())
         } else {
-            let second = ChatChunk {
-                id: "c1".into(),
-                ..Default::default()
-            };
+            let second = content_chunk("c1");
             let s = futures::stream::iter(vec![Ok(first), Ok(second)]);
             Ok(s.boxed())
         }
@@ -414,6 +445,134 @@ async fn cancel_after_first_chunk_success_does_not_retrip_breaker() {
     );
 }
 
+/// The three pre-content outcomes a half-open stream probe can take,
+/// each preceded by a content-free `delta.role` opener: role-only then
+/// EOS, role then content, or role then a mid-open error.
+enum RoleOutcome {
+    OnlyRole,
+    ContentAfterRole,
+    ErrorMidOpen,
+}
+
+/// Streaming provider that always opens with a content-free role chunk,
+/// then takes the configured `RoleOutcome`. Lets the content-boundary
+/// tests prove a role chunk does NOT close a half-open breaker while
+/// first content does.
+struct RoleProbeProvider {
+    id: String,
+    outcome: RoleOutcome,
+    stream_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for RoleProbeProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response(&self.id, "unused"))
+    }
+    async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+        unreachable!("not exercised by these tests")
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        let id = self.id.clone();
+        let items: Vec<Result<ChatChunk>> = match self.outcome {
+            RoleOutcome::OnlyRole => vec![Ok(role_chunk())],
+            RoleOutcome::ContentAfterRole => vec![Ok(role_chunk()), Ok(content_chunk("c1"))],
+            RoleOutcome::ErrorMidOpen => {
+                vec![
+                    Ok(role_chunk()),
+                    Err(Error::upstream(&id, 503, "mid-open boom")),
+                ]
+            }
+        };
+        Ok(futures::stream::iter(items).boxed())
+    }
+}
+
+fn build_role_probe_router(outcome: RoleOutcome) -> Router {
+    let provider: Arc<dyn Provider> = Arc::new(RoleProbeProvider {
+        id: "p".into(),
+        outcome,
+        stream_calls: Arc::new(AtomicUsize::new(0)),
+    });
+    build_router_with_provider(provider)
+}
+
+#[tokio::test]
+async fn half_open_role_only_does_not_close_breaker() {
+    // A half-open probe stream that emits ONLY a content-free role chunk
+    // then EOS is a pre-content empty stream: the role must NOT close the
+    // breaker (no spurious record_success). It re-trips cleanly and the
+    // probe slot is released -- recoverable, not latched closed or open.
+    let router = build_role_probe_router(RoleOutcome::OnlyRole);
+    arm_half_open(&router);
+
+    let r = router.stream(plain_req()).await;
+    assert!(
+        r.is_err(),
+        "role-only pre-content empty stream must fall over"
+    );
+    assert!(
+        !slot_in_flight(&router),
+        "the half-open probe slot must be released after a role-only probe",
+    );
+    assert_eq!(
+        circuit_phase(&router),
+        crate::runtime_state::CircuitPhase::HalfOpenReady,
+        "a role chunk must NOT close the breaker; it re-trips and stays recoverable",
+    );
+}
+
+#[tokio::test]
+async fn half_open_first_content_closes_breaker() {
+    // A half-open probe stream that emits a role opener THEN content
+    // closes the breaker on first content (not on the role).
+    let router = build_role_probe_router(RoleOutcome::ContentAfterRole);
+    arm_half_open(&router);
+
+    let stream = router
+        .stream(plain_req())
+        .await
+        .expect("role + content commits -> Ok stream");
+    assert!(
+        !slot_in_flight(&router),
+        "first content releases the half-open probe slot",
+    );
+    assert_eq!(
+        circuit_phase(&router),
+        crate::runtime_state::CircuitPhase::Closed,
+        "first content must close the half-open breaker",
+    );
+    drop(stream);
+}
+
+#[tokio::test]
+async fn half_open_role_then_error_records_failure_and_releases_slot() {
+    // A half-open probe that opens with a role then errors before any
+    // content records a breaker failure (re-trips) and releases the slot
+    // -- the role never committed, so this is a pre-content failure.
+    let router = build_role_probe_router(RoleOutcome::ErrorMidOpen);
+    arm_half_open(&router);
+
+    let r = router.stream(plain_req()).await;
+    assert!(r.is_err(), "a pre-content error must fall over");
+    assert!(
+        !slot_in_flight(&router),
+        "the half-open probe slot must be released after a role-then-error probe",
+    );
+    assert_eq!(
+        circuit_phase(&router),
+        crate::runtime_state::CircuitPhase::HalfOpenReady,
+        "role-then-error records a failure (re-trips) and stays recoverable",
+    );
+}
+
 /// Multi-surface mock for the half-open-probe-gets-401-then-refresh-
 /// succeeds path the slot-release fix targets. Each of `complete`,
 /// `stream`, and `count_tokens` returns `Error::Upstream { status:
@@ -478,10 +637,7 @@ impl Provider for Recovering401MultiProvider {
         if n == 0 {
             return Err(Error::upstream(&self.id, 401, "stale token"));
         }
-        let chunk = ChatChunk {
-            id: format!("ok-{}", self.id),
-            ..Default::default()
-        };
+        let chunk = content_chunk(&format!("ok-{}", self.id));
         Ok(futures::stream::once(async move { Ok(chunk) }).boxed())
     }
     async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
@@ -1111,10 +1267,7 @@ impl Provider for HangUntilClearedProvider {
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
         self.maybe_hang().await;
-        let chunk = ChatChunk {
-            id: format!("ok-{}", self.id),
-            ..Default::default()
-        };
+        let chunk = content_chunk(&format!("ok-{}", self.id));
         Ok(futures::stream::once(async move { Ok(chunk) }).boxed())
     }
     async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
