@@ -178,6 +178,14 @@ impl IngressAdapter for OpenAiIngress {
         Box::new(OpenAiStreamState::default())
     }
 
+    /// Render one canonical `ChatChunk` as an OpenAI streaming SSE event.
+    ///
+    /// CONTRACT: an OpenAI-Chat stream opens with a single
+    /// `delta.role="assistant"` chunk before any content, and every
+    /// egress lane emits it exactly once. This renderer relays whatever
+    /// the lane produced verbatim; the once-in-first-position guarantee is
+    /// enforced upstream in each lane's SSE state machine (and pinned by
+    /// the cross-lane opening-role-chunk test).
     fn render_chunk(
         &self,
         chunk: ChatChunk,

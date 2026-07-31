@@ -559,7 +559,8 @@ listed at the bottom of each crate.
 - `src/openai_compat/response.rs` -- response normalization; lifts
   `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys
 - `src/openai_compat/sse.rs` -- stateless per-chunk parsing +
-  `ThinkTagAccumulator` for the `<think>` cross-chunk path
+  `ThinkTagAccumulator` for the `<think>` cross-chunk path +
+  `StreamedToolCallIds` (per-stream synthesis of missing tool-call ids)
 - `src/openai_compat/util.rs` -- shared `build_reasoning_detail` helper for
   request/response/SSE normalizers
 

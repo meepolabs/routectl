@@ -533,6 +533,12 @@ impl Provider for OpenAiCompatProvider {
             // carry distinct `index` values instead of collapsing onto 0.
             // RawThinkTag threads its own counter inside ThinkTagAccumulator.
             let mut reasoning_index: u32 = 0;
+            // Per-stream synthesizer for missing streamed tool-call ids.
+            // Applied to every emitted chunk (both the stateless
+            // parse_event path and the RawThinkTag process path) so an
+            // id-less indexed tool_call gets a stable id before it reaches
+            // the openai->anthropic pairing that keys on the id.
+            let mut tool_call_ids = sse::StreamedToolCallIds::default();
             // Per-choice running concatenation of `delta.content` text,
             // indexed by `choice.index` and grown on demand. The terminal
             // chunk (the one carrying `finish_reason`) gets the
@@ -586,6 +592,16 @@ impl Provider for OpenAiCompatProvider {
                 match result {
                     Ok(None) => {}
                     Ok(Some(mut chunk)) => {
+                        // Synthesize any missing streamed tool-call id
+                        // before the terminal/tool-call classification and
+                        // the yield, so the emitted chunk always carries a
+                        // pairing-stable id. An unpairable tool_call (bad
+                        // index or a genuinely ambiguous id collision) fails
+                        // the stream rather than mispairing a tool_result.
+                        if let Err(e) = tool_call_ids.fill_missing_ids(&provider_id, &mut chunk) {
+                            yield Err(e);
+                            return;
+                        }
                         // Mark terminal + tool-call state PER choice.index so
                         // an `n > 1` stream where one choice finishes and a
                         // sibling truncates mid tool-call is classified by
