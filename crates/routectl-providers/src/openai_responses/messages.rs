@@ -25,6 +25,27 @@
 //! envelope, restored here so continuity survives the round trip. The
 //! restored pair is a CLIENT-CONTROLLED hint and passes through the same
 //! replay gate as a natively tagged artifact.
+//!
+//! Tool-call ids: every `call_id` this module emits -- on a
+//! `function_call` and on the `function_call_output` answering it --
+//! passes through `tool_id::sanitize_tool_id`. The Responses API
+//! correlates an output to its call BY `call_id`, and sanitization is
+//! pure, so applying it at all four emit sites is what keeps one logical
+//! id landing on one wire id no matter which ingress shape it arrived in
+//! (a `ToolUse` part or the OpenAI-shape `tool_calls` field for the call;
+//! a `ToolResult` part on a user turn or a `Role::Tool` message for the
+//! output). Sanitizing a subset silently drops the tool result: the
+//! output names a call the request never contained, so the model answers
+//! without it.
+//!
+//! OPEN: whether the Responses API constrains `call_id`'s charset at all
+//! is UNVERIFIED -- the API reference is auth-walled and every `call_id`
+//! in this repo's fixtures is synthetic and already wire-safe, so neither
+//! source establishes a constraint. Sanitizing is correct either way,
+//! because the two sides must MATCH regardless. If a live capture ever
+//! shows `call_id` is permissive, passing ids through verbatim on this
+//! lane becomes the more faithful option; that is a lane-awareness change
+//! to the shared sanitizer, not a change here.
 
 use serde_json::Value;
 
@@ -126,7 +147,7 @@ fn extract_tool_results(id: &str, content: &MessageContent, out: &mut Vec<Respon
         }
         let output = tool_result_to_output_body(id, content);
         out.push(ResponseInputItem::FunctionCallOutput {
-            call_id: tool_use_id.clone(),
+            call_id: crate::tool_id::sanitize_tool_id(tool_use_id).into_owned(),
             output,
         });
     }
@@ -455,13 +476,14 @@ struct ReasoningGroup {
 }
 
 fn translate_tool_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputItem>) -> Result<()> {
-    let Some(call_id) = msg.tool_call_id.as_ref().filter(|s| !s.is_empty()).cloned() else {
+    let Some(raw_call_id) = msg.tool_call_id.as_deref().filter(|s| !s.is_empty()) else {
         return Err(Error::normalize_request(
             id,
             "tool message missing tool_call_id (Role::Tool requires a \
              non-empty tool_call_id for the Responses API function_call_output item)",
         ));
     };
+    let call_id = crate::tool_id::sanitize_tool_id(raw_call_id).into_owned();
     let output = match &msg.content {
         MessageContent::Text(t) => FunctionCallOutputBody::Text(t.clone()),
         MessageContent::Null => FunctionCallOutputBody::Text(String::new()),
@@ -629,7 +651,7 @@ fn walk_assistant_part(
             ..
         }) => {
             tool_calls.push(ResponseInputItem::FunctionCall {
-                call_id: tu_id.clone(),
+                call_id: crate::tool_id::sanitize_tool_id(tu_id).into_owned(),
                 name: name.clone(),
                 arguments: serde_json::to_string(input)
                     .map_err(|e| Error::normalize_request(id, e.to_string()))?,
@@ -1546,6 +1568,231 @@ mod tool_calls_field_tests {
             count, 1,
             "function_call must not be doubled when both content part and tool_calls are set"
         );
+    }
+
+    /// An id that REQUIRES escaping must reach the wire as the SAME value
+    /// on the `function_call` and on the `function_call_output` that
+    /// answers it. The Responses API correlates output to call by
+    /// `call_id`, so a sanitized call plus a raw output silently loses the
+    /// tool result: the model answers without ever seeing it.
+    ///
+    /// This variant exercises the canonical `Role::Tool` output path.
+    #[test]
+    fn escaping_id_correlates_call_and_output_via_tool_role_message() {
+        // Arrange
+        let raw = "call.foo:1";
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": raw,
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                })]),
+            },
+            Message {
+                refusal: None,
+                role: Role::Tool,
+                content: MessageContent::Text("sunny".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some(raw.into()),
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+
+        // Assert
+        assert_eq!(
+            emitted_call_id(&out),
+            emitted_output_call_id(&out),
+            "function_call and function_call_output must carry the same call_id"
+        );
+    }
+
+    /// Same correlation invariant on the Anthropic-shape lane: the tool
+    /// result arrives as a `ToolResult` content part on a USER turn and is
+    /// lifted by `extract_tool_results`, while the call arrives as a
+    /// `ToolUse` content part on the assistant turn.
+    #[test]
+    fn escaping_id_correlates_call_and_output_via_tool_result_part() {
+        // Arrange
+        let raw = "call.foo:1";
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: raw.into(),
+                        name: "get_weather".into(),
+                        input: json!({}),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolResult {
+                        tool_use_id: raw.into(),
+                        content: json!("sunny"),
+                        is_error: None,
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+
+        // Assert
+        assert_eq!(
+            emitted_call_id(&out),
+            emitted_output_call_id(&out),
+            "function_call and function_call_output must carry the same call_id"
+        );
+    }
+
+    /// The two ingress shapes for one logical call must land on the same
+    /// wire id: an `id` arriving as a `ToolUse` content part and the same
+    /// `id` arriving on the OpenAI-shape `tool_calls` field.
+    #[test]
+    fn escaping_id_agrees_across_both_call_emit_shapes() {
+        // Arrange
+        let raw = "call.foo:1";
+        let via_part = vec![
+            user_text("hi"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: raw.into(),
+                        name: "f".into(),
+                        input: json!({}),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let via_field = vec![
+            user_text("hi"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": raw,
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+        ];
+
+        // Act
+        let part_out = build_input("test", AuthKind::ChatgptOauth, &via_part).unwrap();
+        let field_out = build_input("test", AuthKind::ChatgptOauth, &via_field).unwrap();
+
+        // Assert
+        assert_eq!(
+            emitted_call_id(&part_out),
+            emitted_call_id(&field_out),
+            "one logical id must reach the wire identically from either ingress shape"
+        );
+    }
+
+    /// A wire-safe id is untouched by the correlation fix -- the common
+    /// case must not be mangled.
+    #[test]
+    fn wire_safe_id_passes_through_unchanged_on_both_sides() {
+        // Arrange
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_abc-1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+            Message {
+                refusal: None,
+                role: Role::Tool,
+                content: MessageContent::Text("ok".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("call_abc-1".into()),
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+
+        // Assert
+        assert_eq!(emitted_call_id(&out), "call_abc-1");
+        assert_eq!(emitted_output_call_id(&out), "call_abc-1");
+    }
+
+    fn emitted_call_id(items: &[ResponseInputItem]) -> &str {
+        items
+            .iter()
+            .find_map(|i| match i {
+                ResponseInputItem::FunctionCall { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .expect("a function_call item must be emitted")
+    }
+
+    fn emitted_output_call_id(items: &[ResponseInputItem]) -> &str {
+        items
+            .iter()
+            .find_map(|i| match i {
+                ResponseInputItem::FunctionCallOutput { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .expect("a function_call_output item must be emitted")
     }
 
     /// A single-turn assistant text message with no tool_calls produces a

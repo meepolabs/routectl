@@ -1461,6 +1461,33 @@ mod tool_id_correlation_tests {
         assert_eq!(uses, results);
     }
 
+    /// A wire-safe id over the 64-byte `toolUseId` ceiling folds to the
+    /// digest form at BOTH the tool_use emit and the tool_result
+    /// correlation site, so the result is not orphaned. The expected value
+    /// is the literal the Bedrock Converse lane pins too -- the fold must
+    /// not depend on which lane sanitizes the id, or a fallback chain that
+    /// emits the use on one lane and replays the result on another breaks
+    /// correlation.
+    #[test]
+    fn over_long_wire_safe_tool_id_folds_consistently_across_anthropic_egress() {
+        // Arrange -- 65 bytes, entirely in the target charset.
+        let raw = "a".repeat(65);
+        let messages = vec![
+            user_msg(),
+            assistant_with_tool_call(&raw),
+            tool_result(&raw),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translation must not error");
+
+        // Assert
+        let expected = format!("esct_{}_8087e9a889f8a14c", "a".repeat(42));
+        assert_eq!(tool_use_id(&out), expected);
+        assert_eq!(tool_result_id(&out), expected);
+        assert_eq!(expected.len(), 64);
+    }
+
     fn tool_use_ids(out: &[AnthropicMessage]) -> Vec<String> {
         collect_block_ids(out, |b| match b {
             ContentBlock::ToolUse { id, .. } => Some(id.clone()),
