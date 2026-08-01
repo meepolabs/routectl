@@ -58,6 +58,20 @@ impl SystemContent {
         }
     }
 
+    /// True when this carries no meaningful system text: an empty or
+    /// whitespace-only `Text`, or `Blocks` in which every block's text is
+    /// empty or whitespace-only (including an empty block array).
+    ///
+    /// Egresses use this to decide that a canonical `system` supplied on the
+    /// wire is equivalent to none at all, so no upstream receives a
+    /// meaningless empty system value.
+    pub fn is_blank(&self) -> bool {
+        match self {
+            Self::Text(s) => s.trim().is_empty(),
+            Self::Blocks(blocks) => blocks.iter().all(|b| b.text.trim().is_empty()),
+        }
+    }
+
     /// Iterator over `cache_control` markers in the order they appear in
     /// the system position of the cache prefix.
     pub fn cache_controls(&self) -> impl Iterator<Item = &CacheControl> {
@@ -115,6 +129,52 @@ mod tests {
     fn text_form_flattens_to_itself() {
         let s = SystemContent::Text("hi".into());
         assert_eq!(s.flatten(), "hi");
+    }
+
+    #[test]
+    fn empty_and_whitespace_text_are_blank() {
+        assert!(SystemContent::Text(String::new()).is_blank());
+        assert!(SystemContent::Text("   \n\t ".into()).is_blank());
+        assert!(!SystemContent::Text("you are helpful".into()).is_blank());
+    }
+
+    #[test]
+    fn blocks_are_blank_when_every_block_text_is_blank() {
+        let blank = SystemContent::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: String::new(),
+                cache_control: None,
+                citations: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: "  \n".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ]);
+        assert!(blank.is_blank());
+        assert!(SystemContent::Blocks(vec![]).is_blank());
+    }
+
+    #[test]
+    fn blocks_are_not_blank_when_one_block_has_text() {
+        let mixed = SystemContent::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: "  ".into(),
+                cache_control: None,
+                citations: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: "real prompt".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ]);
+        assert!(!mixed.is_blank());
     }
 
     #[test]

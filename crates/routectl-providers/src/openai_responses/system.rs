@@ -35,13 +35,13 @@ pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
     }
     let filtered = filtered?;
     match &filtered {
-        SystemContent::Text(t) if t.is_empty() => None,
+        SystemContent::Text(t) if t.trim().is_empty() => None,
         SystemContent::Text(t) => Some(t.clone()),
         SystemContent::Blocks(blocks) => {
             warn_on_cache_control_loss(blocks);
             let combined: Vec<String> = blocks
                 .iter()
-                .filter(|b| !b.text.is_empty())
+                .filter(|b| !b.text.trim().is_empty())
                 .map(|b| b.text.clone())
                 .collect();
             if combined.is_empty() {
@@ -173,6 +173,31 @@ mod tests {
             logs_contain("billing/attribution system block dropped"),
             "billing-dropped warn must fire even when the system collapses to None"
         );
+    }
+
+    /// Pin: a blank canonical system (empty string, whitespace-only, or
+    /// blocks whose every text is blank) collapses to None so the
+    /// orchestrator emits an empty `instructions` -- the server's
+    /// "no system prompt" -- rather than a meaningless blank instruction.
+    #[test]
+    fn blank_canonical_system_collapses_to_none() {
+        for system in [
+            SystemContent::Text(String::new()),
+            SystemContent::Text("   \n\t ".into()),
+            SystemContent::Blocks(vec![block(""), block("  \n")]),
+        ] {
+            // Arrange
+            let req = req_with_system(system);
+
+            // Act
+            let instructions = translate_system(&req);
+
+            // Assert
+            assert!(
+                instructions.is_none(),
+                "a blank canonical system must collapse to None, got: {instructions:?}"
+            );
+        }
     }
 
     #[test]

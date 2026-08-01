@@ -340,6 +340,14 @@ pub(crate) fn normalize(
     let filtered_system = req
         .system
         .as_ref()
+        // A blank canonical system (`"system": ""`, whitespace-only, or
+        // blocks whose every text is blank) is treated as "no canonical
+        // system supplied" -- the same reading as None -- so it falls
+        // through to the Role::System lift below rather than suppressing
+        // it. It carries no instruction, so it must never reach the wire as
+        // `system: ""`, and it must not silently discard a system prompt a
+        // direct caller put in the messages array.
+        .filter(|s| !s.is_blank())
         .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut billing_dropped));
     if billing_dropped {
         tracing::warn!(
@@ -510,6 +518,11 @@ pub(crate) fn normalize(
 #[cfg(test)]
 #[path = "request_allowlist_tests.rs"]
 mod allowlist_tests;
+
+// A blank canonical req.system never reaches the wire as `system: ""`.
+#[cfg(test)]
+#[path = "request_empty_system_tests.rs"]
+mod empty_system_tests;
 
 // Tests for context_management emulation in normalize().
 #[cfg(test)]

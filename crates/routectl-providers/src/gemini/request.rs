@@ -100,16 +100,24 @@ fn warn_dropped_cache_control(provider_id: &str, req: &ChatRequest) {
 fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
     let mut texts: Vec<String> = Vec::new();
 
-    // Collect system-role messages.
+    // Collect system-role messages. Blank texts contribute nothing -- an
+    // empty part in systemInstruction is meaningless and the other
+    // Anthropic-shape egresses already drop it.
     for msg in &*req.messages {
         if !matches!(msg.role, Role::System) {
             continue;
         }
         match &msg.content {
-            MessageContent::Text(t) => texts.push(t.clone()),
+            MessageContent::Text(t) => {
+                if !t.trim().is_empty() {
+                    texts.push(t.clone());
+                }
+            }
             MessageContent::Parts(parts) => {
                 for p in parts {
-                    if let Some(t) = extract_text_from_part(p) {
+                    if let Some(t) = extract_text_from_part(p)
+                        && !t.trim().is_empty()
+                    {
                         texts.push(t);
                     }
                 }
@@ -119,13 +127,17 @@ fn build_system_instruction(req: &ChatRequest) -> Option<SystemInstruction> {
     }
 
     // Lift top-level `system` field if present (Anthropic ingress path).
+    // A blank canonical system (`"system": ""`, whitespace-only, or blocks
+    // whose every text is blank) carries no instruction, so it contributes
+    // nothing: Gemini would otherwise receive a systemInstruction holding an
+    // empty text part.
     use routectl_core::SystemContent;
-    if let Some(system) = &req.system {
+    if let Some(system) = req.system.as_ref().filter(|s| !s.is_blank()) {
         match system {
             SystemContent::Text(t) => texts.push(t.clone()),
             SystemContent::Blocks(blocks) => {
                 for block in blocks {
-                    if !block.text.is_empty() {
+                    if !block.text.trim().is_empty() {
                         texts.push(block.text.clone());
                     }
                 }
@@ -1100,6 +1112,152 @@ mod tests {
         assert_eq!(body.contents.len(), 1);
         let si = body.system_instruction.expect("system_instruction present");
         assert_eq!(si.parts[0].text.as_deref(), Some("you are helpful"));
+    }
+
+    /// A canonical `system` supplied as an empty string carries no
+    /// instruction: the body must omit `systemInstruction` entirely rather
+    /// than ship a part holding an empty text.
+    #[test]
+    fn empty_canonical_system_text_emits_no_system_instruction() {
+        // Arrange
+        let req = ChatRequest {
+            system: Some(SystemContent::Text(String::new())),
+            ..base_req()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        assert!(
+            body.system_instruction.is_none(),
+            "an empty canonical system must omit systemInstruction"
+        );
+        let wire = serde_json::to_value(&body).expect("serialize ok");
+        assert!(
+            wire.get("systemInstruction").is_none(),
+            "no systemInstruction key on the wire: {wire}"
+        );
+    }
+
+    /// Whitespace-only canonical system is equally meaningless.
+    #[test]
+    fn whitespace_only_canonical_system_text_emits_no_system_instruction() {
+        // Arrange
+        let req = ChatRequest {
+            system: Some(SystemContent::Text("   \n\t ".into())),
+            ..base_req()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        assert!(body.system_instruction.is_none());
+        let wire = serde_json::to_value(&body).expect("serialize ok");
+        assert!(wire.get("systemInstruction").is_none(), "{wire}");
+    }
+
+    /// Blocks whose every text is blank must not emit a systemInstruction
+    /// holding empty parts.
+    #[test]
+    fn all_blank_canonical_system_blocks_emit_no_system_instruction() {
+        // Arrange
+        let req = ChatRequest {
+            system: Some(SystemContent::Blocks(vec![
+                SystemBlock {
+                    kind: "text".into(),
+                    text: String::new(),
+                    cache_control: None,
+                    citations: None,
+                },
+                SystemBlock {
+                    kind: "text".into(),
+                    text: "  ".into(),
+                    cache_control: None,
+                    citations: None,
+                },
+            ])),
+            ..base_req()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        assert!(body.system_instruction.is_none());
+        let wire = serde_json::to_value(&body).expect("serialize ok");
+        assert!(wire.get("systemInstruction").is_none(), "{wire}");
+    }
+
+    /// Regression guard: the blank screen must not swallow a real prompt.
+    #[test]
+    fn blank_block_beside_real_block_keeps_only_the_real_text() {
+        // Arrange
+        let req = ChatRequest {
+            system: Some(SystemContent::Blocks(vec![
+                SystemBlock {
+                    kind: "text".into(),
+                    text: "  ".into(),
+                    cache_control: None,
+                    citations: None,
+                },
+                SystemBlock {
+                    kind: "text".into(),
+                    text: "be helpful".into(),
+                    cache_control: None,
+                    citations: None,
+                },
+            ])),
+            ..base_req()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        let si = body.system_instruction.expect("real block survives");
+        assert_eq!(si.parts.len(), 1);
+        assert_eq!(si.parts[0].text.as_deref(), Some("be helpful"));
+    }
+
+    /// A blank canonical system does not suppress the Role::System lift:
+    /// blank reads as "no canonical system supplied", so a direct caller's
+    /// system message still reaches the wire.
+    #[test]
+    fn blank_canonical_system_still_lifts_system_messages() {
+        // Arrange
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_system("you are helpful"), make_user("hi")].into(),
+            system: Some(SystemContent::Text(String::new())),
+            ..Default::default()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        let si = body.system_instruction.expect("lifted system survives");
+        assert_eq!(si.parts.len(), 1);
+        assert_eq!(si.parts[0].text.as_deref(), Some("you are helpful"));
+    }
+
+    /// A blank Role::System message contributes no empty part either.
+    #[test]
+    fn blank_system_message_emits_no_system_instruction() {
+        // Arrange
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_system("   "), make_user("hi")].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let body = translate("gemini:test", &req).expect("translate ok");
+
+        // Assert
+        assert!(body.system_instruction.is_none());
     }
 
     #[test]
