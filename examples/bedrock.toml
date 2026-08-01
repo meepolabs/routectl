@@ -35,6 +35,12 @@
 # ships up to ten betas via the `anthropic-beta` HTTP header; those
 # that are not on this list drop at DEBUG before send. Empty list (or
 # omitted field) = pass-through (no filtering).
+#
+# CARVE-OUT: "structured-outputs-2025-12-15" is force-added whenever a
+# request's assembled body carries `output_config.format`, whether or not
+# it appears below -- it is a server requirement implied by the in-use
+# feature, not a client-opted beta. To deny structured outputs, declare
+# the feature in the provider's `unsupported_features`.
 allowed_betas = [
   "context-1m-2025-08-07",
   "claude-code-20250219",
