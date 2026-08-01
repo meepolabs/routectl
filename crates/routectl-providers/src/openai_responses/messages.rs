@@ -102,7 +102,7 @@ fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
     // `function_call_output` input items keyed by call_id. Without
     // this lift, the upstream 400s with "No tool output found for
     // function call <id>".
-    extract_tool_results(id, &msg.content, out);
+    extract_tool_results(id, &msg.content, out)?;
 
     let content = build_user_content(id, &msg.content)?;
     if content.is_empty() {
@@ -125,9 +125,22 @@ fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
 /// tool outputs as user-turn content blocks; the Responses API wants
 /// them as sibling input items, so we lift them out before
 /// `build_user_content` walks the remaining parts.
-fn extract_tool_results(id: &str, content: &MessageContent, out: &mut Vec<ResponseInputItem>) {
+///
+/// An empty `tool_use_id` fails the request rather than dropping the
+/// block. The Responses API correlates an output to its call BY
+/// `call_id`: an empty id can never name the call it answers, so the
+/// request would either be rejected upstream or answered without the
+/// tool result. A loud local rejection beats a silently degraded answer,
+/// and it is the same policy `translate_tool_message` applies to an
+/// empty `tool_call_id` on the canonical `Role::Tool` shape -- one
+/// defect, one policy, whichever ingress shape it arrived in.
+fn extract_tool_results(
+    id: &str,
+    content: &MessageContent,
+    out: &mut Vec<ResponseInputItem>,
+) -> Result<()> {
     let MessageContent::Parts(parts) = content else {
-        return;
+        return Ok(());
     };
     for p in parts {
         let ContentPart::Known(KnownContentPart::ToolResult {
@@ -139,11 +152,12 @@ fn extract_tool_results(id: &str, content: &MessageContent, out: &mut Vec<Respon
             continue;
         };
         if tool_use_id.is_empty() {
-            tracing::warn!(
-                provider = id,
-                "dropping tool_result with empty tool_use_id on Responses egress"
-            );
-            continue;
+            return Err(Error::normalize_request(
+                id,
+                "tool_result block has an empty tool_use_id (a ToolResult part \
+                 requires a non-empty tool_use_id for the Responses API \
+                 function_call_output item)",
+            ));
         }
         let output = tool_result_to_output_body(id, content);
         out.push(ResponseInputItem::FunctionCallOutput {
@@ -151,6 +165,7 @@ fn extract_tool_results(id: &str, content: &MessageContent, out: &mut Vec<Respon
             output,
         });
     }
+    Ok(())
 }
 
 /// Translate the Anthropic-shape `tool_result.content` value into a
@@ -475,6 +490,15 @@ struct ReasoningGroup {
     encrypted_content: Option<String>,
 }
 
+/// Translate a canonical `Role::Tool` message into a
+/// `function_call_output` input item.
+///
+/// A missing or empty `tool_call_id` fails the request. The Responses API
+/// correlates an output to its call BY `call_id`, so an empty id can
+/// never name the call it answers and the model would answer without the
+/// tool result. `extract_tool_results` applies the same policy to an
+/// empty `tool_use_id` on the Anthropic-shape lane: one defect, one
+/// policy, so the outcome does not depend on the ingress shape.
 fn translate_tool_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputItem>) -> Result<()> {
     let Some(raw_call_id) = msg.tool_call_id.as_deref().filter(|s| !s.is_empty()) else {
         return Err(Error::normalize_request(
@@ -1827,5 +1851,155 @@ mod tool_calls_field_tests {
             .iter()
             .find(|i| matches!(i, ResponseInputItem::Message { role, .. } if role == "assistant"));
         assert!(assistant_msg.is_some(), "assistant Message must survive");
+    }
+}
+
+/// Both ingress shapes for a tool output must treat an unusable
+/// correlating id the same way: fail the request, never drop the block.
+/// A `call_id` is the only thing that binds an output to its call, so a
+/// dropped output means the model silently answers without the tool
+/// result.
+#[cfg(test)]
+mod empty_tool_id_policy_tests {
+    use serde_json::json;
+
+    use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
+
+    use super::super::AuthKind;
+    use super::super::types::ResponseInputItem;
+    use super::build_input;
+
+    fn user_text(text: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// A `Role::Tool` message carrying `tool_call_id`, which may be
+    /// absent (`None`) or present-but-empty.
+    fn tool_role_message(tool_call_id: Option<&str>) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Text("sunny".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: tool_call_id.map(str::to_string),
+            tool_calls: None,
+        }
+    }
+
+    /// A user turn whose content is a single Anthropic-shape
+    /// `ToolResult` part. The canonical `tool_use_id` is a plain
+    /// `String`, so an absent id is only representable as an empty one.
+    fn tool_result_turn(tool_use_id: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(
+                KnownContentPart::ToolResult {
+                    tool_use_id: tool_use_id.into(),
+                    content: json!("sunny"),
+                    is_error: None,
+                    cache_control: None,
+                },
+            )]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    fn output_call_ids(out: &[ResponseInputItem]) -> Vec<&str> {
+        out.iter()
+            .filter_map(|i| match i {
+                ResponseInputItem::FunctionCallOutput { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_tool_call_id_on_tool_role_message_errors() {
+        // Arrange
+        let messages = vec![user_text("hi"), tool_role_message(Some(""))];
+
+        // Act
+        let result = build_input("test", AuthKind::ChatgptOauth, &messages);
+
+        // Assert
+        let err = result.expect_err("an empty tool_call_id must fail the request");
+        assert!(
+            err.to_string().contains("tool_call_id"),
+            "error must name the offending field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_tool_call_id_on_tool_role_message_errors() {
+        // Arrange
+        let messages = vec![user_text("hi"), tool_role_message(None)];
+
+        // Act
+        let result = build_input("test", AuthKind::ChatgptOauth, &messages);
+
+        // Assert
+        let err = result.expect_err("an absent tool_call_id must fail the request");
+        assert!(
+            err.to_string().contains("tool_call_id"),
+            "error must name the offending field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_tool_use_id_on_tool_result_part_errors() {
+        // Arrange
+        let messages = vec![user_text("hi"), tool_result_turn("")];
+
+        // Act
+        let result = build_input("test", AuthKind::ChatgptOauth, &messages);
+
+        // Assert
+        let err = result.expect_err("an empty tool_use_id must fail the request");
+        assert!(
+            err.to_string().contains("tool_use_id"),
+            "error must name the offending field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_empty_tool_call_id_on_tool_role_message_emits_the_output() {
+        // Arrange
+        let messages = vec![user_text("hi"), tool_role_message(Some("call_1"))];
+
+        // Act
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
+            .expect("a valid tool_call_id must translate");
+
+        // Assert
+        assert_eq!(output_call_ids(&out), vec!["call_1"]);
+    }
+
+    #[test]
+    fn non_empty_tool_use_id_on_tool_result_part_emits_the_output() {
+        // Arrange
+        let messages = vec![user_text("hi"), tool_result_turn("call_1")];
+
+        // Act
+        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
+            .expect("a valid tool_use_id must translate");
+
+        // Assert
+        assert_eq!(output_call_ids(&out), vec!["call_1"]);
     }
 }
