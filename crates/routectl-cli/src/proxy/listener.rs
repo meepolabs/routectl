@@ -1152,6 +1152,76 @@ mod tests {
         );
     }
 
+    /// Guards the OTHER `log_snapshot()` seam in the accept loop: the
+    /// periodic [`METRICS_SNAPSHOT_INTERVAL`] tick, which the
+    /// shutdown-flush test above cannot observe (it returns on the
+    /// shutdown branch before the timer ever elapses). `start_paused`
+    /// auto-advances the clock to each pending deadline, so a full
+    /// interval passes without a single millisecond of wall time.
+    #[tokio::test(start_paused = true)]
+    async fn run_listener_flushes_a_metrics_snapshot_on_the_periodic_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
+        // Plain loopback origins rather than wiremock servers: this test
+        // sends no traffic at all, and a mock server's own background
+        // tasks would keep the runtime busy enough to interfere with the
+        // paused clock's auto-advance.
+        let ctx = test_ctx(
+            Url::parse("http://127.0.0.1:9").unwrap(),
+            Url::parse("http://127.0.0.1:9").unwrap(),
+        );
+        // Seed a counter so the emitted snapshot carries a non-zero value
+        // and the assertion proves the shared instance's totals reach it.
+        ctx.metrics
+            .incr_request(Leg::Inference, ResultClass::Success, PathClass::Inference);
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // The sender stays alive for the whole test: dropping it makes
+        // `shutdown.changed()` resolve (with an error the select arm
+        // matches), which would fire the SHUTDOWN flush and mask a
+        // missing periodic emission.
+        let (_shutdown_tx, shutdown_rx) = watch::channel(());
+
+        // Driven inline (not on a spawned task) because `with_capture`
+        // only sees events emitted on the calling thread. `run_listener`
+        // never returns on its own here, so the timeout is how the future
+        // ends -- it must outlast exactly one snapshot interval.
+        let (outcome, events) = routectl_testkit::with_capture(tokio::time::timeout(
+            METRICS_SNAPSHOT_INTERVAL + Duration::from_secs(1),
+            run_listener(
+                proxy_listener,
+                acceptor,
+                ctx,
+                Arc::from("api.anthropic.com"),
+                shutdown_rx,
+            ),
+        ))
+        .await;
+        assert!(
+            outcome.is_err(),
+            "the loop must still be running: it may only exit on the shutdown signal"
+        );
+
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.target == "routectl_cli::proxy::metrics"
+                    && event.message == "proxy metrics snapshot"
+            })
+            .collect();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "exactly one periodic snapshot must be emitted per elapsed interval, got {}",
+            snapshots.len()
+        );
+        assert_eq!(
+            snapshots[0].field("rc_proxy_requests_total"),
+            Some("1"),
+            "the periodic snapshot must carry the shared instance's accumulated total"
+        );
+    }
+
     /// Assembly-level proof of the slowloris guard: a client that
     /// connects to the real accept loop and then withholds the CONNECT
     /// terminator forever must have its connection closed once

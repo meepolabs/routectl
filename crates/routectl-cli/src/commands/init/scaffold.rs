@@ -15,11 +15,10 @@ use std::path::Path;
 
 use super::super::edit_pipeline::gate;
 
-/// The committed starter config, single-sourced from the same file
-/// `config example` embeds (its shipped-example test pins the file's schema
-/// validity). This module is one directory deeper than `commands/config.rs`,
-/// hence one extra `../` in the path.
-const STARTER_CONFIG: &str = include_str!("../../../../../examples/config.toml");
+/// The committed starter config, single-sourced from the constant
+/// `config example` prints, so the scaffolded bytes and the emitted bytes
+/// cannot drift (its shipped-example test pins the file's schema validity).
+const STARTER_CONFIG: &str = super::super::config::EXAMPLE_CONFIG;
 
 /// Why a scaffold refused. Each variant is a distinguishable signal the
 /// orchestrator matches on -- notably [`AlreadyExists`](ScaffoldError::AlreadyExists),
