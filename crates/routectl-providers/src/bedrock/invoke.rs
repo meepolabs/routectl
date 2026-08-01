@@ -180,6 +180,26 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         super::body_fields::FilterContext::InvokeBody,
     );
 
+    // Capability union, LAST so it reads the body that actually ships: a
+    // body carrying `output_config.format` is rejected by AWS unless the
+    // structured-outputs beta rides along in `anthropic_beta`. Deliberately
+    // AFTER both Bedrock allowlist filters:
+    //   - after `filter_bedrock_betas`, because the flag is a
+    //     routectl-derived server requirement implied by the shipped body,
+    //     not a client-opted beta, so it bypasses `[bedrock] allowed_betas`
+    //     with the same standing the operator's `cfg.anthropic_beta` floor
+    //     has. Unioning it earlier lets a restrictive allowlist that omits
+    //     the flag drop it again and ship the gated field ungated.
+    //   - after `filter_bedrock_body_fields`, so an `allowed_body_fields`
+    //     list that drops `output_config` entirely produces no flag either.
+    //     When `output_config.format` DOES survive that filter, the flag it
+    //     implies has to survive too, even if the operator's list omits
+    //     `anthropic_beta` -- an ungated structured-output body is a
+    //     guaranteed 400.
+    // Feature-triggered and idempotent: no `output_config.format` means no
+    // flag, and an already-present flag is neither duplicated nor reordered.
+    crate::anthropic_api::request::apply_structured_outputs_beta_to_body(&mut body);
+
     Ok(body)
 }
 
@@ -1069,8 +1089,64 @@ mod tests {
         let body = normalize_request(&cfg, &req).unwrap();
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
+        // The gating beta rides along with the field it gates. `fake_cfg`'s
+        // `allowed_betas` omits it, so this also pins the carve-out.
+        let betas = body["anthropic_beta"]
+            .as_array()
+            .expect("a structured-output body must carry anthropic_beta");
+        assert!(
+            betas
+                .iter()
+                .any(|b| b.as_str()
+                    == Some(routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA)),
+            "output_config.format must never ship without its gating beta; got: {betas:?}"
+        );
         // Bedrock-required version still set.
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
+    }
+
+    /// REGRESSION: a NON-EMPTY `[bedrock] allowed_betas` that omits the
+    /// structured-outputs flag must not strip it off a body that carries
+    /// `output_config.format`. The flag is a routectl-derived server
+    /// requirement implied by the shipped field, so the union runs AFTER
+    /// `filter_bedrock_betas` -- running it earlier let the filter drop the
+    /// flag again and shipped the gated field ungated, which AWS 400s.
+    #[test]
+    fn structured_outputs_beta_survives_a_restrictive_bedrock_allowlist() {
+        let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
+        let mut cfg = fake_cfg();
+        cfg.allowed_betas = vec!["context-1m-2025-08-07".into()];
+        assert!(
+            !cfg.allowed_betas.iter().any(|b| b == flag),
+            "precondition: the allowlist must omit the structured-outputs flag"
+        );
+        assert!(
+            !cfg.anthropic_beta.iter().any(|b| b == flag),
+            "precondition: the operator floor must not supply the flag either"
+        );
+
+        let mut req = user_req();
+        req.response_format = Some(json!({
+            "type": "json_schema",
+            "json_schema": {"name": "widget", "schema": {"type": "object"}},
+        }));
+
+        let body = normalize_request(&cfg, &req).unwrap();
+        assert!(
+            body["output_config"].get("format").is_some(),
+            "precondition: the structured-output directive must reach the body; got: {body}"
+        );
+        let betas: Vec<&str> = body["anthropic_beta"]
+            .as_array()
+            .expect("the gating beta must be on the final body")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert_eq!(
+            betas.iter().filter(|b| **b == flag).count(),
+            1,
+            "the flag must survive the allowlist exactly once; got: {betas:?}"
+        );
     }
 
     // -----------------------------------------------------------------

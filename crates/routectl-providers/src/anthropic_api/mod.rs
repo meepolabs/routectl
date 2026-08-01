@@ -146,8 +146,12 @@ impl Provider for AnthropicApiProvider {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
 
-        let (rb, beta_decision) =
-            self.build_headers(self.client.post(self.messages_url()), &req, &token);
+        let (rb, beta_decision) = self.build_headers(
+            self.client.post(self.messages_url()),
+            &req,
+            &token,
+            Some(&body),
+        );
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
         let mut request = rb
             .header("content-type", "application/json")
@@ -318,8 +322,12 @@ impl Provider for AnthropicApiProvider {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
 
-        let (rb, beta_decision) =
-            self.build_headers(self.client.post(self.messages_url()), &req, &token);
+        let (rb, beta_decision) = self.build_headers(
+            self.client.post(self.messages_url()),
+            &req,
+            &token,
+            Some(&body),
+        );
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
         let mut request = rb
             .header("content-type", "application/json")
@@ -543,8 +551,15 @@ impl Provider for AnthropicApiProvider {
         // (matches upstream) and posts via `.json()`. On the mantle lane
         // SigV4 must hash the body, so serialize to bytes and sign the
         // built request -- the `.json()` unbuffered path cannot be signed.
-        let (rb, beta_decision) =
-            self.build_headers(self.client.post(self.count_tokens_url()), &req, &token);
+        // `body` here is the post-allowlist count_tokens body, which is the
+        // shape that actually ships -- so a body-derived capability beta is
+        // gated on the reshaped body, not on the pre-allowlist `normalized`.
+        let (rb, beta_decision) = self.build_headers(
+            self.client.post(self.count_tokens_url()),
+            &req,
+            &token,
+            Some(&body),
+        );
         let request = if self.is_mantle() {
             let body_bytes = serde_json::to_vec(&body)
                 .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;

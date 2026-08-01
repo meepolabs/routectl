@@ -128,7 +128,7 @@ fn build_count_tokens_body_skips_absent_allowlist_fields() {
 fn outbound_header_names(provider: &AnthropicApiProvider, req: &ChatRequest) -> Vec<String> {
     let client = reqwest::Client::new();
     let rb = client.post("http://127.0.0.1/test");
-    let (rb, _decision) = provider.build_headers(rb, req, "test-token");
+    let (rb, _decision) = provider.build_headers(rb, req, "test-token", None);
     let request = rb.build().expect("build outbound request");
     request
         .headers()
@@ -229,15 +229,29 @@ fn forward_client_headers_unlisted_names_dropped() {
 
 /// Drive `build_headers` end-to-end and return the value of the
 /// requested header on the assembled outbound request, or `None`
-/// if the header is absent.
+/// if the header is absent. Composes headers with no assembled body, so
+/// body-derived capability betas never fire -- use
+/// `outbound_header_value_for_body` to exercise those.
 fn outbound_header_value(
     provider: &AnthropicApiProvider,
     req: &ChatRequest,
     name: &str,
 ) -> Option<String> {
+    outbound_header_value_for_body(provider, req, name, None)
+}
+
+/// `outbound_header_value` with an explicit assembled wire body, so tests
+/// can drive the body-derived beta union (`output_config.format` ->
+/// structured-outputs).
+fn outbound_header_value_for_body(
+    provider: &AnthropicApiProvider,
+    req: &ChatRequest,
+    name: &str,
+    body: Option<&Value>,
+) -> Option<String> {
     let client = reqwest::Client::new();
     let rb = client.post("http://127.0.0.1/test");
-    let (rb, _decision) = provider.build_headers(rb, req, "test-token");
+    let (rb, _decision) = provider.build_headers(rb, req, "test-token", body);
     let request = rb.build().expect("build outbound request");
     request
         .headers()
@@ -916,6 +930,238 @@ fn beta_floor_absent_on_api_key_auth() {
     );
 }
 
+// -- structured-outputs capability beta --------------------------------
+/// Plain api-key provider against api.anthropic.com: no OAuth gate, no
+/// beta floor, so the structured-outputs beta can only arrive from the
+/// body-derived capability union.
+fn api_key_cfg_for_betas(allowed_betas: Vec<String>) -> AnthropicApiConfig {
+    AnthropicApiConfig {
+        id: "test".into(),
+        auth: Arc::new(StaticToken::new("test-key")),
+        base_url: "https://api.anthropic.com".into(),
+        anthropic_version: "2023-06-01".into(),
+        auth_kind: AuthKind::ApiKey,
+        header_extras: Vec::new(),
+        user_agent: None,
+        allowed_betas,
+        forward_client_headers: Vec::new(),
+        context_management: false,
+        max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+        session_id: None,
+        cloak: CloakConfig::default(),
+        use_forwarded_bearer: false,
+
+        #[cfg(feature = "bedrock")]
+        mantle: None,
+    }
+}
+
+/// A body carrying `output_config.format` is rejected upstream unless the
+/// structured-outputs beta rides along. Pre-fix that flag reached the wire
+/// ONLY via the Claude-Code OAuth floor, so an ordinary api-key provider
+/// sending a `json_schema` request emitted the beta-gated field with no
+/// beta header at all.
+#[test]
+fn api_key_request_with_output_config_format_carries_structured_outputs_beta() {
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let req = ChatRequest::default();
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}},
+    });
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("a body carrying output_config.format must produce a beta header");
+    assert_eq!(
+        value,
+        routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA,
+        "the api-key path must carry exactly the structured-outputs beta"
+    );
+}
+
+/// The union is capability-driven (a server requirement implied by the
+/// shipped body), not a client-opted beta -- so it bypasses the operator
+/// `allowed_betas` allowlist exactly as the operator-pinned floor does.
+/// Without this, an operator allowlist would silently produce a body
+/// upstream rejects.
+#[test]
+fn structured_outputs_beta_bypasses_the_client_allowlist() {
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(vec!["some-other-beta".into()]));
+    let req = ChatRequest::default();
+    let body = serde_json::json!({"output_config": {"format": {"type": "json_object"}}});
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the capability beta must survive a restrictive allowlist");
+    assert!(
+        value
+            .split(',')
+            .any(|b| b.trim() == routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA),
+        "allowed_betas gates client-requested betas only; got: {value}"
+    );
+}
+
+/// No `output_config.format` on the shipped body -> no flag added. Pins
+/// that the union is gated on the body and never fires unconditionally.
+/// A sibling `output_config.effort` (adaptive-thinking path) is NOT the
+/// structured-output directive and must not trigger it either.
+#[test]
+fn body_without_output_config_format_gains_no_structured_outputs_beta() {
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let req = ChatRequest::default();
+
+    for body in [
+        serde_json::json!({"model": "claude-sonnet-4-5"}),
+        serde_json::json!({"output_config": {"effort": "high"}}),
+    ] {
+        assert!(
+            outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+                .is_none(),
+            "no output_config.format must mean no beta header; body: {body}"
+        );
+    }
+}
+
+/// The trigger reads the ASSEMBLED body, not `req.response_format`: an
+/// `output_config.format` that arrives via the `provider_extras`
+/// forward-compat sweep (an Anthropic-ingress round-trip) fires the union
+/// even though the canonical request carries no `response_format`. This is
+/// why the union cannot key off `req` -- `merge_provider_extras` and
+/// `reconcile_output_config_effort` reshape `output_config` after
+/// translation.
+#[test]
+fn structured_outputs_beta_triggers_on_output_config_arriving_via_provider_extras() {
+    let provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let req = ChatRequest {
+        model: "claude-sonnet-4-5".into(),
+        max_tokens: Some(64),
+        // No response_format: the directive rides provider_extras only.
+        provider_extras: Some(serde_json::json!({
+            "output_config": {"format": {"type": "json_object"}}
+        })),
+        ..Default::default()
+    };
+
+    let body = provider.normalize_request(&req).expect("normalize");
+    assert!(
+        body["output_config"].get("format").is_some(),
+        "precondition: the extras sweep must land output_config.format; got: {body}"
+    );
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("an extras-supplied output_config.format must produce a beta header");
+    assert!(
+        value
+            .split(',')
+            .any(|b| b.trim() == routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA),
+        "the union must read the assembled body, not req.response_format; got: {value}"
+    );
+}
+
+/// A cloaked Claude-Code OAuth request's beta list stays BYTE-IDENTICAL
+/// with the union in play: the pinned floor already carries the
+/// structured-outputs flag, so the union is a no-op -- no duplicate, no
+/// reorder, same joined header value as a request with no body.
+#[test]
+fn oauth_claude_code_beta_list_is_byte_identical_with_structured_outputs_body() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let req = req_with_claude_code_headers(Vec::new());
+    let body = serde_json::json!({
+        "output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}},
+    });
+
+    let without_body = outbound_header_value(&provider, &req, "anthropic-beta")
+        .expect("the OAuth floor must produce a beta header");
+    let with_body = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the OAuth floor must produce a beta header");
+
+    assert_eq!(
+        with_body, without_body,
+        "the OAuth Claude-Code beta list must be byte-identical to today"
+    );
+    // The composer emits the OAuth gate flag first, then the floor in
+    // corpus order (its own `oauth-2025-04-20` entry deduped away), so the
+    // emitted list is the floor's contents with one leading rotation.
+    let betas: Vec<&str> = with_body.split(',').map(str::trim).collect();
+    let floor = routectl_core::identity::anthropic::default_claude_code_anthropic_betas();
+    assert_eq!(
+        betas.len(),
+        floor.len(),
+        "the union must not widen the floor; got: {with_body}"
+    );
+    for flag in floor {
+        assert!(
+            betas.contains(flag),
+            "the emitted list must still carry every floor flag ({flag}); got: {with_body}"
+        );
+    }
+    assert_eq!(
+        betas
+            .iter()
+            .filter(|b| **b == routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA)
+            .count(),
+        1,
+        "the union must be idempotent, never duplicating the floor's flag"
+    );
+}
+
+/// Genuine-CC (`is_non_cc == false`, so the speculative beta floor is
+/// skipped) still gets the structured-outputs flag when the body actually
+/// carries `output_config.format`. The union is deliberately NOT gated on
+/// `is_non_cc`: unlike the floor it is feature-triggered, so a real Claude
+/// Code request using structured outputs needs the flag exactly as a
+/// cloaked one does -- without it Anthropic rejects the field.
+#[test]
+fn genuine_cc_request_with_output_config_format_carries_structured_outputs_beta() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let mut req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+    req.anthropic_beta = vec!["fine-grained-tool-streaming-2025-05-14".into()];
+    let body = serde_json::json!({
+        "output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}},
+    });
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("anthropic-beta header must be present on the genuine-CC path");
+    let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+    assert_eq!(
+        betas,
+        vec![
+            // The client's own beta set, verbatim and first.
+            "fine-grained-tool-streaming-2025-05-14",
+            // The OAuth gate flag, unioned on both CC paths.
+            routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA,
+            // The body-derived capability flag -- the floor is skipped here,
+            // so this is the only other entry.
+            routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA,
+        ],
+        "genuine-CC must get its own betas + the OAuth gate + exactly the \
+         structured-outputs flag; got: {value}"
+    );
+}
+
+/// Fail-closed on a third-party anthropic-shaped host: the union is not
+/// pinned to `api.anthropic.com`, so a self-hosted or gateway base_url
+/// carrying `output_config.format` still emits the gating beta. A
+/// downstream that ignores unknown betas loses nothing; one that enforces
+/// them would otherwise reject the field.
+#[test]
+fn non_anthropic_host_with_output_config_format_still_carries_structured_outputs_beta() {
+    let mut cfg = api_key_cfg_for_betas(Vec::new());
+    cfg.base_url = "https://anthropic.gateway.example.com".into();
+    let provider = AnthropicApiProvider::new(cfg);
+    let req = ChatRequest::default();
+    let body = serde_json::json!({
+        "output_config": {"format": {"type": "json_object"}},
+    });
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("a third-party anthropic-shaped host must still get the beta");
+    assert_eq!(
+        value,
+        routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA,
+        "the union is host-independent; got: {value}"
+    );
+}
+
 /// Genuine-CC (own-mode, `is_non_cc() == false`) requests must NOT get
 /// the fingerprint-widening beta floor: real Claude Code never asked
 /// for capability betas like `context-1m` on e.g. a haiku/WebFetch
@@ -1042,7 +1288,7 @@ fn outbound_header_pairs(
 ) -> Vec<(String, String)> {
     let client = reqwest::Client::new();
     let rb = client.post("http://127.0.0.1/test");
-    let (rb, _decision) = provider.build_headers(rb, req, "test-token");
+    let (rb, _decision) = provider.build_headers(rb, req, "test-token", None);
     let request = rb.build().expect("build outbound request");
     request
         .headers()
@@ -2106,7 +2352,7 @@ async fn build_wire_request(
     let client = reqwest::Client::new();
     let rb = client.post("http://127.0.0.1/test");
     provider
-        .build_headers(rb, req, &token)
+        .build_headers(rb, req, &token, None)
         .0
         .build()
         .expect("build outbound request")
@@ -2399,7 +2645,7 @@ fn beta_decision_reflects_genuine_cc_request() {
     let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
     let client = reqwest::Client::new();
     let rb = client.post("http://127.0.0.1/test");
-    let (_rb, decision) = provider.build_headers(rb, &req, "test-token");
+    let (_rb, decision) = provider.build_headers(rb, &req, "test-token", None);
 
     assert!(
         !decision.is_non_cc,
@@ -2424,7 +2670,7 @@ fn beta_decision_reflects_non_cc_request() {
     let req = req_with_claude_code_headers(Vec::new());
     let client = reqwest::Client::new();
     let rb = client.post("http://127.0.0.1/test");
-    let (_rb, decision) = provider.build_headers(rb, &req, "test-token");
+    let (_rb, decision) = provider.build_headers(rb, &req, "test-token", None);
 
     assert!(
         decision.is_non_cc,
@@ -2576,6 +2822,29 @@ async fn mantle_build_headers_stamp_anthropic_version() {
     assert_eq!(
         outbound_header_value(&provider, &req, "anthropic-version").as_deref(),
         Some("2023-06-01"),
+    );
+}
+
+/// The mantle Anthropic lane carries betas on the `anthropic-beta` HEADER
+/// (its body-side `anthropic_beta` is stripped before send, like the
+/// first-party lane), so the body-derived capability union must fire here
+/// too: a mantle request whose body carries `output_config.format` gets the
+/// gating beta despite the lane running no beta floor at all.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn mantle_build_headers_carry_structured_outputs_beta_for_output_config_format() {
+    let provider = AnthropicApiProvider::new(mantle_cfg_bearer().await);
+    let req = ChatRequest::default();
+    let body = serde_json::json!({
+        "output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}},
+    });
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the mantle lane must emit the gating beta for a structured-output body");
+    assert_eq!(
+        value,
+        routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA,
+        "the mantle lane composes no floor, so the union is the only source; got: {value}"
     );
 }
 

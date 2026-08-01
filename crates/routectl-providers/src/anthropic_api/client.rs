@@ -69,6 +69,13 @@ pub struct AnthropicApiConfig {
     /// Mirrors the Bedrock-egress `[bedrock] allowed_betas` shape so
     /// multi-tenant or API-gateway deployments can constrain which
     /// betas authenticated clients can opt into.
+    ///
+    /// CARVE-OUT: the structured-outputs beta
+    /// (`STRUCTURED_OUTPUTS_BETA`) is force-added whenever the assembled
+    /// body carries `output_config.format`, regardless of this list -- it
+    /// is a routectl-derived server requirement implied by the in-use
+    /// feature, not a client-opted beta. To deny structured outputs, deny
+    /// the feature. See `docs/CONFIGURATION.md`.
     pub allowed_betas: Vec<String>,
     /// Strict allowlist of inbound `x-claude-code-*` header names the
     /// egress is permitted to forward upstream. The Anthropic ingress
@@ -456,11 +463,24 @@ impl AnthropicApiProvider {
         )
     }
 
+    /// Compose the outbound headers, including the three-source
+    /// `anthropic-beta` union.
+    ///
+    /// `wire_body` is the ASSEMBLED body this request will ship, when the
+    /// caller has one. It is read ONLY to detect capability-driven beta
+    /// requirements that depend on what actually lands on the wire (today:
+    /// `output_config.format` -> `STRUCTURED_OUTPUTS_BETA`). The canonical
+    /// `req` cannot answer that question -- the `provider_extras` merge and
+    /// `reconcile_output_config_effort` add and remove `output_config` after
+    /// translation, so `req.response_format` is not the shipped shape. `None`
+    /// means "no body-derived betas", used by callers that compose headers
+    /// without an assembled body.
     pub(super) fn build_headers(
         &self,
         rb: reqwest::RequestBuilder,
         req: &ChatRequest,
         token: &str,
+        wire_body: Option<&Value>,
     ) -> (reqwest::RequestBuilder, BetaDecision) {
         let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
         rb = match self.cfg.auth_kind {
@@ -607,6 +627,35 @@ impl AnthropicApiProvider {
         // doesn't honour the beta would cause a 400.
         if self.cfg.context_management {
             merged_betas.retain(|b| b != context_management::CONTEXT_MANAGEMENT_BETA);
+        }
+
+        // Capability-driven union, LAST: a body carrying
+        // `output_config.format` is rejected upstream unless the
+        // structured-outputs beta rides along, on EVERY auth kind. Placed
+        // after `filter_anthropic_betas` (and after the operator/floor
+        // unions) because this is a server requirement implied by the
+        // shipped body, not a client-opted beta subject to `allowed_betas`
+        // -- the same standing the operator-pinned floor has. Idempotent, so
+        // an OauthBearer request whose floor already carries the flag keeps
+        // its beta list byte-identical.
+        //
+        // NOT gated on `is_non_cc`, unlike the pinned floor above -- this
+        // union intentionally fires on the genuine-CC (`is_non_cc == false`)
+        // path too. The floor's gate exists because the floor is
+        // SPECULATIVE: it force-widens a real client's beta set with
+        // capability flags CC never asked for, which Anthropic 400s. This
+        // union is the opposite -- it fires ONLY when the assembled body
+        // actually carries `output_config.format`, so a genuine-CC request
+        // reaching here demonstrably uses the gated feature and needs its
+        // flag, exactly as a cloaked one does.
+        //
+        // SUPPRESSED on the forwarded leg, like every other minted-beta site
+        // here: there the client's own beta set must reach Anthropic verbatim
+        // per the FORWARDING TRANSPARENCY CONTRACT, and the client owns the
+        // forwarded body too -- so widening its fingerprint with a flag it
+        // did not send is never routectl's call.
+        if !forwarded_leg && let Some(body) = wire_body {
+            super::extras::union_structured_outputs_beta(body, &mut merged_betas);
         }
 
         // Snapshot the FINAL composed beta set (post context_management

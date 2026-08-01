@@ -453,6 +453,9 @@ allowed_betas        = ["computer-use-2025-01-24", "files-api-2025-04-14"]
 # allowed_body_fields  = [...]  # optional body-field allowlist
 ```
 
+One flag bypasses this filter unconditionally: see
+[the structured-outputs carve-out](#allowed_betas-carve-out-the-structured-outputs-beta).
+
 ### `[providers.X] anthropic_beta` -- per-provider Bedrock floor
 
 A static `anthropic_beta` value that routectl always injects on
@@ -488,6 +491,27 @@ kind         = "anthropic-api"
 api_key_ref  = "env://ANTHROPIC_API_KEY"
 allowed_betas = ["claude-code-20250219", "oauth-2025-04-20"]
 ```
+
+### `allowed_betas` carve-out: the structured-outputs beta
+
+One flag is exempt from BOTH allowlists above. Whenever a request's
+assembled body carries `output_config.format` (the structured-output
+directive), routectl force-adds
+`structured-outputs-2025-12-15` to that request's beta set on both the
+`anthropic-api` lane (the `anthropic-beta` HTTP header) and the Bedrock
+lane (the body's `anthropic_beta` array), regardless of
+`[providers.X] allowed_betas` or `[bedrock] allowed_betas`.
+
+The flag is not a client-opted beta: it is a routectl-derived server
+requirement implied by the structured-outputs feature the request is
+already using. Upstream rejects a body carrying `output_config.format`
+without it, so dropping the flag would guarantee a 400 rather than
+constrain anything.
+
+An operator who wants to deny structured outputs should deny the
+FEATURE -- declare it in the provider's `unsupported_features` so
+requests using it are never routed to that provider -- rather than
+relying on the beta allowlist.
 
 ## `[providers.X] api_shape` -- Bedrock API selector
 

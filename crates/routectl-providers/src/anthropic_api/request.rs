@@ -66,6 +66,11 @@ use super::tools::{apply_parallel_tool_use, parallel_tool_calls_extra, translate
 // means those call sites need no edits across the file split.
 pub(crate) use super::extras::{build_thinking, filter_anthropic_betas};
 pub(crate) use super::system::translate_system;
+// The structured-outputs body-beta carrier is applied by the body-shape
+// Bedrock-Invoke egress AFTER its own beta allowlist filter, not here --
+// see `apply_structured_outputs_beta_to_body`.
+#[cfg(feature = "bedrock")]
+pub(crate) use super::extras::apply_structured_outputs_beta_to_body;
 // `lift_legacy_system` (the unfiltered lift) is consumed only by the
 // Bedrock Converse egress; the anthropic-api orchestrator below uses the
 // billing-aware `lift_legacy_system_stripped`. Gate the re-export so the

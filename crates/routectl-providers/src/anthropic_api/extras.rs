@@ -490,6 +490,77 @@ fn body_has_adaptive_thinking(body: &Value) -> bool {
             == Some("adaptive")
 }
 
+/// True iff the assembled body carries `output_config.format`, the
+/// structured-output directive Anthropic gates behind
+/// `STRUCTURED_OUTPUTS_BETA`.
+///
+/// Reads the ASSEMBLED body for the same reason
+/// `reconcile_output_config_effort` does: `merge_provider_extras` and the
+/// `response_format` lift both add `output_config` after translation, and
+/// the effort reconciler can drop a now-empty `output_config`, so
+/// `req.response_format` is not a reliable signal for what ships.
+pub(super) fn body_has_output_config_format(body: &Value) -> bool {
+    body.get("output_config")
+        .and_then(|oc| oc.get("format"))
+        .is_some()
+}
+
+/// Union `STRUCTURED_OUTPUTS_BETA` into `betas` when `body` carries
+/// `output_config.format`. Idempotent: an already-present flag is neither
+/// duplicated nor reordered.
+///
+/// A capability-driven server requirement rather than a client-opted beta,
+/// so it runs AFTER the `allowed_betas` filter (`filter_anthropic_betas`)
+/// on every auth kind -- a body carrying the gated field without the flag
+/// is rejected upstream regardless of who asked for it.
+pub(super) fn union_structured_outputs_beta(body: &Value, betas: &mut Vec<String>) {
+    if !body_has_output_config_format(body) {
+        return;
+    }
+    let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
+    if betas.iter().any(|b| b == flag) {
+        return;
+    }
+    betas.push(flag.to_string());
+}
+
+/// Body-field analogue of `union_structured_outputs_beta`: union the flag
+/// into `body.anthropic_beta` when the same body carries
+/// `output_config.format`. Same idempotence contract. Serves the
+/// body-shape Anthropic egress (Bedrock-Invoke reads betas from the body);
+/// the api.anthropic.com egress strips the field and carries betas on the
+/// `anthropic-beta` header instead.
+///
+/// MUST be applied by the body-shape egress AFTER that egress's own beta
+/// allowlist filter runs. On Bedrock-Invoke a non-empty `[bedrock]
+/// allowed_betas` that omits this flag would otherwise drop it again and
+/// ship `output_config.format` ungated -- which AWS rejects. Same standing
+/// as the header carrier: a server requirement implied by the shipped body
+/// is not a client-opted beta subject to an allowlist.
+///
+/// Gated on `bedrock`: Bedrock-Invoke is the only egress that reads betas
+/// from the body, so the lean build has no consumer.
+#[cfg(feature = "bedrock")]
+pub fn apply_structured_outputs_beta_to_body(body: &mut Value) {
+    if !body_has_output_config_format(body) {
+        return;
+    }
+    let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(arr) = obj.get_mut("anthropic_beta").and_then(Value::as_array_mut) {
+        if !arr.iter().any(|b| b.as_str() == Some(flag)) {
+            arr.push(Value::from(flag));
+        }
+    } else {
+        obj.insert(
+            "anthropic_beta".into(),
+            Value::Array(vec![Value::from(flag)]),
+        );
+    }
+}
+
 /// Late enforcer of the temperature/top_p invariant, the sampling analogue
 /// of `reconcile_output_config_effort`. Assembly forces `temperature = 1.0`
 /// and drops `top_p` whenever thinking is composed (Anthropic forbids

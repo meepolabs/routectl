@@ -43,6 +43,14 @@ pub const OAUTH_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 /// never drift out of sync with the sibling literal.
 pub const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
+/// The `anthropic-beta` flag gating `output_config.format` (structured
+/// outputs). A server-side capability requirement, not a client-opted
+/// beta: any Anthropic-shape body carrying `output_config.format` must
+/// ship this flag or upstream rejects the field. Single source of truth
+/// shared by the floor list below and the egress capability union, so the
+/// two can never drift.
+pub const STRUCTURED_OUTPUTS_BETA: &str = "structured-outputs-2025-12-15";
+
 /// Default `User-Agent` for the OauthBearer surface. Used as the
 /// client-level fallback in `AnthropicApiProvider::new()` when the
 /// operator leaves `user_agent` unset on an oauth-bearer provider.
@@ -111,7 +119,7 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
         "interleaved-thinking-2025-05-14",
         "context-management-2025-06-27",
         "prompt-caching-scope-2026-01-05",
-        "structured-outputs-2025-12-15",
+        STRUCTURED_OUTPUTS_BETA,
         "fast-mode-2026-02-01",
         "redact-thinking-2026-02-12",
         "token-efficient-tools-2026-03-28",
