@@ -294,8 +294,8 @@ mod build_resolved_models_tests {
     #[tokio::test]
     async fn zero_stream_first_byte_timeout_ms_is_skipped_not_set() {
         // `stream_first_byte_timeout_ms = 0` would abandon every stream
-        // before the first chunk. The resolver must WARN and leave the
-        // field None, never propagate Some(0).
+        // before its first content-bearing chunk. The resolver must WARN
+        // and leave the field None, never propagate Some(0).
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
             vec![(

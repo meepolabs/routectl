@@ -873,7 +873,7 @@ accounting is per-attempt (not per-request).
 | `circuit_failures`             | Option<u32> | None (disabled) | Trip the circuit breaker after this many consecutive failed attempts. Once tripped, the router skips this provider for `circuit_cooldown_ms`. |
 | `circuit_cooldown_ms`          | Option<u64> | 30000 (30s) when `circuit_failures` is set; unused otherwise | How long to keep the circuit open once tripped. |
 | `request_timeout_ms`           | Option<u64> | None (no cap)   | Per-attempt request timeout. Resolution order: per-provider `request_timeout_ms` > global `[retry] request_timeout_ms` > None (no cap). Per-alias retry overrides were removed in v0.6; to vary timeouts per route, split into distinct `[providers.X]` entries. |
-| `stream_first_byte_timeout_ms` | Option<u64> | None            | Per-provider first-byte timeout for streaming responses. Resolution order: per-model > per-provider > global `[retry] stream_first_byte_timeout_ms`. |
+| `stream_first_byte_timeout_ms` | Option<u64> | None            | Per-provider first-content timeout for streaming responses (content-free leading chunks do not satisfy it). Resolution order: per-model > per-provider > global `[retry] stream_first_byte_timeout_ms`. |
 
 `rpm_limit` and circuit breaker are both `None` (disabled) when omitted.
 `circuit_cooldown_ms` is only meaningful when `circuit_failures` is set;
