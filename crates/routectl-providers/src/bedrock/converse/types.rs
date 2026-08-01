@@ -212,11 +212,21 @@ pub struct ConverseImageSource {
 /// AWS Converse `document` content block. AWS schema:
 /// `{format: "pdf"|"csv"|"doc"|"docx"|"xls"|"xlsx"|"html"|"txt"|"md",
 ///   name: "...",
-///   source: {bytes: <base64>}}`. The `name` field is required by AWS,
-/// validated against `^[a-zA-Z0-9-()[\]_ ]{1,200}$`. We emit a
-/// best-effort name from the canonical Document `title` field; when
-/// absent we use a generic placeholder so AWS doesn't reject the block
-/// outright.
+///   source: {bytes: <base64>},
+///   citations: {enabled: <bool>}}`. The `name` field is required by AWS,
+/// which states its charset as prose rather than a pattern: alphanumeric
+/// characters, whitespace (no more than one in a row), hyphens,
+/// parentheses, square brackets -- NOT underscore, and there is no
+/// published `Pattern:` on the member. `sanitize_document_name` in
+/// `messages.rs` is the single enforcement point. We emit a best-effort
+/// name from the canonical Document `title` field; when absent we use a
+/// generic placeholder so AWS doesn't reject the block outright.
+///
+/// AWS also accepts an optional `context` string ("contextual information
+/// about how the document should be processed or interpreted by the model
+/// when generating citations"). It has no member here on purpose: no
+/// canonical content part models it, so there is nothing to forward and an
+/// always-absent field would only look like an oversight in reverse.
 #[derive(Debug, Serialize)]
 pub struct ConverseDocument {
     /// Document MIME format: pdf, csv, doc, docx, xls, xlsx, html, txt, md.
@@ -224,6 +234,17 @@ pub struct ConverseDocument {
     /// Filename for the document. Required by AWS.
     pub(crate) name: String,
     pub(crate) source: ConverseDocumentSource,
+    /// Citation generation config. Optional on the wire, and omitted when
+    /// citations are off -- an explicit `{enabled: false}` is the same
+    /// behavior as absence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) citations: Option<ConverseCitationsConfig>,
+}
+
+/// AWS `CitationsConfig`: exactly one required member, `enabled`.
+#[derive(Debug, Serialize)]
+pub struct ConverseCitationsConfig {
+    pub(crate) enabled: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -8,40 +8,59 @@
 //! is the charset this module targets at every id-emit site AND every
 //! matching tool_result correlation site.
 //!
-//! The mapping is INJECTIVE, not lossy: two distinct raw ids never share
-//! a wire id. A lossy char-replacement (`.` and `:` both -> `_`) let
-//! `call.a` and `call:a` collapse onto one wire id, and two tool_use
-//! blocks with the same id are themselves a 400. Instead, an id that
-//! needs escaping is emitted as `esc_<escaped>` (see
-//! [`sanitize_tool_id`]), a namespace disjoint from every id that passes
-//! through verbatim.
+//! The mapping is NOT lossy in the char-replacement sense: a lossy
+//! replacement (`.` and `:` both -> `_`) let `call.a` and `call:a`
+//! collapse onto one wire id, and two tool_use blocks with the same id
+//! are themselves a 400. Instead, an id that needs escaping is emitted as
+//! `esc_<escaped>` (see [`sanitize_tool_id`]), a namespace disjoint from
+//! every id that passes through verbatim.
+//!
+//! Distinctness comes with two different strengths, and they are not
+//! interchangeable:
+//!
+//! - **Escape path -- INJECTIVE.** The `_<hex>` encoding is reversible,
+//!   so distinct raw ids always yield distinct escaped bodies.
+//! - **Digest path -- COLLISION-RESISTANT ONLY.** An id whose emitted
+//!   form would exceed the 64-byte ceiling folds to
+//!   `esct_<prefix>_<digest>` (see [`sanitize_tool_id`]). Output is
+//!   capped at 64 bytes while input is unbounded, so by pigeonhole some
+//!   pair of inputs must collide; distinctness rests on a 64-bit FNV-1a
+//!   digest over a retained prefix that unequal inputs can already
+//!   saturate. Not adversary-resistant -- FNV is not the primitive for
+//!   that, and a keyed or cryptographic digest would be if it were ever
+//!   wanted. It is not swapped speculatively because the digest must
+//!   stay stable across processes and builds (see [`fnv1a64`]).
 //!
 //! The mapping is also PURE and deterministic: a `tool_use` and the
 //! `tool_result` answering it are translated at different call sites with
 //! no shared state, so equal raw ids must land on equal wire ids for the
-//! result not to be orphaned.
+//! result not to be orphaned. That is also why the ceiling is applied
+//! uniformly rather than per-lane: a lane-dependent mapping would send
+//! one lane's `tool_use` verbatim and a later lane's `tool_result`
+//! folded, and the two would no longer correlate across a fallback chain.
 //!
-//! Escaping expands an id (up to 3x), so an escaped form that would
-//! exceed Bedrock's documented 64-char `toolUseId` ceiling is folded to
-//! a digest form under its own prefix rather than trading one 400 for
-//! another.
+//! Escaping expands an id (up to 3x), and even an already-wire-safe id
+//! can exceed Bedrock's documented 64-char `toolUseId` ceiling, so any
+//! emitted form over the ceiling is folded to the digest form under its
+//! own prefix rather than trading one 400 for another.
 //!
-//! An already-valid id is returned unchanged (no allocation). The
-//! deterministic empty-id fallback (`call_<index>`) lives at the call
-//! sites and is itself charset-valid, so sanitizing it is a no-op.
+//! An already-valid id within the ceiling is returned unchanged (no
+//! allocation). The deterministic empty-id fallback (`call_<index>`) lives
+//! at the call sites and is itself charset-valid, so sanitizing it is a
+//! no-op.
 
 use std::borrow::Cow;
 
 /// Marker prefix for the escaped form. An id that needs escaping is
 /// emitted under this prefix, and an id that already starts with one of
 /// the marker prefixes is escaped too, so the verbatim, escaped, and
-/// digest namespaces are pairwise disjoint -- the property that makes the
-/// mapping injective.
+/// digest namespaces are pairwise disjoint -- no id from one form can
+/// ever equal an id from another.
 const ESCAPE_PREFIX: &str = "esc_";
 
-/// Marker prefix for the digest form used when the escaped form would
-/// exceed [`MAX_TOOL_ID_LEN`]. Distinct from `ESCAPE_PREFIX` (the fourth
-/// byte is `t`, not `_`), so a digest id can never equal an escaped one.
+/// Marker prefix for the digest form used when an emitted id would exceed
+/// [`MAX_TOOL_ID_LEN`]. Distinct from `ESCAPE_PREFIX` (the fourth byte is
+/// `t`, not `_`), so a digest id can never equal an escaped one.
 const DIGEST_PREFIX: &str = "esct_";
 
 /// The escape character inside an escaped id. It is itself in the allowed
@@ -71,26 +90,36 @@ fn is_wire_safe(id: &str) -> bool {
         && !id.starts_with(DIGEST_PREFIX)
 }
 
-/// Map `id` into the `[a-zA-Z0-9_-]` tool-id charset, injectively.
+/// Map `id` into the `[a-zA-Z0-9_-]` tool-id charset within
+/// [`MAX_TOOL_ID_LEN`] bytes.
 ///
-/// A wire-safe id borrows through unchanged. Anything else becomes
-/// `esc_<escaped>`, where `escaped` encodes each byte outside
-/// `[a-zA-Z0-9-]` -- including a literal `_` -- as `_<lowercase hex>`.
-/// That encoding is reversible, so distinct raw ids yield distinct
-/// escaped bodies, and the marker prefix keeps an escaped id from ever
-/// equalling a verbatim one. Callers therefore cannot emit two tool_use
-/// blocks sharing a wire id, and because the function is pure a
-/// tool_result still correlates to its tool_use.
+/// A wire-safe id at or under the ceiling borrows through unchanged.
+/// Anything else becomes `esc_<escaped>`, where `escaped` encodes each
+/// byte outside `[a-zA-Z0-9-]` -- including a literal `_` -- as
+/// `_<lowercase hex>`. That encoding is reversible, so on this path the
+/// mapping is INJECTIVE: distinct raw ids yield distinct escaped bodies,
+/// and the marker prefix keeps an escaped id from ever equalling a
+/// verbatim one. Because the function is pure, a tool_result still
+/// correlates to its tool_use.
 ///
-/// An escaped form over [`MAX_TOOL_ID_LEN`] folds to
-/// `esct_<prefix>_<digest>`, which is exactly at the ceiling and stays
-/// deterministic; injectivity there rests on the 64-bit digest rather
-/// than on reversibility.
+/// Any emitted form over [`MAX_TOOL_ID_LEN`] -- an escape expansion, or a
+/// wire-safe id that is simply too long -- folds to
+/// `esct_<prefix>_<digest>`, exactly at the ceiling and still
+/// deterministic. That path is COLLISION-RESISTANT, not injective: a
+/// 64-byte output over unbounded input must collide by pigeonhole, and
+/// only the 64-bit digest separates inputs whose retained prefix agrees.
+/// See the module docs for why that tradeoff is taken and why the digest
+/// is not a cryptographic one.
 ///
 /// An empty id maps to empty: the non-empty guarantee is the call sites'
 /// (`call_<index>`), not this function's.
 pub fn sanitize_tool_id(id: &str) -> Cow<'_, str> {
     if is_wire_safe(id) {
+        if id.len() > MAX_TOOL_ID_LEN {
+            // Already in the target charset, so the id is its own
+            // legibility prefix -- there is no escaped form to slice.
+            return Cow::Owned(digest_form(id, id));
+        }
         return Cow::Borrowed(id);
     }
     let mut out = String::with_capacity(ESCAPE_PREFIX.len() + id.len() * 3);
@@ -105,18 +134,21 @@ pub fn sanitize_tool_id(id: &str) -> Cow<'_, str> {
         }
     }
     if out.len() > MAX_TOOL_ID_LEN {
-        return Cow::Owned(digest_form(id, &out));
+        return Cow::Owned(digest_form(id, &out[ESCAPE_PREFIX.len()..]));
     }
     Cow::Owned(out)
 }
 
-/// Fold an over-long escaped id to `esct_<escaped prefix>_<digest>`,
-/// exactly [`MAX_TOOL_ID_LEN`] bytes. The retained prefix is for operator
-/// legibility only; the digest carries the distinctness. `escaped` is
-/// pure ASCII by construction, so the prefix slice is on a char boundary.
-fn digest_form(raw: &str, escaped: &str) -> String {
+/// Fold an over-long id to `esct_<prefix>_<digest>`, exactly
+/// [`MAX_TOOL_ID_LEN`] bytes. `body` is the text the retained prefix is
+/// sliced from -- the escaped body on the escape path, the raw id itself
+/// on the wire-safe path (already in the target charset, so it needs no
+/// encoding). The prefix is for operator legibility only; the digest,
+/// always keyed on the RAW id, carries the distinctness, so the same raw
+/// id folds identically at every call site. `body` is pure ASCII by
+/// construction, so the prefix slice is on a char boundary.
+fn digest_form(raw: &str, body: &str) -> String {
     let keep = MAX_TOOL_ID_LEN - DIGEST_PREFIX.len() - 1 - DIGEST_HEX_LEN;
-    let body = &escaped[ESCAPE_PREFIX.len()..];
     let head = &body[..body.len().min(keep)];
     format!(
         "{DIGEST_PREFIX}{head}_{digest:016x}",
@@ -290,11 +322,102 @@ mod tests {
     }
 
     #[test]
-    fn long_wire_safe_id_is_not_truncated() {
-        // The ceiling applies only to the escape expansion. An id the
-        // client already sent in the target charset passes through, even
-        // over 64 bytes -- truncating it would orphan its tool_result.
-        let id = "a".repeat(80);
-        assert_eq!(sanitize_tool_id(&id), id);
+    fn long_wire_safe_id_folds_to_the_digest_form_within_the_ceiling() {
+        // The ceiling is Bedrock's `toolUseId` max length, which applies
+        // to any emitted id -- not just to an escape expansion. An
+        // over-long id already in the target charset used to pass through
+        // verbatim and 400 the upstream.
+        let id = "a".repeat(MAX_TOOL_ID_LEN + 1);
+
+        // Act
+        let out = sanitize_tool_id(&id);
+
+        // Assert
+        assert!(out.starts_with(DIGEST_PREFIX), "got `{out}`");
+        assert_eq!(out.len(), MAX_TOOL_ID_LEN);
+        assert!(out.bytes().all(is_allowed_tool_id_byte));
+    }
+
+    #[test]
+    fn wire_safe_id_exactly_at_the_ceiling_still_borrows_unchanged() {
+        // Arrange -- the boundary: 64 bytes is legal, 65 is not.
+        let id = "a".repeat(MAX_TOOL_ID_LEN);
+
+        // Act
+        let out = sanitize_tool_id(&id);
+
+        // Assert
+        assert!(matches!(out, Cow::Borrowed(_)), "must not allocate");
+        assert_eq!(out, id);
+    }
+
+    #[test]
+    fn over_long_wire_safe_use_and_result_fold_identically() {
+        // Correlation: a tool_use id and the tool_result answering it are
+        // sanitized at different call sites with no shared state, so the
+        // fold must be a pure function of the raw id. Asserting
+        // `f(x) == f(x)` alone is tautological and passes even under a raw
+        // passthrough, so pin the folded SHAPE too: prefix, exact ceiling
+        // length, and that the raw id is not what reaches the wire.
+        let id = "a".repeat(200);
+        let use_id = sanitize_tool_id(&id).into_owned();
+        let result_id = sanitize_tool_id(&id).into_owned();
+
+        assert_eq!(use_id, result_id, "the fold must be deterministic");
+        assert!(
+            use_id.starts_with(DIGEST_PREFIX),
+            "an over-ceiling id must reach the digest namespace; got {use_id}"
+        );
+        assert_eq!(
+            use_id.len(),
+            MAX_TOOL_ID_LEN,
+            "the fold sits AT the ceiling"
+        );
+        assert_ne!(use_id, id, "the raw over-ceiling id must not pass through");
+    }
+
+    #[test]
+    fn over_long_wire_safe_ids_stay_distinct_past_the_retained_prefix() {
+        // Arrange -- identical for the whole retained prefix, so only the
+        // digest separates them.
+        let a = format!("{}a", "z".repeat(MAX_TOOL_ID_LEN));
+        let b = format!("{}b", "z".repeat(MAX_TOOL_ID_LEN));
+
+        // Act
+        let out_a = sanitize_tool_id(&a).into_owned();
+        let out_b = sanitize_tool_id(&b).into_owned();
+
+        // Assert -- distinctness is necessary but NOT sufficient: two raw
+        // passthroughs are also distinct. Require the digest form as well,
+        // so reverting the fold fails this test.
+        assert_ne!(out_a, out_b, "the digest must separate them");
+        for out in [&out_a, &out_b] {
+            assert!(
+                out.starts_with(DIGEST_PREFIX),
+                "must be folded, not passed through; got {out}"
+            );
+            assert_eq!(out.len(), MAX_TOOL_ID_LEN);
+        }
+    }
+
+    #[test]
+    fn folded_wire_safe_id_never_equals_a_folded_escaped_id() {
+        // The two folds share the digest namespace, so the retained
+        // prefix must keep them apart: the escaped fold's prefix is the
+        // escaped body, the wire-safe fold's is the raw id.
+        let wire_safe = "a".repeat(MAX_TOOL_ID_LEN + 1);
+        let needs_escape = ".".repeat(MAX_TOOL_ID_LEN + 1);
+
+        let out_safe = sanitize_tool_id(&wire_safe).into_owned();
+        let out_escaped = sanitize_tool_id(&needs_escape).into_owned();
+
+        assert_ne!(out_safe, out_escaped);
+        // Both must actually be FOLDED -- under a raw passthrough the
+        // wire-safe side is never folded and the inequality above holds
+        // vacuously.
+        assert!(out_safe.starts_with(DIGEST_PREFIX), "got {out_safe}");
+        assert!(out_escaped.starts_with(DIGEST_PREFIX), "got {out_escaped}");
+        assert_eq!(out_safe.len(), MAX_TOOL_ID_LEN);
+        assert_eq!(out_escaped.len(), MAX_TOOL_ID_LEN);
     }
 }

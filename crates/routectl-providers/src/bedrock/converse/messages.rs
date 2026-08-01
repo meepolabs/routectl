@@ -25,9 +25,10 @@ use routectl_core::{
 use crate::anthropic_api::parts::strip_text_after_tool_use;
 
 use super::types::{
-    CachePoint, ConverseContentBlock, ConverseDocument, ConverseDocumentSource, ConverseImage,
-    ConverseImageSource, ConverseMessage, ConverseRequestReasoningBlock,
-    ConverseRequestReasoningText, ConverseToolResult, ConverseToolResultContent, ConverseToolUse,
+    CachePoint, ConverseCitationsConfig, ConverseContentBlock, ConverseDocument,
+    ConverseDocumentSource, ConverseImage, ConverseImageSource, ConverseMessage,
+    ConverseRequestReasoningBlock, ConverseRequestReasoningText, ConverseToolResult,
+    ConverseToolResultContent, ConverseToolUse,
 };
 
 /// Translate every message in `req.messages` into a `ConverseMessage`,
@@ -78,7 +79,7 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
                 push_or_coalesce(&mut out, "assistant", blocks);
             }
             Role::Tool => {
-                let tool_msg = build_tool_message(msg)?;
+                let tool_msg = build_tool_message(id, msg)?;
                 push_or_coalesce(&mut out, "user", tool_msg.content);
             }
         }
@@ -412,9 +413,17 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
         }
         KnownContentPart::Image { source, .. } => Ok(translate_image_source(id, source)),
         KnownContentPart::ImageUrl { image_url, .. } => Ok(translate_image_url(id, image_url)),
-        KnownContentPart::Document { source, title, .. } => {
-            Ok(translate_document(id, source, title.as_deref()))
-        }
+        KnownContentPart::Document {
+            source,
+            title,
+            citations,
+            ..
+        } => Ok(translate_document(
+            id,
+            source,
+            title.as_deref(),
+            citations.as_ref(),
+        )),
         // OpenAI-shape file part. Reuse the document translator by first
         // rewriting the base64 `file_data` data URI into the canonical
         // Anthropic document source shape. Non-translatable shapes
@@ -424,7 +433,8 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
         // (mirrors how `translate_image_url` drops unsupported refs).
         KnownContentPart::File { file, .. } => {
             if let Some((source, title)) = file_data_to_document_source(file) {
-                Ok(translate_document(id, &source, title.as_deref()))
+                // An OpenAI-shape file part has no citations carrier.
+                Ok(translate_document(id, &source, title.as_deref(), None))
             } else {
                 tracing::warn!(
                     provider = id,
@@ -440,7 +450,7 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
             ..
         } => Ok(Some(ConverseContentBlock::ToolUse {
             tool_use: ConverseToolUse {
-                tool_use_id: tu_id.clone(),
+                tool_use_id: crate::tool_id::sanitize_tool_id(tu_id).into_owned(),
                 name: name.clone(),
                 input: input.clone(),
             },
@@ -455,7 +465,7 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
             ensure_min_tool_result_content(&mut result_content);
             Ok(Some(ConverseContentBlock::ToolResult {
                 tool_result: ConverseToolResult {
-                    tool_use_id: tool_use_id.clone(),
+                    tool_use_id: crate::tool_id::sanitize_tool_id(tool_use_id).into_owned(),
                     content: result_content,
                     status: is_error.map(|e| if e { "error".into() } else { "success".into() }),
                 },
@@ -638,6 +648,7 @@ fn translate_document(
     id: &str,
     source: &Value,
     title: Option<&str>,
+    citations: Option<&Value>,
 ) -> Option<ConverseContentBlock> {
     let Some(obj) = source.as_object() else {
         tracing::warn!(
@@ -682,8 +693,39 @@ fn translate_document(
             format,
             name,
             source: ConverseDocumentSource { bytes },
+            citations: translate_document_citations(id, citations)
+                .map(|enabled| ConverseCitationsConfig { enabled }),
         },
     })
+}
+
+/// Lift a canonical document `citations` value onto the AWS
+/// `CitationsConfig` shape. The canonical field is an opaque `Value`
+/// carrying Anthropic's `{enabled: bool}` object verbatim, and AWS's
+/// `CitationsConfig` has exactly the same single member, so this is a bool
+/// lift rather than a structural translation.
+///
+/// Returns `Some(true)` only for an explicit `{"enabled": true}`. An
+/// absent value, or an explicit `false`, returns None so the optional
+/// member is omitted -- `{enabled: false}` is indistinguishable from
+/// absence in behavior and only adds wire noise. Any other shape returns
+/// None with a WARN: the canonical field is opaque because ingresses
+/// forward it verbatim, so guessing an interpretation would silently
+/// invent a citation setting the caller never asked for.
+fn translate_document_citations(id: &str, citations: Option<&Value>) -> Option<bool> {
+    let citations = citations?;
+    match citations.as_object().and_then(|o| o.get("enabled")) {
+        Some(Value::Bool(true)) => Some(true),
+        Some(Value::Bool(false)) => None,
+        _ => {
+            tracing::warn!(
+                provider = id,
+                "dropping unrecognized document citations value on Converse egress; \
+                 expected an object with a boolean `enabled` member"
+            );
+            None
+        }
+    }
 }
 
 /// AWS Converse document `format` allowlist. Mirrors AWS docs as of
@@ -896,7 +938,7 @@ fn translate_tool_result_array_element(v: &Value) -> ConverseToolResultContent {
 /// turn. Returns an error when `tool_call_id` is missing -- AWS rejects
 /// `toolResult.toolUseId == ""` and the silent fallback that produced
 /// an empty string upstream-failed with a vague 400.
-fn build_tool_message(msg: &Message) -> Result<ConverseMessage> {
+fn build_tool_message(id: &str, msg: &Message) -> Result<ConverseMessage> {
     let Some(tool_use_id) = msg.tool_call_id.as_ref().filter(|s| !s.is_empty()).cloned() else {
         return Err(routectl_core::Error::NormalizeRequest(
             "bedrock-converse".to_string(),
@@ -911,7 +953,10 @@ fn build_tool_message(msg: &Message) -> Result<ConverseMessage> {
     let tool_use_id = crate::tool_id::sanitize_tool_id(&tool_use_id).into_owned();
     let mut content = match &msg.content {
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
-        MessageContent::Parts(parts) => parts.iter().map(translate_part_for_tool_result).collect(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .map(|p| translate_part_for_tool_result(id, p))
+            .collect(),
         MessageContent::Null => Vec::new(),
     };
     // AWS Converse requires at least 1 element in toolResult.content.
@@ -937,7 +982,7 @@ fn build_tool_message(msg: &Message) -> Result<ConverseMessage> {
 /// parts (image / document) wrap as `{"json": {"type":"tool_use",...}}`
 /// and Claude 3+ on Converse rejects the malformed shape -- the model
 /// gets the canonical schema instead of the AWS image/document block.
-fn translate_part_for_tool_result(p: &ContentPart) -> ConverseToolResultContent {
+fn translate_part_for_tool_result(id: &str, p: &ContentPart) -> ConverseToolResultContent {
     match p {
         ContentPart::Known(KnownContentPart::Text { text, .. }) => {
             ConverseToolResultContent::Text { text: text.clone() }
@@ -945,10 +990,13 @@ fn translate_part_for_tool_result(p: &ContentPart) -> ConverseToolResultContent 
         ContentPart::Known(KnownContentPart::Image { source, .. }) => {
             image_source_to_tool_result(source).unwrap_or_else(|| content_part_to_json_fallback(p))
         }
-        ContentPart::Known(KnownContentPart::Document { source, title, .. }) => {
-            document_to_tool_result(source, title.as_deref())
-                .unwrap_or_else(|| content_part_to_json_fallback(p))
-        }
+        ContentPart::Known(KnownContentPart::Document {
+            source,
+            title,
+            citations,
+            ..
+        }) => document_to_tool_result(id, source, title.as_deref(), citations.as_ref())
+            .unwrap_or_else(|| content_part_to_json_fallback(p)),
         _ => {
             tracing::debug!(
                 "tool_result Parts element falls back to Json wrap; \
@@ -988,14 +1036,18 @@ fn image_source_to_tool_result(source: &Value) -> Option<ConverseToolResultConte
     })
 }
 
-/// Translate a canonical Document part (source + title) into the AWS
-/// toolResult `Document` variant. Returns None for unmappable media
-/// types or unsupported source types. Text sources are base64-encoded
+/// Translate a canonical Document part (source + title + citations) into
+/// the AWS toolResult `Document` variant. Returns None for unmappable
+/// media types or unsupported source types. Text sources are base64-encoded
 /// (shared with `translate_document` and the tool_result array path via
-/// `normalize_document_source_bytes`).
+/// `normalize_document_source_bytes`), and citations lift through the same
+/// `translate_document_citations` mapping the message-content path uses so
+/// a document behaves identically in either position.
 fn document_to_tool_result(
+    id: &str,
     source: &Value,
     title: Option<&str>,
+    citations: Option<&Value>,
 ) -> Option<ConverseToolResultContent> {
     let obj = source.as_object()?;
     let kind = obj.get("type").and_then(|v| v.as_str())?;
@@ -1003,13 +1055,20 @@ fn document_to_tool_result(
     let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
     let format = media_type_to_document_format(media_type)?;
     let bytes = normalize_document_source_bytes(kind, data)?;
-    Some(ConverseToolResultContent::Document {
-        document: serde_json::json!({
-            "format": format,
-            "name": sanitize_document_name(title),
-            "source": {"bytes": bytes},
-        }),
-    })
+    let mut document = serde_json::json!({
+        "format": format,
+        "name": sanitize_document_name(title),
+        "source": {"bytes": bytes},
+    });
+    if let Some(enabled) = translate_document_citations(id, citations)
+        && let Some(map) = document.as_object_mut()
+    {
+        map.insert(
+            "citations".to_string(),
+            serde_json::json!({"enabled": enabled}),
+        );
+    }
+    Some(ConverseToolResultContent::Document { document })
 }
 
 #[cfg(test)]
@@ -1017,6 +1076,10 @@ mod tests {
     use super::*;
     use routectl_core::{ReasoningDetail, ReasoningDetailKind};
     use serde_json::json;
+    use tracing_test::traced_test;
+
+    /// Provider id passed to translators under test; only reaches log fields.
+    const TEST_ID: &str = "test";
 
     fn user_msg() -> Message {
         Message {
@@ -1754,6 +1817,157 @@ mod tests {
         assert_eq!(tool_use_id, tool_result_id);
     }
 
+    /// The CANONICAL-part path (an Anthropic-shape assistant `ToolUse`
+    /// block plus a user `ToolResult` block) is a different code path from
+    /// `Message.tool_calls` + `Role::Tool`, and it bypassed the sanitizer
+    /// entirely until 2026-08-01: an over-ceiling id reached the wire raw.
+    /// Raw/raw still CORRELATES, which is why the id-collision tests never
+    /// caught it -- the defect is that Bedrock rejects a `toolUseId` over
+    /// its documented 64-byte maximum.
+    #[test]
+    fn over_long_tool_id_on_canonical_parts_folds_within_the_ceiling() {
+        // Arrange -- 65 bytes, entirely inside the target charset.
+        let raw = "a".repeat(65);
+        let messages = vec![
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: raw.clone(),
+                        name: "f".into(),
+                        input: json!({}),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolResult {
+                        tool_use_id: raw.clone(),
+                        content: json!("ok"),
+                        is_error: None,
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert -- both sides fold to the SAME 64-byte digest as every
+        // other lane, so the result still correlates AND the wire is legal.
+        let expected = format!("esct_{}_8087e9a889f8a14c", "a".repeat(42));
+        assert_eq!(expected.len(), 64, "the fold must sit at the ceiling");
+        let use_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolUse { tool_use } => {
+                        Some(tool_use.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolUse block must be present");
+        let result_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolResult { tool_result } => {
+                        Some(tool_result.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolResult block must be present");
+        assert_eq!(use_id, expected, "canonical ToolUse id must fold");
+        assert_eq!(result_id, expected, "canonical ToolResult id must fold");
+    }
+
+    /// A wire-safe id over the documented 64-byte `toolUseId` ceiling
+    /// folds to the digest form at BOTH the toolUse emit and the toolResult
+    /// correlation site. The expected literal is the same one the Anthropic
+    /// lane pins, which is the cross-lane agreement the fold rests on: an
+    /// id sanitized on one lane and replayed on another must land on the
+    /// same value.
+    #[test]
+    fn over_long_wire_safe_tool_id_folds_consistently_across_converse_egress() {
+        // Arrange -- 65 bytes, entirely in the target charset.
+        let raw = "a".repeat(65);
+        let messages = vec![
+            user_msg(),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": raw,
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+            Message {
+                refusal: None,
+                role: Role::Tool,
+                content: MessageContent::Text("ok".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some(raw.clone()),
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let expected = format!("esct_{}_8087e9a889f8a14c", "a".repeat(42));
+        assert_eq!(expected.len(), 64, "the fold must sit at the ceiling");
+        let tool_use_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolUse { tool_use } => {
+                        Some(tool_use.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolUse block must be present");
+        let tool_result_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolResult { tool_result } => {
+                        Some(tool_result.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolResult block must be present");
+        assert_eq!(tool_use_id, expected);
+        assert_eq!(tool_result_id, expected);
+    }
+
     /// A valid id round-trips unchanged through both the toolUse emit and
     /// the toolResult correlation site.
     #[test]
@@ -1912,7 +2126,8 @@ mod tests {
         };
 
         // Act
-        let result = build_tool_message(&msg).expect("Null-content tool message must translate");
+        let result =
+            build_tool_message(TEST_ID, &msg).expect("Null-content tool message must translate");
 
         // Assert
         let tool_result = result
@@ -2056,7 +2271,7 @@ mod tests {
     #[test]
     fn text_source_document_to_tool_result_is_base64_encoded() {
         let source = json!({"type": "text", "media_type": "text/plain", "data": "hello"});
-        let out = document_to_tool_result(&source, Some("notes"))
+        let out = document_to_tool_result(TEST_ID, &source, Some("notes"), None)
             .expect("text source must now translate to a Document variant, not None");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
@@ -2089,7 +2304,7 @@ mod tests {
         );
 
         let source = json!({"type": "base64", "media_type": "text/plain", "data": already});
-        let out = document_to_tool_result(&source, Some("notes"))
+        let out = document_to_tool_result(TEST_ID, &source, Some("notes"), None)
             .expect("base64 source must translate to a Document variant");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("Parts path: expected Document variant, got: {out:?}");
@@ -2358,5 +2573,176 @@ mod tests {
         // Assert
         assert_eq!(name.chars().count(), 199);
         assert_eq!(name, "a".repeat(199));
+    }
+
+    /// Build a user message carrying one canonical Document part with the
+    /// given `citations` value.
+    fn document_message(citations: Option<Value>) -> Message {
+        use routectl_core::KnownContentPart;
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Document {
+                source: json!({
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "JVBERi0xLjQ=",
+                }),
+                title: Some("notes".into()),
+                citations,
+                cache_control: None,
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Build a `Role::Tool` message whose Parts content carries one
+    /// canonical Document part with the given `citations` value.
+    fn document_tool_message(citations: Option<Value>) -> Message {
+        Message {
+            role: Role::Tool,
+            tool_call_id: Some("tu_1".into()),
+            ..document_message(citations)
+        }
+    }
+
+    /// Serialize the single Document block out of a translated message and
+    /// return it as JSON, so assertions see the exact wire shape.
+    fn document_block_json(messages: &[Message]) -> Value {
+        let out = build_messages(TEST_ID, messages).expect("messages must translate");
+        let block = out
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .find(|b| matches!(b, ConverseContentBlock::Document { .. }))
+            .expect("a Document block must be present");
+        serde_json::to_value(block).expect("block must serialize")["document"].clone()
+    }
+
+    /// Same, for the tool-result path: the Document rides inside
+    /// `toolResult.content`.
+    fn tool_result_document_json(messages: &[Message]) -> Value {
+        let out = build_messages(TEST_ID, messages).expect("messages must translate");
+        let block = out
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .find(|b| matches!(b, ConverseContentBlock::ToolResult { .. }))
+            .expect("a ToolResult block must be present");
+        let json = serde_json::to_value(block).expect("block must serialize");
+        json["toolResult"]["content"]
+            .as_array()
+            .expect("toolResult.content must be an array")
+            .iter()
+            .find_map(|c| c.get("document").cloned())
+            .expect("a document toolResult element must be present")
+    }
+
+    /// An Anthropic-origin document with citations ENABLED must reach the
+    /// Converse wire carrying `citations: {enabled: true}` -- previously the
+    /// call site discarded the field and the model returned uncited prose.
+    #[test]
+    fn document_citations_enabled_reaches_wire_from_message_content() {
+        // Arrange
+        let messages = vec![document_message(Some(json!({"enabled": true})))];
+
+        // Act
+        let document = document_block_json(&messages);
+
+        // Assert
+        assert_eq!(
+            document["citations"],
+            json!({"enabled": true}),
+            "message-content document must carry citations onto the wire: {document}"
+        );
+    }
+
+    /// The same document appearing in a tool result must behave identically
+    /// -- a citations config that survives in message content and vanishes
+    /// in a tool result is the asymmetry this fix exists to prevent.
+    #[test]
+    fn document_citations_enabled_reaches_wire_from_tool_result() {
+        // Arrange
+        let messages = vec![document_tool_message(Some(json!({"enabled": true})))];
+
+        // Act
+        let document = tool_result_document_json(&messages);
+
+        // Assert
+        assert_eq!(
+            document["citations"],
+            json!({"enabled": true}),
+            "tool-result document must carry citations onto the wire: {document}"
+        );
+    }
+
+    /// A document with no citations value emits no `citations` member on
+    /// either path -- the field is optional on `DocumentBlock`.
+    #[test]
+    fn document_without_citations_omits_the_member_on_both_paths() {
+        // Arrange / Act
+        let from_content = document_block_json(&[document_message(None)]);
+        let from_tool_result = tool_result_document_json(&[document_tool_message(None)]);
+
+        // Assert
+        assert!(
+            from_content.get("citations").is_none(),
+            "absent citations must not emit the member: {from_content}"
+        );
+        assert!(
+            from_tool_result.get("citations").is_none(),
+            "absent citations must not emit the member: {from_tool_result}"
+        );
+        assert_eq!(
+            from_content["format"], "pdf",
+            "the rest of the document block is unchanged: {from_content}"
+        );
+    }
+
+    /// An explicit `{enabled: false}` is behaviorally identical to absence,
+    /// so the optional member is omitted rather than emitted as wire noise.
+    #[test]
+    fn document_citations_disabled_omits_the_member_on_both_paths() {
+        // Arrange
+        let disabled = json!({"enabled": false});
+
+        // Act
+        let from_content = document_block_json(&[document_message(Some(disabled.clone()))]);
+        let from_tool_result = tool_result_document_json(&[document_tool_message(Some(disabled))]);
+
+        // Assert
+        assert!(
+            from_content.get("citations").is_none(),
+            "citations:false must not emit the member: {from_content}"
+        );
+        assert!(
+            from_tool_result.get("citations").is_none(),
+            "citations:false must not emit the member: {from_tool_result}"
+        );
+    }
+
+    /// The canonical citations field is opaque, so a value that is not an
+    /// object with a boolean `enabled` gets no guessed interpretation: the
+    /// member is omitted and the loss is logged.
+    #[traced_test]
+    #[test]
+    fn malformed_document_citations_omits_the_member_and_warns() {
+        // Arrange
+        let messages = vec![document_message(Some(json!("yes")))];
+
+        // Act
+        let document = document_block_json(&messages);
+
+        // Assert
+        assert!(
+            document.get("citations").is_none(),
+            "a malformed citations value must not be guessed at: {document}"
+        );
+        assert!(
+            logs_contain("dropping unrecognized document citations value"),
+            "the dropped citations config must be observable in the logs"
+        );
     }
 }
