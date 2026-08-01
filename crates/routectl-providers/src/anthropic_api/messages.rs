@@ -7,7 +7,8 @@
 //! `tool_calls` as ToolUse blocks for multi-turn replay); Role::System
 //! is dropped here (already lifted into `req.system` by `system.rs`);
 //! Role::Tool becomes a synthesized user-role message carrying a
-//! tool_result block.
+//! tool_result block, and a run of consecutive Role::Tool turns folds
+//! into ONE such message with one block per turn.
 //!
 //! `normalize_replay_invariants` applies two outgoing invariants before
 //! translation: a hard reject for tool_result messages missing a
@@ -809,7 +810,23 @@ fn translate_simple_content(c: &MessageContent) -> AnthropicContent {
 // Tool-role messages
 // ---------------------------------------------------------------------------
 
-fn build_tool_message(msg: &Message) -> AnthropicMessage {
+/// Fold a run of canonical tool-result turns into ONE user-role message
+/// carrying one `tool_result` block per turn, in submission order. A
+/// single-element run yields exactly the one-block message this seam has
+/// always emitted. Mirrors the Bedrock Converse egress, whose
+/// `push_or_coalesce` merges the same synthesized user turns: real
+/// Anthropic combines consecutive user turns server-side, but a strict
+/// Anthropic-compatible gateway rejects them.
+fn build_tool_message(run: &[&Message]) -> AnthropicMessage {
+    AnthropicMessage {
+        role: AnthropicRole::User,
+        content: AnthropicContent::Blocks(
+            run.iter().copied().map(build_tool_result_block).collect(),
+        ),
+    }
+}
+
+fn build_tool_result_block(msg: &Message) -> ContentBlock {
     // Sanitize to the same charset the tool_use emit uses so a result
     // for an OpenAI-origin id (`call.foo:1`) still correlates with its
     // tool_use block after both are mapped to `call_foo_1`.
@@ -828,15 +845,11 @@ fn build_tool_message(msg: &Message) -> AnthropicMessage {
         ),
         MessageContent::Null => Value::Null,
     };
-    let content_val = ensure_min_tool_result_content(content_val);
-    AnthropicMessage {
-        role: AnthropicRole::User,
-        content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
-            tool_use_id,
-            content: content_val,
-            cache_control: None,
-            is_error: None,
-        }]),
+    ContentBlock::ToolResult {
+        tool_use_id,
+        content: ensure_min_tool_result_content(content_val),
+        cache_control: None,
+        is_error: None,
     }
 }
 
@@ -864,26 +877,65 @@ fn ensure_min_tool_result_content(content: Value) -> Value {
 /// they're already lifted into `req.system` (canonical) or by
 /// `lift_legacy_system` for direct callers without an ingress, so
 /// re-emitting them as messages would duplicate.
+///
+/// A run of CONSECUTIVE `Role::Tool` turns (the parallel-tool-call reply
+/// shape) folds into one user message carrying one `tool_result` block per
+/// turn -- see `build_tool_message`. Any non-tool turn ends the run, so
+/// tool results separated by an assistant turn stay in separate messages
+/// and nothing is reordered across the boundary.
 pub(super) fn translate_messages(id: &str, messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
     let mut out: Vec<AnthropicMessage> = Vec::with_capacity(messages.len());
-    for msg in messages {
+    let mut i = 0usize;
+    while i < messages.len() {
+        let msg = &messages[i];
         match msg.role {
             Role::System => {
                 // Already handled via req.system / lift_legacy_system.
                 // Drop here (do not duplicate in the messages array).
+                i += 1;
             }
-            Role::User => out.push(AnthropicMessage {
-                role: AnthropicRole::User,
-                content: translate_simple_content(&msg.content),
-            }),
-            Role::Assistant => out.push(AnthropicMessage {
-                role: AnthropicRole::Assistant,
-                content: build_assistant_content(id, msg)?,
-            }),
-            Role::Tool => out.push(build_tool_message(msg)),
+            Role::User => {
+                out.push(AnthropicMessage {
+                    role: AnthropicRole::User,
+                    content: translate_simple_content(&msg.content),
+                });
+                i += 1;
+            }
+            Role::Assistant => {
+                out.push(AnthropicMessage {
+                    role: AnthropicRole::Assistant,
+                    content: build_assistant_content(id, msg)?,
+                });
+                i += 1;
+            }
+            Role::Tool => {
+                let (run, run_end) = collect_tool_run(messages, i);
+                out.push(build_tool_message(&run));
+                i = run_end;
+            }
         }
     }
     Ok(out)
+}
+
+/// Gather the run of tool turns starting at `start`, returning the turns
+/// and the index of the first message that ends the run. `Role::System`
+/// emits nothing (it was lifted into `req.system`), so it is transparent
+/// here rather than a run boundary -- the Converse egress, which drops
+/// System before its coalescing step, behaves the same way. Only a User
+/// or Assistant turn ends the run.
+fn collect_tool_run(messages: &[Message], start: usize) -> (Vec<&Message>, usize) {
+    let mut run: Vec<&Message> = Vec::new();
+    let mut i = start;
+    while let Some(msg) = messages.get(i) {
+        match msg.role {
+            Role::Tool => run.push(msg),
+            Role::System => {}
+            Role::User | Role::Assistant => break,
+        }
+        i += 1;
+    }
+    (run, i)
 }
 
 #[cfg(test)]
@@ -1790,7 +1842,7 @@ mod tool_use_dedup_tests {
     #[test]
     fn null_content_tool_result_maps_to_empty_string() {
         // Arrange / Act
-        let m = build_tool_message(&tool_msg(MessageContent::Null));
+        let m = build_tool_message(&[&tool_msg(MessageContent::Null)]);
 
         // Assert
         assert_eq!(tool_result_content(&m), &Value::String(String::new()));
@@ -1801,7 +1853,7 @@ mod tool_use_dedup_tests {
     #[test]
     fn empty_parts_tool_result_maps_to_empty_string() {
         // Arrange / Act
-        let m = build_tool_message(&tool_msg(MessageContent::Parts(Vec::new())));
+        let m = build_tool_message(&[&tool_msg(MessageContent::Parts(Vec::new()))]);
 
         // Assert
         assert_eq!(tool_result_content(&m), &Value::String(String::new()));
@@ -1811,9 +1863,201 @@ mod tool_use_dedup_tests {
     #[test]
     fn non_empty_text_tool_result_is_preserved() {
         // Arrange / Act
-        let m = build_tool_message(&tool_msg(MessageContent::Text("ok".to_string())));
+        let m = build_tool_message(&[&tool_msg(MessageContent::Text("ok".to_string()))]);
 
         // Assert
         assert_eq!(tool_result_content(&m), &Value::String("ok".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod tool_result_coalescing_tests {
+    use super::{ContentBlock, translate_messages};
+    use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage, AnthropicRole};
+    use routectl_core::{
+        CacheControl, ContentPart, KnownContentPart, Message, MessageContent, Role,
+    };
+
+    fn user(text: &str) -> Message {
+        plain(Role::User, MessageContent::Text(text.to_string()), None)
+    }
+
+    fn assistant(text: &str) -> Message {
+        plain(
+            Role::Assistant,
+            MessageContent::Text(text.to_string()),
+            None,
+        )
+    }
+
+    fn tool_result(id: &str, content: MessageContent) -> Message {
+        plain(Role::Tool, content, Some(id.to_string()))
+    }
+
+    fn plain(role: Role, content: MessageContent, tool_call_id: Option<String>) -> Message {
+        Message {
+            refusal: None,
+            role,
+            content,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id,
+            tool_calls: None,
+        }
+    }
+
+    fn text(s: &str) -> MessageContent {
+        MessageContent::Text(s.to_string())
+    }
+
+    fn roles(out: &[AnthropicMessage]) -> Vec<&'static str> {
+        out.iter()
+            .map(|m| match m.role {
+                AnthropicRole::User => "user",
+                AnthropicRole::Assistant => "assistant",
+            })
+            .collect()
+    }
+
+    fn tool_result_ids(m: &AnthropicMessage) -> Vec<&str> {
+        let AnthropicContent::Blocks(blocks) = &m.content else {
+            panic!("expected Blocks content");
+        };
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Three parallel tool results fold into ONE user message carrying
+    /// three tool_result blocks in submission order, each keeping its own
+    /// tool_use_id. A strict Anthropic-compatible gateway rejects the
+    /// consecutive user turns the unmerged shape would emit.
+    #[test]
+    fn parallel_tool_results_coalesce_into_one_user_message() {
+        // Arrange
+        let messages = vec![
+            user("weather?"),
+            assistant("looking it up"),
+            tool_result("call_1", text("sunny")),
+            tool_result("call_2", text("noon")),
+            tool_result("call_3", text("72F")),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translate");
+
+        // Assert
+        assert_eq!(roles(&out), vec!["user", "assistant", "user"]);
+        assert_eq!(
+            tool_result_ids(&out[2]),
+            vec!["call_1", "call_2", "call_3"],
+            "every tool_use_id must survive in submission order"
+        );
+    }
+
+    /// A lone tool result still emits exactly one user message with one
+    /// tool_result block -- the merge must not change the single-result
+    /// wire shape.
+    #[test]
+    fn single_tool_result_emits_one_block_unchanged() {
+        // Arrange
+        let messages = vec![
+            user("weather?"),
+            assistant("looking it up"),
+            tool_result("call_1", text("sunny")),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translate");
+
+        // Assert
+        assert_eq!(roles(&out), vec!["user", "assistant", "user"]);
+        assert_eq!(tool_result_ids(&out[2]), vec!["call_1"]);
+    }
+
+    /// An intervening assistant turn ends the run: two tool-result groups
+    /// separated by an assistant turn stay two user messages, and no
+    /// result migrates across the boundary.
+    #[test]
+    fn tool_results_separated_by_assistant_turn_stay_separate_messages() {
+        // Arrange
+        let messages = vec![
+            user("weather?"),
+            assistant("first call"),
+            tool_result("call_1", text("sunny")),
+            assistant("second call"),
+            tool_result("call_2", text("noon")),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translate");
+
+        // Assert
+        assert_eq!(
+            roles(&out),
+            vec!["user", "assistant", "user", "assistant", "user"]
+        );
+        assert_eq!(tool_result_ids(&out[2]), vec!["call_1"]);
+        assert_eq!(tool_result_ids(&out[4]), vec!["call_2"]);
+    }
+
+    /// A user turn between two tool results is likewise a run boundary --
+    /// coalescing never reorders a tool result past a caller turn.
+    #[test]
+    fn tool_results_separated_by_user_turn_stay_separate_messages() {
+        // Arrange
+        let messages = vec![
+            assistant("call one"),
+            tool_result("call_1", text("sunny")),
+            user("and the time?"),
+            tool_result("call_2", text("noon")),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translate");
+
+        // Assert
+        assert_eq!(roles(&out), vec!["assistant", "user", "user", "user"]);
+        assert_eq!(tool_result_ids(&out[1]), vec!["call_1"]);
+        assert_eq!(tool_result_ids(&out[3]), vec!["call_2"]);
+    }
+
+    /// Per-block metadata on a coalesced tool result's nested content
+    /// survives the merge: a cache_control marker on a Part inside the
+    /// second of two results still ships.
+    #[test]
+    fn nested_block_cache_control_survives_coalescing() {
+        // Arrange
+        let marked = MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+            text: "cached output".to_string(),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            citations: None,
+        })]);
+        let messages = vec![
+            assistant("two calls"),
+            tool_result("call_1", text("sunny")),
+            tool_result("call_2", marked),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translate");
+
+        // Assert
+        let AnthropicContent::Blocks(blocks) = &out[1].content else {
+            panic!("expected Blocks content");
+        };
+        assert_eq!(blocks.len(), 2, "both results must ride one message");
+        let ContentBlock::ToolResult { content, .. } = &blocks[1] else {
+            panic!("expected a tool_result block");
+        };
+        assert!(
+            content[0]["cache_control"].is_object(),
+            "nested per-block cache_control must survive, got: {content}"
+        );
     }
 }
