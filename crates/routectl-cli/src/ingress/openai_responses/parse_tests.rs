@@ -1275,6 +1275,46 @@ fn preserved_items_keep_relative_order_on_egress() {
 }
 
 #[test]
+fn max_output_tokens_survives_the_responses_round_trip() {
+    // Arrange: a client capping the completion on the Responses ingress.
+    let body = json!({
+        "model": "gpt-5-codex",
+        "input": "hi",
+        "max_output_tokens": 500
+    });
+
+    // Act: ingress -> canonical -> egress wire body.
+    let req = parse(body);
+    let out = responses_egress_body(&req);
+
+    // Assert: the ceiling is intact at both hops.
+    assert_eq!(req.max_tokens, Some(500));
+    assert_eq!(
+        out.get("max_output_tokens")
+            .and_then(serde_json::Value::as_u64),
+        Some(500),
+        "the caller's ceiling must survive to the egress wire; got {out}"
+    );
+}
+
+#[test]
+fn omitted_max_output_tokens_stays_omitted_on_the_round_trip() {
+    // Arrange: no ceiling from the client.
+    let body = json!({"model": "gpt-5-codex", "input": "hi"});
+
+    // Act
+    let req = parse(body);
+    let out = responses_egress_body(&req);
+
+    // Assert: routectl synthesizes nothing on this lane.
+    assert_eq!(req.max_tokens, None);
+    assert!(
+        out.get("max_output_tokens").is_none(),
+        "omission must stay omission on the Responses egress; got {out}"
+    );
+}
+
+#[test]
 fn known_kinds_produce_no_passthrough() {
     // Arrange: only modeled kinds -- nothing to preserve.
     let body = json!({

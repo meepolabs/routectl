@@ -50,6 +50,7 @@ expression: body
     }
   ],
   "instructions": "",
+  "max_output_tokens": 1024,
   "model": "claude-3-opus",
   "parallel_tool_calls": true,
   "store": false,

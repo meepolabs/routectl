@@ -76,6 +76,13 @@ pub struct ResponsesRequest {
     /// string-string constraint that upstream may not require.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_metadata: Option<serde_json::Value>,
+
+    /// Caller-supplied output ceiling, forwarded from canonical
+    /// `max_tokens`. Never synthesized: `None` stays absent on the wire so
+    /// the upstream applies its own default (the Anthropic-shape
+    /// `routectl_internal.max_output_tokens` baseline does not apply here).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output_tokens: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------

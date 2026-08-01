@@ -1187,9 +1187,11 @@ Resolution chain at dispatch:
 
 Only consumed by Anthropic-shape egresses (`anthropic-api` and
 `bedrock-invoke`). The other egresses (`openai-compat`,
-`openai-responses`, `bedrock-converse`) forward caller omission cleanly
-without injection (good-translator principle: do not inject where the
-upstream already handles it).
+`openai-responses`, `bedrock-converse`) forward a caller-supplied
+`max_tokens` under their own wire name (`openai-responses` emits it as
+`max_output_tokens`) and forward caller omission cleanly without
+injection (good-translator principle: do not inject where the upstream
+already handles it).
 
 Set this when an Anthropic-shape egress points at a model whose
 upstream `max_tokens` cap is below `64000` -- otherwise a caller that
