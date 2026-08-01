@@ -493,6 +493,287 @@ async fn drain_usage_writer_completes_with_concurrent_handle() {
     assert_eq!(count, n as i64, "all queued rows must be flushed on drain");
 }
 
+// ---- Route auth inventory: every served path is explicitly classified ----
+
+/// Recursively collect every `.rs` file under `dir` that is NOT a test
+/// sidecar. Sidecars (`*_tests.rs`, `tests.rs`) may register throwaway
+/// routes for their own fixtures, which are not part of the served
+/// surface.
+#[cfg(test)]
+fn production_rust_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in std::fs::read_dir(&current).expect("read crate source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// The crate's own `src/` tree, resolved from the compile-time manifest
+/// dir so the scan is independent of the test process's cwd.
+#[cfg(test)]
+fn crate_src_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
+/// Strip the inline `mod tests { .. }` tail of a source file so routes
+/// registered by a test fixture are not mistaken for served ones. Keyed on
+/// the module opener rather than `#[cfg(test)]`, which also decorates
+/// test-only items (the inventory consts themselves) that sit ABOVE real
+/// route registrations.
+#[cfg(test)]
+fn production_prefix(src: &str) -> &str {
+    match src.find("mod tests {") {
+        Some(idx) => &src[..idx],
+        None => src,
+    }
+}
+
+/// Drop `//`-introduced tails (line comments AND doc comments) so prose
+/// that merely NAMES a route-registration call is not scanned as one.
+#[cfg(test)]
+fn without_comments(src: &str) -> String {
+    src.lines()
+        .map(|line| match line.find("//") {
+            Some(idx) => &line[..idx],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every string-literal path passed to a route registration in `src`'s
+/// production prefix. Panics if a registration's first argument is NOT a
+/// literal: a computed path would silently evade the inventory.
+#[cfg(test)]
+fn registered_paths_in(src: &str, label: &str) -> Vec<String> {
+    let needle = ".route(";
+    let mut paths = Vec::new();
+    // Comments are stripped BEFORE truncating, not after: a `//` comment
+    // containing the literal `mod tests {` would otherwise truncate the
+    // scan at the comment, and any route registered BELOW it would vanish
+    // from `served` while the already-classified routes above stayed
+    // visible -- leaving BOTH difference assertions empty so the guard
+    // passes vacuously and the route ships unauthenticated.
+    let scannable = production_prefix(&without_comments(src)).to_string();
+    let mut rest = scannable.as_str();
+    while let Some(idx) = rest.find(needle) {
+        rest = &rest[idx + needle.len()..];
+        let arg = rest.trim_start();
+        let literal = arg.strip_prefix('"').unwrap_or_else(|| {
+            panic!(
+                "{label}: route registered with a non-literal path -- the route auth \
+                 inventory can only classify literal paths; register it with a \
+                 literal or extend the inventory scan"
+            )
+        });
+        let end = literal
+            .find('"')
+            .expect("unterminated route path string literal");
+        paths.push(literal[..end].to_string());
+    }
+    paths
+}
+
+/// A route added to the serve router without being classified as either
+/// public or auth-gated must FAIL here rather than ship unauthenticated.
+///
+/// The scan reads the crate's production sources (test sidecars and inline
+/// `mod tests` tails excluded) for every registered path literal and
+/// compares that set against the declared inventory. Adding a `.route()`
+/// line anywhere in the crate -- on the `public` builder, the `authed`
+/// builder, the status subtree, or a brand-new module -- fails this test
+/// until its author names the path in `PUBLIC_ROUTES` or
+/// `AUTH_GATED_ROUTES`. The reverse direction (a declared path that is no
+/// longer served) fails too, so the inventory cannot go stale.
+#[test]
+fn every_registered_route_is_classified_public_or_auth_gated() {
+    // Arrange
+    let mut served: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for path in production_rust_sources(&crate_src_dir()) {
+        let src = std::fs::read_to_string(&path).expect("read crate source file");
+        let label = path.display().to_string();
+        served.extend(registered_paths_in(&src, &label));
+    }
+    let declared: std::collections::BTreeSet<String> = PUBLIC_ROUTES
+        .iter()
+        .chain(AUTH_GATED_ROUTES.iter())
+        .map(|p| (*p).to_string())
+        .collect();
+
+    // Assert: neither direction may drift.
+    let unclassified: Vec<&String> = served.difference(&declared).collect();
+    assert!(
+        unclassified.is_empty(),
+        "route(s) registered but not classified: {unclassified:?} -- add each to \
+         PUBLIC_ROUTES (with the reason it is auth-exempt) or AUTH_GATED_ROUTES"
+    );
+    let unserved: Vec<&String> = declared.difference(&served).collect();
+    assert!(
+        unserved.is_empty(),
+        "route(s) declared in the auth inventory but no longer registered: \
+         {unserved:?} -- drop them from the inventory"
+    );
+
+    // A path may not be claimed by both lists at once.
+    for path in PUBLIC_ROUTES {
+        assert!(
+            !AUTH_GATED_ROUTES.contains(path),
+            "{path} is declared both public and auth-gated"
+        );
+    }
+}
+
+/// The serve router must never widen its unclassified surface through a
+/// nested/fallback/service route, which registers paths the literal scan
+/// above cannot see.
+#[test]
+fn production_sources_register_no_opaque_route_surfaces() {
+    // `.fallback_service(` and `.method_not_allowed_fallback(` are axum 0.8
+    // catch-all registrars that do NOT contain `.fallback(` as a substring,
+    // so each needs its own entry: either one mounts a surface the literal
+    // `.route(` scan cannot enumerate.
+    let opaque = [
+        ".nest(",
+        ".nest_service(",
+        ".route_service(",
+        ".fallback(",
+        ".fallback_service(",
+        ".method_not_allowed_fallback(",
+    ];
+    for path in production_rust_sources(&crate_src_dir()) {
+        let src = std::fs::read_to_string(&path).expect("read crate source file");
+        let production = production_prefix(&without_comments(&src)).to_string();
+        for token in opaque {
+            assert!(
+                !production.contains(token),
+                "`{token}` in {} registers paths the route auth inventory cannot \
+                 enumerate; classify the surface explicitly before using it",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Behavioral half of the inventory: with tokens configured, drive a real
+/// request at every declared path through the REAL `build_axum_router`
+/// output and assert the auth layer actually challenges each auth-gated
+/// path while each public path is served. This is what makes the declared
+/// lists evidence rather than a restatement -- a path listed in
+/// `AUTH_GATED_ROUTES` that is wired onto the `public` builder fails here.
+#[tokio::test]
+async fn declared_auth_gated_routes_challenge_unauthenticated_requests() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    // Arrange: the production router with a non-empty token set on a
+    // loopback bind (so `status_requires_auth` holds too).
+    let router = routectl_router::Router::new(Arc::new(Config::default()));
+    let (state, _usage_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let bound: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let token_set = Arc::new(TokenSet::new(vec!["secret".to_string()]));
+    let app = build_axum_router(state, token_set, 1024, None, bound);
+
+    // Act + Assert: no credential -> 401 on every auth-gated path.
+    for path in AUTH_GATED_ROUTES {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(*path)
+                    .header("host", "127.0.0.1:8080")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router must respond");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} is declared auth-gated but served an unauthenticated request"
+        );
+    }
+
+    // And the declared-public paths are served without a credential.
+    for path in PUBLIC_ROUTES {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(*path)
+                    .header("host", "127.0.0.1:8080")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router must respond");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{path} is declared public (liveness probes on --unsafe-public \
+             deployments depend on it) but did not serve"
+        );
+    }
+}
+
+/// The token-less loopback dev path is unchanged: with no configured
+/// tokens on a loopback bind, an auth-gated path is served without a
+/// credential (the auth layer is never mounted, so there is no
+/// per-request cost either).
+#[tokio::test]
+async fn token_less_loopback_serves_auth_gated_routes_without_credentials() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    // Arrange
+    let router = routectl_router::Router::new(Arc::new(Config::default()));
+    let (state, _usage_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let bound: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let app = build_axum_router(state, Arc::new(TokenSet::default()), 1024, None, bound);
+
+    // Act
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("host", "127.0.0.1:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router must respond");
+
+    // Assert
+    assert_ne!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "token-less loopback must keep the zero-auth dev path"
+    );
+}
+
 /// Read `SELECT COUNT(*)` from the usage DB at `path`. Test helper.
 #[cfg(test)]
 fn rusqlite_count(path: &std::path::Path) -> i64 {
