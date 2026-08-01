@@ -708,32 +708,59 @@ fn media_type_to_document_format(mt: &str) -> Option<String> {
     }
 }
 
-/// AWS validates `document.name` against `^[a-zA-Z0-9-()[\]_ ]{1,200}$`.
-/// Map a canonical `title` to a safe name -- replace disallowed chars
-/// with `_`, truncate at 200, default to `"document"` when title is
-/// missing or fully scrubbed.
+/// Map a canonical document `title` to a name AWS Converse accepts.
+///
+/// AWS expresses the `document.name` charset as prose, not a pattern:
+/// "The name can only contain the following characters: Alphanumeric
+/// characters; Whitespace characters (no more than one in a row); Hyphens;
+/// Parentheses; Square brackets", with a length of 1 to 200. Underscore is
+/// absent from that list, so it is neither kept nor used as a replacement.
+///
+/// Disallowed characters map to `-`, whitespace runs collapse to a single
+/// space, the result is trimmed and truncated to 200 characters, and a
+/// missing or fully scrubbed title falls back to `"document"` (AWS rejects
+/// an empty name).
 fn sanitize_document_name(title: Option<&str>) -> String {
-    let raw = title.unwrap_or("").trim();
-    if raw.is_empty() {
-        return "document".to_string();
-    }
-    let cleaned: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '(' | ')' | '[' | ']' | '_' | ' ') {
+    let mut collapsed = String::new();
+    let mut pending_space = false;
+    for c in title.unwrap_or("").chars() {
+        if c.is_whitespace() {
+            // Leading whitespace is dropped rather than collapsed; a run is
+            // only emitted once a keepable character follows it.
+            pending_space = !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+        }
+        collapsed.push(
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '(' | ')' | '[' | ']') {
                 c
             } else {
-                '_'
-            }
-        })
-        .take(200)
-        .collect();
-    if cleaned.trim().is_empty() {
-        "document".to_string()
+                '-'
+            },
+        );
+    }
+    let truncated = collapsed
+        .chars()
+        .take(DOCUMENT_NAME_MAX_LEN)
+        .collect::<String>();
+    // Truncation can strand the space that separated two collapsed words.
+    let name = truncated.trim_end();
+    if name.is_empty() {
+        DOCUMENT_NAME_FALLBACK.to_string()
     } else {
-        cleaned
+        name.to_string()
     }
 }
+
+/// AWS `document.name` length ceiling (`Maximum length of 200`).
+const DOCUMENT_NAME_MAX_LEN: usize = 200;
+
+/// Emitted when a title is absent or leaves nothing after sanitizing --
+/// AWS requires a minimum length of 1.
+const DOCUMENT_NAME_FALLBACK: &str = "document";
 
 /// Normalize a canonical document source's bytes to the base64 form AWS
 /// Converse's JSON wire requires. `base64` sources pass through verbatim;
@@ -1663,7 +1690,7 @@ mod tests {
 
     /// An OpenAI-origin id with `.`/`:` is sanitized identically at the
     /// toolUse emit AND the toolResult correlation site, so the result is
-    /// not orphaned: both land on `call_foo_1`.
+    /// not orphaned.
     #[test]
     fn openai_origin_tool_id_sanitized_consistently_across_converse_egress() {
         // Arrange
@@ -1722,8 +1749,8 @@ mod tests {
                 })
             })
             .expect("toolResult block must be present");
-        assert_eq!(tool_use_id, "call_foo_1");
-        assert_eq!(tool_result_id, "call_foo_1");
+        assert_eq!(tool_use_id, "esc_call_2efoo_3a1");
+        assert_eq!(tool_result_id, "esc_call_2efoo_3a1");
         assert_eq!(tool_use_id, tool_result_id);
     }
 
@@ -1788,6 +1815,80 @@ mod tests {
             .expect("toolResult block must be present");
         assert_eq!(tool_use_id, "call_abc-1_2");
         assert_eq!(tool_result_id, "call_abc-1_2");
+    }
+
+    /// Two DISTINCT source tool ids that differ only in characters the
+    /// former lossy sanitizer folded to `_` must reach the wire as
+    /// DISTINCT toolUseIds, with each toolResult still correlating to its
+    /// own toolUse.
+    #[test]
+    fn colliding_source_tool_ids_stay_distinct_and_paired_on_converse_egress() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    json!({
+                        "id": "call.a",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{}"},
+                    }),
+                    json!({
+                        "id": "call:a",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{}"},
+                    }),
+                ]),
+            },
+            tool_msg("call.a"),
+            tool_msg("call:a"),
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let uses: Vec<String> = result
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                ConverseContentBlock::ToolUse { tool_use } => Some(tool_use.tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let results: Vec<String> = result
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                ConverseContentBlock::ToolResult { tool_result } => {
+                    Some(tool_result.tool_use_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses.len(), 2, "both distinct source calls must survive");
+        assert_ne!(uses[0], uses[1], "toolUseIds must not collide");
+        assert_eq!(uses, results, "each result must pair with its own use");
+    }
+
+    fn tool_msg(id: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Text("ok".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some(id.into()),
+            tool_calls: None,
+        }
     }
 
     /// LOW-5 fix: a `Role::Tool` message with `MessageContent::Null` must
@@ -2162,5 +2263,100 @@ mod tests {
             .filter(|b| matches!(b, ConverseContentBlock::ToolResult { .. }))
             .count();
         assert_eq!(block_count, 1, "exactly one toolResult block expected");
+    }
+
+    /// AWS's prose for `document.name` omits underscore, so an underscored
+    /// filename must not keep its underscores nor gain new ones from the
+    /// replacement of the disallowed dot.
+    #[test]
+    fn document_name_maps_underscores_and_dots_to_hyphens() {
+        // Arrange / Act
+        let name = sanitize_document_name(Some("report_v2.pdf"));
+
+        // Assert
+        assert_eq!(name, "report-v2-pdf");
+        assert!(!name.contains('_'), "underscore is not in AWS's charset");
+    }
+
+    /// AWS allows whitespace but "no more than one in a row", so a run must
+    /// collapse to a single space.
+    #[test]
+    fn document_name_collapses_whitespace_runs_to_one_space() {
+        // Arrange / Act
+        let name = sanitize_document_name(Some("my   notes.pdf"));
+
+        // Assert
+        assert_eq!(name, "my notes-pdf");
+    }
+
+    /// Tabs and newlines are whitespace under AWS's prose, so they collapse
+    /// into the same single space rather than becoming hyphens.
+    #[test]
+    fn document_name_collapses_mixed_whitespace_kinds() {
+        // Arrange / Act
+        let name = sanitize_document_name(Some("a \t\n b"));
+
+        // Assert
+        assert_eq!(name, "a b");
+    }
+
+    /// A name already inside AWS's documented charset must survive verbatim.
+    #[test]
+    fn document_name_passes_through_already_valid_names() {
+        // Arrange
+        let valid = "Q3 Report (final) [v2] - 2026";
+
+        // Act
+        let name = sanitize_document_name(Some(valid));
+
+        // Assert
+        assert_eq!(name, valid);
+    }
+
+    /// Surrounding whitespace is dropped rather than collapsed to a leading
+    /// or trailing space.
+    #[test]
+    fn document_name_trims_surrounding_whitespace() {
+        // Arrange / Act
+        let name = sanitize_document_name(Some("  spaced  "));
+
+        // Assert
+        assert_eq!(name, "spaced");
+    }
+
+    /// AWS requires a minimum length of 1, so a missing title or one whose
+    /// every character is whitespace must yield the deterministic fallback.
+    #[test]
+    fn document_name_falls_back_when_nothing_survives() {
+        // Arrange / Act / Assert
+        assert_eq!(sanitize_document_name(None), "document");
+        assert_eq!(sanitize_document_name(Some("")), "document");
+        assert_eq!(sanitize_document_name(Some("   \t ")), "document");
+    }
+
+    /// Non-whitespace characters outside the charset are replaced, not
+    /// dropped, so an all-disallowed title stays non-empty.
+    #[test]
+    fn document_name_replaces_rather_than_drops_disallowed_characters() {
+        // Arrange / Act
+        let name = sanitize_document_name(Some("***"));
+
+        // Assert
+        assert_eq!(name, "---");
+    }
+
+    /// AWS caps the name at 200 characters, and truncation must not leave a
+    /// trailing space that would read as a violating boundary.
+    #[test]
+    fn document_name_truncates_at_two_hundred_characters() {
+        // Arrange -- 199 'a's then a space then more, so the 200th char is a space.
+        let title = format!("{} tail", "a".repeat(199));
+
+        // Act
+        let name = sanitize_document_name(Some(&title));
+
+        // Assert
+        assert_eq!(name.chars().count(), 199);
+        assert_eq!(name, "a".repeat(199));
     }
 }

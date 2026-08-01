@@ -798,9 +798,10 @@ fn document_content_block_translates_to_aws_document_block() {
     assert_eq!(blocks[0]["text"], "", "got {body}");
     let doc = &blocks[1]["document"];
     assert_eq!(doc["format"], "pdf", "got {body}");
-    // AWS document.name validates against [a-zA-Z0-9-()[]_ ]{1,200};
-    // dots are sanitized to underscores so `report.pdf` -> `report_pdf`.
-    assert_eq!(doc["name"], "report_pdf", "got {body}");
+    // AWS's document.name prose allows alphanumerics, single whitespace,
+    // hyphens, parentheses and square brackets -- not dots, and not
+    // underscores. `report.pdf` therefore sanitizes to `report-pdf`.
+    assert_eq!(doc["name"], "report-pdf", "got {body}");
     assert_eq!(doc["source"]["bytes"], "JVBERi0xLjQK", "got {body}");
 }
 

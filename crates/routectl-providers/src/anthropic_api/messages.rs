@@ -545,7 +545,8 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
 /// any call whose RAW id is already present; the content-part channel wins
 /// because it preserves interleaving with surrounding text. Deduping on the
 /// raw id (not the sanitized one) means two distinct calls whose ids differ
-/// only by a sanitized-away char (e.g. `call.a` and `call:a`) both survive.
+/// only by an escaped char (e.g. `call.a` and `call:a`) both survive, and
+/// because sanitization is injective they reach the wire under distinct ids.
 fn emit_tool_use_blocks_from_calls(
     id: &str,
     tool_calls: &[Value],
@@ -745,10 +746,10 @@ fn append_assistant_message_blocks(
 /// unsanitized tool_use id would orphan its sanitized tool_result.
 /// Returns the RAW (pre-sanitization) id when the part is a ToolUse so
 /// callers can dedupe against the tool_calls channel on the unambiguous
-/// source identity: two distinct raw ids that collapse to the same
-/// sanitized value (e.g. `call.a` and `call:a` -> `call_a`) are separate
-/// tool calls and must both survive. The emitted wire block still carries
-/// the sanitized id. Non-ToolUse parts delegate to the generic
+/// source identity: two distinct raw ids (e.g. `call.a` and `call:a`) are
+/// separate tool calls and must both survive. The emitted wire block
+/// carries the sanitized id, which is injective, so the two do not
+/// collide on the wire either. Non-ToolUse parts delegate to the generic
 /// `translate_content_part`.
 fn translate_assistant_content_part(p: &ContentPart) -> (ContentBlock, Option<String>) {
     if let ContentPart::Known(KnownContentPart::ToolUse {
@@ -829,7 +830,7 @@ fn build_tool_message(run: &[&Message]) -> AnthropicMessage {
 fn build_tool_result_block(msg: &Message) -> ContentBlock {
     // Sanitize to the same charset the tool_use emit uses so a result
     // for an OpenAI-origin id (`call.foo:1`) still correlates with its
-    // tool_use block after both are mapped to `call_foo_1`.
+    // tool_use block after both are mapped to the same wire id.
     let tool_use_id =
         crate::tool_id::sanitize_tool_id(msg.tool_call_id.as_deref().unwrap_or("")).into_owned();
     // Anthropic tool_result.content accepts either a string or an array
@@ -1360,7 +1361,7 @@ mod tool_id_correlation_tests {
 
     /// An OpenAI-origin id with `.`/`:` is sanitized identically at the
     /// tool_use emit AND the tool_result correlation site, so the result
-    /// is not orphaned: both land on `call_foo_1`.
+    /// is not orphaned.
     #[test]
     fn openai_origin_tool_id_sanitized_consistently_across_anthropic_egress() {
         // Arrange
@@ -1374,8 +1375,8 @@ mod tool_id_correlation_tests {
         let out = translate_messages("anthropic", &messages).expect("translation must not error");
 
         // Assert
-        assert_eq!(tool_use_id(&out), "call_foo_1");
-        assert_eq!(tool_result_id(&out), "call_foo_1");
+        assert_eq!(tool_use_id(&out), "esc_call_2efoo_3a1");
+        assert_eq!(tool_result_id(&out), "esc_call_2efoo_3a1");
         assert_eq!(tool_use_id(&out), tool_result_id(&out));
     }
 
@@ -1396,6 +1397,96 @@ mod tool_id_correlation_tests {
         // Assert
         assert_eq!(tool_use_id(&out), "call_abc-1_2");
         assert_eq!(tool_result_id(&out), "call_abc-1_2");
+    }
+
+    /// Two DISTINCT source tool ids that differ only in characters the
+    /// former lossy sanitizer folded to `_` (`call.a` / `call:a` -> both
+    /// `call_a`) must reach the wire as DISTINCT tool_use ids -- Anthropic
+    /// rejects a message carrying two tool_use blocks with the same id.
+    #[test]
+    fn colliding_source_tool_ids_emit_distinct_wire_ids() {
+        // Arrange -- one assistant turn carrying both calls.
+        let mut assistant = assistant_with_tool_call("call.a");
+        let Some(calls) = assistant.tool_calls.as_mut() else {
+            panic!("fixture must carry tool_calls");
+        };
+        calls.push(json!({
+            "id": "call:a",
+            "type": "function",
+            "function": {"name": "f", "arguments": "{}"},
+        }));
+        let messages = vec![user_msg(), assistant];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translation must not error");
+
+        // Assert
+        let ids = tool_use_ids(&out);
+        assert_eq!(ids.len(), 2, "both distinct source calls must survive");
+        assert_ne!(ids[0], ids[1], "wire ids must not collide");
+    }
+
+    /// The collision fix must not break pairing: with a colliding id pair
+    /// each tool_result still correlates to exactly one tool_use, and to
+    /// the right one.
+    #[test]
+    fn colliding_source_tool_ids_keep_use_result_correlation() {
+        // Arrange
+        let mut assistant = assistant_with_tool_call("call.a");
+        let Some(calls) = assistant.tool_calls.as_mut() else {
+            panic!("fixture must carry tool_calls");
+        };
+        calls.push(json!({
+            "id": "call:a",
+            "type": "function",
+            "function": {"name": "f", "arguments": "{}"},
+        }));
+        let messages = vec![
+            user_msg(),
+            assistant,
+            tool_result("call.a"),
+            tool_result("call:a"),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translation must not error");
+
+        // Assert -- the two result ids are distinct and are exactly the
+        // two emitted tool_use ids, so neither result is orphaned nor
+        // mispaired onto the other call.
+        let uses = tool_use_ids(&out);
+        let results = tool_result_ids(&out);
+        assert_eq!(results.len(), 2);
+        assert_ne!(results[0], results[1]);
+        assert_eq!(uses, results);
+    }
+
+    fn tool_use_ids(out: &[AnthropicMessage]) -> Vec<String> {
+        collect_block_ids(out, |b| match b {
+            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+    }
+
+    fn tool_result_ids(out: &[AnthropicMessage]) -> Vec<String> {
+        collect_block_ids(out, |b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        })
+    }
+
+    fn collect_block_ids(
+        out: &[AnthropicMessage],
+        pick: impl Fn(&ContentBlock) -> Option<String>,
+    ) -> Vec<String> {
+        out.iter()
+            .filter_map(|m| match &m.content {
+                AnthropicContent::Blocks(blocks) => Some(blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(pick)
+            .collect()
     }
 }
 
@@ -1678,7 +1769,7 @@ mod tool_use_dedup_tests {
 
     /// The ToolUse content-part channel runs sanitize_tool_id, so an
     /// OpenAI-origin id (`call.foo:1`) surfacing on the content-part
-    /// channel alone lands on the same `call_foo_1` the tool_calls channel
+    /// channel alone lands on the same wire id the tool_calls channel
     /// would produce -- ids cannot diverge by source channel.
     #[test]
     fn tool_use_content_part_id_is_sanitized() {
@@ -1694,7 +1785,7 @@ mod tool_use_dedup_tests {
         // Assert
         let uses = tool_use_blocks(&content);
         assert_eq!(uses.len(), 1);
-        assert_eq!(uses[0].0, "call_foo_1");
+        assert_eq!(uses[0].0, "esc_call_2efoo_3a1");
     }
 
     /// Both channels carry the SAME logical tool call under an
@@ -1714,7 +1805,7 @@ mod tool_use_dedup_tests {
         // Assert
         let uses = tool_use_blocks(&content);
         assert_eq!(uses.len(), 1, "divergent-id double emission must not occur");
-        assert_eq!(uses[0].0, "call_foo_1");
+        assert_eq!(uses[0].0, "esc_call_2efoo_3a1");
     }
 
     /// Non-overlapping ids on the two channels both survive: only matching
@@ -1780,14 +1871,14 @@ mod tool_use_dedup_tests {
         assert_eq!(uses[0].0, "toolu_1");
     }
 
-    /// Two DISTINCT tool calls whose raw ids differ only by a
-    /// sanitized-away char (`call.a` on the content-part channel,
-    /// `call:a` on the tool_calls channel -- both sanitize to `call_a`)
-    /// are separate calls and must BOTH be emitted. Deduping on the
-    /// sanitized id would collapse them and silently drop one; deduping on
-    /// the raw source id keeps both.
+    /// Two DISTINCT tool calls whose raw ids differ only by a char the
+    /// former lossy sanitizer folded to `_` (`call.a` on the content-part
+    /// channel, `call:a` on the tool_calls channel) are separate calls:
+    /// both must be emitted, AND under DISTINCT wire ids. Deduping on the
+    /// sanitized id would collapse them and silently drop one; emitting
+    /// both under one wire id is itself a 400.
     #[test]
-    fn distinct_raw_ids_that_sanitize_equal_both_emit() {
+    fn distinct_raw_ids_that_formerly_sanitized_equal_emit_distinct_wire_ids() {
         // Arrange
         let msg = assistant(
             MessageContent::Parts(vec![tool_use_part("call.a")]),
@@ -1797,17 +1888,14 @@ mod tool_use_dedup_tests {
         // Act
         let content = build_assistant_content("anthropic", &msg).expect("build must not error");
 
-        // Assert: both survive; neither distinct call is dropped by dedup.
+        // Assert: both survive, under ids that do not collide.
         let uses = tool_use_blocks(&content);
         assert_eq!(
             uses.len(),
             2,
-            "distinct raw ids that sanitize to the same value must both emit"
+            "distinct raw ids must both emit, neither dropped by dedup"
         );
-        // Both wire ids are the sanitized form.
-        for (id, _) in &uses {
-            assert_eq!(id.as_str(), "call_a", "wire id must be the sanitized form");
-        }
+        assert_ne!(uses[0].0, uses[1].0, "wire ids must not collide");
     }
 
     fn tool_msg(content: MessageContent) -> Message {
