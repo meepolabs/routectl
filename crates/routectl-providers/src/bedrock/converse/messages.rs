@@ -461,7 +461,7 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
             is_error,
             ..
         } => {
-            let mut result_content = translate_tool_result_content(content);
+            let mut result_content = translate_tool_result_content(id, content);
             ensure_min_tool_result_content(&mut result_content);
             Ok(Some(ConverseContentBlock::ToolResult {
                 tool_result: ConverseToolResult {
@@ -819,12 +819,12 @@ fn normalize_document_source_bytes(kind: &str, data: &str) -> Option<String> {
     }
 }
 
-fn translate_tool_result_content(content: &Value) -> Vec<ConverseToolResultContent> {
+fn translate_tool_result_content(id: &str, content: &Value) -> Vec<ConverseToolResultContent> {
     match content {
         Value::String(s) => vec![ConverseToolResultContent::Text { text: s.clone() }],
         Value::Array(arr) => arr
             .iter()
-            .map(translate_tool_result_array_element)
+            .map(|v| translate_tool_result_array_element(id, v))
             .collect(),
         Value::Null => Vec::new(),
         other => vec![ConverseToolResultContent::Json {
@@ -853,7 +853,7 @@ fn ensure_min_tool_result_content(content: &mut Vec<ConverseToolResultContent>) 
 /// Claude 3+. Dispatch on the `type` tag so each shape lands in the
 /// correct AWS variant; bare strings stay as Text; unknown shapes fall
 /// to Json.
-fn translate_tool_result_array_element(v: &Value) -> ConverseToolResultContent {
+fn translate_tool_result_array_element(id: &str, v: &Value) -> ConverseToolResultContent {
     if let Value::String(s) = v {
         return ConverseToolResultContent::Text { text: s.clone() };
     }
@@ -923,11 +923,13 @@ fn translate_tool_result_array_element(v: &Value) -> ConverseToolResultContent {
             };
             let title = obj.get("title").and_then(|t| t.as_str());
             ConverseToolResultContent::Document {
-                document: serde_json::json!({
-                    "format": format,
-                    "name": sanitize_document_name(title),
-                    "source": {"bytes": bytes},
-                }),
+                document: tool_result_document_value(
+                    id,
+                    format,
+                    title,
+                    bytes,
+                    obj.get("citations"),
+                ),
             }
         }
         _ => ConverseToolResultContent::Json { json: v.clone() },
@@ -1040,9 +1042,8 @@ fn image_source_to_tool_result(source: &Value) -> Option<ConverseToolResultConte
 /// the AWS toolResult `Document` variant. Returns None for unmappable
 /// media types or unsupported source types. Text sources are base64-encoded
 /// (shared with `translate_document` and the tool_result array path via
-/// `normalize_document_source_bytes`), and citations lift through the same
-/// `translate_document_citations` mapping the message-content path uses so
-/// a document behaves identically in either position.
+/// `normalize_document_source_bytes`), and the emitted wire value comes
+/// from `tool_result_document_value` so both tool_result paths agree.
 fn document_to_tool_result(
     id: &str,
     source: &Value,
@@ -1055,6 +1056,24 @@ fn document_to_tool_result(
     let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
     let format = media_type_to_document_format(media_type)?;
     let bytes = normalize_document_source_bytes(kind, data)?;
+    Some(ConverseToolResultContent::Document {
+        document: tool_result_document_value(id, format, title, bytes, citations),
+    })
+}
+
+/// Assemble the `toolResult.content[].document` wire value shared by both
+/// tool_result document paths -- the canonical Parts path and the raw
+/// Anthropic-shape array path. Both emit the same members as
+/// `ConverseDocument`, and citations lift through the same
+/// `translate_document_citations` mapping the message-content path uses, so
+/// a document behaves identically wherever it appears.
+fn tool_result_document_value(
+    id: &str,
+    format: String,
+    title: Option<&str>,
+    bytes: String,
+    citations: Option<&Value>,
+) -> Value {
     let mut document = serde_json::json!({
         "format": format,
         "name": sanitize_document_name(title),
@@ -1068,7 +1087,7 @@ fn document_to_tool_result(
             serde_json::json!({"enabled": enabled}),
         );
     }
-    Some(ConverseToolResultContent::Document { document })
+    document
 }
 
 #[cfg(test)]
@@ -2254,7 +2273,7 @@ mod tests {
             "source": {"type": "text", "media_type": "text/plain", "data": "hello"},
             "title": "notes",
         });
-        let out = translate_tool_result_array_element(&element);
+        let out = translate_tool_result_array_element(TEST_ID, &element);
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
         };
@@ -2294,7 +2313,7 @@ mod tests {
             "source": {"type": "base64", "media_type": "text/plain", "data": already},
             "title": "notes",
         });
-        let out = translate_tool_result_array_element(&element);
+        let out = translate_tool_result_array_element(TEST_ID, &element);
         let ConverseToolResultContent::Document { document } = out else {
             panic!("array path: expected Document variant, got: {out:?}");
         };
@@ -2734,6 +2753,121 @@ mod tests {
 
         // Act
         let document = document_block_json(&messages);
+
+        // Assert
+        assert!(
+            document.get("citations").is_none(),
+            "a malformed citations value must not be guessed at: {document}"
+        );
+        assert!(
+            logs_contain("dropping unrecognized document citations value"),
+            "the dropped citations config must be observable in the logs"
+        );
+    }
+
+    /// Build a RAW Anthropic-shape document element for a tool_result
+    /// content array with the given `citations` value.
+    fn raw_document_element(citations: Option<Value>) -> Value {
+        let mut element = json!({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBERi0xLjQ=",
+            },
+            "title": "notes",
+        });
+        if let Some(citations) = citations {
+            element["citations"] = citations;
+        }
+        element
+    }
+
+    /// Serialize the document emitted by the raw tool_result array path so
+    /// assertions see the exact wire shape.
+    fn raw_element_document_json(citations: Option<Value>) -> Value {
+        let out = translate_tool_result_array_element(TEST_ID, &raw_document_element(citations));
+        let ConverseToolResultContent::Document { document } = out else {
+            panic!("expected a Document toolResult variant, got: {out:?}");
+        };
+        document
+    }
+
+    /// A RAW Anthropic-shape document inside a tool_result content array
+    /// must carry its citations config onto the wire, exactly like the two
+    /// canonical `KnownContentPart::Document` paths -- previously this path
+    /// never read the sibling `citations` key and silently dropped it.
+    #[test]
+    fn raw_tool_result_document_citations_enabled_reaches_wire() {
+        // Arrange / Act
+        let document = raw_element_document_json(Some(json!({"enabled": true})));
+
+        // Assert
+        assert_eq!(
+            document["citations"],
+            json!({"enabled": true}),
+            "raw tool_result document must carry citations onto the wire: {document}"
+        );
+    }
+
+    /// The raw path emits the same wire bytes as the canonical tool_result
+    /// path for an equivalent input -- one shape, one helper, no drift.
+    #[test]
+    fn raw_tool_result_document_matches_canonical_wire_shape() {
+        // Arrange
+        let citations = json!({"enabled": true});
+
+        // Act
+        let from_raw = raw_element_document_json(Some(citations.clone()));
+        let from_canonical = tool_result_document_json(&[document_tool_message(Some(citations))]);
+
+        // Assert
+        assert_eq!(
+            from_raw, from_canonical,
+            "raw and canonical tool_result paths must emit identical documents"
+        );
+    }
+
+    /// Absent citations omit the optional member on the raw path, matching
+    /// the canonical paths (same helper, no second mapping).
+    #[test]
+    fn raw_tool_result_document_without_citations_omits_the_member() {
+        // Arrange / Act
+        let document = raw_element_document_json(None);
+
+        // Assert
+        assert!(
+            document.get("citations").is_none(),
+            "absent citations must not emit the member: {document}"
+        );
+        assert_eq!(
+            document["format"], "pdf",
+            "the rest of the document block is unchanged: {document}"
+        );
+    }
+
+    /// An explicit `{enabled: false}` is behaviorally identical to absence
+    /// on the raw path too, so the member is omitted rather than emitted.
+    #[test]
+    fn raw_tool_result_document_citations_disabled_omits_the_member() {
+        // Arrange / Act
+        let document = raw_element_document_json(Some(json!({"enabled": false})));
+
+        // Assert
+        assert!(
+            document.get("citations").is_none(),
+            "citations:false must not emit the member: {document}"
+        );
+    }
+
+    /// A malformed citations value on the raw path gets no guessed
+    /// interpretation: the member is omitted and the loss is logged, via the
+    /// same shared helper the canonical paths use.
+    #[traced_test]
+    #[test]
+    fn raw_tool_result_document_malformed_citations_omits_the_member_and_warns() {
+        // Arrange / Act
+        let document = raw_element_document_json(Some(json!("yes")));
 
         // Assert
         assert!(
