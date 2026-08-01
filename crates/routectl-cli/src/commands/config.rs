@@ -221,9 +221,16 @@ fn derive_dotted_path(message: &str) -> Option<String> {
     None
 }
 
+/// The committed example config, embedded once for every consumer: `config
+/// example` prints it and `init --scaffold` writes it. A second
+/// `include_str!` of the same file elsewhere would be a copy that no
+/// compiler check keeps in step with this one, so callers name this
+/// constant instead.
+pub(crate) const EXAMPLE_CONFIG: &str = include_str!("../../../../examples/config.toml");
+
 /// Print the example config to stdout.
 pub fn example() -> Result<()> {
-    print!("{}", include_str!("../../../../examples/config.toml"));
+    print!("{EXAMPLE_CONFIG}");
     Ok(())
 }
 
@@ -240,6 +247,55 @@ fn scheme_of(uri: &str) -> &'static str {
         "literal:"
     } else {
         "unknown"
+    }
+}
+
+#[cfg(test)]
+mod emitted_example_tests {
+    use super::*;
+
+    /// Whatever `config example` emits, THIS build must be able to load --
+    /// `config example | routectl config check` is the documented
+    /// copy-to-config-dir flow, and an emitted provider kind the running
+    /// binary cannot deserialize breaks it at the first step. The assertion
+    /// carries no feature gate on purpose: it must hold on every feature
+    /// combination the binary can be built with, so a future kind added to
+    /// the example behind a cfg gate fails here instead of in an operator's
+    /// terminal.
+    ///
+    /// Scope, stated precisely: this runs TYPED DESERIALIZATION plus the
+    /// shared semantic validators (`parse_config` + `validation_report`,
+    /// via `gate`). That is exactly what catches the failure this guards --
+    /// an `unknown variant` rejection when the example documents a provider
+    /// kind the build does not compile.
+    ///
+    /// It is NOT the full runtime load path: startup additionally runs
+    /// `load_effective_config` and then constructs the router and its
+    /// providers. So a kind that parses but cannot be BUILT in some feature
+    /// build would still pass here (see the repo learning that `config
+    /// check` passing does not prove `serve` can build the config). Widening
+    /// this to router construction is deliberately not done: it would pull
+    /// provider credential resolution into a unit test for no gain against
+    /// the parse-shaped defect this pins.
+    #[test]
+    fn the_emitted_example_config_loads_on_this_build() {
+        // Arrange: exactly the bytes `config example` writes to stdout.
+        let emitted = EXAMPLE_CONFIG;
+
+        // Act
+        let gated = crate::commands::edit_pipeline::gate(emitted);
+
+        // Assert
+        let config = gated.unwrap_or_else(|errors| {
+            panic!(
+                "this build emits an example it cannot load; enabled provider \
+                 kinds must cover every kind the example documents: {errors:?}"
+            )
+        });
+        assert!(
+            !config.providers.is_empty(),
+            "the emitted example must declare providers"
+        );
     }
 }
 

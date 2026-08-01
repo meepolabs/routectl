@@ -341,10 +341,11 @@ listed at the bottom of each crate.
   checksum; re-signs an existing billing block in place after egress body
   mutations
 - `src/tool_id.rs` -- shared tool-call id charset sanitizer: maps an id into
-  `[a-zA-Z0-9_-]` injectively (wire-safe ids pass through, anything else is
-  hex-escaped under a reserved prefix, over-long forms fold to a digest) and
-  deterministically, so distinct source ids never share a wire id and a
-  `tool_use` id still equals its `tool_result` correlator
+  `[a-zA-Z0-9_-]` within the 64-byte `toolUseId` ceiling (wire-safe ids at or
+  under the ceiling pass through, anything else is hex-escaped under a reserved
+  prefix, any form over the ceiling folds to a digest) -- injective on the
+  escape path, collision-resistant on the digest fold -- and deterministic, so
+  a `tool_use` id still equals its `tool_result` correlator on every lane
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures
   (401/403-vs-other auth-warn split) across egresses
 - `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
@@ -665,7 +666,9 @@ listed at the bottom of each crate.
   claim through the same replay ladder; enforces the empty-item floor
   (producers return `Option`, `retain_replayable_reasoning` sweeps before
   emission); also translates `File` content blocks -> `InputFile` items with
-  `file_data` or `file_id`
+  `file_data` or `file_id`; runs every emitted `call_id` (both
+  `function_call` and `function_call_output` sites) through `tool_id` so one
+  logical id keeps one wire id and a tool result still correlates
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
   `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key
@@ -729,11 +732,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `includeThoughts`), `build_response_format`
   (json_schema / json_object -> `responseMimeType` + `clean_schema`-ed
   `responseSchema`; unrecognized shape warns),
-  thought-part replay carrying `thoughtSignature`; `data_uri_inline_data`
-  parses RFC 2397 base64 image URIs (params before `;base64,` tolerated)
-  into `inlineData`, and both image arms drop-with-warn rather than emit an
-  image part with no bytes (a `data:` URI never falls through to text; a
-  non-base64 `source` never becomes empty `inlineData`);
+  thought-part replay carrying `thoughtSignature`; `split_base64_data_uri`
+  is the one RFC 2397 base64 `data:` URI parser (params before `;base64,`
+  tolerated), shared by the image arm (via `data_uri_inline_data`) and the
+  `File` arm, which reads the canonical inner OpenAI object the Anthropic
+  and Converse egresses read; every bytes-carrying arm (`Image`,
+  `ImageUrl`, `File`, `Document`) drops-with-warn rather than emit a part
+  with no bytes (a `data:` URI never falls through to text; a non-base64
+  or reference-only source never becomes empty `inlineData`);
   `warn_dropped_cache_control`
   emits the drop-with-warn breadcrumb for caller `cache_control` markers
   (Gemini has no breakpoint surface), matching the openai-compat/responses
@@ -787,7 +793,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/mod.rs` -- groups Converse adapter (vendor-neutral
   envelope)
 - `src/bedrock/converse/types.rs` -- request wire types (`ConverseRequest`,
-  AWS-shape content blocks, `ToolConfig`, `InferenceConfig`)
+  AWS-shape content blocks, `ToolConfig`, `InferenceConfig`,
+  `ConverseDocument` with its optional `citations` /
+  `ConverseCitationsConfig`)
 - `src/bedrock/converse/response_types.rs` -- response + ConverseStream event
   wire types
 - `src/bedrock/converse/request.rs` -- canonical -> Converse request body
@@ -795,7 +803,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/system.rs` -- canonical `system` -> Converse
   `[{text}|{cachePoint}]` block array
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
-  messages (per-role dispatch, cachePoint interleave)
+  messages (per-role dispatch, cachePoint interleave); `sanitize_document_name`
+  is the single `document.name` charset/length enforcement point and
+  `translate_document_citations` the single citations bool lift, both shared
+  by the message-content and toolResult document paths so the two cannot
+  drift
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
   when the translated transcript references tool blocks but no tools survive
@@ -2738,7 +2750,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `AtomicU64` counter mirroring the `routectl_usage::handle::UsageCounters`
   pattern, with the Prometheus-shaped names kept only as `tracing`-snapshot
   label metadata; `ProxyMetrics::log_snapshot` is the single seam to swap for
-  an exporter if one ever lands. `ProxyMetrics` counts requests by the three
+  an exporter if one ever lands, emitted from TWO places in the listener's
+  accept loop (a periodic tick and the graceful-shutdown flush), each with its
+  own regression test. `ProxyMetrics` counts requests by the three
   closed dims (`Leg` / `ResultClass` / `PathClass`), open/closed streams, idle
   aborts, unknown forwarded paths, and TLS handshake failures/timeouts;
   `WarnOnce::warn_once(method, path)` dedups a per-path warning. By
@@ -2785,7 +2799,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   pointing at the `config.toml` line that produced it; `derive_dotted_path`
   conservatively recognizes leading `[a.b.c]` headers and
   ``alias/model/provider `X` `` clauses, and unresolvable messages fall back
-  unchanged (a display aid only, never a taxonomy change)
+  unchanged (a display aid only, never a taxonomy change). `EXAMPLE_CONFIG`
+  is the ONE `include_str!` of `examples/config.toml`, named by `config
+  example` and by `init --scaffold`'s `STARTER_CONFIG`; an ungated test
+  gate-loads it so no build can emit an example it cannot itself parse
 - `src/commands/config_edit.rs` -- `routectl config set/unset`: the write
   pipeline through the shared gate. Order: RAW version preflight FIRST
   (refuses `version < CURRENT_CONFIG_VERSION` byte-identically BEFORE any
@@ -2979,8 +2996,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   + actionable, surfaced before any side effect
 - `src/commands/init/scaffold.rs` -- the `--scaffold` fast-path plus the
   wizard's fresh-machine seed. `scaffold_fresh` drops the committed starter
-  `examples/config.toml` (single-sourced with `config example`,
-  `include_str!`); `scaffold_seed` lays down the minimal `version`-only anchor
+  `examples/config.toml` (single-sourced with `config example` off the one
+  `EXAMPLE_CONFIG` embed); `scaffold_seed` lays down the minimal
+  `version`-only anchor
   the wizard needs on disk before `provider add`/the final write can edit
   through the one write path. Both go through `scaffold_from_text`:
   shared-gate-validate the text, then publish via fsynced temp file +
