@@ -178,9 +178,10 @@ pub(crate) fn set_output_config_format(obj: &mut serde_json::Map<String, Value>,
 /// This deliberately validates the POST-assembly wire body, NOT the canonical
 /// `ChatRequest`. Assembly is lossy -- `tool_choice="none"` suppresses tools,
 /// the billing-attribution strip drops a block, a legacy `Role::System` lift
-/// flattens its cache_control away, and `Role::Tool` Parts collapse into one
-/// unmarked `ToolResult` -- so this walk counts what ACTUALLY ships. It is
-/// load-bearing and is NOT replaceable with `validate_source(req)` on the
+/// flattens its cache_control away, and consecutive `Role::Tool` turns
+/// collapse into one message of unmarked `ToolResult` blocks -- so this walk
+/// counts what ACTUALLY ships. It is load-bearing and is NOT replaceable with
+/// `validate_source(req)` on the
 /// canonical request: that would change the cap/ordering outcome for every
 /// suppressed / stripped / lifted / collapsed request. The canonical
 /// pre-assembly walk lives in routectl-core cache_control.rs
