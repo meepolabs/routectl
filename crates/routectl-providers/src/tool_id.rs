@@ -113,7 +113,24 @@ fn is_wire_safe(id: &str) -> bool {
 ///
 /// An empty id maps to empty: the non-empty guarantee is the call sites'
 /// (`call_<index>`), not this function's.
+///
+/// # Input contract
+///
+/// `id` MUST be a RAW client / canonical tool-call id -- never an output
+/// of this function. Applying it twice is not a no-op and is not meant to
+/// be: the function is deliberately NOT idempotent. Idempotence would
+/// require passing an id that already starts with a marker prefix
+/// through unchanged, and that is exactly what destroys injectivity -- a
+/// raw client id `esc_x` would then land on the same wire id as the
+/// escaped form of `x`. Escaping such an id again is what keeps the
+/// verbatim, escaped, and digest namespaces disjoint.
 pub fn sanitize_tool_id(id: &str) -> Cow<'_, str> {
+    // No debug_assert that `id` lacks a marker prefix: a legitimate raw
+    // client id may genuinely start with `esc_` / `esct_` (the case the
+    // prefix check in `is_wire_safe` exists to escape), so such a guard
+    // would fire on valid input. Nothing at this boundary can tell that
+    // id apart from this function's own output, so the single-application
+    // invariant is documented above rather than asserted.
     if is_wire_safe(id) {
         if id.len() > MAX_TOOL_ID_LEN {
             // Already in the target charset, so the id is its own
@@ -247,6 +264,28 @@ mod tests {
         // form of `call.1`.
         assert_eq!(sanitize_tool_id("esc_call_2e1"), "esc_esc_5fcall_5f2e1");
         assert_ne!(sanitize_tool_id("esc_call_2e1"), sanitize_tool_id("call.1"));
+    }
+
+    #[test]
+    fn double_application_is_not_a_no_op_by_design() {
+        // The inequality below is the INTENDED behavior, not a bug to
+        // "fix" into idempotence: idempotence would mean passing an id
+        // that already carries a marker prefix through unchanged, and
+        // then a raw client id `esc_x` would collide with the escaped
+        // form of `x`. Non-idempotence is what keeps the mapping
+        // injective, so every call site must pass a RAW id.
+        let raw = "call.foo:1";
+        let once = sanitize_tool_id(raw).into_owned();
+        let twice = sanitize_tool_id(&once).into_owned();
+
+        assert_eq!(once, "esc_call_2efoo_3a1");
+        assert_eq!(twice, "esc_esc_5fcall_5f2efoo_5f3a1");
+        assert_ne!(once, twice, "sanitization must NOT be idempotent");
+
+        // The prefix check is what preserves disjointness: an
+        // already-escaped-LOOKING raw id is escaped again rather than
+        // passed through.
+        assert_eq!(sanitize_tool_id("esc_x"), "esc_esc_5fx");
     }
 
     #[test]
