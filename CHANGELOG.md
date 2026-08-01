@@ -95,6 +95,8 @@ list with more narrative.
 
 ### Fixed
 
+- **Bedrock Converse streaming no longer drops text and reasoning deltas.** The ConverseStream decoder required a prior `contentBlockStart` frame at a given `contentBlockIndex` before it would accept a `contentBlockDelta` there, so any block without one had every delta silently skipped. AWS emits `contentBlockStart` for tool use only (`ContentBlockStart` is a union of `image` / `toolResult` / `toolUse`), which means text and reasoning blocks never get one and a streamed response could arrive as an empty assistant turn with a valid `finish_reason` and correct usage. Text and reasoning blocks now open lazily on their first delta; tool-use blocks keep their start-driven path, and a text or reasoning delta landing on a tool-use index is still skipped.
+
 - **`count_tokens` no longer trips the shared circuit breaker on a capability error.** When the first count_tokens-capable seat is capable by kind (`anthropic-api`) but its upstream does not implement `count_tokens` (e.g. an `anthropic-api` base URL that forwards to a Bedrock Invoke egress), it returns a wire 501. That 501 was recorded as a health failure on the per-model breaker shared with completions, so a steady stream of count_tokens probes could flap the breaker open and force completions onto their fallback. `count_tokens` now treats a capability error (local `NotImplemented` or a wire 501) as capability, not health: it releases the probe slot without a breaker debit and walks to the next capable seat, returning a real count. Completion-path 501s are unchanged and still trip the breaker.
   - The per-seat capability 501 now logs at `debug` (it is the steady-state path when a passthrough seat cannot count); other `count_tokens` upstream errors and all completion-path 501s stay at WARN.
 
@@ -129,7 +131,7 @@ list with more narrative.
 - **Upstream error `type` / `code` / stop-reason** threaded through to the client; 503 / 529 map to `overloaded_error` on both dialects.
 - **Foreign-shaped thinking signatures** are dropped on the Anthropic egress instead of forwarded as an invalid signature.
 - **Exact effort-to-budget table** replaces the proportional estimate; openai-responses converts a budget-only request to the nearest effort level.
-- **Tool-call ids** sanitized to the Anthropic charset at every emit and correlation site.
+- **Tool-call ids** sanitized to the Anthropic charset at every emit and correlation site, injectively -- two distinct source ids never collapse onto one wire id.
 - **Assistant `tool_calls`** re-emitted as native tool-use on Converse and openai-responses, so multi-turn tool loops no longer break.
 - **openai-compat wire-lift** shapes corrected for strict hosts (json_schema `name`, stray `cache_control`, thinking-only turns, unrepresentable blocks, dropped `is_error`).
 - **openai-compat egress fidelity**: text-only `tool_result` collapse, Anthropic `metadata` blocked, `max_completion_tokens` restored for o-series / gpt-5.

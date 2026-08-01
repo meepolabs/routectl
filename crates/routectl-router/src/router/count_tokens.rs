@@ -20,6 +20,13 @@ use super::{DispatchTarget, Router, StripDecision, apply_layered_overlays};
 /// `count_tokens` walks the dispatch chain to the first target whose
 /// `provider_kind` matches this token and skips the rest. Matches the
 /// `kind = "..."` discriminant from `ProviderEntry::kind_str`.
+///
+/// This is a routectl implementation boundary, NOT a provider-surface
+/// fact: AWS does ship `POST /model/{modelId}/count-tokens`, so Bedrock
+/// is absent here because routectl has not implemented that lane yet.
+/// Widening this to a slice needs the tokenizer-family invariant above
+/// re-established explicitly -- the walk is only safe today because
+/// every capable kind shares Anthropic's tokenizer.
 pub(super) const COUNT_TOKENS_CAPABLE_KIND: &str = "anthropic-api";
 
 /// Outcome of dispatching `count_tokens` to one capable seat, driving

@@ -340,9 +340,11 @@ listed at the bottom of each crate.
 - `src/claude_signing.rs` -- byte-level re-signer for the billing-header
   checksum; re-signs an existing billing block in place after egress body
   mutations
-- `src/tool_id.rs` -- shared tool-call id charset sanitizer (chars outside
-  `[a-zA-Z0-9_-]` -> `_`, deterministic) so sanitized `tool_use` ids and their
-  `tool_result` correlators stay equal
+- `src/tool_id.rs` -- shared tool-call id charset sanitizer: maps an id into
+  `[a-zA-Z0-9_-]` injectively (wire-safe ids pass through, anything else is
+  hex-escaped under a reserved prefix, over-long forms fold to a digest) and
+  deterministically, so distinct source ids never share a wire id and a
+  `tool_use` id still equals its `tool_result` correlator
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures
   (401/403-vs-other auth-warn split) across egresses
 - `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
@@ -725,13 +727,20 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `thinkingLevel` string by effort, selected by model generation; older
   -> numeric `thinkingBudget` verbatim / effort table / dynamic `-1`;
   `includeThoughts`), `build_response_format`
-  (json_schema / json_object -> `responseMimeType` + `responseSchema`),
-  thought-part replay carrying `thoughtSignature`; `warn_dropped_cache_control`
+  (json_schema / json_object -> `responseMimeType` + `clean_schema`-ed
+  `responseSchema`; unrecognized shape warns),
+  thought-part replay carrying `thoughtSignature`; `data_uri_inline_data`
+  parses RFC 2397 base64 image URIs (params before `;base64,` tolerated)
+  into `inlineData`, and both image arms drop-with-warn rather than emit an
+  image part with no bytes (a `data:` URI never falls through to text; a
+  non-base64 `source` never becomes empty `inlineData`);
+  `warn_dropped_cache_control`
   emits the drop-with-warn breadcrumb for caller `cache_control` markers
   (Gemini has no breakpoint surface), matching the openai-compat/responses
   egresses
 - `src/gemini/schema.rs` -- `clean_schema`: pure JSON-Schema -> Gemini
-  OpenAPI-subset cleaner for tool `parameters` (oneOf -> anyOf, strip
+  OpenAPI-subset cleaner shared by tool `parameters` and
+  `generationConfig.responseSchema` (oneOf -> anyOf, strip
   `$schema`/`$ref`/`additionalProperties`, nullable-union lift, numeric-enum
   coercion, uppercased `type`), recursing nested objects/arrays/combinators
 - `src/gemini/response.rs` -- Gemini response -> canonical `ChatResponse`;
@@ -758,7 +767,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   invariants, the `MAX_FRAME_BYTES` 8 MB DoS cap, decode-error recovery, and
   the WARN/TRACE log-hygiene split (prelude-only at WARN, full payload hex at
   TRACE); both the InvokeModel-stream and ConverseStream decoders delegate to
-  `decode_frames`
+  `decode_frames`. Also owns `frame_type` (protocol frame classification from
+  `:message-type` / `:event-type` / `:exception-type`) and `exception_error`
+  (exception member name -> HTTP status), shared so the two lanes classify
+  upstream failures identically
 - `src/bedrock/eventstream.rs` -- InvokeModel-stream frame handler / payload
   interpreter (base64-unwrap of Anthropic SSE per frame); delegates the
   framing byte loop and DoS cap to `frame.rs`
@@ -2232,7 +2244,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and the shared `#[cfg(test)]` fixture helper lives in `test_support.rs`
 - `src/server/serve.rs` -- listener bind + serve loop: `serve` (bind then
   serve) / `serve_on_listener` / `serve_on_listener_with_overlay` boot path,
-  `build_axum_router` route wiring, the graceful bounded-drain shutdown
+  `build_axum_router` route wiring (every registered path is classified by
+  the `PUBLIC_ROUTES` / `AUTH_GATED_ROUTES` test-only inventory consts, which
+  `serve_tests.rs` enforces against a scan of the crate's registered path
+  literals plus real 401-vs-200 probes, so an unclassified route fails a test
+  instead of shipping unauthenticated), the graceful bounded-drain shutdown
   (`serve_with_bounded_drain` + `drain_deadline_watcher` + `DRAIN_DEADLINE`),
   MITM front-proxy spawn (`start_mitm_proxy`), and the usage-writer lifecycle
   (`build_usage_writer` / `drain_usage_writer`). On the owned router before

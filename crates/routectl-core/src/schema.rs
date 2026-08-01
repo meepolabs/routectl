@@ -534,7 +534,11 @@ pub enum MessageContent {
 /// - Qwen / vLLM: `enabled` -> `chat_template_kwargs.enable_thinking`
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReasoningConfig {
-    /// "minimal" | "low" | "medium" | "high" | "xhigh" | "none"
+    /// "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    ///
+    /// `"none"` is NOT an accepted request value: it is a budget-band
+    /// label internal to the effort<->budget bijection, which the clamp
+    /// path deliberately does not model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     /// Anthropic/Gemini-style budget. Mutually exclusive with `effort` per OpenRouter.
