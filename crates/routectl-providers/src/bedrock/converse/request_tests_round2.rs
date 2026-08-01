@@ -422,7 +422,7 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
     assert_eq!(arr.len(), 1, "got {body}");
     let doc = &arr[0]["document"];
     assert_eq!(doc["format"], "pdf", "got {body}");
-    assert_eq!(doc["name"], "report_pdf", "got {body}");
+    assert_eq!(doc["name"], "report-pdf", "got {body}");
     assert_eq!(doc["source"]["bytes"], "JVBERi0xLjQK", "got {body}");
 }
 
