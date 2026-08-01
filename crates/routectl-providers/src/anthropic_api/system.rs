@@ -20,6 +20,11 @@ use crate::system_filter::is_billing_attribution_block;
 
 /// Convert canonical `SystemContent` to wire `AnthropicSystem`. Preserves
 /// per-block cache_control and citations.
+///
+/// Blank content is NOT filtered here: this is the pure typed mapping, and
+/// callers decide what absent means for their wire. Each egress screens a
+/// blank canonical `req.system` with `SystemContent::is_blank` before
+/// calling, so `system: ""` never reaches an upstream.
 pub fn translate_system(s: &SystemContent) -> AnthropicSystem {
     match s {
         SystemContent::Text(t) => AnthropicSystem::Text(t.clone()),

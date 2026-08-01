@@ -64,7 +64,13 @@ pub fn normalize(
     // synthetic `role: "system"` message. Strict OpenAI-compat hosts
     // (NIM) reject the top-level field with `400 Validation:
     // Unsupported parameter(s): system`.
-    if let Some(sys) = req.system.as_ref() {
+    //
+    // A blank canonical system reads as "no canonical system supplied"
+    // (same as None): it must not lower a meaningless empty system message,
+    // and -- because lowering also drops the existing role:system entries --
+    // it must not silently discard a real prompt a direct caller put in the
+    // messages array.
+    if let Some(sys) = req.system.as_ref().filter(|s| !s.is_blank()) {
         // Drop the Claude Code billing/attribution block before flatten:
         // openai-compat is a third-party upstream and must not receive the
         // client fingerprint the block carries.
@@ -80,7 +86,7 @@ pub fn normalize(
             .as_ref()
             .map(routectl_core::SystemContent::flatten)
             .unwrap_or_default();
-        if !text.is_empty() {
+        if !text.trim().is_empty() {
             let messages = obj
                 .entry("messages")
                 .or_insert_with(|| Value::Array(Vec::new()))
@@ -1181,6 +1187,94 @@ mod tests {
         assert!(body.get("system").is_none());
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "user", "no system message injected");
+    }
+
+    /// Pin: every blank canonical system shape -- empty string,
+    /// whitespace-only, and blocks whose every text is blank -- lowers to no
+    /// system message at all, and the top-level field never reaches the wire.
+    #[test]
+    fn blank_system_shapes_inject_no_system_message() {
+        use routectl_core::{SystemBlock, SystemContent};
+
+        let blank = |text: &str| SystemBlock {
+            kind: "text".into(),
+            text: text.into(),
+            cache_control: None,
+            citations: None,
+        };
+        for system in [
+            SystemContent::Text(String::new()),
+            SystemContent::Text("   \n\t ".into()),
+            SystemContent::Blocks(vec![blank(""), blank("  \n")]),
+        ] {
+            // Arrange
+            let mut req = simple_req("test-model");
+            req.system = Some(system);
+
+            // Act
+            let body = normalize(
+                "test",
+                &req,
+                ReasoningDialect::Passthrough,
+                HistoryReasoning::Auto,
+                None,
+                false,
+            )
+            .unwrap();
+
+            // Assert
+            assert!(
+                body.get("system").is_none(),
+                "the top-level system field must never reach the wire: {body}"
+            );
+            let messages = body["messages"].as_array().unwrap();
+            assert!(
+                messages.iter().all(|m| m["role"] != "system"),
+                "no system message may be injected for a blank system: {body}"
+            );
+        }
+    }
+
+    /// A blank canonical system must not discard a direct caller's
+    /// Role::System message: lowering drops the existing role:system entries,
+    /// so blank has to skip the lowering entirely.
+    #[test]
+    fn blank_canonical_system_preserves_role_system_message() {
+        use routectl_core::SystemContent;
+
+        // Arrange
+        let mut req = simple_req("test-model");
+        req.system = Some(SystemContent::Text("   ".into()));
+        insert_msg(
+            &mut req,
+            0,
+            Message {
+                refusal: None,
+                role: Role::System,
+                content: MessageContent::Text("you are helpful".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "you are helpful");
     }
 
     #[test]

@@ -32,6 +32,12 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
     let filtered_system = req
         .system
         .as_ref()
+        // A blank canonical system reads as "no canonical system supplied"
+        // (same as None), so it falls through to the Role::System lift
+        // rather than suppressing it. Without this, a whitespace-only
+        // `system` would ship as `[{text: "   "}]`: accepted by AWS
+        // (non-zero length) but a meaningless instruction.
+        .filter(|s| !s.is_blank())
         .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut billing_dropped));
     if billing_dropped {
         tracing::warn!(
@@ -45,7 +51,7 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
         .or_else(|| lift_legacy_system(&req.messages))?;
     let mut out: Vec<ConverseSystemBlock> = Vec::new();
     match anthropic_system {
-        AnthropicSystem::Text(t) if t.is_empty() => {
+        AnthropicSystem::Text(t) if t.trim().is_empty() => {
             // Empty system is just absent -- avoid emitting a stray
             // `system: [{text: ""}]` which AWS rejects with
             // "minimum length of 1".
@@ -57,7 +63,7 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
                 // rejects a `{cachePoint}` with no preceding content block.
                 // Skip the whole entry so a verbatim-preserved empty block
                 // with cache_control doesn't emit a leading/orphan marker.
-                if b.text.is_empty() {
+                if b.text.trim().is_empty() {
                     continue;
                 }
                 out.push(ConverseSystemBlock::Text(b.text.clone()));
@@ -90,6 +96,31 @@ mod tests {
         ChatRequest {
             system: Some(system),
             ..Default::default()
+        }
+    }
+
+    /// Pin: a blank canonical system (empty string, whitespace-only, or
+    /// blocks whose every text is blank) produces no `system` array at all.
+    /// AWS rejects `system: [{text:""}]` outright; whitespace-only would be
+    /// accepted but is a meaningless instruction.
+    #[test]
+    fn blank_canonical_system_produces_no_system_array() {
+        for system in [
+            SystemContent::Text(String::new()),
+            SystemContent::Text("   \n\t ".into()),
+            SystemContent::Blocks(vec![block("", None), block("  \n", None)]),
+        ] {
+            // Arrange
+            let req = req_with_system(system);
+
+            // Act
+            let out = build_system(&req);
+
+            // Assert
+            assert!(
+                out.is_none(),
+                "a blank canonical system must produce no system array, got: {out:?}"
+            );
         }
     }
 

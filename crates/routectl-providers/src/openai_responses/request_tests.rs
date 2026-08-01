@@ -122,6 +122,39 @@ fn system_content_concatenates_text_blocks_to_instructions() {
     assert_eq!(v["instructions"], json!("be helpful\n\nbe concise"));
 }
 
+/// Pin: a blank canonical system yields an empty `instructions` string on
+/// the serialized body -- the Responses server's "no system prompt" -- never
+/// a blank instruction. The field is always serialized on this wire, so an
+/// empty string is the omission.
+#[test]
+fn blank_canonical_system_serializes_empty_instructions() {
+    let blank = |text: &str| SystemBlock {
+        kind: "text".into(),
+        text: text.into(),
+        cache_control: None,
+        citations: None,
+    };
+    for system in [
+        SystemContent::Text(String::new()),
+        SystemContent::Text("   \n\t ".into()),
+        SystemContent::Blocks(vec![blank(""), blank("  \n")]),
+    ] {
+        // Arrange
+        let mut req = req_with(vec![user_text("hi")]);
+        req.system = Some(system);
+
+        // Act
+        let v = translate_to_json(&cfg(), &req);
+
+        // Assert
+        assert_eq!(
+            v["instructions"],
+            json!(""),
+            "a blank canonical system must not produce a blank instruction: {v}"
+        );
+    }
+}
+
 #[test]
 fn system_content_with_cache_control_warns_and_strips() {
     // Arrange

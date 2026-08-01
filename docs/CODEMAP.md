@@ -42,7 +42,8 @@ listed at the bottom of each crate.
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`
 - `src/system_content.rs` -- typed top-level `system` field (flat string OR
-  array of `SystemBlock` with per-block cache_control)
+  array of `SystemBlock` with per-block cache_control); `is_blank` is the
+  shared egress screen that keeps a meaningless `system: ""` off every wire
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` +
   `ToolDef::Other(Value)` with `from_openai_function` interop
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, breakpoint

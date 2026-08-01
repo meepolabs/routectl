@@ -120,6 +120,41 @@ fn system_string_serializes_as_array_of_text_blocks() {
     assert_eq!(sys[0], json!({"text": "be helpful"}));
 }
 
+/// Pin: a blank canonical system never reaches the Converse wire -- the
+/// serialized body carries no `system` key for any blank shape.
+#[test]
+fn blank_canonical_system_serializes_no_system_key() {
+    let blank = |text: &str| SystemBlock {
+        kind: "text".into(),
+        text: text.into(),
+        cache_control: None,
+        citations: None,
+    };
+    for system in [
+        SystemContent::Text(String::new()),
+        SystemContent::Text("   \n\t ".into()),
+        SystemContent::Blocks(vec![blank(""), blank("  \n")]),
+    ] {
+        // Arrange
+        let cfg = fake_cfg();
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            system: Some(system),
+            messages: vec![user_msg("hi")].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        assert!(
+            body.get("system").is_none(),
+            "a blank canonical system must emit no system key: {body}"
+        );
+    }
+}
+
 #[test]
 fn system_blocks_with_cache_control_emit_cache_point_after_text() {
     let cfg = fake_cfg();
