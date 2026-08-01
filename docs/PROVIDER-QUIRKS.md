@@ -532,7 +532,7 @@ Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggres
 Resolution priority is model > provider > global
 (`[models.X]` > `[providers.Y]` > `[retry]`). The related
 `request_timeout_ms` full-request ceiling is provider/global only (no
-per-model tier); bump it alongside the first-byte timeout for
+per-model tier); bump it alongside the first-content timeout for
 long-thinking responses. For the full timeout/retry resolution rules
 and how upstream `Retry-After` / `resets_at` hints are honored, see
 [CONFIGURATION.md](CONFIGURATION.md) "Retry and fallback defaults" and
@@ -652,7 +652,7 @@ routectl logs a `body_excerpt` truncated to 256 chars
 |---|---|
 | `400 thinking.type.enabled is not supported` | Need `supports_adaptive_thinking = true` on `[models.X]` (Opus 4.7+) |
 | `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[models.X]` (DeepSeek v4) |
-| `stream first-byte timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
+| `stream first-content timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |
 | `400 thinking enabled requires temperature 1.0` | Don't set `temperature` when reasoning is enabled (routectl auto-forces 1.0 if you do) |
 | `400 context_management is not allowed` or `400 anthropic-beta header not recognised` | Set `context_management = true` on the provider (DeepSeek /anthropic or similar) |

@@ -81,7 +81,7 @@ pub struct ResolvedModel {
     /// Per-model payload extras. Deep-merged with the provider's
     /// `payload_extras` (model wins on leaf collision).
     pub payload_extras: Option<Value>,
-    /// Per-model first-byte timeout for streaming responses. Wins
+    /// Per-model first-content timeout for streaming responses. Wins
     /// over per-provider + global tiers when set.
     pub stream_first_byte_timeout_ms: Option<u64>,
     /// Operator-declared per-model ceiling for the `max_tokens` value

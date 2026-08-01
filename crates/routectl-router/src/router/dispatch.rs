@@ -2277,7 +2277,10 @@ async fn try_stream_with_first_content(
             Err(_) => Err(Error::upstream(
                 provider_name,
                 0,
-                format!("stream first-byte timeout after {ms}ms"),
+                format!(
+                    "stream first-content timeout after {ms}ms; content-free leading \
+                     chunks (role opener, id/model metadata) do not satisfy the deadline"
+                ),
             )),
         },
         None => open_and_first.await,

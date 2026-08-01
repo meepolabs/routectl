@@ -1395,7 +1395,7 @@ pub async fn build_resolved_models(
             if ms == 0 {
                 tracing::warn!(
                     model = %nickname,
-                    "[models.{nickname}] stream_first_byte_timeout_ms = 0 would abandon every stream before the first chunk; ignoring the override"
+                    "[models.{nickname}] stream_first_byte_timeout_ms = 0 would abandon every stream before its first content-bearing chunk; ignoring the override"
                 );
             } else {
                 resolved = resolved.with_stream_first_byte_timeout_ms(ms);

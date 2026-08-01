@@ -649,7 +649,7 @@ pub struct ModelEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_extras: Option<Value>,
 
-    /// Per-model first-byte timeout for streaming responses. Resolved
+    /// Per-model first-content timeout for streaming responses. Resolved
     /// with precedence per-model > per-provider > global, extending
     /// the existing two-tier provider > global resolution on
     /// `RetryPolicy::stream_first_byte_timeout_ms`.
@@ -793,8 +793,8 @@ impl ModelEntry {
 
     /// Set the per-model `stream_first_byte_timeout_ms`. Wins over
     /// the per-provider and global resolution. A value of 0 is an
-    /// operator-error sentinel (every stream would time out before
-    /// the first chunk arrived); flagged in debug builds.
+    /// operator-error sentinel (every stream would time out before its
+    /// first content-bearing chunk arrived); flagged in debug builds.
     pub fn with_stream_first_byte_timeout_ms(mut self, ms: u64) -> Self {
         debug_assert!(
             ms > 0,
@@ -2356,7 +2356,7 @@ pub struct ProviderRuntimePolicy {
     /// only the two tiers above remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
-    /// Per-attempt first-byte timeout for streaming responses through
+    /// Per-attempt first-content timeout for streaming responses through
     /// this provider. Same provider > global resolution as
     /// `request_timeout_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
