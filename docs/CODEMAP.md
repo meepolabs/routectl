@@ -183,9 +183,12 @@ listed at the bottom of each crate.
   (`handlers::models::forwarded_proxy_target`). Also the Claude Code
   anthropic-beta floor: `default_claude_code_anthropic_betas()` (the 14-flag
   corpus-verified CC beta set) plus the shared single-source-of-truth const
-  literals `OAUTH_ANTHROPIC_BETA` (`oauth-2025-04-20`) and `CONTEXT_1M_BETA`
-  (`context-1m-2025-08-07`), consumed by the anthropic-api provider's header
-  composition (`build_headers`) and the beta-decision 4xx observability
+  literals `OAUTH_ANTHROPIC_BETA` (`oauth-2025-04-20`), `CONTEXT_1M_BETA`
+  (`context-1m-2025-08-07`), and `STRUCTURED_OUTPUTS_BETA`
+  (`structured-outputs-2025-12-15`, also unioned by the egress whenever the
+  assembled body carries `output_config.format`), consumed by the
+  anthropic-api provider's header composition (`build_headers`) and the
+  beta-decision 4xx observability
 - `src/error.rs` -- `Error` enum
   (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...)
   and `Result` alias; `Error::Upstream` carries a structural `retry_after:
@@ -459,7 +462,12 @@ listed at the bottom of each crate.
   Claude-Code identity headers/UA never fire on this ApiKey lane),
   `sign_mantle` (post-build SigV4/bearer signing via `crate::mantle::sign`),
   and `record_mantle_span_fields` (records `lane`/`auth_mode`/`region` on the
-  request span)
+  request span). `build_headers` also takes the assembled `wire_body`
+  (`Option<&Value>`) so the beta compose can union capability betas the
+  shipped body implies -- today `output_config.format` ->
+  `STRUCTURED_OUTPUTS_BETA`, unioned last (post-allowlist, post-floor,
+  post-context_management-strip, suppressed on the forwarded leg) and
+  idempotent, so an OAuth Claude-Code list stays byte-identical
 - `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store
   for context-management beta emulation; exports `ThinkingCache`,
   `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA`,
@@ -496,7 +504,13 @@ listed at the bottom of each crate.
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
   reconciliation (`merge_provider_extras`, `filter_anthropic_betas`,
   `reconcile_output_config_effort`,
-  `strip_thinking_when_tool_choice_forces_use`)
+  `strip_thinking_when_tool_choice_forces_use`); also the structured-outputs
+  capability-beta union (`body_has_output_config_format` +
+  `union_structured_outputs_beta` for the header carrier /
+  `apply_structured_outputs_beta_to_body` for the body carrier, applied by
+  the Bedrock-Invoke egress after its own allowlist filters), which gates
+  the beta on the ASSEMBLED body's `output_config.format` and bypasses
+  `allowed_betas` as a server requirement rather than a client-opted beta
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical
   `ChatResponse` (content-block walk, stop_reason map, usage cache stats)
 - `src/anthropic_api/sse.rs` -- Anthropic SSE event state machine
@@ -668,7 +682,9 @@ listed at the bottom of each crate.
   emission); also translates `File` content blocks -> `InputFile` items with
   `file_data` or `file_id`; runs every emitted `call_id` (both
   `function_call` and `function_call_output` sites) through `tool_id` so one
-  logical id keeps one wire id and a tool result still correlates
+  logical id keeps one wire id and a tool result still correlates; an empty
+  correlating id fails the request on BOTH output shapes (a tool-role
+  message's `tool_call_id` and a `tool_result` part's `tool_use_id`)
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
   `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key
@@ -782,7 +798,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   framing byte loop and DoS cap to `frame.rs`
 - `src/bedrock/invoke.rs` -- InvokeModel adapter: reuses
   `anthropic_api::request::normalize`, patches `anthropic_version:
-  "bedrock-2023-05-31"`
+  "bedrock-2023-05-31"`, and applies the structured-outputs body-beta union
+  LAST (after both allowlist filters) so a body shipping
+  `output_config.format` never egresses without its gating flag
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke
   body + Converse `additionalModelRequestFields`)
 - `src/bedrock/body_fields.rs` -- shared `allowed_body_fields` filter against
@@ -803,11 +821,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/system.rs` -- canonical `system` -> Converse
   `[{text}|{cachePoint}]` block array
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
-  messages (per-role dispatch, cachePoint interleave); `sanitize_document_name`
-  is the single `document.name` charset/length enforcement point and
-  `translate_document_citations` the single citations bool lift, both shared
-  by the message-content and toolResult document paths so the two cannot
-  drift
+  messages (per-role dispatch, cachePoint interleave). Three
+  document-construction paths: the canonical message-content document
+  (`translate_document` -> typed `ConverseDocument`), the raw Anthropic-shape
+  tool_result document, and the canonical tool_result document
+  (`document_to_tool_result`); the two tool_result paths both delegate their
+  wire value to the shared assembler `tool_result_document_value`.
+  `sanitize_document_name` is the single `document.name` charset/length
+  enforcement point and `translate_document_citations` the single citations
+  bool lift, and all three paths route through them so they cannot drift
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
   when the translated transcript references tool blocks but no tools survive
