@@ -1443,8 +1443,46 @@ fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
 }
 
 // ---------------------------------------------------------------------------
-// v0.8 max_tokens injection contract: openai-responses MUST NOT inject
+// v0.8 max_tokens contract: forward what the caller sent, inject nothing
 // ---------------------------------------------------------------------------
+
+/// A caller-supplied ceiling must reach the wire under the Responses
+/// API's own field name. Forwarding is not injection: the good-translator
+/// principle forbids synthesizing a value, not honoring one.
+#[test]
+fn openai_responses_forwards_caller_max_tokens_as_max_output_tokens() {
+    let mut req = req_with(vec![user_text("hi")]);
+    req.max_tokens = Some(500);
+
+    let v = translate_to_json(&cfg(), &req);
+
+    assert_eq!(
+        v.get("max_output_tokens").and_then(Value::as_u64),
+        Some(500),
+        "caller max_tokens must reach the wire as max_output_tokens; got: {v}"
+    );
+    assert!(
+        v.get("max_tokens").is_none(),
+        "the Responses wire field is max_output_tokens, not max_tokens; got: {v}"
+    );
+}
+
+/// The caller's value wins over the Anthropic-shape carrier, and the
+/// carrier never contributes its own number to this lane.
+#[test]
+fn openai_responses_caller_max_tokens_wins_over_internal_carrier() {
+    let mut req = req_with(vec![user_text("hi")]);
+    req.max_tokens = Some(500);
+    req.routectl_internal.max_output_tokens = 8000;
+
+    let v = translate_to_json(&cfg(), &req);
+
+    assert_eq!(
+        v.get("max_output_tokens").and_then(Value::as_u64),
+        Some(500),
+        "caller-supplied ceiling must win over the router carrier; got: {v}"
+    );
+}
 
 /// The openai-responses egress MUST NOT inject `max_tokens` when the
 /// caller omits it. Mirrors the openai-compat negative-injection test

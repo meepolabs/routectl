@@ -19,6 +19,7 @@ expression: body
     }
   ],
   "instructions": "You are an assistant with long instructions.",
+  "max_output_tokens": 1024,
   "model": "claude-opus-4-7",
   "parallel_tool_calls": true,
   "store": false,

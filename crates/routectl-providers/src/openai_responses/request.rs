@@ -50,6 +50,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        max_output_tokens: req.max_tokens,
     };
 
     extras::apply_reasoning(&mut request, req);
