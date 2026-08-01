@@ -14,7 +14,8 @@
 //! the anthropic-api egress kind implements count_tokens, and it is
 //! Claude-only, so every capable target shares the same Anthropic
 //! tokenizer family. `Router::count_tokens` skips count_tokens-incapable
-//! KINDS (e.g. Bedrock, which has no count_tokens endpoint) before
+//! KINDS (e.g. Bedrock, for which routectl does not implement
+//! count_tokens yet -- AWS itself DOES ship a CountTokens API) before
 //! dispatch, AND walks past a capable-by-kind seat that returns a
 //! capability error at runtime -- a local NotImplemented or a wire 501
 //! (e.g. an anthropic-api base_url that back-hops to a Bedrock egress).
