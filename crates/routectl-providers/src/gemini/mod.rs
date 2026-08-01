@@ -1173,7 +1173,9 @@ mod e2e_tests {
                 "request": {
                     "generationConfig": {
                         "responseMimeType": "application/json",
-                        "responseSchema": {"type": "object", "properties": {"answer": {"type": "string"}}}
+                        // Cleaned into the Gemini OpenAPI subset (uppercase
+                        // TYPE enum) exactly like tool parameters.
+                        "responseSchema": {"type": "OBJECT", "properties": {"answer": {"type": "STRING"}}}
                     }
                 }
             })))

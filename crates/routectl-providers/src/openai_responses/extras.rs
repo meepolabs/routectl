@@ -209,11 +209,36 @@ pub(super) fn apply_response_format(request: &mut ResponsesRequest, req: &ChatRe
 /// json_schema format, so a missing name defaults to `"response"` (matching
 /// the openai-compat wire-lift default).
 fn responses_text_format(response_format: &Value) -> Option<Value> {
-    let obj = response_format.as_object()?;
-    match obj.get("type").and_then(Value::as_str)? {
+    let Some(obj) = response_format.as_object() else {
+        tracing::warn!(
+            "response_format is not an object; dropping structured-output \
+             directive on Responses egress"
+        );
+        return None;
+    };
+    let Some(kind) = obj.get("type").and_then(Value::as_str) else {
+        tracing::warn!(
+            "response_format carries no string type token; dropping \
+             structured-output directive on Responses egress"
+        );
+        return None;
+    };
+    match kind {
         "json_schema" => {
-            let js = obj.get("json_schema").and_then(Value::as_object)?;
-            let schema = js.get("schema").cloned()?;
+            let Some(js) = obj.get("json_schema").and_then(Value::as_object) else {
+                tracing::warn!(
+                    "response_format json_schema is absent or not an object; \
+                     dropping structured-output directive on Responses egress"
+                );
+                return None;
+            };
+            let Some(schema) = js.get("schema").cloned() else {
+                tracing::warn!(
+                    "response_format json_schema carries no json_schema.schema; \
+                     dropping structured-output directive on Responses egress"
+                );
+                return None;
+            };
             let name = js.get("name").and_then(Value::as_str).unwrap_or("response");
             let mut fmt = serde_json::Map::new();
             fmt.insert("type".into(), Value::from("json_schema"));
@@ -225,7 +250,14 @@ fn responses_text_format(response_format: &Value) -> Option<Value> {
             Some(Value::Object(fmt))
         }
         "json_object" => Some(serde_json::json!({"type": "json_object"})),
-        _ => None,
+        other => {
+            tracing::warn!(
+                response_format_type = other,
+                "unrecognized response_format shape; dropping structured-output \
+                 directive on Responses egress"
+            );
+            None
+        }
     }
 }
 

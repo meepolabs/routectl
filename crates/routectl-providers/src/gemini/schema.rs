@@ -1,10 +1,11 @@
-//! JSON Schema -> Gemini OpenAPI-subset cleaning for tool `parameters`.
+//! JSON Schema -> Gemini OpenAPI-subset cleaning for the shared `Schema` proto.
 //!
-//! Gemini's `functionDeclarations[].parameters` accepts an OpenAPI 3.0
-//! Schema subset, not raw JSON Schema. A caller tool schema authored for
-//! OpenAI/Anthropic can carry constructs Gemini rejects with a 400 or
-//! silently mis-parses. This module normalizes a caller schema into the
-//! subset before emit:
+//! Gemini's `functionDeclarations[].parameters` and
+//! `generationConfig.responseSchema` are the SAME proto and accept an
+//! OpenAPI 3.0 Schema subset, not raw JSON Schema. A caller tool or
+//! structured-output schema authored for OpenAI/Anthropic can carry
+//! constructs Gemini rejects with a 400 or silently mis-parses. This module
+//! normalizes a caller schema into the subset before emit:
 //!
 //!   - `oneOf` -> `anyOf` (Gemini has no `oneOf`).
 //!   - Resolve an intra-document `$ref` (`#/$defs/X`, `#/definitions/X`) by
