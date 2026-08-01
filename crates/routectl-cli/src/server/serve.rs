@@ -618,9 +618,63 @@ pub(super) fn status_requires_auth(token_set: &TokenSet, bound: std::net::Socket
     !token_set.is_empty() || !bound.ip().is_loopback()
 }
 
+/// Paths served WITHOUT the listener auth layer, by explicit declaration.
+///
+/// `/health` is the sole member, deliberately: an external liveness probe
+/// on an `--unsafe-public` deployment must be able to reach it without
+/// holding a listener token. Its response carries no configuration, usage,
+/// or credential data -- but it DOES carry `version`
+/// (`CARGO_PKG_VERSION`), so an unauthenticated caller on a public bind
+/// learns the exact build. That is accepted: the version is already
+/// discoverable from the release artifacts a public deployment was
+/// installed from, and a liveness probe that cannot report which build is
+/// live is much less useful. Anything beyond `{status, version}` belongs
+/// on the auth-gated `/status/health`, not here.
+///
+/// Together with `AUTH_GATED_ROUTES` this is the router's declared auth
+/// inventory. `serve_tests.rs` scans the crate's production sources for
+/// every registered path literal and fails on any path missing from both
+/// lists, so a new route is unauthenticated only by a conscious edit HERE
+/// -- never as a side effect of which builder its `.route()` line landed
+/// on. Both lists are `cfg(test)`: nothing on the request path consults
+/// them, so the inventory adds zero runtime cost.
+#[cfg(test)]
+pub(super) const PUBLIC_ROUTES: &[&str] = &["/health"];
+
+/// Paths that MUST sit behind the listener auth layer whenever tokens are
+/// configured. Two separately-gated groups, by construction:
+///
+///   * `/v1/*` -- gated iff the resolved token set is non-empty (an empty
+///     set is the token-less loopback dev path, which skips the layer
+///     entirely for zero per-request overhead).
+///   * `/`, `/status*` -- gated by `status_requires_auth`, which is
+///     strictly WIDER (tokens configured OR a non-loopback bind) and sits
+///     under an additional `Host` allowlist. Listed here because the
+///     tokens-configured case is exactly the `/v1/*` condition; the extra
+///     no-tokens + non-loopback cell is pinned separately by
+///     `status_requires_auth_covers_the_four_cells`.
+#[cfg(test)]
+pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
+    "/v1/models",
+    "/v1/chat/completions",
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+    "/v1/responses",
+    "/",
+    "/status",
+    "/status/usage",
+    "/status/health",
+    "/status/config",
+    "/status/doctor",
+];
+
 /// `max_body_bytes` MUST already be the resolved effective value
 /// (zero -> default mapped by `compute_max_body_bytes`). Private to
 /// this module; the only call site is `serve_on_listener`.
+///
+/// Every path registered below is classified by [`PUBLIC_ROUTES`] or
+/// [`AUTH_GATED_ROUTES`]; adding a route without classifying it fails a
+/// test in `serve_tests.rs`.
 ///
 /// `proxy::split::ANTHROPIC_INFERENCE_PATHS` is the source of truth for
 /// which of these routes the MITM front-proxy classifies as
@@ -643,8 +697,9 @@ fn build_axum_router(
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
 
-    // Public routes: /health is intentionally outside the auth layer
-    // so external liveness probes work in --unsafe-public deployments.
+    // Public routes: every path here MUST also appear in `PUBLIC_ROUTES`
+    // (which records why each is auth-exempt). A path registered on this
+    // builder without that declaration fails the inventory test.
     let public = AxumRouter::new().route("/health", get(handlers::health::health));
 
     // Authenticated routes: /v1/models lists configured aliases (low
