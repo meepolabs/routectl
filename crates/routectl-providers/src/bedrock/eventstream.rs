@@ -92,10 +92,23 @@ fn handle_invoke_frame(
     message: Message,
     sse_state: &mut SseState,
 ) -> Result<Option<ChatChunk>> {
-    let event_type = frame::header_str(&message, ":event-type")
-        .unwrap_or("")
-        .to_string();
     let payload_bytes = message.payload();
+    let event_type = match frame::frame_type(&message) {
+        frame::FrameType::Event(name) => name.to_string(),
+        // A protocol-typed failure frame. Every exception ends the stream,
+        // recognized member name or not -- skipping one truncates the
+        // response while the breaker records the seat healthy.
+        frame::FrameType::Exception(name) => {
+            return Err(frame::exception_error(provider_id, name, payload_bytes));
+        }
+        frame::FrameType::Untyped => {
+            tracing::debug!(
+                provider = provider_id,
+                "bedrock: skipping eventstream frame with no :message-type or :event-type"
+            );
+            return Ok(None);
+        }
+    };
 
     match event_type.as_str() {
         "chunk" => {
@@ -178,42 +191,20 @@ fn handle_invoke_frame(
             }
             sse_state.parse_event(provider_id, inner)
         }
+        // An upstream that violates the protocol by naming an exception in
+        // `:event-type` (with `:message-type: event`, or absent) still
+        // classifies as a failure rather than an unknown frame to skip.
         "internalServerException"
         | "modelStreamErrorException"
         | "validationException"
         | "throttlingException"
         | "serviceUnavailableException"
         | "accessDeniedException"
-        | "unauthorizedException" => {
-            let payload: Value = serde_json::from_slice(payload_bytes).unwrap_or(Value::Null);
-            let msg = payload
-                .pointer("/message")
-                .or_else(|| payload.pointer("/Message"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(event_type.as_str())
-                .to_string();
-            // Synthesize a status code roughly matching the exception kind.
-            let status: u16 = match event_type.as_str() {
-                "throttlingException" => 429,
-                "validationException" => 400,
-                "serviceUnavailableException" => 503,
-                "accessDeniedException" => 403,
-                "unauthorizedException" => 401,
-                _ => 500,
-            };
-            if matches!(
-                event_type.as_str(),
-                "accessDeniedException" | "unauthorizedException"
-            ) {
-                tracing::warn!(
-                    provider = %provider_id,
-                    event_type = %event_type,
-                    message = %routectl_core::sanitize_for_log(&msg),
-                    "bedrock in-stream auth/permission exception",
-                );
-            }
-            Err(Error::upstream(provider_id, status, msg))
-        }
+        | "unauthorizedException" => Err(frame::exception_error(
+            provider_id,
+            event_type.as_str(),
+            payload_bytes,
+        )),
         // Unknown frame types -- log and skip rather than fail. AWS
         // adds new events occasionally and we don't want clients
         // breaking on extensions.
@@ -238,10 +229,30 @@ mod tests {
     use routectl_core::Error;
 
     fn make_frame(event_type: &str, payload_json: &str) -> Message {
-        Message::new(Bytes::from(payload_json.to_string().into_bytes())).add_header(Header::new(
-            ":event-type",
-            HeaderValue::String(event_type.to_string().into()),
-        ))
+        Message::new(Bytes::from(payload_json.to_string().into_bytes()))
+            .add_header(Header::new(
+                ":message-type",
+                HeaderValue::String("event".to_string().into()),
+            ))
+            .add_header(Header::new(
+                ":event-type",
+                HeaderValue::String(event_type.to_string().into()),
+            ))
+    }
+
+    /// A frame in the shape AWS actually uses for a modeled exception:
+    /// `:message-type: "exception"` with the member name in
+    /// `:exception-type` and NO `:event-type` header.
+    fn make_exception_frame(exception_type: &str, payload_json: &str) -> Message {
+        Message::new(Bytes::from(payload_json.to_string().into_bytes()))
+            .add_header(Header::new(
+                ":message-type",
+                HeaderValue::String("exception".to_string().into()),
+            ))
+            .add_header(Header::new(
+                ":exception-type",
+                HeaderValue::String(exception_type.to_string().into()),
+            ))
     }
 
     fn handle(event_type: &str, payload: &str) -> Result<Option<ChatChunk>> {
@@ -300,6 +311,57 @@ mod tests {
     #[test]
     fn unknown_event_type_is_skipped_not_error() {
         let res = handle("someBrandNewEventType", "{}");
+        assert!(matches!(res, Ok(None)), "got {res:?}");
+    }
+
+    /// The wire shape AWS actually sends when it throttles mid-stream:
+    /// `:message-type: exception` + `:exception-type: throttlingException`,
+    /// no `:event-type`. Classifying on `:event-type` alone made this frame
+    /// unrecognized, so the response truncated silently and the breaker
+    /// recorded the throttled seat healthy.
+    #[test]
+    fn protocol_shaped_throttling_exception_frame_maps_to_429() {
+        let mut sse_state = SseState::default();
+        let err = handle_invoke_frame(
+            "test-bedrock",
+            make_exception_frame("throttlingException", r#"{"message":"slow down"}"#),
+            &mut sse_state,
+        )
+        .unwrap_err();
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 429);
+                assert!(body.contains("slow down"), "body: {body}");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// A protocol-typed exception whose member name we do not know must
+    /// still end the stream -- failing closed as a 500 rather than being
+    /// skipped as an unknown frame.
+    #[test]
+    fn unknown_exception_type_fails_closed_as_500() {
+        let mut sse_state = SseState::default();
+        let err = handle_invoke_frame(
+            "test-bedrock",
+            make_exception_frame("someFutureAwsException", r#"{"message":"nope"}"#),
+            &mut sse_state,
+        )
+        .unwrap_err();
+        match err {
+            Error::Upstream { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// A frame naming neither `:message-type` nor `:event-type` carries
+    /// nothing decodable and nothing marking it a failure -- skip it.
+    #[test]
+    fn frame_with_no_type_headers_is_skipped() {
+        let mut sse_state = SseState::default();
+        let bare = Message::new(Bytes::from_static(b"{}"));
+        let res = handle_invoke_frame("test-bedrock", bare, &mut sse_state);
         assert!(matches!(res, Ok(None)), "got {res:?}");
     }
 
@@ -600,6 +662,50 @@ mod tests {
             if let Err(e) = item {
                 panic!("regression: stream errored instead of skipping: {e:?}");
             }
+        }
+    }
+
+    /// End-to-end through the real wire encoding: a content frame followed
+    /// by a protocol-shaped throttle exception must surface the 429 to the
+    /// consumer. The stream's terminal item being an `Err` is what makes
+    /// the router's breaker accounting debit the seat instead of recording
+    /// success on a truncated response.
+    #[tokio::test]
+    async fn mid_stream_exception_frame_terminates_stream_with_error() {
+        let inner = r#"{"type":"ping"}"#;
+        let b64 = B64_STANDARD.encode(inner.as_bytes());
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+
+        let encode = |frame: &Message| -> Vec<u8> {
+            let mut buf = Vec::new();
+            aws_smithy_eventstream::frame::write_message_to(frame, &mut buf)
+                .expect("encode eventstream frame");
+            buf
+        };
+        let mut wire = encode(&make_frame("chunk", &payload));
+        wire.extend_from_slice(&encode(&make_exception_frame(
+            "throttlingException",
+            r#"{"message":"slow down"}"#,
+        )));
+
+        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(wire))]);
+        let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
+
+        let mut last_err = None;
+        while let Some(item) = chunks.next().await {
+            if let Err(e) = item {
+                last_err = Some(e);
+            }
+        }
+        match last_err {
+            Some(Error::Upstream { status, body, .. }) => {
+                assert_eq!(status, 429);
+                assert!(body.contains("slow down"), "body: {body}");
+            }
+            other => panic!(
+                "mid-stream throttle must terminate the stream with a 429; \
+                 got {other:?}"
+            ),
         }
     }
 }

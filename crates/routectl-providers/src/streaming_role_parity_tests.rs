@@ -123,7 +123,6 @@ fn bedrock_opening() -> Vec<ChatChunk> {
     let mut out = Vec::new();
     for (event_type, payload) in [
         ("messageStart", r#"{"role":"assistant"}"#),
-        ("contentBlockStart", r#"{"contentBlockIndex":0}"#),
         (
             "contentBlockDelta",
             r#"{"contentBlockIndex":0,"delta":{"text":"hi"}}"#,

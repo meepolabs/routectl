@@ -12,10 +12,30 @@ use futures::StreamExt;
 use futures::stream as fstream;
 
 fn make_frame(event_type: &str, payload_json: &str) -> AwsMessage {
-    AwsMessage::new(Bytes::from(payload_json.to_string().into_bytes())).add_header(Header::new(
-        ":event-type",
-        HeaderValue::String(event_type.to_string().into()),
-    ))
+    AwsMessage::new(Bytes::from(payload_json.to_string().into_bytes()))
+        .add_header(Header::new(
+            ":message-type",
+            HeaderValue::String("event".to_string().into()),
+        ))
+        .add_header(Header::new(
+            ":event-type",
+            HeaderValue::String(event_type.to_string().into()),
+        ))
+}
+
+/// A frame in the shape AWS actually uses for a modeled exception:
+/// `:message-type: "exception"` with the member name in `:exception-type`
+/// and NO `:event-type` header.
+fn make_exception_frame(exception_type: &str, payload_json: &str) -> AwsMessage {
+    AwsMessage::new(Bytes::from(payload_json.to_string().into_bytes()))
+        .add_header(Header::new(
+            ":message-type",
+            HeaderValue::String("exception".to_string().into()),
+        ))
+        .add_header(Header::new(
+            ":exception-type",
+            HeaderValue::String(exception_type.to_string().into()),
+        ))
 }
 
 /// Encode a single AWS eventstream frame to its on-the-wire bytes.
@@ -68,15 +88,12 @@ fn bedrock_converse_role_chunk_emitted_once() {
 
 #[test]
 fn text_block_lifecycle_yields_text_deltas() {
-    // Arrange: start, two deltas, stop.
+    // Arrange: AWS sends NO contentBlockStart for a text block
+    // (contentBlockStart is tool-use only), so the sequence is deltas
+    // then stop.
     let mut state = ConverseStreamState::default();
 
     // Act
-    let _ = run(
-        "contentBlockStart",
-        r#"{"contentBlockIndex":0}"#,
-        &mut state,
-    );
     let c1 = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,"delta":{"text":"hello "}}"#,
@@ -95,6 +112,166 @@ fn text_block_lifecycle_yields_text_deltas() {
     assert_eq!(c2.len(), 1);
     assert_eq!(c2[0].choices[0].delta.content.as_deref(), Some("world"));
     assert!(stop.is_empty());
+}
+
+/// Regression guard: on the documented AWS wire a text block arrives
+/// with NO `contentBlockStart` frame (`start` is required and its union
+/// has no text member). The delta must open the block itself rather
+/// than be dropped.
+#[test]
+fn text_delta_without_content_block_start_yields_text() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act: the AWS worked example's order -- messageStart then deltas.
+    let _ = run("messageStart", r#"{"role":"assistant"}"#, &mut state);
+    let chunks = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,"delta":{"text":"hi"}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("hi"));
+}
+
+/// Regression guard: a start-less reasoning block must survive with its
+/// signature paired onto the terminal aggregated detail.
+#[test]
+fn reasoning_deltas_without_content_block_start_pair_text_and_signature() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let _ = run("messageStart", r#"{"role":"assistant"}"#, &mut state);
+    let thinking = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,
+            "delta":{"reasoningContent":{"text":"step 1"}}}"#,
+        &mut state,
+    );
+    let sig = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,
+            "delta":{"reasoningContent":{"signature":"sig"}}}"#,
+        &mut state,
+    );
+    let stop = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
+
+    // Assert
+    assert_eq!(thinking.len(), 1);
+    assert_eq!(
+        thinking[0].choices[0].delta.reasoning.as_deref(),
+        Some("step 1")
+    );
+    assert!(sig.is_empty(), "signature delta is buffered, not emitted");
+    assert_eq!(stop.len(), 1);
+    let detail = &stop[0].choices[0].delta.reasoning_details[0];
+    assert_eq!(detail.payload["text"], "step 1");
+    assert_eq!(detail.payload["signature"], "sig");
+    assert_eq!(detail.index, Some(0));
+}
+
+/// Regression guard: a start-less redacted-reasoning delta emits its
+/// encrypted detail immediately.
+#[test]
+fn redacted_reasoning_delta_without_content_block_start_emits_detail() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let chunks = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,
+            "delta":{"reasoningContent":{"redactedContent":"AAECAwQF"}}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(chunks.len(), 1);
+    let detail = &chunks[0].choices[0].delta.reasoning_details[0];
+    assert_eq!(detail.payload["data"], "AAECAwQF");
+}
+
+/// Lazy block creation stays index-keyed: two start-less blocks at
+/// distinct indices must not share state, and each reasoning block
+/// gets its own detail index.
+#[test]
+fn concurrent_start_less_blocks_keep_independent_state_per_index() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act: interleave a text block at 0 with a reasoning block at 1.
+    let text = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,"delta":{"text":"visible"}}"#,
+        &mut state,
+    );
+    let think_a = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":1,"delta":{"reasoningContent":{"text":"a"}}}"#,
+        &mut state,
+    );
+    let think_b = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":2,"delta":{"reasoningContent":{"text":"b"}}}"#,
+        &mut state,
+    );
+    let stop1 = run("contentBlockStop", r#"{"contentBlockIndex":1}"#, &mut state);
+    let stop2 = run("contentBlockStop", r#"{"contentBlockIndex":2}"#, &mut state);
+    let stop0 = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
+
+    // Assert: text unaffected by the reasoning blocks, and each
+    // reasoning block accumulated only its own delta under its own
+    // detail index.
+    assert_eq!(text[0].choices[0].delta.content.as_deref(), Some("visible"));
+    assert_eq!(think_a.len(), 1);
+    assert_eq!(think_b.len(), 1);
+    let d1 = &stop1[0].choices[0].delta.reasoning_details[0];
+    let d2 = &stop2[0].choices[0].delta.reasoning_details[0];
+    assert_eq!(d1.payload["text"], "a");
+    assert_eq!(d2.payload["text"], "b");
+    assert_eq!(d1.index, Some(0));
+    assert_eq!(d2.index, Some(1));
+    assert!(
+        stop0.is_empty(),
+        "a text block's stop emits no reasoning detail"
+    );
+}
+
+/// A text or reasoning delta landing on an index already opened as a
+/// tool_use block is a wire violation -- still skipped, so the tool
+/// accumulator cannot be corrupted.
+#[test]
+fn text_and_reasoning_deltas_on_a_tool_use_block_are_skipped() {
+    // Arrange: a typed tool-use start (the only documented start shape).
+    let mut state = ConverseStreamState::default();
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":3,
+            "start":{"toolUse":{"toolUseId":"tu_9","name":"calc"}}}"#,
+        &mut state,
+    );
+
+    // Act
+    let text = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":3,"delta":{"text":"nope"}}"#,
+        &mut state,
+    );
+    let reasoning = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":3,"delta":{"reasoningContent":{"text":"nope"}}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert!(text.is_empty(), "text delta on a tool_use block must skip");
+    assert!(
+        reasoning.is_empty(),
+        "reasoning delta on a tool_use block must skip"
+    );
 }
 
 #[test]
@@ -137,15 +314,11 @@ fn tool_use_lifecycle_emits_tool_call_deltas() {
 /// detail is deferred to contentBlockStop.
 #[test]
 fn reasoning_text_delta_emits_thinking_chunk() {
-    // Arrange
+    // Arrange: no contentBlockStart -- a reasoning block has none on
+    // the documented wire.
     let mut state = ConverseStreamState::default();
 
     // Act
-    let _ = run(
-        "contentBlockStart",
-        r#"{"contentBlockIndex":0}"#,
-        &mut state,
-    );
     let chunks = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,
@@ -169,11 +342,6 @@ fn reasoning_text_delta_emits_thinking_chunk() {
 #[test]
 fn reasoning_signature_after_text_uses_same_detail_index() {
     let mut state = ConverseStreamState::default();
-    let _ = run(
-        "contentBlockStart",
-        r#"{"contentBlockIndex":0}"#,
-        &mut state,
-    );
     let text_chunks = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,
@@ -210,12 +378,8 @@ fn redacted_reasoning_detail_carries_monotonic_index_after_text_reasoning() {
     let mut state = ConverseStreamState::default();
 
     // Two text-reasoning blocks so the counter advances past 0: block 0
-    // -> detail_index 0, block 1 -> detail_index 1 (this is N).
-    let _ = run(
-        "contentBlockStart",
-        r#"{"contentBlockIndex":0}"#,
-        &mut state,
-    );
+    // -> detail_index 0, block 1 -> detail_index 1 (this is N). No
+    // contentBlockStart frames -- reasoning blocks get none.
     let _ = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,"delta":{"reasoningContent":{"text":"a"}}}"#,
@@ -223,11 +387,6 @@ fn redacted_reasoning_detail_carries_monotonic_index_after_text_reasoning() {
     );
     let stop0 = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
 
-    let _ = run(
-        "contentBlockStart",
-        r#"{"contentBlockIndex":1}"#,
-        &mut state,
-    );
     let _ = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":1,"delta":{"reasoningContent":{"text":"b"}}}"#,
@@ -242,11 +401,6 @@ fn redacted_reasoning_detail_carries_monotonic_index_after_text_reasoning() {
     let _ = stop0; // first block establishes the counter at 0.
 
     // A redacted block on a third index.
-    let _ = run(
-        "contentBlockStart",
-        r#"{"contentBlockIndex":2}"#,
-        &mut state,
-    );
     let redacted = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":2,"delta":{"reasoningContent":{"redactedContent":"AAECAwQF"}}}"#,
@@ -380,8 +534,13 @@ fn unknown_stop_reason_passes_through_on_closing_chunk() {
     );
 }
 
+/// AWS documents `modelStreamErrorException` with HTTP Status Code 424
+/// ("A streaming error occurred. Retry your request.") in the
+/// ConverseStream response elements -- NOT 500. Preserving the documented
+/// status keeps the router's retry/breaker classification aligned with
+/// what AWS said went wrong.
 #[test]
-fn model_stream_error_exception_surfaces_as_upstream_500() {
+fn model_stream_error_exception_surfaces_as_upstream_424() {
     // Arrange
     let mut state = ConverseStreamState::default();
 
@@ -392,16 +551,60 @@ fn model_stream_error_exception_surfaces_as_upstream_500() {
         &mut state,
     );
 
-    // Assert: maps to 500 (default for non-throttling/validation
-    // exceptions). The caller (router) re-classifies based on
-    // status; we only need to make sure it's an Upstream variant
-    // with the body propagated.
+    // Assert
     let err = res.unwrap_err();
     match err {
         Error::Upstream { status, body, .. } => {
-            assert_eq!(status, 500);
+            assert_eq!(status, 424, "AWS documents this member as 424");
             assert!(body.contains("glitch"), "body: {body}");
         }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+/// `modelTimeoutException` is documented as 408, and arrives on the
+/// protocol-shaped path (`:message-type: exception`).
+#[test]
+fn model_timeout_exception_surfaces_as_upstream_408() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_exception_frame("modelTimeoutException", r#"{"message":"too slow"}"#),
+        &mut state,
+    );
+
+    // Assert
+    let err = res.unwrap_err();
+    match err {
+        Error::Upstream { status, body, .. } => {
+            assert_eq!(status, 408, "AWS documents this member as 408");
+            assert!(body.contains("too slow"), "body: {body}");
+        }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+/// A protocol-shaped `modelStreamErrorException` (the real wire framing)
+/// must reach the same 424, not just the `:event-type` fallback path.
+#[test]
+fn protocol_shaped_model_stream_error_surfaces_as_upstream_424() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_exception_frame("modelStreamErrorException", r#"{"message":"glitch"}"#),
+        &mut state,
+    );
+
+    // Assert
+    let err = res.unwrap_err();
+    match err {
+        Error::Upstream { status, .. } => assert_eq!(status, 424),
         other => panic!("expected Upstream, got {other:?}"),
     }
 }
@@ -459,6 +662,110 @@ fn unknown_event_type_is_skipped_not_errored() {
     assert!(chunks.is_empty());
 }
 
+/// The wire shape AWS actually sends when it throttles mid-stream:
+/// `:message-type: exception` + `:exception-type: throttlingException`, no
+/// `:event-type`. Classifying on `:event-type` alone made this frame
+/// unrecognized, so the response truncated silently and the breaker
+/// recorded the throttled seat healthy.
+#[test]
+fn protocol_shaped_throttling_exception_frame_surfaces_as_upstream_429() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_exception_frame("throttlingException", r#"{"message":"slow down"}"#),
+        &mut state,
+    );
+
+    // Assert
+    match res.unwrap_err() {
+        Error::Upstream { status, body, .. } => {
+            assert_eq!(status, 429);
+            assert!(body.contains("slow down"), "body: {body}");
+        }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+/// A protocol-typed exception whose member name we do not know must still
+/// end the stream -- failing closed as a 500 rather than being skipped.
+#[test]
+fn unknown_exception_type_fails_closed_as_500() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_exception_frame("someFutureAwsException", r#"{"message":"nope"}"#),
+        &mut state,
+    );
+
+    // Assert
+    match res.unwrap_err() {
+        Error::Upstream { status, .. } => assert_eq!(status, 500),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+/// A frame naming neither `:message-type` nor `:event-type` carries nothing
+/// decodable and nothing marking it a failure -- skip it.
+#[test]
+fn frame_with_no_type_headers_is_skipped() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let chunks = handle_converse_frame(
+        "test",
+        AwsMessage::new(Bytes::from_static(b"{}")),
+        &mut state,
+    )
+    .unwrap();
+
+    // Assert
+    assert!(chunks.is_empty());
+}
+
+/// End-to-end through the real wire encoding: a mid-stream protocol-shaped
+/// throttle must terminate the stream with a 429 rather than closing
+/// cleanly on a truncated response.
+#[tokio::test]
+async fn mid_stream_exception_frame_terminates_converse_stream_with_error() {
+    // Arrange
+    let exception = {
+        let frame = make_exception_frame("throttlingException", r#"{"message":"slow down"}"#);
+        let mut buf = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf)
+            .expect("encode eventstream frame");
+        Bytes::from(buf)
+    };
+    let byte_stream = fstream::iter(vec![
+        Ok(encode_frame("messageStart", r#"{"role":"assistant"}"#)),
+        Ok(exception),
+    ]);
+
+    // Act
+    let mut chunks = stream("test".to_string(), byte_stream);
+    let mut last_err = None;
+    while let Some(item) = chunks.next().await {
+        if let Err(e) = item {
+            last_err = Some(e);
+        }
+    }
+
+    // Assert
+    match last_err {
+        Some(Error::Upstream { status, body, .. }) => {
+            assert_eq!(status, 429);
+            assert!(body.contains("slow down"), "body: {body}");
+        }
+        other => panic!("mid-stream throttle must terminate the stream with a 429; got {other:?}"),
+    }
+}
+
 #[test]
 fn tool_call_index_is_stable_across_two_tool_blocks() {
     // Arrange
@@ -510,10 +817,6 @@ async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
     // and clients saw a stream that just stopped.
     let frames: Vec<std::result::Result<Bytes, reqwest::Error>> = vec![
         Ok(encode_frame("messageStart", r#"{"role":"assistant"}"#)),
-        Ok(encode_frame(
-            "contentBlockStart",
-            r#"{"contentBlockIndex":0}"#,
-        )),
         Ok(encode_frame(
             "contentBlockDelta",
             r#"{"contentBlockIndex":0,"delta":{"text":"hello"}}"#,
@@ -639,10 +942,6 @@ async fn matched_stop_sequence_lifts_on_eof_flush_path() {
     // by the stream() flush must still carry the matched sequence.
     let frames: Vec<std::result::Result<Bytes, reqwest::Error>> = vec![
         Ok(encode_frame("messageStart", r#"{"role":"assistant"}"#)),
-        Ok(encode_frame(
-            "contentBlockStart",
-            r#"{"contentBlockIndex":0}"#,
-        )),
         Ok(encode_frame(
             "contentBlockDelta",
             r#"{"contentBlockIndex":0,"delta":{"text":"hi STOP"}}"#,

@@ -136,6 +136,122 @@ pub fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str> {
     None
 }
 
+/// What a decoded frame's headers say the frame IS.
+///
+/// The amazon-eventstream wire protocol types every frame with
+/// `:message-type`; `:event-type` is only present when that value is
+/// `"event"`. A modeled exception arrives as `:message-type: "exception"`
+/// with the member name in `:exception-type`. Classifying on `:event-type`
+/// alone therefore cannot see an exception frame at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameType<'a> {
+    /// A content event; the name is the `:event-type` header value.
+    Event(&'a str),
+    /// A failure frame. The name is the `:exception-type` member name
+    /// when present, else the raw `:message-type` value -- so a frame the
+    /// protocol types as a failure is never mistaken for content, even
+    /// when its member name is one we do not know.
+    Exception(&'a str),
+    /// Neither `:message-type` nor `:event-type` names the frame. Nothing
+    /// can be decoded from it and nothing marks it as a failure.
+    Untyped,
+}
+
+/// Classify a decoded frame from its protocol headers.
+///
+/// Authority: `aws_smithy_eventstream::smithy::parse_response_headers`,
+/// which reads `:event-type` only for `:message-type == "event"` and
+/// `:exception-type` for `:message-type == "exception"`.
+///
+/// A missing `:message-type` violates the protocol, but is treated as
+/// `"event"` so an upstream that emits only `:event-type` still decodes.
+/// Any other `:message-type` (including the protocol's framework-level
+/// `"error"`) is a failure frame: skipping it would truncate the response
+/// while reporting clean completion.
+pub fn frame_type(message: &Message) -> FrameType<'_> {
+    match header_str(message, ":message-type") {
+        Some("event") | None => match header_str(message, ":event-type") {
+            Some(name) => FrameType::Event(name),
+            None => FrameType::Untyped,
+        },
+        Some(message_type) => {
+            FrameType::Exception(header_str(message, ":exception-type").unwrap_or(message_type))
+        }
+    }
+}
+
+/// Build the `Error::Upstream` for a Bedrock failure frame, mapping the
+/// exception member name to the HTTP status the router classifies on.
+///
+/// Shared by both streaming lanes so the two Bedrock paths cannot drift
+/// in how they classify the same upstream failure. An unrecognized name
+/// maps to 500: a failure frame must end the stream even when its member
+/// name is new to us, or the client sees a silently truncated response
+/// and the breaker records the seat healthy.
+pub fn exception_error(provider_id: &str, exception_type: &str, payload: &[u8]) -> Error {
+    let parsed: serde_json::Value =
+        serde_json::from_slice(payload).unwrap_or(serde_json::Value::Null);
+    let raw = parsed
+        .pointer("/message")
+        .or_else(|| parsed.pointer("/Message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(exception_type);
+    // Bound the carried message at the shared error-body ceiling, matching
+    // the non-stream lane (`bedrock::mod`). The only other bound here is the
+    // 8 MiB frame cap -- 128x this ceiling -- so without the truncation a
+    // hostile or misconfigured upstream could make every failed stream carry
+    // a multi-megabyte String that is then cloned along the retry/fallback
+    // chain.
+    let msg = truncate_on_char_boundary(raw, routectl_core::MAX_ERROR_BODY_BYTES);
+    // Statuses are AWS's own, per the ConverseStream response-element docs
+    // (API_runtime_ConverseStream): each in-stream exception member
+    // documents an HTTP Status Code. Preserving them keeps the router's
+    // failure classification (retry class, breaker debit) aligned with
+    // what AWS actually said went wrong -- collapsing everything to 500
+    // would turn a documented-retryable 424/408 into a generic server
+    // failure.
+    let status: u16 = match exception_type {
+        "throttlingException" => 429,
+        "validationException" => 400,
+        "serviceUnavailableException" => 503,
+        "accessDeniedException" => 403,
+        "unauthorizedException" => 401,
+        // "A streaming error occurred. Retry your request." -- 424.
+        "modelStreamErrorException" => 424,
+        // "Processing time exceeded the model timeout length." -- 408.
+        "modelTimeoutException" => 408,
+        "internalServerException" => 500,
+        _ => 500,
+    };
+    if matches!(
+        exception_type,
+        "accessDeniedException" | "unauthorizedException"
+    ) {
+        tracing::warn!(
+            provider = %provider_id,
+            event_type = %exception_type,
+            message = %routectl_core::sanitize_for_log(&msg),
+            "bedrock in-stream auth/permission exception",
+        );
+    }
+    // No HTTP headers exist at the eventstream frame layer.
+    Error::upstream(provider_id, status, msg)
+}
+
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 char
+/// (`&s[..max]` panics on a multi-byte boundary, and an exception message is
+/// upstream-controlled text that may be non-ASCII).
+fn truncate_on_char_boundary(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// Drive an AWS-eventstream byte stream through a per-provider handler,
 /// emitting `ChatChunk`s. Partial frames buffer internally until enough
 /// bytes arrive; the advertised-length DoS guard, prelude-tracking, and
@@ -432,6 +548,98 @@ mod tests {
         let frame = make_frame("messageStart", "{}");
         assert_eq!(header_str(&frame, ":event-type"), Some("messageStart"));
         assert_eq!(header_str(&frame, ":content-type"), None);
+    }
+
+    /// `:message-type: "exception"` names the member in `:exception-type`;
+    /// `:event-type` is absent. Per aws-smithy-eventstream's
+    /// `parse_response_headers`.
+    #[test]
+    fn exception_message_type_classifies_from_exception_type_header() {
+        let frame = Message::new(Bytes::from_static(b"{}"))
+            .add_header(Header::new(
+                ":message-type",
+                HeaderValue::String("exception".to_string().into()),
+            ))
+            .add_header(Header::new(
+                ":exception-type",
+                HeaderValue::String("throttlingException".to_string().into()),
+            ));
+        assert_eq!(
+            frame_type(&frame),
+            FrameType::Exception("throttlingException")
+        );
+    }
+
+    #[test]
+    fn event_message_type_classifies_from_event_type_header() {
+        let frame = Message::new(Bytes::from_static(b"{}"))
+            .add_header(Header::new(
+                ":message-type",
+                HeaderValue::String("event".to_string().into()),
+            ))
+            .add_header(Header::new(
+                ":event-type",
+                HeaderValue::String("contentBlockDelta".to_string().into()),
+            ));
+        assert_eq!(frame_type(&frame), FrameType::Event("contentBlockDelta"));
+    }
+
+    /// A missing `:message-type` violates the protocol but is tolerated as
+    /// an event so an upstream sending only `:event-type` still decodes.
+    #[test]
+    fn missing_message_type_falls_back_to_event_type() {
+        let frame = make_frame("messageStart", "{}");
+        assert_eq!(frame_type(&frame), FrameType::Event("messageStart"));
+    }
+
+    /// A `:message-type` that is neither "event" nor "exception" (e.g. the
+    /// protocol's framework-level "error") is still a failure frame, named
+    /// by its `:message-type` when no `:exception-type` accompanies it.
+    #[test]
+    fn other_message_type_is_a_failure_frame() {
+        let frame = Message::new(Bytes::from_static(b"{}")).add_header(Header::new(
+            ":message-type",
+            HeaderValue::String("error".to_string().into()),
+        ));
+        assert_eq!(frame_type(&frame), FrameType::Exception("error"));
+    }
+
+    #[test]
+    fn frame_with_no_type_headers_is_untyped() {
+        let frame = Message::new(Bytes::from_static(b"{}"));
+        assert_eq!(frame_type(&frame), FrameType::Untyped);
+    }
+
+    #[test]
+    fn exception_error_maps_member_names_to_statuses() {
+        let cases = [
+            ("throttlingException", 429_u16),
+            ("validationException", 400),
+            ("serviceUnavailableException", 503),
+            ("accessDeniedException", 403),
+            ("unauthorizedException", 401),
+            ("internalServerException", 500),
+            ("someFutureAwsException", 500),
+        ];
+        for (name, expected) in cases {
+            match exception_error("test", name, br#"{"message":"boom"}"#) {
+                Error::Upstream { status, body, .. } => {
+                    assert_eq!(status, expected, "status for {name}");
+                    assert!(body.contains("boom"), "body for {name}: {body}");
+                }
+                other => panic!("expected Upstream for {name}, got {other:?}"),
+            }
+        }
+    }
+
+    /// With no `message` field in the payload, the member name itself is
+    /// the error body -- a caller must never see an empty explanation.
+    #[test]
+    fn exception_error_falls_back_to_member_name_as_body() {
+        match exception_error("test", "throttlingException", b"not json") {
+            Error::Upstream { body, .. } => assert_eq!(body, "throttlingException"),
+            other => panic!("expected Upstream, got {other:?}"),
+        }
     }
 
     #[test]
