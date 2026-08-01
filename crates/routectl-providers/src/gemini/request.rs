@@ -457,33 +457,68 @@ fn content_part_to_part(
                 Ok(None)
             }
             KnownContentPart::File { file, .. } => {
-                // OpenAI file block: try to extract inline base64 content.
-                let filename = file
-                    .get("file")
-                    .and_then(|f| f.get("filename"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("file");
-                let data = file
-                    .get("file")
-                    .and_then(|f| f.get("file_data"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let mime = mime_from_filename(filename);
+                // Canonical `file` IS the inner OpenAI object
+                // (`{filename, file_data}` or `{file_id}`), matching how
+                // `anthropic_api::parts::parse_file_document_source` and
+                // `bedrock::converse::messages::file_data_to_document_source`
+                // read it. Only the base64 `file_data` form carries bytes;
+                // the `file_id` reference form and any non-base64-data-URI
+                // `file_data` are dropped with a WARN rather than emitted as
+                // a part whose payload Gemini cannot decode.
+                let file_data = file.get("file_data").and_then(Value::as_str);
+                let Some((media_type, b64)) = file_data.and_then(split_base64_data_uri) else {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        has_file_data = file_data.is_some(),
+                        "gemini: dropping file part with no inline base64 file_data"
+                    );
+                    return Ok(None);
+                };
+                // RFC 2397 permits omitting the media type; only then does
+                // the filename extension get a say.
+                let mime_type = if media_type.is_empty() {
+                    let filename = file
+                        .get("filename")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    mime_from_filename(filename).to_string()
+                } else {
+                    media_type
+                };
                 Ok(Some(inline_data_part(InlineData {
-                    mime_type: mime.to_string(),
-                    data: data.to_string(),
+                    mime_type,
+                    data: b64.to_string(),
                 })))
             }
             KnownContentPart::Document { source, .. } => {
-                // Anthropic document: extract text or base64.
-                let text = source.get("text").and_then(Value::as_str);
-                if let Some(t) = text {
+                // Anthropic document: a text source forwards as text; only a
+                // base64 source carries bytes for inlineData. A url source
+                // (which the Anthropic ingress accepts verbatim) has none --
+                // dropping it with a WARN beats emitting a zero-byte PDF.
+                // Mirrors the `Image` arm above.
+                if let Some(t) = source.get("text").and_then(Value::as_str) {
                     return Ok(Some(text_part(t.to_string())));
+                }
+                let kind = source.get("type").and_then(Value::as_str);
+                if kind != Some("base64") {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        source_type = %kind.unwrap_or("<missing>"),
+                        "gemini: dropping non-base64 document source"
+                    );
+                    return Ok(None);
                 }
                 let data = source
                     .get("data")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                if data.is_empty() {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        "gemini: dropping base64 document source with empty data"
+                    );
+                    return Ok(None);
+                }
                 let mime = source
                     .get("media_type")
                     .and_then(Value::as_str)
@@ -1056,26 +1091,43 @@ pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value)
 /// empty payload -- the caller drops the block with a WARN rather than
 /// emit an image part with no bytes.
 fn data_uri_inline_data(url: &str) -> Option<InlineData> {
-    // Scheme match is case-insensitive (RFC 3986 sec 3.1); the caller
-    // admits `DATA:` too, so stripping only the lowercase spelling here
-    // would turn a legal mixed-case URI into a drop.
-    let rest = url
-        .get(..5)
-        .filter(|p| p.eq_ignore_ascii_case("data:"))
-        .and_then(|_| url.get(5..))?;
-    let (mt_with_params, b64) = rest.split_once(";base64,")?;
-    let media_type = mt_with_params
-        .split(';')
-        .next()
-        .unwrap_or(mt_with_params)
-        .to_ascii_lowercase();
-    if media_type.is_empty() || b64.is_empty() {
+    let (media_type, b64) = split_base64_data_uri(url)?;
+    if media_type.is_empty() {
         return None;
     }
     Some(InlineData {
         mime_type: media_type,
         data: b64.to_string(),
     })
+}
+
+/// Split a base64 `data:` URI into its lowercased media type and payload.
+///
+/// The media type may come back empty: RFC 2397 permits omitting it
+/// (`data:;base64,...`), and the file egress then falls back to the
+/// filename extension. Callers that have no such fallback treat an empty
+/// media type as unparseable.
+///
+/// `None` when the URI is not a `data:` URI, has no `;base64,`
+/// separator, or has an empty payload.
+fn split_base64_data_uri(url: &str) -> Option<(String, &str)> {
+    // Scheme match is case-insensitive (RFC 3986 sec 3.1); the callers
+    // admit `DATA:` too, so stripping only the lowercase spelling here
+    // would turn a legal mixed-case URI into a drop.
+    let rest = url
+        .get(..5)
+        .filter(|p| p.eq_ignore_ascii_case("data:"))
+        .and_then(|_| url.get(5..))?;
+    let (mt_with_params, b64) = rest.split_once(";base64,")?;
+    if b64.is_empty() {
+        return None;
+    }
+    let media_type = mt_with_params
+        .split(';')
+        .next()
+        .unwrap_or(mt_with_params)
+        .to_ascii_lowercase();
+    Some((media_type, b64))
 }
 
 fn mime_from_filename(filename: &str) -> &'static str {
@@ -2876,5 +2928,181 @@ mod tests {
         // Assert
         assert!(parts.is_empty());
         assert!(logs_contain("empty data"));
+    }
+
+    /// Canonical `File.file` holds the INNER OpenAI object -- the same shape
+    /// the Anthropic and Converse egresses read (`file.file_data`).
+    fn file_part(file: Value) -> ContentPart {
+        ContentPart::Known(KnownContentPart::File {
+            file,
+            cache_control: None,
+        })
+    }
+
+    fn document_part(source: Value) -> ContentPart {
+        ContentPart::Known(KnownContentPart::Document {
+            source,
+            title: None,
+            citations: None,
+            cache_control: None,
+        })
+    }
+
+    #[test]
+    fn openai_file_part_maps_to_inline_data() {
+        // Arrange: the base64-upload form an OpenAI client sends.
+        let part = file_part(json!({
+            "filename": "report.pdf",
+            "file_data": "data:application/pdf;base64,JVBERi0xLjQK",
+        }));
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        let inline = parts[0].inline_data.as_ref().expect("inlineData part");
+        assert_eq!(inline.mime_type, "application/pdf", "mime from the URI");
+        assert_eq!(inline.data, "JVBERi0xLjQK", "data: prefix stripped");
+    }
+
+    /// RFC 2397 allows omitting the media type. Only then does the filename
+    /// extension get a say in the mime.
+    #[test]
+    fn file_part_without_uri_media_type_falls_back_to_filename() {
+        // Arrange
+        let part = file_part(json!({
+            "filename": "report.pdf",
+            "file_data": "data:;base64,JVBERi0xLjQK",
+        }));
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        let inline = parts[0].inline_data.as_ref().expect("inlineData part");
+        assert_eq!(inline.mime_type, "application/pdf");
+        assert_eq!(inline.data, "JVBERi0xLjQK");
+    }
+
+    /// Assert a drop diagnostic was emitted at WARN, not merely that the
+    /// message text appears somewhere. `logs_contain` alone would stay green
+    /// if a future edit downgraded these to `debug!`, which production log
+    /// filtering hides -- silently restoring the invisible-content-loss the
+    /// drop-with-warn behavior exists to prevent.
+    fn assert_warned(events: &[routectl_testkit::CapturedEvent], needle: &str) {
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == tracing::Level::WARN && e.message.contains(needle)),
+            "expected a WARN containing {needle:?}; got {:?}",
+            events
+                .iter()
+                .map(|e| (e.level, e.message.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[traced_test]
+    fn file_id_only_file_part_drops_with_warn() {
+        // Arrange: the previously-uploaded reference form carries no bytes.
+        let part = file_part(json!({"file_id": "file-abc123"}));
+
+        // Act
+        let mut parts = Vec::new();
+        let events = routectl_testkit::capture_events(|| parts = parts_for(part));
+
+        // Assert
+        assert!(parts.is_empty(), "a reference-only file part has no bytes");
+        assert_warned(&events, "dropping file part");
+    }
+
+    #[test]
+    #[traced_test]
+    fn non_data_uri_file_data_drops_with_warn() {
+        // Arrange: file_data that is not an RFC 2397 base64 URI. Emitting it
+        // verbatim would ship unparseable bytes as a document part.
+        let part = file_part(json!({
+            "filename": "report.pdf",
+            "file_data": "https://example.com/report.pdf",
+        }));
+
+        // Act
+        let mut parts = Vec::new();
+        let events = routectl_testkit::capture_events(|| parts = parts_for(part));
+
+        // Assert
+        assert!(parts.is_empty());
+        assert_warned(&events, "dropping file part");
+    }
+
+    #[test]
+    fn text_document_source_takes_the_text_fast_path() {
+        // Arrange
+        let part = document_part(json!({"type": "text", "text": "hello doc"}));
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        assert_eq!(parts[0].text.as_deref(), Some("hello doc"));
+        assert!(parts[0].inline_data.is_none());
+    }
+
+    #[test]
+    fn base64_document_source_maps_to_inline_data() {
+        // Arrange
+        let part = document_part(json!({
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": "JVBERi0xLjQK",
+        }));
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        let inline = parts[0].inline_data.as_ref().expect("inlineData part");
+        assert_eq!(inline.mime_type, "application/pdf");
+        assert_eq!(inline.data, "JVBERi0xLjQK");
+    }
+
+    #[test]
+    #[traced_test]
+    fn url_document_source_drops_with_warn() {
+        // Arrange: a legal Anthropic url-shape source, which the Anthropic
+        // ingress accepts verbatim. It has no bytes, so the old code emitted
+        // inlineData{application/pdf, ""} -- a zero-byte PDF.
+        let part = document_part(json!({
+            "type": "url",
+            "url": "https://example.com/report.pdf",
+        }));
+
+        // Act
+        let mut parts = Vec::new();
+        let events = routectl_testkit::capture_events(|| parts = parts_for(part));
+
+        // Assert
+        assert!(parts.is_empty(), "a source with no bytes must be dropped");
+        assert_warned(&events, "dropping non-base64 document source");
+    }
+
+    #[test]
+    #[traced_test]
+    fn base64_document_source_with_empty_data_drops_with_warn() {
+        // Arrange: correct source type, truncated payload.
+        let part = document_part(json!({
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": "",
+        }));
+
+        // Act
+        let mut parts = Vec::new();
+        let events = routectl_testkit::capture_events(|| parts = parts_for(part));
+
+        // Assert
+        assert!(parts.is_empty());
+        assert_warned(&events, "dropping base64 document source with empty data");
     }
 }
