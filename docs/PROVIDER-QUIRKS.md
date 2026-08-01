@@ -428,10 +428,15 @@ multi-turn thinking continuity is preserved.
 `response_format` maps to `generationConfig`:
 
 - `{type: "json_schema", json_schema: {schema}}` ->
-  `responseMimeType: "application/json"` + `responseSchema: <schema>`
+  `responseMimeType: "application/json"` + `responseSchema: <schema>`,
+  the schema first normalized by the same `clean_schema` pass tool
+  `parameters` gets (`responseSchema` and
+  `functionDeclarations[].parameters` are the same `Schema` proto, so a
+  raw pydantic/zod schema would 400)
 - `{type: "json_object"}` -> `responseMimeType: "application/json"`
   (no schema)
-- anything else / absent -> neither field emitted
+- anything else / absent -> neither field emitted, with a WARN
+  breadcrumb so the dropped directive is observable
 
 **payload_extras / safetySettings:** knobs the canonical schema does
 not carry natively flow through `[providers.X] payload_extras` (merged

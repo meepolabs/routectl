@@ -347,46 +347,71 @@ fn content_part_to_part(
         ContentPart::Known(known) => match known {
             KnownContentPart::Text { text, .. } => Ok(Some(text_part(text.clone()))),
             KnownContentPart::Image { source, .. } => {
-                // Anthropic image source: {type:"base64", media_type, data}
-                // Map to inlineData.
-                let mime = source
-                    .get("media_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("image/jpeg")
-                    .to_string();
+                // Anthropic image source: only {type:"base64", media_type,
+                // data} carries inline bytes we can map to inlineData. A
+                // {type:"url"} source (which the Anthropic ingress accepts
+                // verbatim) has no bytes at all -- dropping it with a WARN
+                // beats emitting an inlineData that claims a media type it
+                // has no payload for. Mirrors the Converse egress
+                // (`bedrock::converse::messages::translate_image_source`).
+                let kind = source.get("type").and_then(Value::as_str);
+                if kind != Some("base64") {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        source_type = %kind.unwrap_or("<missing>"),
+                        "gemini: dropping non-base64 image source"
+                    );
+                    return Ok(None);
+                }
                 let data = source
                     .get("data")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                    .unwrap_or_default();
+                if data.is_empty() {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        "gemini: dropping base64 image source with empty data"
+                    );
+                    return Ok(None);
+                }
+                let mime = source
+                    .get("media_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/jpeg");
                 Ok(Some(inline_data_part(InlineData {
-                    mime_type: mime,
-                    data,
+                    mime_type: mime.to_string(),
+                    data: data.to_string(),
                 })))
             }
             KnownContentPart::ImageUrl { image_url, .. } => {
                 // OpenAI image_url: {url} -- Gemini inlineData needs base64.
-                // Gemini also supports urls via fileData. For now emit text
-                // with the URL as a best-effort passthrough; Gemini does not
-                // natively accept arbitrary remote URLs in inlineData.
                 let url = image_url
                     .get("url")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                // If it's a data URI (data:mime/type;base64,...), extract.
-                if let Some(stripped) = url.strip_prefix("data:")
-                    && let Some(semi) = stripped.find(';')
-                {
-                    let mime = &stripped[..semi];
-                    let rest = &stripped[semi + 1..];
-                    if let Some(b64) = rest.strip_prefix("base64,") {
-                        return Ok(Some(inline_data_part(InlineData {
-                            mime_type: mime.to_string(),
-                            data: b64.to_string(),
-                        })));
-                    }
+                // URI schemes are case-insensitive (RFC 3986 sec 3.1), so
+                // `DATA:` is the same scheme as `data:`. Matching only the
+                // lowercase spelling would send a legal mixed-case data URI
+                // down the text fall-through -- the exact billed-as-prose
+                // failure this guard exists to prevent.
+                if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
+                    // A data: URI must never reach the text fall-through:
+                    // the whole base64 payload would ship upstream as prose,
+                    // billed as input text, with no image and no diagnostic.
+                    // Unparseable -> drop with a WARN.
+                    let Some(inline) = data_uri_inline_data(url) else {
+                        tracing::warn!(
+                            provider = %provider_id,
+                            "gemini: dropping data: image_url that is not a supported base64 image URI"
+                        );
+                        return Ok(None);
+                    };
+                    return Ok(Some(inline_data_part(inline)));
                 }
-                // Non-data URL: pass as text (best-effort).
+                // Non-data URL (https://, gs://): Gemini does not accept
+                // arbitrary remote URLs in inlineData, so pass the URL along
+                // as text -- a deliberate best-effort passthrough, unlike the
+                // data: case there is no payload being smuggled.
                 Ok(Some(text_part(url.to_string())))
             }
             KnownContentPart::ToolUse {
@@ -850,6 +875,14 @@ fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
 /// - `{type:"json_schema", json_schema:{schema}}` -> `("application/json", Some(schema))`
 /// - `{type:"json_object"}` -> `("application/json", None)`
 /// - anything else / absent -> `(None, None)`
+///
+/// `responseSchema` is the SAME `Schema` proto as
+/// `functionDeclarations[].parameters`, so the caller schema goes through
+/// `clean_schema` exactly like tool parameters do -- a raw pydantic/zod
+/// schema (`additionalProperties`, `$defs`/`$ref`, `allOf`, `$schema`) 400s
+/// otherwise. The Gemini-2.0+ `responseJsonSchema` field is a DIFFERENT,
+/// full-JSON-Schema field: if a path emitting it is ever added, it must NOT
+/// be cleaned, since the OpenAPI-subset fixes corrupt valid JSON Schema.
 fn build_response_format(req: &ChatRequest) -> (Option<String>, Option<Value>) {
     let format = match req.response_format.as_ref() {
         Some(f) => f,
@@ -861,11 +894,24 @@ fn build_response_format(req: &ChatRequest) -> (Option<String>, Option<Value>) {
             let schema = format
                 .get("json_schema")
                 .and_then(|js| js.get("schema"))
-                .cloned();
+                .map(clean_schema);
+            if schema.is_none() {
+                tracing::warn!(
+                    "response_format json_schema carries no json_schema.schema; \
+                     emitting responseMimeType without responseSchema"
+                );
+            }
             (Some("application/json".to_string()), schema)
         }
         Some("json_object") => (Some("application/json".to_string()), None),
-        _ => (None, None),
+        _ => {
+            tracing::warn!(
+                response_format_type = kind.unwrap_or("<absent>"),
+                "unrecognized response_format shape; dropping structured-output \
+                 directive on Gemini egress"
+            );
+            (None, None)
+        }
     }
 }
 
@@ -993,6 +1039,43 @@ pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value)
         }
         body_obj.insert(k.clone(), v.clone());
     }
+}
+
+/// Parse an RFC 2397 base64 image data URI into Gemini `inlineData`.
+///
+/// Splits on `;base64,` FIRST, then takes the bare media type from the
+/// prefix: RFC 2397 allows `;<param>` between the media type and the
+/// `;base64` flag, and browser tooling emits `;charset=utf-8`. A
+/// positional first-semicolon parse mis-reads that form entirely.
+/// Mirrors `anthropic_api::parts::parse_image_url_source`, which is the
+/// tested reference for this parse; the media type is lowercased so the
+/// wire body stays deterministic across casing variants (RFC 2045 says
+/// MIME types are case-insensitive).
+///
+/// `None` when the URI has no `;base64,` separator, no media type, or an
+/// empty payload -- the caller drops the block with a WARN rather than
+/// emit an image part with no bytes.
+fn data_uri_inline_data(url: &str) -> Option<InlineData> {
+    // Scheme match is case-insensitive (RFC 3986 sec 3.1); the caller
+    // admits `DATA:` too, so stripping only the lowercase spelling here
+    // would turn a legal mixed-case URI into a drop.
+    let rest = url
+        .get(..5)
+        .filter(|p| p.eq_ignore_ascii_case("data:"))
+        .and_then(|_| url.get(5..))?;
+    let (mt_with_params, b64) = rest.split_once(";base64,")?;
+    let media_type = mt_with_params
+        .split(';')
+        .next()
+        .unwrap_or(mt_with_params)
+        .to_ascii_lowercase();
+    if media_type.is_empty() || b64.is_empty() {
+        return None;
+    }
+    Some(InlineData {
+        mime_type: media_type,
+        data: b64.to_string(),
+    })
 }
 
 fn mime_from_filename(filename: &str) -> &'static str {
@@ -2278,7 +2361,105 @@ mod tests {
             .generation_config
             .expect("generation_config");
         assert_eq!(gc.response_mime_type.as_deref(), Some("application/json"));
-        assert_eq!(gc.response_schema.expect("schema")["type"], "object");
+        // responseSchema shares the Schema proto with tool parameters, so it
+        // is cleaned: the type token is Gemini's uppercase TYPE enum.
+        assert_eq!(gc.response_schema.expect("schema")["type"], "OBJECT");
+    }
+
+    #[test]
+    fn response_format_pydantic_shaped_schema_is_cleaned_on_the_wire() {
+        // A pydantic-emitted schema carries additionalProperties, $defs and a
+        // $ref to a nested model, plus an allOf wrapper. All must be gone and
+        // the nested shape must survive inlined.
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")].into(),
+            response_format: Some(json!({
+                "type": "json_schema",
+                "json_schema": {"schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "$defs": {
+                        "Address": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {"city": {"type": "string"}}
+                        }
+                    },
+                    "properties": {
+                        "home": {"$ref": "#/$defs/Address"},
+                        "note": {"allOf": [{"type": "string"}]}
+                    },
+                    "required": ["home"]
+                }}
+            })),
+            ..Default::default()
+        };
+        let schema = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .response_schema
+            .expect("response_schema");
+
+        assert_eq!(schema["type"], "OBJECT");
+        assert!(schema.get("additionalProperties").is_none());
+        assert!(schema.get("$defs").is_none());
+        let home = &schema["properties"]["home"];
+        assert!(home.get("$ref").is_none(), "$ref must be inlined away");
+        assert_eq!(home["type"], "OBJECT");
+        assert!(home.get("additionalProperties").is_none());
+        assert_eq!(home["properties"]["city"]["type"], "STRING");
+        assert!(schema["properties"]["note"].get("allOf").is_none());
+        assert_eq!(schema["required"], json!(["home"]));
+    }
+
+    #[test]
+    fn response_format_zod_shaped_schema_drops_dollar_schema() {
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")].into(),
+            response_format: Some(json!({
+                "type": "json_schema",
+                "json_schema": {"schema": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"count": {"type": ["integer", "null"]}}
+                }}
+            })),
+            ..Default::default()
+        };
+        let schema = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .response_schema
+            .expect("response_schema");
+
+        assert!(schema.get("$schema").is_none());
+        assert!(schema.get("additionalProperties").is_none());
+        assert_eq!(schema["type"], "OBJECT");
+        assert_eq!(schema["properties"]["count"]["type"], "INTEGER");
+        assert_eq!(schema["properties"]["count"]["nullable"], true);
+    }
+
+    #[test]
+    fn response_format_json_schema_without_schema_emits_mime_only() {
+        // The loss is warned at the call site; the wire keeps the JSON mime so
+        // the request still asks for JSON rather than failing.
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")].into(),
+            response_format: Some(json!({"type": "json_schema"})),
+            ..Default::default()
+        };
+        let gc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config");
+        assert_eq!(gc.response_mime_type.as_deref(), Some("application/json"));
+        assert!(gc.response_schema.is_none());
     }
 
     #[test]
@@ -2499,5 +2680,201 @@ mod tests {
             !logs_contain("cache_control dropped"),
             "no drop diagnostic without a cache_control marker"
         );
+    }
+
+    // -- image translation ------------------------------------------------
+
+    fn user_with_parts(parts: Vec<ContentPart>) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Parts(parts),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Every `Part` the Gemini body carries for a single-part user turn.
+    /// A turn whose parts are all dropped is elided from `contents`
+    /// entirely (pre-existing behavior), so this flattens rather than
+    /// indexing a turn that may not exist.
+    fn parts_for(part: ContentPart) -> Vec<Part> {
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![user_with_parts(vec![part])].into(),
+            ..Default::default()
+        };
+        let body = translate("gemini:test", &req).expect("translate ok");
+        body.contents.into_iter().flat_map(|c| c.parts).collect()
+    }
+
+    fn image_url_part(url: &str) -> ContentPart {
+        ContentPart::Known(KnownContentPart::ImageUrl {
+            image_url: json!({"url": url}),
+            cache_control: None,
+        })
+    }
+
+    fn image_source_part(source: Value) -> ContentPart {
+        ContentPart::Known(KnownContentPart::Image {
+            source,
+            cache_control: None,
+        })
+    }
+
+    #[test]
+    fn data_uri_image_url_maps_to_inline_data() {
+        // Arrange: the plain RFC 2397 base64 form.
+        let part = image_url_part("data:image/png;base64,iVBORw0KGgo=");
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        let inline = parts[0].inline_data.as_ref().expect("inlineData part");
+        assert_eq!(inline.mime_type, "image/png");
+        assert_eq!(inline.data, "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn parameterized_data_uri_image_url_maps_to_inline_data() {
+        // Arrange: RFC 2397 allows `;<param>` between the media type and the
+        // `;base64` flag, and browser tooling emits `;charset=utf-8`. A
+        // positional first-semicolon parse mis-reads this and would ship the
+        // whole base64 payload upstream as a text part.
+        let part = image_url_part("data:image/png;charset=utf-8;base64,iVBORw0KGgo=");
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        let inline = parts[0].inline_data.as_ref().expect("inlineData part");
+        assert_eq!(inline.mime_type, "image/png");
+        assert_eq!(inline.data, "iVBORw0KGgo=");
+        assert!(parts[0].text.is_none(), "must not also emit a text part");
+    }
+
+    /// URI schemes are case-insensitive (RFC 3986 sec 3.1), so `DATA:` names
+    /// the same scheme as `data:`. A lowercase-only match would send this
+    /// legal spelling down the text fall-through and ship the base64 payload
+    /// upstream as prose -- the failure the guard exists to prevent.
+    #[test]
+    fn mixed_case_data_uri_scheme_maps_to_inline_data() {
+        // Arrange
+        let part = image_url_part("DATA:image/PNG;base64,iVBORw0KGgo=");
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        let inline = parts[0].inline_data.as_ref().expect("inlineData part");
+        assert_eq!(inline.mime_type, "image/png", "media type is lowercased");
+        assert_eq!(inline.data, "iVBORw0KGgo=");
+        assert!(parts[0].text.is_none(), "must not also emit a text part");
+    }
+
+    #[test]
+    #[traced_test]
+    fn unparseable_data_uri_image_url_drops_with_warn() {
+        // Arrange: a data: URI with no `;base64,` separator. Passing this
+        // through as text would smuggle the payload upstream as billed prose.
+        let part = image_url_part("data:image/png,notbase64payload");
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        assert!(parts.is_empty(), "no part may carry the data: URI onward");
+        assert!(logs_contain("dropping data: image_url"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn empty_payload_data_uri_image_url_drops_with_warn() {
+        // Arrange: truncated upload -- media type present, zero bytes.
+        let part = image_url_part("data:image/png;base64,");
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        assert!(parts.is_empty());
+        assert!(logs_contain("dropping data: image_url"));
+    }
+
+    #[test]
+    fn remote_image_url_still_passes_through_as_text() {
+        // Arrange: Gemini does not accept arbitrary remote URLs in
+        // inlineData; forwarding the URL as text is a deliberate
+        // best-effort choice and must stay.
+        let part = image_url_part("https://example.com/cat.png");
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        assert_eq!(
+            parts[0].text.as_deref(),
+            Some("https://example.com/cat.png")
+        );
+        assert!(parts[0].inline_data.is_none());
+    }
+
+    #[test]
+    fn base64_image_source_maps_to_inline_data() {
+        // Arrange: the Anthropic-shape source that genuinely carries bytes.
+        let part = image_source_part(json!({
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw0KGgo=",
+        }));
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        let inline = parts[0].inline_data.as_ref().expect("inlineData part");
+        assert_eq!(inline.mime_type, "image/png");
+        assert_eq!(inline.data, "iVBORw0KGgo=");
+    }
+
+    #[test]
+    #[traced_test]
+    fn url_image_source_drops_with_warn() {
+        // Arrange: a legal Anthropic url-shape source, which the Anthropic
+        // ingress accepts verbatim. It has no media_type and no data, so the
+        // old code emitted inlineData{image/jpeg, ""} -- a JPEG with no bytes.
+        let part = image_source_part(json!({
+            "type": "url",
+            "url": "https://example.com/cat.png",
+        }));
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        assert!(parts.is_empty(), "a source with no bytes must be dropped");
+        assert!(logs_contain("dropping non-base64 image source"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn base64_image_source_with_empty_data_drops_with_warn() {
+        // Arrange: correct source type, truncated payload.
+        let part = image_source_part(json!({
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "",
+        }));
+
+        // Act
+        let parts = parts_for(part);
+
+        // Assert
+        assert!(parts.is_empty());
+        assert!(logs_contain("empty data"));
     }
 }

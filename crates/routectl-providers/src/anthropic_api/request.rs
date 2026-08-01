@@ -122,11 +122,36 @@ pub(crate) const fn clamp_sampling_for_thinking(
 /// nothing. Shared with the Bedrock-Converse bag builder so both Claude
 /// seams map the directive the same way.
 pub(crate) fn response_format_to_anthropic_format(response_format: &Value) -> Option<Value> {
-    let obj = response_format.as_object()?;
-    match obj.get("type").and_then(Value::as_str)? {
+    let Some(obj) = response_format.as_object() else {
+        tracing::warn!(
+            "response_format is not an object; dropping structured-output \
+             directive on Anthropic egress"
+        );
+        return None;
+    };
+    let Some(kind) = obj.get("type").and_then(Value::as_str) else {
+        tracing::warn!(
+            "response_format carries no string type token; dropping \
+             structured-output directive on Anthropic egress"
+        );
+        return None;
+    };
+    match kind {
         "json_schema" => {
-            let js = obj.get("json_schema").and_then(Value::as_object)?;
-            let schema = js.get("schema").cloned()?;
+            let Some(js) = obj.get("json_schema").and_then(Value::as_object) else {
+                tracing::warn!(
+                    "response_format json_schema is absent or not an object; \
+                     dropping structured-output directive on Anthropic egress"
+                );
+                return None;
+            };
+            let Some(schema) = js.get("schema").cloned() else {
+                tracing::warn!(
+                    "response_format json_schema carries no json_schema.schema; \
+                     dropping structured-output directive on Anthropic egress"
+                );
+                return None;
+            };
             let mut format = serde_json::Map::new();
             format.insert("type".into(), Value::from("json_schema"));
             format.insert("schema".into(), schema);
@@ -141,7 +166,14 @@ pub(crate) fn response_format_to_anthropic_format(response_format: &Value) -> Op
             Some(Value::Object(format))
         }
         "json_object" => Some(serde_json::json!({"type": "json_object"})),
-        _ => None,
+        other => {
+            tracing::warn!(
+                response_format_type = other,
+                "unrecognized response_format shape; dropping structured-output \
+                 directive on Anthropic egress"
+            );
+            None
+        }
     }
 }
 
