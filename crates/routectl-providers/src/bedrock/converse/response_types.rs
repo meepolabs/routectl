@@ -174,9 +174,11 @@ pub struct StreamContentBlockStart {
     pub(crate) start: Option<StreamContentBlockStartPayload>,
 }
 
-/// `start` payload of a `contentBlockStart` event. Today AWS only
-/// populates this for tool_use blocks; text + reasoning blocks open
-/// without a typed start payload.
+/// `start` payload of a `contentBlockStart` event. AWS marks `start`
+/// required and its union members are `image` / `toolResult` /
+/// `toolUse` -- text and reasoning blocks get no `contentBlockStart`
+/// frame at all. `start` is modelled `Option` only so a malformed or
+/// future upstream frame parses instead of failing the stream.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum StreamContentBlockStartPayload {

@@ -161,10 +161,24 @@ pub fn handle_converse_frame(
     message: Message,
     state: &mut ConverseStreamState,
 ) -> Result<Vec<ChatChunk>> {
-    let event_type = frame::header_str(&message, ":event-type")
-        .unwrap_or("")
-        .to_string();
     let payload = message.payload();
+    let event_type = match frame::frame_type(&message) {
+        frame::FrameType::Event(name) => name.to_string(),
+        // A protocol-typed failure frame. Every exception ends the stream,
+        // recognized member name or not -- skipping one truncates the
+        // response while the breaker records the seat healthy.
+        frame::FrameType::Exception(name) => {
+            return Err(frame::exception_error(provider_id, name, payload));
+        }
+        frame::FrameType::Untyped => {
+            tracing::debug!(
+                provider = provider_id,
+                "bedrock converse: skipping eventstream frame with no \
+                 :message-type or :event-type"
+            );
+            return Ok(vec![]);
+        }
+    };
 
     match event_type.as_str() {
         "messageStart" => {
@@ -244,16 +258,17 @@ pub fn handle_converse_frame(
             let ev: StreamMetadata = parse_payload(provider_id, payload, "metadata")?;
             Ok(vec![build_closing_chunk(state, ev.usage.as_ref())])
         }
-        // AWS exception event types. Status codes mirror invoke's
-        // mapping so the router sees consistent classification across
-        // the two Bedrock paths.
+        // AWS exception event types named in `:event-type` by an upstream
+        // that violates the protocol's `:message-type: exception` framing.
+        // Status codes come from the shared frame-layer mapping so the two
+        // Bedrock lanes classify identically.
         "internalServerException"
         | "modelStreamErrorException"
         | "validationException"
         | "throttlingException"
         | "serviceUnavailableException"
         | "accessDeniedException"
-        | "unauthorizedException" => Err(decode_exception_event(provider_id, &event_type, payload)),
+        | "unauthorizedException" => Err(frame::exception_error(provider_id, &event_type, payload)),
         // Unknown frames -- log + skip per the same forward-compat
         // policy as invoke_stream.
         other => {
@@ -320,9 +335,17 @@ fn handle_block_start(
             BlockState::Text
         }
         None => {
-            // Per AWS docs text + reasoning blocks open without a typed
-            // start payload. Default to Text; the delta handler upgrades
-            // to Reasoning on the first reasoningContent delta.
+            // AWS marks `ContentBlockStartEvent.start` required and its
+            // union has only image / toolResult / toolUse members, so a
+            // start frame with no payload is not a documented shape --
+            // text and reasoning blocks get NO start frame at all (the
+            // event-sequence docs label contentBlockStart "tool use
+            // only", and the worked example goes messageStart ->
+            // contentBlockDelta directly). Tolerated rather than
+            // rejected: default to Text and let the delta handler
+            // upgrade to Reasoning on the first reasoningContent delta.
+            // Blocks are opened lazily by `handle_block_delta`, so no
+            // delta depends on this arm running.
             BlockState::Text
         }
     };
@@ -339,17 +362,26 @@ fn handle_block_delta(
     };
     match delta {
         StreamDelta::Text { text } => {
-            // Symmetric with tool-use: require a prior contentBlockStart
-            // (AWS emits one for every block, even text). A delta on
-            // an unknown block is an out-of-band event -- skip rather
-            // than synthesize a chunk that would corrupt the canonical
-            // stream. Mirrors the ToolUse arm's defensive-skip below.
-            if !state.blocks.contains_key(&ev.content_block_index) {
-                tracing::debug!(
-                    content_block_index = ev.content_block_index,
-                    "skipping text delta on unknown block (no prior contentBlockStart)"
-                );
-                return vec![];
+            // Self-starting: AWS sends NO contentBlockStart for a text
+            // block (start is required and its union has no text
+            // member), so the first delta opens the block. An existing
+            // ToolUse entry at this index is a genuine wire violation --
+            // a text delta on a tool block would corrupt the accumulator.
+            match state.blocks.get(&ev.content_block_index) {
+                Some(BlockState::ToolUse { .. }) => {
+                    tracing::debug!(
+                        provider = provider_id,
+                        content_block_index = ev.content_block_index,
+                        "bedrock converse: skipping text delta on a tool_use block"
+                    );
+                    return vec![];
+                }
+                Some(_) => {}
+                None => {
+                    state
+                        .blocks
+                        .insert(ev.content_block_index, BlockState::Text);
+                }
             }
             vec![text_chunk(text)]
         }
@@ -372,15 +404,24 @@ fn handle_block_delta(
             vec![tool_delta_chunk(id, name, call_index, tool_use.input)]
         }
         StreamDelta::ReasoningContent { reasoning_content } => {
-            // Upgrade the placeholder `Text` state (inserted on
-            // `contentBlockStart` for no-payload blocks) to
-            // `Reasoning` on the first reasoningContent delta. If
-            // there's NO prior state at this index, that means
-            // contentBlockStart was missed -- skip rather than
-            // synthesize. Symmetric with the text + tool-use arms.
+            // Self-starting, same as the text arm: AWS sends no
+            // contentBlockStart for a reasoning block, so the first
+            // reasoningContent delta at this index opens it. A
+            // placeholder `Text` state (inserted by a start frame with
+            // an unrecognized or absent payload) upgrades in place so
+            // the detail index is minted exactly once per block. Only a
+            // ToolUse entry is skipped -- that is a real wire violation.
             match state.blocks.get(&ev.content_block_index) {
                 Some(BlockState::Reasoning { .. }) => {}
-                Some(BlockState::Text) => {
+                Some(BlockState::ToolUse { .. }) => {
+                    tracing::debug!(
+                        provider = provider_id,
+                        content_block_index = ev.content_block_index,
+                        "bedrock converse: skipping reasoning delta on a tool_use block"
+                    );
+                    return vec![];
+                }
+                Some(BlockState::Text) | None => {
                     let di = state.next_detail_index;
                     state.next_detail_index += 1;
                     state.blocks.insert(
@@ -389,17 +430,9 @@ fn handle_block_delta(
                             detail_index: di,
                             accumulated: String::new(),
                             signature: None,
-                            detail_id: uuid::Uuid::new_v4().to_string(),
+                            detail_id: Uuid::new_v4().to_string(),
                         },
                     );
-                }
-                _ => {
-                    tracing::debug!(
-                        content_block_index = ev.content_block_index,
-                        "skipping reasoning delta on unknown or non-text block \
-                         (no prior contentBlockStart, or block is tool_use)"
-                    );
-                    return vec![];
                 }
             }
             let mut chunks = Vec::new();
@@ -662,39 +695,6 @@ fn parse_payload<T: serde::de::DeserializeOwned>(
             "bedrock converse-stream {label} payload parse failed (provider={provider_id}): {e}"
         ))
     })
-}
-
-fn decode_exception_event(provider_id: &str, event_type: &str, payload: &[u8]) -> Error {
-    // CLAUDE.md log conventions: 256-char body excerpt + structured
-    // tracing for auth/permission events.
-    let v: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
-    let msg = v
-        .pointer("/message")
-        .or_else(|| v.pointer("/Message"))
-        .and_then(|x| x.as_str())
-        .unwrap_or(event_type)
-        .to_string();
-    let status: u16 = match event_type {
-        "throttlingException" => 429,
-        "validationException" => 400,
-        "serviceUnavailableException" => 503,
-        "accessDeniedException" => 403,
-        "unauthorizedException" => 401,
-        _ => 500,
-    };
-    if matches!(
-        event_type,
-        "accessDeniedException" | "unauthorizedException"
-    ) {
-        tracing::warn!(
-            provider = %provider_id,
-            event_type = %event_type,
-            message = %routectl_core::sanitize_for_log(&msg),
-            "bedrock in-stream auth/permission exception",
-        );
-    }
-    // no HTTP headers at the eventstream frame layer
-    Error::upstream(provider_id, status, msg)
 }
 
 #[cfg(test)]
