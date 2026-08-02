@@ -1,12 +1,13 @@
 //! Read-only `/status` family.
 //!
-//! Every route here is a GET that returns a [`Panel`] envelope (or, for the
-//! `/status` aggregate, a map of them). The surface is deliberately
-//! read-only: [`StatusState`] carries only read handles, so a status handler
-//! is structurally incapable of mutating the router, the usage ledger, or the
-//! request-forwarding seam. Each panel is built through `guard_panel`, which
-//! degrades a failing data source to a single unavailable panel rather than a
-//! 500 or a process crash.
+//! Every route here returns a [`Panel`] envelope (or, for the `/status`
+//! aggregate, a map of them). All but one are GETs; `/status/query` answers the
+//! `QUERY` method instead, since it carries a request body. The surface is
+//! deliberately read-only: [`StatusState`] carries only read handles, so a
+//! status handler is structurally incapable of mutating the router, the usage
+//! ledger, or the request-forwarding seam. Each panel is built through
+//! `guard_panel`, which degrades a failing data source to a single unavailable
+//! panel rather than a 500 or a process crash.
 //!
 //! [`status_router`] is merged into the serve process behind the
 //! status-subtree-only middleware in [`crate::server::status_gate`] (a
@@ -19,6 +20,7 @@ mod config;
 mod doctor;
 mod health;
 mod page;
+mod query;
 mod router_view;
 mod types;
 mod usage;
@@ -30,7 +32,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::{Json, Router as AxumRouter};
 use parking_lot::Mutex;
 use routectl_router::ActivationState;
@@ -94,6 +96,7 @@ pub struct PanelObservability {
     pub health: PanelCounters,
     pub config: PanelCounters,
     pub doctor: PanelCounters,
+    pub query: PanelCounters,
 }
 
 impl Default for PanelObservability {
@@ -103,6 +106,7 @@ impl Default for PanelObservability {
             health: PanelCounters::new("health"),
             config: PanelCounters::new("config"),
             doctor: PanelCounters::new("doctor"),
+            query: PanelCounters::new("status_query"),
         }
     }
 }
@@ -239,9 +243,14 @@ where
     }
 }
 
-/// The typed sub-router for the `/status` family. Registers GET-only routes;
-/// a non-GET request to any path gets a 405 from axum's method router. The
-/// merge into the main app router happens in a later wiring task.
+/// The typed sub-router for the `/status` family. Every panel path is GET-only;
+/// a non-GET request to one gets a 405 from axum's method router.
+///
+/// `/status/query` is the ONE carve-out: it answers the `QUERY` method, which
+/// axum's `MethodFilter` cannot express, so it registers with `any()` and its
+/// handler guards the method itself (405 for everything but `QUERY`). The
+/// carve-out is route-scoped -- `QUERY` against any other status path is still
+/// a 405.
 pub fn status_router() -> AxumRouter<Arc<StatusState>> {
     AxumRouter::new()
         .route("/status", get(status_aggregate))
@@ -249,6 +258,7 @@ pub fn status_router() -> AxumRouter<Arc<StatusState>> {
         .route("/status/health", get(health::handler))
         .route("/status/config", get(config::handler))
         .route("/status/doctor", get(doctor::handler))
+        .route("/status/query", any(query::handler))
 }
 
 /// The `/status` aggregate: composes the four panels into one envelope.
@@ -313,6 +323,8 @@ mod tests {
         Arc::new(StatusState::from_app(&app, None))
     }
 
+    /// The GET-only panel paths. `/status/query` is deliberately absent: it
+    /// owns the QUERY-method carve-out and is covered by its own tests.
     const STATUS_PATHS: &[&str] = &[
         "/status",
         "/status/usage",
@@ -337,7 +349,10 @@ mod tests {
                 .unwrap();
             assert_eq!(get_resp.status(), StatusCode::OK, "GET {path}");
 
-            for method in ["POST", "PUT", "DELETE", "PATCH"] {
+            // "QUERY" is in the rejected set so the /status/query carve-out is
+            // pinned as ROUTE-SCOPED: registering `any()` on one path must
+            // never widen the method surface of its siblings.
+            for method in ["POST", "PUT", "DELETE", "PATCH", "QUERY"] {
                 let app = status_router().with_state(test_state());
                 let resp = app
                     .oneshot(
@@ -412,6 +427,7 @@ mod tests {
             ("page.rs", include_str!("page.rs"), &panel_forbidden),
             ("types.rs", include_str!("types.rs"), &panel_forbidden),
             ("usage.rs", include_str!("usage.rs"), &panel_forbidden),
+            ("query.rs", include_str!("query.rs"), &panel_forbidden),
             ("health.rs", include_str!("health.rs"), &panel_forbidden),
             ("config.rs", include_str!("config.rs"), &panel_forbidden),
             ("doctor.rs", include_str!("doctor.rs"), &panel_forbidden),

@@ -2471,6 +2471,31 @@ panel is `null` when there is no usage data to summarize; its fields are
 documented under
 [Steady-state would-trim opportunity](#steady-state-would-trim-opportunity).
 
+### `/status/query` is UNSTABLE pre-1.0
+
+The running server's `/status/query` endpoint answers a grouped, windowed
+aggregate over the local usage ledger. Like `--json` above, its payload
+carries a `schema_version` (currently `1`) and its shape is UNSTABLE before
+1.0 -- metric names may be added and the envelope may be restructured. The
+`schema_version` bumps on any semantic change or removal; purely additive
+changes (a new metric, a new grouping or window token) do not bump it.
+
+It answers the `QUERY` method only; every other method on that path is a
+405. The request body is a closed vocabulary -- an unknown key or token is
+refused with HTTP 400 and the fixed code `invalid_query`, and a body the
+server can read but a ledger it cannot is HTTP 200 with an unavailable
+panel, never a 400.
+
+```
+QUERY /status/query
+{"window": "week", "group_by": "model"}
+```
+
+`window` is one of `today`, `week`, `month`, `all`; `group_by` is one of
+`model`, `provider`, `alias`; optional `alias` and `provider` keys narrow
+the result to one routing alias or served provider. Do not build a durable
+integration on the response shape before 1.0.
+
 ### `provider probe [<name>]` -- reachability, free-only
 
 `routectl provider probe` reports one reachability outcome per configured

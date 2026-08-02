@@ -45,6 +45,11 @@ list with more narrative.
 - **Read-only status dashboard** -- a single-file dashboard at
   `GET /` plus `/status/{usage,health,config,doctor}` JSON panels;
   structurally read-only (no mutation routes exist).
+- **Grouped usage query endpoint** -- `QUERY /status/query`, a
+  windowed aggregate over the local usage ledger grouped by model,
+  provider, or alias, with per-group cost resolution and a bounded
+  per-request query budget. The request and response vocabularies are
+  closed and versioned (`schema_version = 1`), and UNSTABLE pre-1.0.
 - **First-party passthrough** -- an optional `[mitm]` front-proxy so
   Claude Code can route inference through routectl while Remote
   Control keeps working against `api.anthropic.com`; per-provider

@@ -15,6 +15,8 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use serde::Serialize;
+
 use crate::db::UsageDb;
 
 use super::aggregate::{QUERY_AGG_SQL, map_fine_row};
@@ -71,7 +73,12 @@ pub enum RowCost {
 }
 
 /// How completely a group's cost could be resolved.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// The serialized form is the lowercase token [`CostStatus::as_str`] returns;
+/// those four tokens are a wire contract, so the rename and `as_str` must stay
+/// in lockstep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CostStatus {
     /// Every row was priced; `cost_usd` is the group's full cost.
     Priced,
@@ -107,7 +114,11 @@ impl CostStatus {
 /// to contribute to them, so "no data" is always distinguishable from "measured
 /// zero". `ttft_p50_ms` and `latency_p50_ms` are request-weighted MEANS, an
 /// approximation of the median; `*_p95_ms` are the observed maxima.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// Every field name here IS the wire vocabulary: an absent `Option` serializes
+/// as an explicit `null` (never skipped) so a reader can tell "no eligible rows"
+/// from a measured `0`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct QueryMetrics {
     /// Total requests.
     pub requests: i64,
@@ -159,7 +170,7 @@ pub struct QueryMetrics {
 
 /// One coarse group: its label under the requested [`GroupDim`], plus its
 /// metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct QueryGroup {
     /// The grouping column's value, or `(unattributed)` when it is NULL.
     pub label: String,
@@ -174,7 +185,7 @@ pub type QueryTotals = QueryMetrics;
 
 /// A grouped query's result: the coarse groups in label order, plus the totals
 /// folded from them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct QueryResult {
     /// Coarse groups, ordered by label.
     pub groups: Vec<QueryGroup>,
@@ -193,12 +204,6 @@ pub struct QueryResult {
 ///
 /// `price` is called once per FINE row -- while `upstream` is still known --
 /// and its verdict is folded into the coarse group the row belongs to.
-///
-/// # Panics
-///
-/// Panics if a resolved cost is not finite. Rate configuration rejects
-/// non-finite values upstream, so this is an invariant check, not a recoverable
-/// input error.
 pub fn query(
     db: &UsageDb,
     spec: &QuerySpec,
@@ -208,9 +213,9 @@ pub fn query(
     let conn = db.conn();
     conn.progress_handler(PROGRESS_OPS, Some(move || Instant::now() > deadline))?;
     // Held across the read + fold so the handler is detached even when the
-    // `price` closure or the finiteness assertion panics: the connection
-    // outlives this call, and a stale expired deadline left on it would
-    // spuriously interrupt the next statement run on it.
+    // `price` closure panics: the connection outlives this call, and a stale
+    // expired deadline left on it would spuriously interrupt the next statement
+    // run on it.
     let _guard = ProgressGuard { conn };
     read_and_fold(db, spec, price)
 }
@@ -372,6 +377,11 @@ impl GroupAcc {
         match cost {
             RowCost::Subscription => self.any_subscription = true,
             RowCost::Priced(usd) => {
+                // A per-row price is finite by construction (rate validation
+                // rejects non-finite rates), so a non-finite one is a pricer
+                // bug, not operator input -- caught in tests, tolerated in
+                // release, where the sum's own finiteness check absorbs it.
+                debug_assert!(usd.is_finite(), "a resolved row price must be finite");
                 self.priced_usd += usd;
                 self.any_priced = true;
             }
@@ -444,10 +454,17 @@ impl GroupAcc {
 
     /// The group's cost and its status. A group with no cost signal at all
     /// (no rows) reads as `unpriced` with no amount.
+    ///
+    /// A non-finite total is a VALUE outcome, not a panic: this fold is
+    /// reachable from the network and the release profile aborts on panic, so a
+    /// cost sum that an extreme-magnitude configured rate overflowed to `inf`
+    /// degrades to "no usable price" rather than taking the process down.
     fn cost(&self) -> (Option<f64>, CostStatus) {
         let priced = self.any_priced.then_some(self.priced_usd);
-        if let Some(usd) = priced {
-            assert!(usd.is_finite(), "resolved usage cost must be finite");
+        if let Some(usd) = priced
+            && !usd.is_finite()
+        {
+            return (None, CostStatus::Unpriced);
         }
         let kinds = i32::from(self.any_priced)
             + i32::from(self.any_subscription)

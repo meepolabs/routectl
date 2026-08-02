@@ -112,5 +112,11 @@ pub mod vocabulary {
         /// Doctor: no on-disk config path is bound to this server, so the
         /// disk-based doctor gather has nothing to read.
         pub const NO_CONFIG_PATH: &str = "no_config_path";
+        /// Query: the grouped aggregate exceeded its per-request deadline and
+        /// was interrupted mid-statement. Distinct from `db_busy` (contention
+        /// on open) and `db_unavailable` (a broken source): the ledger is
+        /// healthy, the requested window is simply too large to answer inside
+        /// the budget.
+        pub const QUERY_TIMEOUT: &str = "query_timeout";
     }
 }

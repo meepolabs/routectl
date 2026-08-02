@@ -17,6 +17,8 @@ impl core::fmt::Debug for routectl_usage::CostStatus
 pub fn routectl_usage::CostStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for routectl_usage::CostStatus
 impl core::marker::StructuralPartialEq for routectl_usage::CostStatus
+impl serde_core::ser::Serialize for routectl_usage::CostStatus
+pub fn routectl_usage::CostStatus::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl core::marker::Freeze for routectl_usage::CostStatus
 impl core::marker::Send for routectl_usage::CostStatus
 impl core::marker::Sync for routectl_usage::CostStatus
@@ -780,6 +782,8 @@ pub fn routectl_usage::QueryGroup::eq(&self, &routectl_usage::QueryGroup) -> boo
 impl core::fmt::Debug for routectl_usage::QueryGroup
 pub fn routectl_usage::QueryGroup::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for routectl_usage::QueryGroup
+impl serde_core::ser::Serialize for routectl_usage::QueryGroup
+pub fn routectl_usage::QueryGroup::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl core::marker::Freeze for routectl_usage::QueryGroup
 impl core::marker::Send for routectl_usage::QueryGroup
 impl core::marker::Sync for routectl_usage::QueryGroup
@@ -843,6 +847,8 @@ pub fn routectl_usage::QueryMetrics::default() -> routectl_usage::QueryMetrics
 impl core::fmt::Debug for routectl_usage::QueryMetrics
 pub fn routectl_usage::QueryMetrics::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for routectl_usage::QueryMetrics
+impl serde_core::ser::Serialize for routectl_usage::QueryMetrics
+pub fn routectl_usage::QueryMetrics::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl core::marker::Freeze for routectl_usage::QueryMetrics
 impl core::marker::Send for routectl_usage::QueryMetrics
 impl core::marker::Sync for routectl_usage::QueryMetrics
@@ -884,6 +890,8 @@ pub fn routectl_usage::QueryResult::eq(&self, &routectl_usage::QueryResult) -> b
 impl core::fmt::Debug for routectl_usage::QueryResult
 pub fn routectl_usage::QueryResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for routectl_usage::QueryResult
+impl serde_core::ser::Serialize for routectl_usage::QueryResult
+pub fn routectl_usage::QueryResult::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl core::marker::Freeze for routectl_usage::QueryResult
 impl core::marker::Send for routectl_usage::QueryResult
 impl core::marker::Sync for routectl_usage::QueryResult

@@ -721,6 +721,65 @@ fn a_panicking_price_closure_still_detaches_the_progress_handler() {
 }
 
 #[test]
+fn a_cost_sum_that_overflows_to_infinity_reads_as_unpriced_rather_than_panicking() {
+    // Arrange: one model over two upstreams, each priced at a magnitude an
+    // operator could reach with an extreme `[registry.*.pricing]` rate, so the
+    // group's SUM overflows f64 to infinity.
+    let (_dir, db) = open_db();
+    for (id, upstream) in [("a", "u1"), ("b", "u2")] {
+        insert(
+            &db,
+            &Fixture {
+                request_id: id,
+                upstream: Some(upstream),
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act: the fold is network-reachable and the release profile aborts on
+    // panic, so a non-finite total must be a VALUE, never an assertion.
+    let result = query(
+        &db,
+        &spec(GroupDim::Model),
+        |_row| RowCost::Priced(f64::MAX),
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert: no cost claimed, and the status says so rather than reporting a
+    // meaningless infinity.
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.cost_usd, None);
+    assert_eq!(m.cost_status, CostStatus::Unpriced);
+    assert_eq!(result.totals.cost_usd, None);
+    assert_eq!(result.totals.cost_status, CostStatus::Unpriced);
+    // The rest of the group is untouched: only the cost degraded.
+    assert_eq!(m.requests, 2);
+}
+
+#[test]
+fn a_finite_cost_still_prices_normally_beside_the_overflow_guard() {
+    // Arrange: the guard must not swallow ordinary large-but-finite costs.
+    let (_dir, db) = open_db();
+    insert(&db, &Fixture::default());
+
+    // Act
+    let result = query(
+        &db,
+        &spec(GroupDim::Model),
+        |_row| RowCost::Priced(1e300),
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.cost_status, CostStatus::Priced);
+    assert_eq!(m.cost_usd, Some(1e300));
+}
+
+#[test]
 fn interrupt_error_maps_to_its_own_variant() {
     // Arrange: the SQLite code a fired progress handler produces.
     let interrupted = rusqlite::Error::SqliteFailure(

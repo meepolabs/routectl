@@ -666,6 +666,7 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
     "/status/health",
     "/status/config",
     "/status/doctor",
+    "/status/query",
 ];
 
 /// `max_body_bytes` MUST already be the resolved effective value

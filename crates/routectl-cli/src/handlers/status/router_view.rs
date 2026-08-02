@@ -5,11 +5,11 @@
 //! secrets: a live `Router` exposes dispatch (`complete`/`stream`) and its
 //! `config` field (secret refs). Rust module privacy is the enforcement: the
 //! `Arc<ArcSwap<Router>>` lives in [`StatusRouterHandle::inner`] and the
-//! loaded `Arc<Router>` in [`StatusRouterView::router`], both PRIVATE to this
-//! module. A sibling panel module holds a `&StatusRouterView` and can call
-//! only the three read methods below -- it can never name the private field,
-//! so it can never obtain a `&Router`, call `.complete`/`.stream`, or touch
-//! `.config`.
+//! loaded `Arc<Router>` in [`StatusRouterView::router`] / [`QueryPricer`], all
+//! PRIVATE to this module. A sibling panel module holds a `&StatusRouterView`
+//! or a `QueryPricer` and can call only the read methods below -- it can never
+//! name the private field, so it can never obtain a `&Router`, call
+//! `.complete`/`.stream`, or touch `.config`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,6 +19,9 @@ use routectl_router::router::RouteTargetStatus;
 use routectl_router::{
     CatalogOverlay, EffectiveView, LearnedRegistryEntry, Router, derive_effective_view,
 };
+use routectl_usage::{AggRow, RowCost};
+
+use crate::commands::usage::cost_for_row;
 
 /// Owns the live-router read handle for the status surface. Loads a fresh
 /// snapshot per [`view`](Self::view) call so a hot-swap is picked up. The
@@ -39,6 +42,33 @@ impl StatusRouterHandle {
         StatusRouterView {
             router: self.inner.load_full(),
         }
+    }
+
+    /// Pin ONE immutable config snapshot and hand back an owned pricer over it.
+    ///
+    /// Owned (not borrowed) so the whole grouped query can be priced on a
+    /// blocking worker against a single snapshot: a router hot-swap mid-query
+    /// can never make two rows of one result price against different rate
+    /// tables.
+    pub fn pricer(&self) -> QueryPricer {
+        QueryPricer {
+            router: self.inner.load_full(),
+        }
+    }
+}
+
+/// An owned, `'static` pricing facade over one pinned router snapshot. The
+/// `Arc<Router>` is private to this module, so a caller can price a row and
+/// nothing else -- it can never reach dispatch or raw config through it.
+pub struct QueryPricer {
+    router: Arc<Router>,
+}
+
+impl QueryPricer {
+    /// The cost verdict for one fine-grained aggregate row, resolved against
+    /// the pinned snapshot through the same function the CLI usage report uses.
+    pub fn price(&self, row: &AggRow) -> RowCost {
+        cost_for_row(&self.router.config, row)
     }
 }
 
