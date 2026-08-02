@@ -2068,10 +2068,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `UsageWriter`/`CHANNEL_CAPACITY`,
   `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`open_rw`/`OpenError`,
   the read-side query surface
-  (`aggregate`/`ttfbs`/`latest_quota`/`k_calibration_summary`/`m1_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`
+  (`aggregate`/`ttfbs`/`latest_quota`/`query`/`k_calibration_summary`/`m1_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`
   + the capability-ledger reads
   `read_capability_events_after`/`latest_tombstone` + the row/summary types
-  `AggRow`/`GroupKey`/`QuotaSnapshot`/`KCalibration`/`M1AttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
+  `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`M1AttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
   `estimate_cost_tokens`/`CostBreakdown`/`Rates` (+ the `#[doc(hidden)]`
   record-path `estimate_cost`), `CapabilityLearnEvent`, `CapabilityEvent` +
   `insert_capability_event` (the append-only capability-ledger writer,
@@ -2126,13 +2126,31 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   capability-event trio capability_events_enqueued /
   capability_events_dropped_full / capability_events_persisted)
 - `src/query/mod.rs` -- read-query facade: owns the shared row/error types
-  `QueryError`, `GroupKey`, `AggRow` and re-exports the whole read-side
-  surface from the three submodules so every symbol stays at
+  `QueryError` (`Sqlite` + `Interrupted`, the latter distinguishing a fired
+  query deadline from a real DB fault), `GroupKey`, `AggRow` and re-exports the
+  whole read-side surface from the four submodules so every symbol stays at
   `routectl_usage::` unchanged
 - `src/query/aggregate.rs` -- aggregate + breakdown queries over the requests
   table; exports `aggregate`, `errors_by_class` (flat per-group failure-class
   breakdown, same window predicate + group key as `aggregate`, sums to
-  `AggRow::errors`), `ttfbs`, `latest_quota`, `QuotaSnapshot`
+  `AggRow::errors`), `ttfbs`, `latest_quota`, `QuotaSnapshot`. Also holds
+  `QUERY_AGG_SQL` + `FineRow` (crate-internal): the grouped-query statement,
+  which shares this module's base column list and GROUP BY verbatim through
+  `concat!` macros so the two statements cannot drift past the one shared row
+  mapper
+- `src/query/grouped.rs` -- the grouped, priced, deadline-bounded aggregate:
+  exports `query(db, &QuerySpec, price, deadline)` plus `QuerySpec`,
+  `GroupDim`, `RowCost`, `QueryResult`, `QueryGroup`, `QueryMetrics` /
+  `QueryTotals`, `CostStatus`. One statement reads at the fine
+  `(model, provider, upstream, alias)` grain with alias/provider filters as
+  BIND params; the fold prices each fine row through the caller's closure
+  BEFORE upstream is dropped, rolls to the coarse `GroupDim` (sums additive,
+  MAX-across-MAX, ratios kept as numerator/denominator pairs), derives the
+  display metrics as `Option` (absent, never 0, when no row was eligible), and
+  folds totals from the same accumulators. Cost enters only via the closure, so
+  the crate stays a leaf; a `progress_handler` deadline surfaces as
+  `QueryError::Interrupted` and is detached by an RAII guard on every exit path,
+  unwinding included
 - `src/query/would_trim.rs` -- would-trim + K-calibration read queries;
   exports `would_trim_summary`, `shadow_misfire_summary`,
   `m1_attribution_summary`, `k_calibration_summary`,

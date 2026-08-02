@@ -2,11 +2,16 @@
 
 mod aggregate;
 mod capability;
+mod grouped;
 mod would_trim;
 
 pub use aggregate::{QuotaSnapshot, aggregate, errors_by_class, latest_quota, ttfbs};
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,
+};
+pub use grouped::{
+    CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySpec, QueryTotals, RowCost,
+    query,
 };
 pub use would_trim::{
     KCalibration, M1AttributionSummary, ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary,
@@ -20,6 +25,12 @@ pub enum QueryError {
     /// A SQLite operation failed while reading.
     #[error("usage query failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    /// The query exceeded its deadline and was interrupted mid-statement. A
+    /// distinct variant so the caller can shed it under its own code rather
+    /// than reporting the DB as unavailable.
+    #[error("usage query exceeded its deadline")]
+    Interrupted,
 }
 
 /// The group-key columns shared by the aggregate and the raw-latency rows.

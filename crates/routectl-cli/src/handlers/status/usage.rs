@@ -341,6 +341,10 @@ fn open_error_code(err: &OpenError) -> &'static str {
 fn query_error_code(err: &QueryError) -> &'static str {
     match err {
         QueryError::Sqlite(source) => busy_or_unavailable(source.sqlite_error_code()),
+        // Unreachable from this panel: it runs no deadline-bounded query, so no
+        // progress handler is installed on its connection. Mapped rather than
+        // panicked so the never-500 posture holds if that ever changes.
+        QueryError::Interrupted => codes::DB_UNAVAILABLE,
     }
 }
 

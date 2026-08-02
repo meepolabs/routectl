@@ -21,8 +21,10 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 # `bundled` compiles SQLite from vendored source, so there is no
 # system libsqlite dependency. This dep lives only in routectl-usage;
-# the lean provider build does not pull it in.
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+# the lean provider build does not pull it in. `hooks` is required for
+# `Connection::progress_handler`, which enforces the read-query deadline
+# from inside SQLite's VM loop (no watchdog thread).
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint", "hooks"] }
 
 [dev-dependencies]
 tempfile = "3"
