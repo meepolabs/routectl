@@ -325,8 +325,9 @@ const fn map_would_trim(summary: WouldTrimSummary) -> UsageWouldTrim {
 
 /// Map a ledger-open failure to its `Panel::unavailable` shed code. A busy
 /// or locked DB under the fast-fail timeout is distinct from a missing or
-/// otherwise unreadable file.
-fn open_error_code(err: &OpenError) -> &'static str {
+/// otherwise unreadable file. Shared with the `/status/query` handler so the
+/// two ledger-backed surfaces classify an open failure identically.
+pub(super) fn open_error_code(err: &OpenError) -> &'static str {
     match err {
         OpenError::NoData { .. } => codes::NO_DATA,
         OpenError::VersionTooNew { .. } | OpenError::VersionTooOld { .. } => codes::SCHEMA_MISMATCH,
@@ -348,7 +349,10 @@ fn query_error_code(err: &QueryError) -> &'static str {
     }
 }
 
-const fn busy_or_unavailable(code: Option<ErrorCode>) -> &'static str {
+/// Whether a SQLite error code names transient contention (shed as busy, worth
+/// a retry) rather than an unusable source. Shared with the `/status/query`
+/// handler so both classify contention identically.
+pub(super) const fn busy_or_unavailable(code: Option<ErrorCode>) -> &'static str {
     if matches!(
         code,
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)

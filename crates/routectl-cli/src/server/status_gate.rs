@@ -28,6 +28,19 @@ use crate::server::is_loopback;
 /// workers. Excess sheds immediately as a 503 (never queues).
 pub const STATUS_MAX_INFLIGHT: usize = 4;
 
+/// Wall-clock budget for ONE `/status/query` grouped aggregate, milliseconds.
+/// Deliberately a hardcoded const, not a config knob: like
+/// [`STATUS_MAX_INFLIGHT`] it bounds a fixed-cost diagnostic read rather than
+/// expressing an operator preference.
+///
+/// Sized to bound a runaway scan without regressing against the unbounded
+/// `/status/usage` panel an operator already relies on: a fine-grained GROUP BY
+/// over a multi-million-row window is a sub-second full scan, so a tighter
+/// budget would interrupt legitimate large-ledger reads, while this one still
+/// leaves a whole query well inside a dashboard poll interval. An overrun sheds
+/// as an unavailable panel (`query_timeout`), never a 500.
+pub const QUERY_BUDGET_MS: u64 = 1000;
+
 /// Wire schema version of the fixed transport-level envelopes this module
 /// emits (the overload 503 and the forbidden-host 403). These are NOT panel
 /// payloads -- they never reach a `Panel<T>` -- but they carry the same

@@ -2150,7 +2150,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   folds totals from the same accumulators. Cost enters only via the closure, so
   the crate stays a leaf; a `progress_handler` deadline surfaces as
   `QueryError::Interrupted` and is detached by an RAII guard on every exit path,
-  unwinding included
+  unwinding included; a cost sum that an extreme configured rate overflowed to
+  non-finite is a VALUE outcome (`cost_usd: None` + `unpriced`), never an
+  assert, because the fold is network-reachable and the release profile aborts
+  on panic. `QueryResult`/`QueryGroup`/`QueryMetrics`/`CostStatus`
+  derive `Serialize`: the metric field names ARE the `/status/query` wire
+  vocabulary, absent `Option`s serialize as explicit `null` (never skipped), and
+  `CostStatus` renames to the same lowercase tokens `as_str` returns
 - `src/query/would_trim.rs` -- would-trim + K-calibration read queries;
   exports `would_trim_summary`, `shadow_misfire_summary`,
   `m1_attribution_summary`, `k_calibration_summary`,
@@ -2412,8 +2418,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   -- a subtree-wide (`Global`, one shared semaphore across all status routes,
   not per-route) hardcoded concurrency cap that sheds excess IMMEDIATELY as
   the fixed JSON 503 `{"schema_version":1,"error":{"code":"overloaded",...}}`
-  (never queues); `handle_status_overload` maps the shed error. NOT a config
-  knob (no `config_classify` section)
+  (never queues); `handle_status_overload` maps the shed error. Also owns
+  `QUERY_BUDGET_MS = 1000`, the per-request wall-clock budget for one
+  `/status/query` grouped aggregate (an overrun sheds as the `query_timeout`
+  unavailable panel). Neither const is a config knob (no `config_classify`
+  section)
 - `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching
   `oauth://<provider>` to `OAuthStore` and `env://` / `file://` / `literal:`
   to `MemoryStore`; degrades gracefully when no `HOME` / `XDG_CONFIG_HOME`
@@ -2537,8 +2546,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Router`/`.config`/dispatch, or of touching the forwarding seam;
   `PanelObservability`/`PanelCounters` are the per-panel last-availability +
   shed-count scaffold (minimal `record` hook now, read side wired later).
-  `status_router() -> Router<Arc<StatusState>>` registers GET-only routes
-  (`/status`, `/status/{usage,health,config,doctor}`); non-GET gets 405.
+  `status_router() -> Router<Arc<StatusState>>` registers GET-only panel routes
+  (`/status`, `/status/{usage,health,config,doctor}`; non-GET gets 405) plus the
+  ONE method carve-out `/status/query`, registered with `any()` because axum's
+  `MethodFilter` cannot express `QUERY` -- the carve-out is route-scoped, so
+  `QUERY` against any sibling path is still a 405.
   `guard_panel` runs every panel builder on `spawn_blocking` + `catch_unwind`,
   mapping a panic OR a join failure to an unavailable `Panel<T>` (never a
   500/crash). The `/status` aggregate composes the four REAL panel builders
@@ -2563,7 +2575,28 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   from the event surface (`state_key`/`capability_key`/`signal_tier`,
   provenance tokens `provider`/`model`/`override`/`learned`, signal-tier
   tokens) plus the `unavailable` reason codes
-  (`no_data`/`schema_mismatch`/`db_busy`/`db_unavailable`/`config_unavailable`/`doctor_unavailable`/`no_config_path`)
+  (`no_data`/`schema_mismatch`/`db_busy`/`db_unavailable`/`config_unavailable`/`doctor_unavailable`/`no_config_path`/`query_timeout`)
+- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 1),
+  the grouped windowed aggregate. Three EXCLUSIVE regimes: 405 (method is not
+  `QUERY`, guarded by the handler's first extractor), 400 (body outside the
+  closed vocabulary -- `deny_unknown_fields` + closed `window`
+  {today,week,month,all} / `group_by` {model,provider,alias} enums + optional
+  alias/provider filters -- or over `MAX_BODY_BYTES` (8 KiB), or still arriving
+  at the `BODY_READ_TIMEOUT` (2s) read deadline that stops a stalled send from
+  parking a concurrency permit; all refused with the FIXED envelope
+  `{"schema_version":1,"error":{"code":"invalid_query",...}}` that never echoes
+  serde text or body bytes and never opens the ledger), and 200 for everything
+  else including every data-source failure. Runs `routectl_usage::query` under
+  the same isolation as the panels (`guard_panel` blocking worker +
+  `catch_unwind`, per-request `open_readonly_fastfail`), priced through the
+  facade's `QueryPricer` (ONE pinned config snapshot per request) and bounded by
+  `QUERY_BUDGET_MS`; a fired deadline sheds `query_timeout`, open/query failures
+  reuse the usage panel's shed-code mapping. Serializes the crate's
+  `QueryResult` EXPLICITLY (`render`, not the `Json` responder, whose own
+  failure arm would be a bare 500 outside the three regimes -- a render failure
+  degrades to the unavailable panel instead), so the metric field names ARE the
+  wire vocabulary (contracts sec 15), with absent `Option` metrics as explicit
+  `null`
 - `src/handlers/status/router_view.rs` -- the read-only router facade that
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
@@ -2571,7 +2604,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   which exposes ONLY three read methods -- `route_targets(now)`,
   `learned_capabilities()`, and `effective_view(&overlay)` (runs
   `derive_effective_view` against the live config INTERNALLY, so panels never
-  touch raw `Config`). Rust module privacy makes the raw `Router` unreachable
+  touch raw `Config`), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
+  pricing facade over one pinned snapshot whose only method costs an `AggRow`
+  through `commands::usage::cost_for_row` (so `/status/query` and the CLI usage
+  report price a row through one function, and a hot-swap mid-query cannot make
+  two rows of one result price against different rate tables). Rust module
+  privacy makes the raw `Router` unreachable
   from the sibling panel modules -- a panel cannot obtain a `&Router`, call
   `.complete`/`.stream`/dispatch, or read `.config`; the `mod.rs`
   forbidden-token scan also covers this file with a facade-specific rule
@@ -3144,7 +3182,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   whose `[providers.X] api_key_ref` starts `oauth://` is subscription (`n/a
   (subscription)`, no $), an API-key provider prices its summed tokens via
   `Config::pricing_for` -> `estimate_cost_tokens` (`$X.XX` or `n/a` when
-  unpriced). `--detail` adds cache-write split + nearest-rank p95/max latency
+  unpriced) through `cost_for_row`, which yields the usage crate's `RowCost`
+  tri-state and is shared with `/status/query`'s pricing closure so the two
+  surfaces can never disagree about what a row costs. `--detail` adds cache-write split + nearest-rank p95/max latency
   + wall-time + server-tool counts. Both the per-group and the footer
   cache-hit-rate flow through ONE shared denominator rule --
   `cache_prompt_den` (`input + cache_read_billed + cache_write_5m +

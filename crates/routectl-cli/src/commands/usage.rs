@@ -20,9 +20,9 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 use routectl_router::Config;
 use routectl_usage::{
     AggRow, GroupKey, KCalibration, M1AttributionSummary, OpenError, QueryError, QuotaSnapshot,
-    Rates, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate, estimate_cost_tokens,
-    k_calibration_summary, latest_quota, m1_attribution_summary, open_readonly,
-    shadow_misfire_summary, ttfbs, would_trim_summary,
+    Rates, RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate,
+    estimate_cost_tokens, k_calibration_summary, latest_quota, m1_attribution_summary,
+    open_readonly, shadow_misfire_summary, ttfbs, would_trim_summary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -402,22 +402,14 @@ fn provider_kind_is_gemini(config: &Config, provider: &str) -> bool {
         .is_some_and(|p| p.kind_str() == "gemini")
 }
 
-/// The cost contribution of one fine-grained `AggRow`.
-#[derive(Clone)]
-enum RowCost {
-    /// Managed-OAuth subscription row: no per-token dollar cost.
-    Subscription,
-    /// API-key row with a `[registry]` price: this dollar amount.
-    Priced(f64),
-    /// API-key row with no price, or no served provider: counts toward
-    /// totals but contributes no dollar cost.
-    Unpriced,
-}
-
 /// Classify and cost one fine-grained row. Subscription detection runs
 /// first (it overrides pricing); then a priced API-key row prices its
 /// summed tokens; everything else is unpriced.
-fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
+///
+/// Returns the usage crate's `RowCost` verdict, which is also what the grouped
+/// query layer's pricing closure must yield -- so the CLI report and the
+/// `/status/query` endpoint price a row through exactly one function.
+pub(crate) fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
     let Some(provider) = row.key.provider.as_deref() else {
         return RowCost::Unpriced;
     };
@@ -573,7 +565,7 @@ pub fn build_window_report(
     for row in &rows {
         let label = group_label(&row.key, dim);
         let cost = cost_for_row(config, row);
-        groups.entry(label).or_default().add(row, cost.clone());
+        groups.entry(label).or_default().add(row, cost);
         total.add(row, cost);
     }
 
