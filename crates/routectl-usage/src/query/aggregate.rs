@@ -26,9 +26,17 @@ pub struct QuotaSnapshot {
     pub reset: Option<i64>,
 }
 
-const AGG_SQL: &str = "\
-SELECT
-    COALESCE(model, requested_model) AS model, provider, upstream, alias,
+/// The group-key + base aggregate columns, shared VERBATIM by [`AGG_SQL`] and
+/// [`QUERY_AGG_SQL`].
+///
+/// This is a macro expanding to a string literal (rather than a `const`) so
+/// both statements can be assembled with `concat!` at compile time: the two
+/// queries MUST agree on the fine grain and on every base column, because the
+/// same `map_agg_row` mapper reads both by ordinal position. Duplicating the
+/// column list as two literals would let one drift silently past the other.
+macro_rules! agg_base_columns {
+    () => {
+        "    COALESCE(model, requested_model) AS model, provider, upstream, alias,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
     SUM(CASE WHEN outcome NOT IN ('ok', 'client_disconnect')
@@ -65,10 +73,155 @@ SELECT
     SUM(CASE WHEN outcome = 'client_disconnect' THEN 1 ELSE 0 END)
                                                          AS client_disconnect_total,
     SUM(CASE WHEN outcome = 'client_disconnect' AND r.model IS NULL
-        THEN 1 ELSE 0 END)                              AS client_disconnect_pre_dispatch
+        THEN 1 ELSE 0 END)                              AS client_disconnect_pre_dispatch"
+    };
+}
+
+/// The fine grain both aggregate statements group at. Shared so the two can
+/// never drift apart.
+macro_rules! agg_group_by {
+    () => {
+        "GROUP BY COALESCE(model, requested_model), provider, upstream, alias"
+    };
+}
+
+const AGG_SQL: &str = concat!(
+    "SELECT\n",
+    agg_base_columns!(),
+    "\nFROM requests AS r
+WHERE ts_start >= ?1 AND ts_start < ?2\n",
+    agg_group_by!()
+);
+
+/// Row-eligibility predicate for every time-to-first-token figure: a streaming
+/// success that recorded a first-byte time. Shared by the p50 numerator /
+/// denominator AND the p95 MAX so the two can never describe different
+/// populations -- a mid-stream failure stamps a `ttfb_ms` too, and counting it
+/// in one but not the other lets p50 exceed p95.
+macro_rules! ttft_eligible {
+    () => {
+        "stream = 1 AND outcome = 'ok' AND ttfb_ms IS NOT NULL"
+    };
+}
+
+/// Row-eligibility predicate for the request-weighted throughput estimate:
+/// a streaming success with a usable TTFB, a STRICTLY positive generation
+/// window, and a reported output-token count. The `>` is strict on purpose --
+/// a zero-length window would divide by zero.
+macro_rules! tok_s_eligible {
+    () => {
+        "stream = 1 AND outcome = 'ok' AND ttfb_ms IS NOT NULL
+            AND latency_ms > ttfb_ms AND output_tokens IS NOT NULL"
+    };
+}
+
+/// The cache-INCLUSIVE prompt total for one row: the disjoint prompt
+/// dimensions summed, NULL counters contributing 0. Denominator of the
+/// per-row cache-hit fraction.
+macro_rules! cache_prompt_total {
+    () => {
+        "(COALESCE(input_tokens, 0) + cache_read
+            + COALESCE(cache_write_5m, 0) + COALESCE(cache_write_1h, 0))"
+    };
+}
+
+/// The `/status/query` aggregate: [`AGG_SQL`]'s base columns at the SAME fine
+/// grain, plus the eleven expressions the derived display metrics need, plus the
+/// two optional filters as BIND PARAMS (never interpolated identifiers).
+///
+/// A SEPARATE statement rather than more columns on `AGG_SQL`: the existing
+/// panel binds exactly two params and maps exactly the base columns, so adding
+/// the filter placeholders and the extra columns there would change every
+/// existing caller's call shape for no benefit. The base column list and the
+/// GROUP BY are shared verbatim through macros, so the fine grain and the
+/// `map_agg_row` ordinals stay identical by construction.
+///
+/// Every zero-row-able SUM is COALESCEd (an empty group set returns NO rows,
+/// but a group whose rows are all NULL in a column returns SQL NULL, which
+/// would fail an `i64` column read); every MAX is read as `Option`, since a MAX
+/// over no non-NULL values is legitimately absent.
+pub(super) const QUERY_AGG_SQL: &str = concat!(
+    "SELECT\n",
+    agg_base_columns!(),
+    ",
+    MAX(CASE WHEN ",
+    ttft_eligible!(),
+    " THEN ttfb_ms END)                                 AS ttfb_max,
+    COALESCE(SUM(CASE WHEN ",
+    ttft_eligible!(),
+    " THEN ttfb_ms ELSE 0 END), 0)                      AS ttft_sum,
+    COALESCE(SUM(CASE WHEN ",
+    ttft_eligible!(),
+    " THEN 1 ELSE 0 END), 0)                            AS ttft_count,
+    COALESCE(SUM(latency_ms), 0)                        AS latency_sum,
+    MAX(latency_ms)                                     AS latency_max,
+    MAX(input_tokens)                                   AS input_tokens_max,
+    COUNT(input_tokens)                                 AS input_tokens_present,
+    COALESCE(SUM(CASE WHEN ",
+    tok_s_eligible!(),
+    "
+        THEN CAST(output_tokens AS REAL) * 1000.0
+             / CAST(latency_ms - ttfb_ms AS REAL)
+        ELSE 0.0 END), 0.0)                             AS tok_s_sum,
+    COALESCE(SUM(CASE WHEN ",
+    tok_s_eligible!(),
+    "
+        THEN 1 ELSE 0 END), 0)                          AS tok_s_count,
+    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
+    cache_prompt_total!(),
+    " > 0
+        THEN CAST(cache_read AS REAL) / CAST(",
+    cache_prompt_total!(),
+    " AS REAL)
+        ELSE 0.0 END), 0.0)                             AS cache_hit_sum,
+    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
+    cache_prompt_total!(),
+    " > 0
+        THEN 1 ELSE 0 END), 0)                          AS cache_hit_count
 FROM requests AS r
 WHERE ts_start >= ?1 AND ts_start < ?2
-GROUP BY COALESCE(model, requested_model), provider, upstream, alias";
+  AND (?3 IS NULL OR alias = ?3)
+  AND (?4 IS NULL OR provider = ?4)\n",
+    agg_group_by!()
+);
+
+/// One [`QUERY_AGG_SQL`] row: the shared base aggregate plus the raw
+/// numerators / denominators / maxima the fold turns into display metrics.
+/// Deliberately NOT folded into `AggRow`: that struct is the existing panel's
+/// contract and gains nothing from these columns.
+pub(super) struct FineRow {
+    /// The base aggregate, identical in shape to what [`aggregate`] returns.
+    pub agg: AggRow,
+    /// `MAX(ttfb_ms)` over streaming successes with a TTFB; `None` when the
+    /// group has no such row.
+    pub ttfb_max: Option<i64>,
+    /// Summed `ttfb_ms` over TTFT-eligible rows -- the p50 numerator. Filtered
+    /// to the SAME population as `ttfb_max`, unlike `AggRow::sum_ttfb_ms`.
+    pub ttft_sum: i64,
+    /// Count of TTFT-eligible rows (the `ttft_sum` divisor).
+    pub ttft_count: i64,
+    /// Summed end-to-end latency, milliseconds.
+    pub latency_sum: i64,
+    /// `MAX(latency_ms)`. `latency_ms` is NOT NULL in the schema, so this is
+    /// `None` only for a group with no rows -- which cannot occur in a grouped
+    /// result -- but it is still read as `Option` rather than assumed.
+    pub latency_max: Option<i64>,
+    /// `MAX(input_tokens)` -- the group's context high-water mark. `None` when
+    /// no row reported an input-token count.
+    pub input_tokens_max: Option<i64>,
+    /// Rows that REPORTED an input-token count (`COUNT` ignores NULL). The
+    /// mean-context denominator.
+    pub input_tokens_present: i64,
+    /// Summed per-request tokens/second over throughput-eligible rows.
+    pub tok_s_sum: f64,
+    /// Count of throughput-eligible rows (the `tok_s_sum` divisor).
+    pub tok_s_count: i64,
+    /// Summed per-request cache-hit FRACTION over cache-reporting rows.
+    pub cache_hit_sum: f64,
+    /// Count of cache-reporting rows with a positive prompt total (the
+    /// `cache_hit_sum` divisor).
+    pub cache_hit_count: i64,
+}
 
 /// Windowed aggregate grouped by `(model, provider, upstream, alias)`.
 /// Rows outside `[from_ms, to_ms)` are excluded. The caller rolls these up
@@ -79,6 +232,25 @@ pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, 
         .query_map([from_ms, to_ms], map_agg_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Build a [`FineRow`] from a [`QUERY_AGG_SQL`] result row: the base columns
+/// through the shared mapper, then the eleven extra columns by ordinal.
+pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
+    Ok(FineRow {
+        agg: map_agg_row(row)?,
+        ttfb_max: row.get(28)?,
+        ttft_sum: row.get(29)?,
+        ttft_count: row.get(30)?,
+        latency_sum: row.get(31)?,
+        latency_max: row.get(32)?,
+        input_tokens_max: row.get(33)?,
+        input_tokens_present: row.get(34)?,
+        tok_s_sum: row.get(35)?,
+        tok_s_count: row.get(36)?,
+        cache_hit_sum: row.get(37)?,
+        cache_hit_count: row.get(38)?,
+    })
 }
 
 /// Build an `AggRow` from a result row. The column order matches `AGG_SQL`.
