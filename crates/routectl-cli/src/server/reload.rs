@@ -70,6 +70,7 @@ pub(super) fn spawn_reload_pipeline(
     activation_swap: Arc<ArcSwap<ActivationState>>,
     usage: UsageHandle,
     shutdown_rx: watch::Receiver<()>,
+    daemon_meta: Arc<crate::handlers::status::DaemonMeta>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -128,6 +129,7 @@ pub(super) fn spawn_reload_pipeline(
             router_swap,
             activation_swap,
             usage,
+            daemon_meta,
         },
         reload_rx,
         shutdown_rx,
@@ -210,6 +212,11 @@ struct ReloadContext {
     /// reach the shared swap without re-threading it per request.
     activation_swap: Arc<ArcSwap<ActivationState>>,
     usage: UsageHandle,
+    /// Stamped after every successful config reload so the status surface's
+    /// config-load age tracks the config actually in effect, not boot time.
+    /// The credentials path deliberately never stamps it: a token refresh
+    /// rebuilds the router from the SAME config.
+    daemon_meta: Arc<crate::handlers::status::DaemonMeta>,
 }
 
 /// Stable message string every activation audit event carries. Grep this
@@ -374,6 +381,7 @@ async fn run_reload_coordinator(
                         ).await {
                             current_config = new_config;
                             current_overlay = new_overlay;
+                            ctx.daemon_meta.stamp_config_loaded();
                             apply_activation(
                                 &ctx.oauth_store,
                                 &current_config,
@@ -399,6 +407,7 @@ async fn run_reload_coordinator(
                         ).await {
                             current_config = new_config;
                             current_overlay = new_overlay;
+                            ctx.daemon_meta.stamp_config_loaded();
                             apply_activation(
                                 &ctx.oauth_store,
                                 &current_config,

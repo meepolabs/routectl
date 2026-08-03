@@ -24,17 +24,18 @@ use serde::Serialize;
 
 use routectl_router::class_policy::ConfigFailureClass;
 use routectl_router::{
-    ActivationEntry, ActivationState, ActivationStatus, ClassPolicyCell, ClassPolicySource,
-    EffectiveRow, EffectiveView, ModelCell, OverrideProvenance, OverrideRow, OverrideVerdict,
-    Source,
+    ActivationEntry, ActivationState, ActivationStatus, AliasChain, ClassPolicyCell,
+    ClassPolicySource, EffectiveRow, EffectiveView, ModelCell, OverrideProvenance, OverrideRow,
+    OverrideVerdict, Source, class_debits,
 };
 
+use super::daemon_meta::DaemonMetaSnapshot;
 use super::vocabulary::{codes, provenance};
-use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
+use super::{Panel, StatusState, guard_panel, utc_rfc3339};
 use crate::server::load_overlay_default;
 
 /// Wire-shape version of the config panel payload.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The provenance-annotated effective view plus the activation inventory. Every
 /// field is a display-safe projection: model economics and capability verdicts
@@ -47,8 +48,45 @@ pub(super) struct ConfigPanel {
     classes: Vec<ClassPolicyWire>,
     /// Config-derived capability-override cells, with verdict + provenance.
     capabilities: Vec<CapabilityCellWire>,
+    /// One entry per `[aliases]` entry, with its ordered fallback chain.
+    aliases: Vec<AliasChainWire>,
+    /// Provenance of the config in effect plus the daemon serving it.
+    source: SourceWire,
     /// Auto-activation inventory: one entry per routectl-owned OAuth provider.
     activation: Vec<ActivationWire>,
+}
+
+/// One alias's ordered fallback chain. The chain order IS the sequence
+/// dispatch walks, so it is carried verbatim -- never sorted, never deduped.
+#[derive(Debug, Clone, Serialize)]
+struct AliasChainWire {
+    alias: String,
+    chain: Vec<String>,
+}
+
+/// Where the effective config came from and which daemon is serving it.
+///
+/// `config_path` is the ONE deliberate filesystem path on this wire: the
+/// dashboard's source strip exists to answer "which file is in effect", and
+/// the whole status surface is already gated behind the host allowlist plus
+/// listener auth. It is the resolved path only -- never config CONTENT, and
+/// never a loader error string (see [`unavailable_from_overlay_error`]).
+#[derive(Debug, Clone, Serialize)]
+struct SourceWire {
+    /// Resolved `config.toml` path, or `None` when serving from a config
+    /// with no on-disk backing (a programmatic / test bind).
+    config_path: Option<String>,
+    /// How long ago the live config was loaded, or `None` before any load
+    /// has been stamped.
+    loaded_age_ms: Option<i64>,
+    /// Number of `[aliases]` entries in the effective view.
+    alias_count: usize,
+    /// Number of `[providers.X]` entries in the effective view.
+    provider_count: usize,
+    /// The address the daemon's listener is bound to.
+    listen_addr: String,
+    /// The running binary's version.
+    version: &'static str,
 }
 
 /// One `[models.X]` entry's effective catalog cell.
@@ -80,6 +118,11 @@ struct ClassPolicyWire {
     class: &'static str,
     retry_cap: u32,
     fallback: bool,
+    /// Whether a failure of this class debits the per-seat circuit breaker's
+    /// health accounting. Read from the router's own [`class_debits`] -- the
+    /// transient-health set has exactly one definition, and this wire field
+    /// must never restate it.
+    debits_breaker: bool,
     /// `config` (operator leaf) or `baked-default`.
     source: &'static str,
 }
@@ -193,7 +236,15 @@ fn map_class(cell: ClassPolicyCell) -> ClassPolicyWire {
         class: class_token(cell.class),
         retry_cap: cell.retry_cap,
         fallback: cell.fallback,
+        debits_breaker: class_debits(&cell.class.to_failure_class()),
         source: class_source_token(cell.source),
+    }
+}
+
+fn map_alias(chain: AliasChain) -> AliasChainWire {
+    AliasChainWire {
+        alias: chain.alias,
+        chain: chain.chain,
     }
 }
 
@@ -223,10 +274,34 @@ fn map_activation((id, entry): (&str, &ActivationEntry)) -> ActivationWire {
     }
 }
 
+/// Fold the effective view's own counts together with the daemon facts into
+/// the source strip. The counts come from the SAME view the tables render
+/// from, so a rendered alias can never be missing from the count.
+fn build_source(
+    effective: &EffectiveView,
+    config_path: Option<&str>,
+    daemon: DaemonMetaSnapshot,
+) -> SourceWire {
+    SourceWire {
+        config_path: config_path.map(str::to_string),
+        loaded_age_ms: daemon.config_loaded_age_ms,
+        alias_count: effective.aliases.len(),
+        provider_count: effective.provider_ids.len(),
+        listen_addr: daemon.listen_addr,
+        version: daemon.version,
+    }
+}
+
 /// Map the derived effective view and activation inventory into the wire DTO.
 /// Pure over its inputs, so the mapping is unit-testable without the router or
 /// a disk read.
-fn build_panel(effective: EffectiveView, activation: &ActivationState) -> ConfigPanel {
+fn build_panel(
+    effective: EffectiveView,
+    activation: &ActivationState,
+    config_path: Option<&str>,
+    daemon: DaemonMetaSnapshot,
+) -> ConfigPanel {
+    let source = build_source(&effective, config_path, daemon);
     ConfigPanel {
         models: effective.models.into_iter().map(map_model).collect(),
         classes: effective.classes.into_iter().map(map_class).collect(),
@@ -235,6 +310,8 @@ fn build_panel(effective: EffectiveView, activation: &ActivationState) -> Config
             .into_iter()
             .map(map_capability)
             .collect(),
+        aliases: effective.aliases.into_iter().map(map_alias).collect(),
+        source,
         activation: activation.iter().map(map_activation).collect(),
     }
 }
@@ -252,15 +329,24 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
     let view = state.router.view();
     let activation = state.activation.load_full();
     // The router snapshot and activation are pinned now, so request time IS
-    // the effective view's read time.
-    let as_of = now_utc_rfc3339();
+    // the effective view's read time -- and the same instant anchors the
+    // source strip's config-load age. ONE clock read feeds both, so a request
+    // crossing a second boundary cannot report an age inconsistent with the
+    // `as_of` beside it.
+    let now = chrono::Utc::now();
+    let as_of = utc_rfc3339(now);
+    let daemon = state.daemon_meta.snapshot(now.timestamp_millis());
+    let config_path = state
+        .config_path
+        .as_ref()
+        .map(|path| path.display().to_string());
     let panel = guard_panel(SCHEMA_VERSION, codes::CONFIG_UNAVAILABLE, move || {
         let overlay = match load_overlay_default() {
             Ok(overlay) => overlay,
             Err(err) => return unavailable_from_overlay_error(&err),
         };
         let effective = view.effective_view(&overlay);
-        let dto = build_panel(effective, &activation);
+        let dto = build_panel(effective, &activation, config_path.as_deref(), daemon);
         Panel::available(SCHEMA_VERSION, as_of, dto)
     })
     .await;
@@ -275,14 +361,38 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::status::DaemonMeta;
     use crate::server::AppState;
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use routectl_router::{CatalogRow, Config, Router};
+    use routectl_router::config::AliasValue;
+    use routectl_router::{CatalogOverlay, CatalogRow, Config, Router, derive_effective_view};
     use serde_json::Value;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    /// A fixed daemon snapshot so the source-strip assertions pin exact
+    /// values instead of racing a live clock.
+    fn sample_daemon() -> DaemonMetaSnapshot {
+        DaemonMetaSnapshot {
+            listen_addr: "127.0.0.1:9000".to_string(),
+            version: env!("CARGO_PKG_VERSION"),
+            config_loaded_age_ms: Some(4_000),
+        }
+    }
+
+    /// Build the wire DTO through the SAME derivation the handler uses, so a
+    /// config-shaped assertion exercises the real path end to end.
+    fn panel_from_config(config: &Config) -> ConfigPanel {
+        let effective = derive_effective_view(config, &CatalogOverlay::default());
+        build_panel(
+            effective,
+            &ActivationState::default(),
+            None,
+            sample_daemon(),
+        )
+    }
 
     fn test_state() -> Arc<StatusState> {
         let router = Router::new(Arc::new(Config::default()));
@@ -293,6 +403,7 @@ mod tests {
         Arc::new(StatusState::from_app(
             &app,
             Some(PathBuf::from("/nonexistent/config.toml")),
+            DaemonMeta::for_test(),
         ))
     }
 
@@ -371,10 +482,12 @@ mod tests {
                 verdict: OverrideVerdict::RouteAway,
                 provenance: OverrideProvenance::Override,
             }],
+            aliases: Vec::new(),
+            provider_ids: Vec::new(),
         };
         let activation = ActivationState::default();
 
-        let panel = build_panel(effective, &activation);
+        let panel = build_panel(effective, &activation, None, sample_daemon());
 
         let opus = &panel.models[0];
         assert_eq!(opus.source, "user");
@@ -391,6 +504,129 @@ mod tests {
         assert_eq!(panel.capabilities[0].provenance, "override");
 
         assert!(panel.activation.is_empty());
+    }
+
+    /// A `Single` alias serializes as a one-element chain and a `Chain` keeps
+    /// the operator's order verbatim -- the chain order IS the fallback
+    /// sequence dispatch walks, so a sort or a dedupe would misreport routing.
+    #[test]
+    fn alias_chains_preserve_single_and_chain_order() {
+        let mut config = Config::default();
+        config
+            .aliases
+            .insert("solo".to_string(), AliasValue::Single("opus".to_string()));
+        config.aliases.insert(
+            "fast".to_string(),
+            AliasValue::Chain(vec![
+                "small".to_string(),
+                "smaller".to_string(),
+                "smallest".to_string(),
+            ]),
+        );
+
+        let panel = panel_from_config(&config);
+
+        let solo = panel
+            .aliases
+            .iter()
+            .find(|a| a.alias == "solo")
+            .expect("single alias present");
+        assert_eq!(solo.chain, vec!["opus".to_string()]);
+
+        let fast = panel
+            .aliases
+            .iter()
+            .find(|a| a.alias == "fast")
+            .expect("chain alias present");
+        assert_eq!(
+            fast.chain,
+            vec![
+                "small".to_string(),
+                "smaller".to_string(),
+                "smallest".to_string()
+            ],
+            "the fallback chain must keep the configured order verbatim"
+        );
+    }
+
+    /// The source strip's counts derive from the SAME effective view the
+    /// tables render from, and every declared field reaches the wire.
+    #[test]
+    fn source_object_carries_every_declared_field() {
+        let mut config = Config::default();
+        config
+            .aliases
+            .insert("solo".to_string(), AliasValue::Single("opus".to_string()));
+        config.aliases.insert(
+            "fast".to_string(),
+            AliasValue::Chain(vec!["small".to_string()]),
+        );
+
+        let effective = derive_effective_view(&config, &CatalogOverlay::default());
+        let panel = build_panel(
+            effective,
+            &ActivationState::default(),
+            Some("/etc/routectl/config.toml"),
+            sample_daemon(),
+        );
+
+        let value = serde_json::to_value(&panel.source).unwrap();
+        let obj = value.as_object().unwrap();
+        for key in [
+            "config_path",
+            "loaded_age_ms",
+            "alias_count",
+            "provider_count",
+            "listen_addr",
+            "version",
+        ] {
+            assert!(obj.contains_key(key), "source strip must carry `{key}`");
+        }
+        assert_eq!(
+            panel.source.config_path.as_deref(),
+            Some("/etc/routectl/config.toml")
+        );
+        assert_eq!(panel.source.loaded_age_ms, Some(4_000));
+        assert_eq!(panel.source.alias_count, 2);
+        assert_eq!(panel.source.provider_count, 0);
+        assert_eq!(panel.source.listen_addr, "127.0.0.1:9000");
+        assert_eq!(panel.source.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// A server bound without an on-disk config reports `None`, never an
+    /// invented placeholder path.
+    #[test]
+    fn source_object_reports_no_path_without_an_on_disk_config() {
+        let panel = panel_from_config(&Config::default());
+        assert!(panel.source.config_path.is_none());
+    }
+
+    /// `debits_breaker` is read from the router's own transient-health set, so
+    /// a recoverable class debits the breaker and a caller-shaped one does not.
+    /// The set itself is never restated here -- only its verdict is asserted.
+    #[test]
+    fn debits_breaker_is_true_for_transient_and_false_for_caller_shaped_classes() {
+        let panel = panel_from_config(&Config::default());
+        let debits = |class: &str| {
+            panel
+                .classes
+                .iter()
+                .find(|c| c.class == class)
+                .unwrap_or_else(|| panic!("class `{class}` present in the effective view"))
+                .debits_breaker
+        };
+
+        assert!(debits("rate-limited"));
+        assert!(debits("server-error"));
+        assert!(debits("timeout"));
+        assert!(debits("network-error"));
+        assert!(debits("overloaded"));
+
+        assert!(!debits("auth"));
+        assert!(!debits("bad-request"));
+        assert!(!debits("content-policy"));
+        assert!(!debits("context-window"));
+        assert!(!debits("feature-unsupported"));
     }
 
     #[test]
@@ -473,6 +709,8 @@ mod tests {
         assert!(json["data"]["models"].is_array());
         assert!(json["data"]["classes"].as_array().unwrap().len() >= 10);
         assert!(json["data"]["capabilities"].is_array());
+        assert!(json["data"]["aliases"].is_array());
+        assert!(json["data"]["source"].is_object());
         assert!(json["data"]["activation"].is_array());
     }
 }

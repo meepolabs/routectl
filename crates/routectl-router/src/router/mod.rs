@@ -43,6 +43,7 @@ mod sticky;
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_learn::CapabilityLearnEvent;
 pub use capability_observe::CapabilityObserveEvent;
+pub use dispatch::class_debits;
 #[cfg(test)]
 use feature_filter::FilterSource;
 use feature_filter::{StripDecision, catalog_capabilities};

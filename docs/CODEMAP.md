@@ -1060,14 +1060,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   drift surface
 - `src/config_effective.rs` -- PURE effective-view derivation
   `derive_effective_view(&Config, &CatalogOverlay) -> EffectiveView{models,
-  classes}` over the SAME lookups `apply_catalog_overlay` uses
+  classes, capabilities, aliases, provider_ids}` over the SAME lookups
+  `apply_catalog_overlay` uses
   (`lookup_baked_with_overrides` + `lookup_overlay_cell` + `merge`) -- no
   `build_resolved_models`, no secret resolution, no network. `ModelCell`
   carries the merged `EffectiveRow` (source: baked/import/user/disabled) per
   config-referenced `(provider_kind, upstream)`; `ClassPolicyCell` tags each
   failure class `ClassPolicySource::{Config, BakedDefault}` via
-  `resolved_class`. Consumed by `config show --effective` (cli) and reusable
-  by a future dashboard read surface
+  `resolved_class`; `AliasChain` flattens each `[aliases]` entry into its
+  ORDERED fallback chain via `AliasValue::nicknames` (Single -> one element,
+  Chain verbatim -- the order IS the sequence dispatch walks) and
+  `provider_ids` lists the `[providers.X]` keys, so a read surface counts
+  aliases/providers off the same view it renders. Consumed by `config show
+  --effective` (cli) and the `/status/config` panel
 - `src/schema_gen.rs` -- `render_schema_json() -> String`: the single source
   of the committed `routectl.schema.json` at the repo root, rendered from
   `schemars::schema_for!(Config)` as pretty JSON with a trailing newline
@@ -1464,7 +1469,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `upstream_status_for_remap`) applies the target's `class_overrides` keeping
   the native `matched_by`, then `should_fallback` /
   `should_retry_same_provider` / `retry_cap_for` decide the outcome and the
-  class-decoupled `class_debits` set gates breaker debit. Class-decision
+  class-decoupled `class_debits` set gates breaker debit (`pub` and re-exported
+  at the crate root, so the `/status/config` panel reports each class's
+  `debits_breaker` from this ONE definition rather than restating the set). Class-decision
   observability: `emit_class_observability` emits one `emit_class_decision`
   event per arm (with `ClassDecisionObs` / `DispatchSurface` / `UpstreamFacts`
   / `upstream_facts`, safe structured dimensions only) plus a
@@ -2586,7 +2593,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/mod.rs` -- read-only `/status` family. `StatusState`
   carries ONLY read handles (a `StatusRouterHandle` read-only facade over the
   router `ArcSwap` -- see `router_view.rs` -- plus the `activation` `ArcSwap`
-  + resolved `usage_db_path`/`config_path`) via `from_app`, so a status
+  + resolved `usage_db_path`/`config_path`, plus a `DaemonMetaHandle` read
+  facade -- see `daemon_meta.rs`) via `from_app`, so a status
   handler is structurally incapable of mutation, of reaching a raw
   `Router`/`.config`/dispatch, or of touching the forwarding seam;
   `PanelObservability`/`PanelCounters` are the per-panel last-availability +
@@ -2604,8 +2612,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   500/crash). The `/status` aggregate composes the four REAL panel builders
   CONCURRENTLY (`tokio::join!`, so one slow panel never stalls the others)
   into `{panels:{usage,health,config,doctor}}` -- each an INDEPENDENT
-  per-panel envelope with its OWN `schema_version` (usage = 2, health = 3,
-  config = 1, doctor = 3)/`as_of`/availability, with NO outer envelope version
+  per-panel envelope with its OWN `schema_version` (usage = 3, health = 5,
+  config = 2, doctor = 4)/`as_of`/availability, with NO outer envelope version
   (push-ready: a future push event is the same per-panel shape keyed by panel
   name). Reuses the same builders the per-panel endpoints call, so one panel's
   source failure OR panic renders only THAT panel unavailable and leaves
@@ -2618,7 +2626,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>
-  `data`/`as_of` `None`; `now_utc_rfc3339` (RFC3339-UTC `as_of` helper);
+  `data`/`as_of` `None`; `now_utc_rfc3339` (RFC3339-UTC `as_of` helper) and
+  `utc_rfc3339` (same format over a caller-pinned instant, for a panel deriving
+  `as_of` and a relative age from ONE clock read);
   `vocabulary` const module -- the fixed snake_case tokens the wire DTOs reuse
   from the event surface (`state_key`/`capability_key`/`signal_tier`,
   provenance tokens `provider`/`model`/`override`/`learned`, signal-tier
@@ -2670,6 +2680,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   from the sibling panel modules -- a panel cannot obtain a `&Router`, call
   `.complete`/`.stream`/dispatch, or read `.config`; the `mod.rs`
   forbidden-token scan also covers this file with a facade-specific rule
+- `src/handlers/status/daemon_meta.rs` -- read-only facade over the
+  process-level daemon facts the config panel's source strip needs.
+  `DaemonMeta` (built once at bind, `stamp_config_loaded()` called at
+  bootstrap and by the reload coordinator after every successful config /
+  overlay reload) holds the bound `listen_addr` plus an atomic last-load
+  epoch-ms; `DaemonMetaHandle` keeps the `Arc` PRIVATE and exposes only
+  `snapshot(now_ms) -> DaemonMetaSnapshot{listen_addr, version,
+  config_loaded_age_ms}`, so a panel can read the facts but never reach the
+  stamp writer. An unstamped load reports `None` (never an epoch sentinel)
+  and a backwards clock step clamps the age to zero (never negative)
 - `src/handlers/status/usage.rs` --
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
@@ -2710,9 +2730,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `view.effective_view(&overlay) -> EffectiveView`. Maps to a purpose-built
   `ConfigPanel` DTO (model cells with `source` token
   baked/import/user/disabled/missing + economics; class-policy cells with
-  kebab class + `config`/`baked-default` source; capability cells with
+  kebab class + `config`/`baked-default` source + `debits_breaker` read from
+  the router's public `class_debits` so the transient-health set is never
+  restated on the wire; capability cells with
   `route-away`/`force-supported` verdict + `provider`/`model`/`override`
-  provenance reusing the shared vocabulary) plus the activation inventory
+  provenance reusing the shared vocabulary; `aliases` carrying each alias's
+  ORDERED fallback chain; a `source` strip with
+  `config_path`/`loaded_age_ms`/`alias_count`/`provider_count`/`listen_addr`/`version`,
+  counts from the same effective view and daemon facts from the
+  `daemon_meta` facade) plus the activation inventory
   (`activation.load_full()` once, each `ActivationEntry` mapped to
   provider_id/provider_kind/status/reason/referenced_by_aliases). Raw `Config`
   is NEVER imported or serialized (the forbidden-import seam test enforces

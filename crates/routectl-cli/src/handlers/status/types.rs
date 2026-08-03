@@ -53,7 +53,14 @@ impl<T> Panel<T> {
 /// Current instant as an RFC3339-UTC string, the format every panel's
 /// `as_of` uses.
 pub fn now_utc_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    utc_rfc3339(chrono::Utc::now())
+}
+
+/// Format an already-read instant in the same RFC3339-UTC shape as
+/// [`now_utc_rfc3339`], for a panel that must pin ONE clock reading and derive
+/// both its `as_of` and a relative age from it.
+pub fn utc_rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// Fixed snake_case wire tokens the status DTOs reuse from the event

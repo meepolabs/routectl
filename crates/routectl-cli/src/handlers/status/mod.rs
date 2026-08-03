@@ -17,6 +17,7 @@
 //! zero-auth dev path. `/v1/*` inherits none of the status-only middleware.
 
 mod config;
+mod daemon_meta;
 mod doctor;
 mod health;
 mod page;
@@ -38,11 +39,14 @@ use parking_lot::Mutex;
 use routectl_router::ActivationState;
 use serde::Serialize;
 
-pub use types::{Panel, now_utc_rfc3339, vocabulary};
+pub use types::{Panel, now_utc_rfc3339, utc_rfc3339, vocabulary};
+
+pub use daemon_meta::DaemonMeta;
 
 pub use page::page_router;
 
 use crate::server::AppState;
+use daemon_meta::DaemonMetaHandle;
 use router_view::StatusRouterHandle;
 
 /// Shared state for the `/status` family. Carries ONLY read handles: the
@@ -65,6 +69,10 @@ pub struct StatusState {
     pub usage_db_path: PathBuf,
     /// Resolved config-file path, when serving from a real on-disk config.
     pub config_path: Option<PathBuf>,
+    /// Process-level daemon facts (bound address, binary version, last
+    /// config-load instant) behind a read-only facade. The config panel's
+    /// source strip is the only reader.
+    pub daemon_meta: DaemonMetaHandle,
     /// Per-panel availability + shed-count tracking. Each panel build
     /// records its outcome here; an availability edge logs a single
     /// transition line (never per poll).
@@ -74,13 +82,18 @@ pub struct StatusState {
 impl StatusState {
     /// Build from the running [`AppState`]. Clones the read handles and reads
     /// the usage-ledger path from the currently-installed config.
-    pub fn from_app(app: &AppState, config_path: Option<PathBuf>) -> Self {
+    pub fn from_app(
+        app: &AppState,
+        config_path: Option<PathBuf>,
+        daemon_meta: Arc<DaemonMeta>,
+    ) -> Self {
         let usage_db_path = app.router.load().config.usage.db_path.clone();
         Self {
             router: StatusRouterHandle::new(app.router.clone()),
             activation: app.activation.clone(),
             usage_db_path,
             config_path,
+            daemon_meta: DaemonMetaHandle::new(daemon_meta),
             observability: PanelObservability::default(),
         }
     }
@@ -326,7 +339,7 @@ mod tests {
         // No panel opens the ledger in the skeleton, so the temp dir may drop
         // immediately -- `usage_db_path` is only read when a real source is
         // wired.
-        Arc::new(StatusState::from_app(&app, None))
+        Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()))
     }
 
     /// The GET-only panel paths. `/status/query` is deliberately absent: it
@@ -437,6 +450,11 @@ mod tests {
             ("health.rs", include_str!("health.rs"), &panel_forbidden),
             ("config.rs", include_str!("config.rs"), &panel_forbidden),
             ("doctor.rs", include_str!("doctor.rs"), &panel_forbidden),
+            (
+                "daemon_meta.rs",
+                include_str!("daemon_meta.rs"),
+                &panel_forbidden,
+            ),
             (
                 "router_view.rs",
                 include_str!("router_view.rs"),
@@ -562,7 +580,7 @@ mod tests {
 
         let router = Router::new(Arc::new(Config::default()));
         let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
-        let mut status = StatusState::from_app(&app, Some(config_path));
+        let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         // Point usage at an absent ledger so ONLY the usage panel sheds.
         status.usage_db_path = dir.path().join("absent-usage.db");
         let state = Arc::new(status);
@@ -607,9 +625,9 @@ mod tests {
             );
         }
         // Each panel carries its OWN schema_version (usage 2, health 5,
-        // doctor 4, config 1).
+        // doctor 4, config 2).
         assert_eq!(panels["health"]["schema_version"], 5);
-        assert_eq!(panels["config"]["schema_version"], 1);
+        assert_eq!(panels["config"]["schema_version"], 2);
         assert_eq!(panels["doctor"]["schema_version"], 4);
     }
 }

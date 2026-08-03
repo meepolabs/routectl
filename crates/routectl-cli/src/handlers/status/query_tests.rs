@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::commands::usage::MAX_BUCKETS;
+use crate::handlers::status::DaemonMeta;
 use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
@@ -19,7 +20,7 @@ use tower::ServiceExt;
 fn state_with_ledger(db_path: PathBuf) -> Arc<StatusState> {
     let router = Router::new(Arc::new(Config::default()));
     let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
-    let mut status = StatusState::from_app(&app, None);
+    let mut status = StatusState::from_app(&app, None, DaemonMeta::for_test());
     status.usage_db_path = db_path;
     Arc::new(status)
 }

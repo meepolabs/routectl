@@ -68,6 +68,17 @@ pub enum ClassPolicySource {
     BakedDefault,
 }
 
+/// One `[aliases]` entry flattened into its ordered fallback chain. A
+/// `Single` alias yields a one-element chain; a `Chain` keeps the operator's
+/// order verbatim, since that order IS the fallback sequence dispatch walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasChain {
+    /// The `[aliases]` table key (may be a suffix-glob pattern).
+    pub alias: String,
+    /// The model nicknames this alias falls back through, in order.
+    pub chain: Vec<String>,
+}
+
 /// The provenance-annotated effective view: the layered surfaces only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveView {
@@ -81,6 +92,10 @@ pub struct EffectiveView {
     /// state on a live router, not config, so they are not part of this
     /// pure view.
     pub capabilities: Vec<OverrideRow>,
+    /// One entry per `[aliases]` table entry, in alias-key order.
+    pub aliases: Vec<AliasChain>,
+    /// The `[providers.X]` table keys, in provider-key order.
+    pub provider_ids: Vec<String>,
 }
 
 /// Every operator-nameable failure class, in a stable render order.
@@ -154,10 +169,23 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
             .then_with(|| a.capability_key.cmp(&b.capability_key))
     });
 
+    let aliases = config
+        .aliases
+        .iter()
+        .map(|(alias, value)| AliasChain {
+            alias: alias.clone(),
+            chain: value.nicknames().map(str::to_string).collect(),
+        })
+        .collect();
+
+    let provider_ids = config.providers.keys().cloned().collect();
+
     EffectiveView {
         models,
         classes,
         capabilities,
+        aliases,
+        provider_ids,
     }
 }
 
