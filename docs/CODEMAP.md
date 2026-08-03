@@ -2663,7 +2663,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   non-series path), then handed to the leaf as a plain
   `BucketSpec`; an all-time window over an empty ledger has no anchor and answers
   with an EMPTY series at the requested unit's width rather than an error. All
-  local-calendar math stays here, keeping `routectl-usage` chrono-free
+  local-calendar math stays here, keeping `routectl-usage` chrono-free.
+  `spec_from_body` is `pub(super)` so the dashboard's drift test can validate
+  the request shapes the page declares against THIS parser instead of a second
+  copy of the vocabulary
 - `src/handlers/status/router_view.rs` -- the read-only router facade that
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
@@ -2758,23 +2761,83 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   re-dial. Config-load errors are already redacted inside the gather (no
   second copy). `config_path: None` -> `no_config_path` unavailable; a gather
   failure -> `doctor_unavailable`
-- `src/handlers/status/page.rs` -- the embedded dashboard page. `PAGE: &str =
-  include_str!("dashboard.html")` (the house `include_str!` pattern -- no
-  `ServeDir`/`rust-embed`); `page_router() -> Router<()>` serves the single
-  self-contained document at `GET /` with a `Cache-Control: no-store` header,
-  stateless and static-bytes-only (structurally read-only; covered by the
-  `mod.rs` forbidden-import scan + its own GET-only 405 assertion). Merged
-  into the serve process under the SAME `status_gate::host_guard` and the SAME
+- `src/handlers/status/page.rs` -- the embedded dashboard page. ASSEMBLES the
+  document at COMPILE time from three sources (`include_str!` x3 --
+  `dashboard.html` markup + `dashboard.css` + `dashboard.js`) by splicing the
+  style and script bodies into the markup's two `@@DASHBOARD_*@@` slots as one
+  inline `<style>` + one inline `<script>`; the join is `const fn` work over
+  byte arrays, so the served `PAGE: &str` is still static bytes and the split
+  is authoring-only (the house `include_str!` pattern -- no
+  `ServeDir`/`rust-embed`). A missing or duplicated slot is a compile-time
+  panic. `page_router() -> Router<()>` serves the single self-contained
+  document at `GET /` with a `Cache-Control: no-store` header, stateless and
+  static-bytes-only (structurally read-only; covered by the `mod.rs`
+  forbidden-import scan + its own GET-only 405 assertion). Merged into the
+  serve process under the SAME `status_gate::host_guard` and the SAME
   conditional listener auth gate (applied whenever `status_requires_auth`
   holds -- tokens configured OR a non-loopback bind) as the JSON, but
   deliberately OFF the JSON `apply_overload_layers` shed budget: a zero-I/O
   `&'static str` response cannot stall/hold a permit, so an overload sheds
   status DATA while the operator's incident window (the shell) still loads.
-  `dashboard.html` is the whole frontend (inline CSS/JS, zero external network
-  deps). A page.rs test pins the dashboard's `EXPECTED` schema-version map
-  (parsed from the first `<script>` block) to the panel `SCHEMA_VERSION`
-  consts (now `pub` on usage/health/config + `DOCTOR_SCHEMA_VERSION` on
-  doctor) so the client render-target and server wire versions cannot drift
+  Four guard tests, all reading the sources with comments stripped so prose
+  cannot read as code: (1) the mutation scan -- a deny-list of mutating verbs
+  in every spelling (quoted/unquoted/computed/form-attribute) plus form
+  affordances and a `/status`-only path allowlist, AND a positive scan
+  asserting the set of `method:` values the script sets is a subset of
+  `{"query"}` (fails closed on a verb nobody deny-listed); (2) the
+  `EXPECTED` schema-version map pinned to the panel `SCHEMA_VERSION` consts
+  (`pub` on usage/health/config, `DOCTOR_SCHEMA_VERSION` on doctor,
+  `query::SCHEMA_VERSION`) so client render-target and server wire versions
+  cannot drift; (3) `QUERY_METRICS` + `QUERY_TOKENS` field names asserted to be
+  fields of a serde-serialized `QueryMetrics` (derived, not a second hardcoded
+  list) and the COMPLETE `QUERY_SHAPES` request vocabulary -- every selectable
+  window x every group_by x each series mode, checked for completeness and
+  duplicate-freedom -- validated through the route's own
+  `query::spec_from_body`; (4) self-containment of the ASSEMBLED page -- every
+  `src`/`href` attribute (case-insensitive, whitespace tolerated around `=`)
+  must be an inline `data:` URI and no CSS
+  `url(...)`/`@import` may appear, so the artifact still renders offline
+- `src/handlers/status/dashboard.html` -- dashboard MARKUP only: the verdict
+  strip (state dot + one plain-language sentence + req/span + window picker +
+  poll indicator; carries no cost figure by design), the six-tab bar
+  (Overview default, then Usage / Routing / Health / Config / Doctor), the
+  banner, and one identical pane shell per tab (`status-<tab>` +
+  `body-<tab>`). Never served alone; carries no `<link>`/`<script src>`
+- `src/handlers/status/dashboard.css` -- dashboard STYLE body. One token set
+  (dark primary, light re-valued under `prefers-color-scheme`), 8px grid,
+  hairline borders, system sans for UI and mono for data, one accent plus one
+  non-semantic second data hue, semantic green/amber/red reserved for
+  good/degraded/broken. Tables scroll inside their card (`.tablewrap`) so the
+  page never scrolls sideways from 380px to 1440px
+- `src/handlers/status/dashboard.js` -- dashboard SCRIPT body: the whole
+  client. Five DATA SOURCES (`usage`/`health`/`config`/`doctor` off the GET
+  `/status` aggregate, plus `query`) each with an independent state record
+  (`loading|live|empty|unavailable|incompatible|invalid_payload|stale|dead`),
+  mapped to the six tabs by `TAB_SOURCES` -- so a dead QUERY degrades only
+  Overview and Usage while the four GET-backed tabs keep rendering.
+  `renderPanel` validates `schema_version` BEFORE reading `data`, then enforces
+  the envelope invariant (exactly one of a meaningful `data` xor an
+  `unavailable` code; zero or both -> `invalid_payload` with no transport
+  backoff) and fails closed per source; `renderPanelGuarded` wraps each source
+  independently so one malformed panel cannot fail the whole round.
+  `safeSection(rec, build)` is the section-level boundary a multi-source tab
+  builder wraps EVERY TAB_SOURCES dependency in, so a secondary source's fault
+  costs that section only; `renderActiveTab`'s own try/catch is the whole-tab
+  last resort. `queryStatus`
+  issues `method:'QUERY'` + `Content-Type: application/json` + a stable
+  stringified body + `cache:'no-store'` under a ~3500ms budget, single-flight
+  (aborts the previous request and bumps a GENERATION so a late old response
+  cannot repaint a newer selection), on backoff state SEPARATE from the GET
+  loop's (a QUERY failure never slows the healthy 5s GET cadence): 403
+  terminal, 400/405 -> incompatible and not retried until the input changes,
+  503/network/timeout and the 200-borne `db_busy`/`db_unavailable`/
+  `query_timeout` codes -> QUERY-only 10/20/30s backoff off the shared
+  `BACKOFF_STEPS_MS` ladder. `QUERY_METRICS` (numeric) + `QUERY_TOKENS`
+  (pass-through, e.g. `cost_status`) are the ONLY home of raw query field
+  names, consumed solely by the thin `QueryAdapter` flat-extraction layer
+  (num0 coercion on the numeric half, no rename, no computed model); render
+  code reads adapter properties. Per-tab `buildX` functions live in
+  marker-delimited blocks registered in `BUILDERS`
 
 ### ingress
 

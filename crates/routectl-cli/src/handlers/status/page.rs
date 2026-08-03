@@ -1,10 +1,18 @@
 //! The embedded-asset dashboard page.
 //!
-//! Serves a single self-contained HTML document (embedded via `include_str!`,
-//! the house pattern -- no `ServeDir`/`rust-embed`) at `GET /`. The response
-//! is static bytes only: this handler carries no state and imports nothing
-//! mutating, so it is structurally read-only, and the forbidden-import scan in
-//! [`super`] covers this source alongside the panels.
+//! Serves a single self-contained HTML document at `GET /`. The document is
+//! ASSEMBLED AT COMPILE TIME from three sources -- `dashboard.html` (markup),
+//! `dashboard.css` (style body), `dashboard.js` (script body) -- each embedded
+//! via `include_str!` and spliced into the markup's two asset slots as one
+//! inline `<style>` and one inline `<script>`. The split is an authoring
+//! convenience only: the runtime artifact is still ONE offline page with zero
+//! external requests (asserted by [`tests::assembled_page_has_no_external_refs`]),
+//! and the whole assembly is a `const`, so the served bytes are still static
+//! and there is no per-request work.
+//!
+//! The response is static bytes only: this handler carries no state and
+//! imports nothing mutating, so it is structurally read-only, and the
+//! forbidden-import scan in [`super`] covers this source alongside the panels.
 //!
 //! [`page_router`] is a stateless [`AxumRouter<()>`]. It is merged into the
 //! serve process under the same `Host` allowlist as the `/status` JSON, and
@@ -19,8 +27,113 @@ use axum::http::header;
 use axum::response::Html;
 use axum::routing::get;
 
-/// The self-contained dashboard document, embedded at build time.
-const PAGE: &str = include_str!("dashboard.html");
+/// The dashboard's three sources. Only [`PAGE`] is ever served; these are the
+/// authoring inputs the tests read directly (a scan of the JS is a scan of the
+/// script, with none of the markup around it).
+const MARKUP: &str = include_str!("dashboard.html");
+const STYLE: &str = include_str!("dashboard.css");
+const SCRIPT: &str = include_str!("dashboard.js");
+
+/// The markup's asset slots. Each appears EXACTLY once and is replaced by the
+/// corresponding inline block; a missing slot is a compile error, not a
+/// silently style-less page.
+const STYLE_SLOT: &str = "@@DASHBOARD_STYLE@@";
+const SCRIPT_SLOT: &str = "@@DASHBOARD_SCRIPT@@";
+
+/// Byte offset of `needle` in `haystack`, panicking at COMPILE time when it is
+/// absent or repeated. A slot that moved or got duplicated must break the
+/// build rather than produce a half-assembled page.
+const fn slot_offset(haystack: &str, needle: &str) -> usize {
+    let (hay, need) = (haystack.as_bytes(), needle.as_bytes());
+    let mut found = usize::MAX;
+    let mut i = 0;
+    while i + need.len() <= hay.len() {
+        let mut j = 0;
+        while j < need.len() && hay[i + j] == need[j] {
+            j += 1;
+        }
+        if j == need.len() {
+            assert!(found == usize::MAX, "dashboard asset slot appears twice");
+            found = i;
+        }
+        i += 1;
+    }
+    assert!(found != usize::MAX, "dashboard asset slot is missing");
+    found
+}
+
+/// `s[from..to]` as a `&str`, in const context.
+const fn slice(s: &str, from: usize, to: usize) -> &str {
+    let (_, rest) = s.as_bytes().split_at(from);
+    let (mid, _) = rest.split_at(to - from);
+    match core::str::from_utf8(mid) {
+        Ok(text) => text,
+        Err(_) => panic!("dashboard markup slot lands mid-character"),
+    }
+}
+
+const STYLE_AT: usize = slot_offset(MARKUP, STYLE_SLOT);
+const SCRIPT_AT: usize = slot_offset(MARKUP, SCRIPT_SLOT);
+
+/// The three markup segments around the two slots. The style slot must precede
+/// the script slot (style in `<head>`, script at the end of `<body>`).
+const HEAD: &str = slice(MARKUP, 0, STYLE_AT);
+const BETWEEN: &str = slice(MARKUP, STYLE_AT + STYLE_SLOT.len(), SCRIPT_AT);
+const TAIL: &str = slice(MARKUP, SCRIPT_AT + SCRIPT_SLOT.len(), MARKUP.len());
+
+/// The assembled document in render order.
+const PARTS: &[&str] = &[
+    HEAD,
+    "<style>\n",
+    STYLE,
+    "</style>",
+    BETWEEN,
+    "<script>\n",
+    SCRIPT,
+    "</script>",
+    TAIL,
+];
+
+const fn joined_len(parts: &[&str]) -> usize {
+    let mut total = 0;
+    let mut i = 0;
+    while i < parts.len() {
+        total += parts[i].len();
+        i += 1;
+    }
+    total
+}
+
+const PAGE_LEN: usize = joined_len(PARTS);
+
+const fn join<const N: usize>(parts: &[&str]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut written = 0;
+    let mut i = 0;
+    while i < parts.len() {
+        let part = parts[i].as_bytes();
+        let mut j = 0;
+        while j < part.len() {
+            out[written] = part[j];
+            written += 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The assembled bytes. A `static` rather than a `const` so the page exists
+/// once in the binary instead of being copied into each use site (the array is
+/// the whole document, and clippy rejects a const this large for exactly that
+/// reason).
+static PAGE_BYTES: [u8; PAGE_LEN] = join::<PAGE_LEN>(PARTS);
+
+/// The self-contained dashboard document, assembled at build time.
+static PAGE: &str = match core::str::from_utf8(&PAGE_BYTES) {
+    Ok(text) => text,
+    Err(_) => panic!("assembled dashboard page is not UTF-8"),
+};
 
 /// GET-only router serving the dashboard shell at `/`. Stateless
 /// ([`AxumRouter<()>`]) so it merges into the state-erased serve router without
@@ -42,6 +155,99 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// Whitespace- and case-normalized view of a source, so `method : 'Post'`
+    /// and `method:"POST"` collapse to the same needle. Backticks are kept.
+    fn compact(src: &str) -> String {
+        src.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase()
+    }
+
+    /// Strip `//` and block comments from a JS source, leaving string literals
+    /// intact. The positive path/verb scans below are assertions about what the
+    /// CODE reaches, so prose that happens to contain a slash or an apostrophe
+    /// must not read as a path literal or an unterminated string. Quote-aware
+    /// so a `//` inside a string literal is not mistaken for a comment.
+    fn strip_js_comments(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        let mut quote: Option<u8> = None;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if let Some(q) = quote {
+                out.push(c as char);
+                if c == b'\\' && i + 1 < bytes.len() {
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            if c == b'"' || c == b'\'' || c == b'`' {
+                quote = Some(c);
+                out.push(c as char);
+                i += 1;
+                continue;
+            }
+            if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            out.push(c as char);
+            i += 1;
+        }
+        out
+    }
+
+    /// Strip CSS comments, so prose in `dashboard.css` cannot read as a rule.
+    fn strip_css_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        while let Some(open) = rest.find("/*") {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 2..];
+            match after.find("*/") {
+                Some(close) => rest = &after[close + 2..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Strip HTML comments, so the markup's authoring notes are not scanned as
+    /// markup.
+    fn strip_html_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        while let Some(open) = rest.find("<!--") {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 4..];
+            match after.find("-->") {
+                Some(close) => rest = &after[close + 3..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
 
     /// The page route is GET-only: `GET /` succeeds, every mutating method is
     /// a 405. Mirrors the status-router assertion so a non-GET route added to
@@ -81,41 +287,38 @@ mod tests {
         }
     }
 
-    /// Read-only client-surface guard: the embedded dashboard JS carries no
+    /// Read-only client-surface guard: the dashboard script carries no
     /// mutation channel and reaches no daemon path other than the read-only
     /// status surface. Read-only is a hard milestone invariant, so this pins
-    /// it at the client layer: any mutating `fetch` method (quoted, backtick,
-    /// unquoted, or a computed `method` property), any form affordance
-    /// (`<form>`, `createElement('form')`, `.submit(`, `document.forms`), or
-    /// any `fetch` to a path outside `/status` / `/status/usage` trips it.
+    /// it at the client layer.
+    ///
+    /// The verb check is BOTH directions. The deny-list rejects the mutating
+    /// verbs in every spelling (quoted, unquoted, computed property, form
+    /// attribute); the positive check then extracts EVERY quoted `method:`
+    /// value the script sets and asserts the set is a subset of the one verb
+    /// this page is allowed to speak. The positive form is strictly stronger:
+    /// a verb nobody thought to deny-list still fails closed.
     #[test]
     fn dashboard_js_carries_no_mutation_channel() {
-        const DASHBOARD: &str = include_str!("dashboard.html");
-        // Normalize away whitespace + case so `method : 'Post'` and
-        // `method:"POST"` collapse to the same needle. Backticks are kept.
-        let compact: String = DASHBOARD
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>()
-            .to_ascii_lowercase();
+        let script = compact(&strip_js_comments(SCRIPT));
 
         for verb in ["post", "put", "delete", "patch"] {
             for quote in ['"', '\'', '`'] {
                 let needle = format!("method:{quote}{verb}{quote}");
                 assert!(
-                    !compact.contains(&needle),
+                    !script.contains(&needle),
                     "dashboard JS must not set a `{needle}` fetch option (read-only)"
                 );
             }
             // Unquoted fetch option (`method:post`) and form-post attribute
             // (`method=post`), both after whitespace/quote normalization.
             assert!(
-                !compact.contains(&format!("method:{verb}")),
+                !script.contains(&format!("method:{verb}")),
                 "dashboard JS must not set an unquoted `method:{verb}` (read-only)"
             );
             assert!(
-                !compact.contains(&format!("method={verb}")),
-                "dashboard must not carry a `method={verb}` form attribute (read-only)"
+                !script.contains(&format!("method={verb}")),
+                "dashboard JS must not carry a `method={verb}` form attribute (read-only)"
             );
         }
 
@@ -124,50 +327,58 @@ mod tests {
         for quote in ['"', '\'', '`'] {
             let needle = format!("[{quote}method{quote}]");
             assert!(
-                !compact.contains(&needle),
+                !script.contains(&needle),
                 "dashboard JS must not use a computed `method` property (read-only)"
             );
         }
 
+        // Positive verb allowlist. `/status/query` answers the QUERY method
+        // and nothing else on this surface carries a verb at all, so the set
+        // of `method:` values the script sets must be exactly that or empty.
+        let verbs = quoted_method_values(&script);
+        for verb in &verbs {
+            assert!(
+                verb == "query",
+                "dashboard JS sets fetch method `{verb}`; only `query` is permitted (read-only)"
+            );
+        }
+        assert!(
+            verbs.contains(&"query".to_string()),
+            "dashboard JS is expected to issue the QUERY aggregate; the positive \
+             method scan found no `method:` at all, so it is no longer guarding anything"
+        );
+
         // Form elements are browser-native mutation affordances -- markup,
         // dynamic construction, and programmatic submission all breach the
-        // pure-read surface, so none may appear.
+        // pure-read surface, so none may appear in EITHER source.
+        let markup = compact(&strip_html_comments(MARKUP));
         assert!(
-            !compact.contains("<form"),
+            !markup.contains("<form") && !script.contains("<form"),
             "dashboard must carry no <form> element (read-only)"
         );
         for quote in ['"', '\'', '`'] {
             let needle = format!("createelement({quote}form{quote}");
             assert!(
-                !compact.contains(&needle),
+                !script.contains(&needle),
                 "dashboard JS must not construct a form element (read-only)"
             );
         }
         assert!(
-            !compact.contains(".submit("),
+            !script.contains(".submit("),
             "dashboard JS must not submit a form (read-only)"
         );
         assert!(
-            !compact.contains("document.forms"),
+            !script.contains("document.forms"),
             "dashboard JS must not reach the document forms collection (read-only)"
         );
 
-        // Positive allowlist: every path-like string literal in the embedded
-        // JS must target the read-only status surface. A GET to `/v1/...` or
-        // any other daemon path is still a breach of the read-only contract,
-        // so pin the set of reachable paths to `/status` / `/status/usage`.
-        let script = {
-            let start = DASHBOARD
-                .find("<script>")
-                .expect("dashboard has a <script> block");
-            let end = DASHBOARD
-                .find("</script>")
-                .expect("dashboard <script> block is closed");
-            &DASHBOARD[start..end]
-        };
+        // Positive path allowlist: every path-like string literal in the
+        // script must target the read-only status surface. A GET to `/v1/...`
+        // or any other daemon path is still a breach of the read-only
+        // contract, so pin the set of reachable paths to the `/status` family.
         for quote in ['"', '\'', '`'] {
             let opener = format!("{quote}/");
-            let mut rest = script;
+            let mut rest = script.as_str();
             while let Some(pos) = rest.find(&opener) {
                 let from_slash = &rest[pos + quote.len_utf8()..];
                 let close = from_slash[1..]
@@ -176,42 +387,67 @@ mod tests {
                 let path = &from_slash[..=close];
                 assert!(
                     path.starts_with("/status"),
-                    "dashboard JS may only fetch /status or /status/usage, found `{path}`"
+                    "dashboard JS may only fetch the /status family, found `{path}`"
                 );
                 rest = &from_slash[close + 1..];
             }
         }
     }
 
+    /// Every quoted value assigned to a `method:` key in a compacted source.
+    fn quoted_method_values(compacted: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut rest = compacted;
+        while let Some(pos) = rest.find("method:") {
+            rest = &rest[pos + "method:".len()..];
+            let mut chars = rest.chars();
+            let Some(quote) = chars.next() else { break };
+            if quote != '"' && quote != '\'' && quote != '`' {
+                continue;
+            }
+            let body = &rest[quote.len_utf8()..];
+            let Some(close) = body.find(quote) else { break };
+            found.push(body[..close].to_string());
+            rest = &body[close..];
+        }
+        found
+    }
+
+    /// Slice the body of a `var <name> = <open> ... <close>` literal out of the
+    /// dashboard script.
+    ///
+    /// Anchored on the DECLARATION, not on the first textual occurrence of the
+    /// name: a comment mentioning `QUERY_METRICS = [...]` precedes the real
+    /// `var QUERY_METRICS =` in this file, and matching it would let the drift
+    /// tests below validate prose while the live declaration drifted freely.
+    /// An absent declaration still fails.
+    fn literal_body(name: &str, open: char, close: char) -> &'static str {
+        let decl_needle = format!("var {name} =");
+        let decl = SCRIPT
+            .find(&decl_needle)
+            .unwrap_or_else(|| panic!("dashboard JS declares `{decl_needle}`"));
+        let decl = decl + decl_needle.len();
+        let start = SCRIPT[decl..]
+            .find(open)
+            .unwrap_or_else(|| panic!("{name} has a literal body"))
+            + decl;
+        let end = SCRIPT[start..]
+            .find(close)
+            .unwrap_or_else(|| panic!("{name} literal is closed"))
+            + start;
+        &SCRIPT[start + 1..end]
+    }
+
     /// Drift guard between client and server: the dashboard's `EXPECTED`
-    /// schema-version map (the per-panel wire versions the JS renders against)
-    /// must equal the Rust panel `SCHEMA_VERSION` consts exactly. They ship in
-    /// the same binary, so a mismatch here would silently degrade a LIVE panel
-    /// to the client's "incompatible" fallback. Pins the two together: parse
-    /// the `EXPECTED = { ... }` object literal out of the embedded script and
-    /// assert key/value parity with the server-side consts.
+    /// schema-version map (the per-source wire versions the JS renders
+    /// against) must equal the Rust `SCHEMA_VERSION` consts exactly. They ship
+    /// in the same binary, so a mismatch here would silently degrade a LIVE
+    /// source to the client's "incompatible" fallback. `query` is in the map
+    /// alongside the four GET panels because the QUERY aggregate is a source
+    /// of its own with its own version.
     #[test]
     fn dashboard_expected_map_matches_panel_schema_versions() {
-        const DASHBOARD: &str = include_str!("dashboard.html");
-
-        // Isolate the first <script> block, the same slice the mutation scan
-        // reads, so a second embedded block could not smuggle a divergent map.
-        let start = DASHBOARD
-            .find("<script>")
-            .expect("dashboard has a <script> block");
-        let end = DASHBOARD
-            .find("</script>")
-            .expect("dashboard <script> block is closed");
-        let script = &DASHBOARD[start..end];
-
-        // Slice the `EXPECTED = { ... }` object-literal body.
-        let decl = script.find("EXPECTED").expect("dashboard defines EXPECTED");
-        let open = script[decl..]
-            .find('{')
-            .expect("EXPECTED has an object literal")
-            + decl;
-        let close = script[open..].find('}').expect("EXPECTED object is closed") + open;
-        let body = &script[open + 1..close];
+        let body = literal_body("EXPECTED", '{', '}');
 
         // Parse the `key: value` pairs (keys may be bare or quoted).
         let mut parsed: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
@@ -248,6 +484,10 @@ mod tests {
                 "doctor".to_string(),
                 crate::handlers::status::doctor::DOCTOR_SCHEMA_VERSION,
             ),
+            (
+                "query".to_string(),
+                crate::handlers::status::query::SCHEMA_VERSION,
+            ),
         ]
         .into_iter()
         .collect();
@@ -256,5 +496,210 @@ mod tests {
             parsed, expected,
             "dashboard EXPECTED map must match the panel SCHEMA_VERSION consts"
         );
+    }
+
+    /// Drift guard on the query VOCABULARY, both halves of it.
+    ///
+    /// `QUERY_METRICS` + `QUERY_TOKENS` are the only places a raw query field
+    /// name lives in the dashboard, so a server-side rename would otherwise
+    /// silently turn a column into zeroes (the adapter coerces a missing
+    /// numeric field through `num0`) or a cost token into `undefined`. Both
+    /// arrays are checked, so a field moved between them stays covered. The
+    /// Rust side is DERIVED from serde -- a serialized `QueryMetrics` value --
+    /// rather than a second hardcoded list, so this test cannot rot into
+    /// agreeing with itself. Subset, not equality: the dashboard is free to read
+    /// only part of the vocabulary.
+    ///
+    /// `QUERY_SHAPES` is the COMPLETE set of request bodies the dashboard can
+    /// issue: the client copies an entry verbatim rather than patching fields
+    /// at runtime, so validating every entry through the route's own parser
+    /// validates every request that can leave the page. Completeness is checked
+    /// too -- every selectable window must carry a shape for every
+    /// (group_by, series-mode) pair any window declares, and no pair may be
+    /// declared twice for one window -- so the client cannot resolve a
+    /// selection to a shape this test never saw.
+    #[test]
+    fn dashboard_metric_tokens_are_in_the_query_vocabulary() {
+        let vocabulary = serde_json::to_value(routectl_usage::QueryMetrics::default())
+            .expect("QueryMetrics serializes");
+        let vocabulary = vocabulary
+            .as_object()
+            .expect("QueryMetrics serializes to an object");
+
+        for name in ["QUERY_METRICS", "QUERY_TOKENS"] {
+            let tokens = string_array(name);
+            assert!(
+                !tokens.is_empty(),
+                "{name} must not be empty (it is part of the dashboard's query field vocabulary)"
+            );
+            for token in &tokens {
+                assert!(
+                    vocabulary.contains_key(token.as_str()),
+                    "dashboard query field `{token}` (in {name}) is not a field of the \
+                     server's QueryMetrics"
+                );
+            }
+        }
+
+        // Every declared request shape must parse as a valid query body. The
+        // shapes are written as strict JSON in dashboard.js precisely so they
+        // can be fed to the server's parser verbatim.
+        let now = chrono::Local::now();
+        let shapes = json_object_literals(literal_body("QUERY_SHAPES", '[', ']'));
+        assert!(
+            !shapes.is_empty(),
+            "QUERY_SHAPES must declare at least one request body"
+        );
+        for shape in &shapes {
+            assert!(
+                crate::handlers::status::query::spec_from_body(shape.as_bytes(), now).is_ok(),
+                "dashboard query shape `{shape}` is not in the server's request vocabulary"
+            );
+        }
+
+        // Completeness: the window is chosen independently of the tab, so every
+        // selectable window needs every (group_by, series-mode) pair the page
+        // asks for anywhere. A missing cell would leave the client resolving a
+        // live selection to no shape at all.
+        let mut declared: std::collections::BTreeSet<(String, String, bool)> =
+            std::collections::BTreeSet::new();
+        for shape in &shapes {
+            let parsed: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(shape).expect("QUERY_SHAPES entry is a flat JSON object");
+            let window = parsed
+                .get("window")
+                .expect("query shape declares a window")
+                .clone();
+            let group_by = parsed
+                .get("group_by")
+                .expect("query shape declares a group_by")
+                .clone();
+            let bucketed = parsed.contains_key("bucket");
+            assert!(
+                declared.insert((window.clone(), group_by.clone(), bucketed)),
+                "QUERY_SHAPES declares `{window}`/`{group_by}` twice for the same series mode; \
+                 the client would resolve one selection to two bodies"
+            );
+        }
+        let pairs: std::collections::BTreeSet<(String, bool)> = declared
+            .iter()
+            .map(|(_, group_by, bucketed)| (group_by.clone(), *bucketed))
+            .collect();
+        for window in string_array("WINDOWS") {
+            for (group_by, bucketed) in &pairs {
+                assert!(
+                    declared.contains(&(window.clone(), group_by.clone(), *bucketed)),
+                    "QUERY_SHAPES has no `{window}` shape for `{group_by}` \
+                     (series: {bucketed}), but the page can select that combination"
+                );
+            }
+        }
+    }
+
+    /// The string entries of a `var <name> = [ ... ]` array literal in the
+    /// dashboard script.
+    fn string_array(name: &str) -> Vec<String> {
+        literal_body(name, '[', ']')
+            .split(',')
+            .map(|entry| {
+                entry
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string()
+            })
+            .filter(|entry| !entry.is_empty())
+            .collect()
+    }
+
+    /// Each `{...}` object literal in an array body, as its own JSON text.
+    fn json_object_literals(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(open) = rest.find('{') {
+            let close = rest[open..].find('}').expect("shape entry is closed") + open;
+            out.push(rest[open..=close].to_string());
+            rest = &rest[close + 1..];
+        }
+        out
+    }
+
+    /// Self-containment guard on the ASSEMBLED page (what the handler serves,
+    /// not the three authoring sources). The single-file, renders-offline
+    /// constraint is what the compile-time assembly must preserve: no
+    /// `src`/`href` pointing anywhere but an inline `data:` URI, and no CSS
+    /// `url(...)` at all. A stylesheet link, a script src, or a web font
+    /// would make the page depend on the network.
+    #[test]
+    fn assembled_page_has_no_external_refs() {
+        assert!(
+            PAGE.contains("<style>") && PAGE.contains("<script>"),
+            "the assembled page must carry the inlined style and script blocks"
+        );
+        assert!(
+            !PAGE.contains(STYLE_SLOT) && !PAGE.contains(SCRIPT_SLOT),
+            "an asset slot survived assembly unreplaced"
+        );
+
+        // Every `src` / `href` ATTRIBUTE value must be an inline data: URI --
+        // the favicon is the only one on this page. Matched on the RAW page
+        // (case-folded for the attribute NAME only, which preserves byte
+        // offsets) and only where whitespace precedes the name and an `=`
+        // follows it, so this is an HTML attribute and not a JS identifier or a
+        // CSS class that happens to contain the same letters. Both the name's
+        // case and the whitespace HTML permits around the `=` are tolerated:
+        // `<script SRC = "https://...">` is as external as the lowercase,
+        // tight-binding spelling.
+        let folded = PAGE.to_ascii_lowercase();
+        for attr in ["src", "href"] {
+            let mut offset = 0;
+            while let Some(pos) = folded[offset..].find(attr) {
+                let at = offset + pos;
+                offset = at + attr.len();
+                let preceded_by_space = folded[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace);
+                if !preceded_by_space {
+                    continue;
+                }
+                let after_name = folded[offset..].trim_start_matches(char::is_whitespace);
+                let Some(after_eq) = after_name.strip_prefix('=') else {
+                    continue;
+                };
+                let value = after_eq.trim_start_matches(char::is_whitespace);
+                let quote = value.chars().next().expect("attribute has a value");
+                assert!(
+                    quote == '"' || quote == '\'',
+                    "dashboard `{attr}` attribute value must be quoted"
+                );
+                assert!(
+                    value[quote.len_utf8()..].starts_with("data:"),
+                    "assembled page carries an external `{attr}` reference (must be a data: URI)"
+                );
+            }
+        }
+        // The scan below reads each source's CODE (comments stripped, so prose
+        // about `url()` does not read as a rule). Asserting the assembled page
+        // carries each source verbatim is what makes that scan a statement
+        // about the SERVED bytes rather than about the authoring inputs.
+        assert!(
+            PAGE.contains(STYLE) && PAGE.contains(SCRIPT),
+            "the assembled page must carry both asset sources verbatim"
+        );
+        let code = [
+            compact(&strip_html_comments(MARKUP)),
+            compact(&strip_css_comments(STYLE)),
+            compact(&strip_js_comments(SCRIPT)),
+        ];
+        for source in &code {
+            assert!(
+                !source.contains("url("),
+                "assembled page carries a CSS url(...) reference (no external asset may be fetched)"
+            );
+            assert!(
+                !source.contains("@import"),
+                "assembled page carries a CSS @import (no external stylesheet may be fetched)"
+            );
+        }
     }
 }
