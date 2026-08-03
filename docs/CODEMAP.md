@@ -2807,14 +2807,27 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (dark primary, light re-valued under `prefers-color-scheme`), 8px grid,
   hairline borders, system sans for UI and mono for data, one accent plus one
   non-semantic second data hue, semantic green/amber/red reserved for
-  good/degraded/broken. Tables scroll inside their card (`.tablewrap`) so the
-  page never scrolls sideways from 380px to 1440px
+  good/degraded/broken. Layout dimensions (column min-widths, flex bases, the
+  step-card width) are named `--col-*`/`--fb-*`/`--w-*` tokens on the 8px grid;
+  hairlines and control details stay at their intentional off-grid values.
+  Tables scroll inside their card (`.tablewrap`) so the page never scrolls
+  sideways from 380px to 1440px
 - `src/handlers/status/dashboard.js` -- dashboard SCRIPT body: the whole
-  client. Five DATA SOURCES (`usage`/`health`/`config`/`doctor` off the GET
-  `/status` aggregate, plus `query`) each with an independent state record
+  client. Six DATA SOURCES (`usage`/`health`/`config`/`doctor` off the GET
+  `/status` aggregate, plus `query` and `usage_all`) each with an independent
+  state record
   (`loading|live|empty|unavailable|incompatible|invalid_payload|stale|dead`),
   mapped to the six tabs by `TAB_SOURCES` -- so a dead QUERY degrades only
-  Overview and Usage while the four GET-backed tabs keep rendering.
+  Overview and Usage while the four GET-backed tabs keep rendering. `usage_all`
+  is a SEPARATE GET of `/status/usage?window=all` on its own controller,
+  backoff index, timer, and `as_of`, validated against the usage panel's wire
+  version via `SOURCE_PANEL`; it exists because Routing attributes over ALL
+  HISTORY while the aggregate's usage panel stays today-scoped for the readers
+  that want today (the Health quota tiles, the Overview seat surface, the
+  verdict strip). A section builder that throws is recorded in `RENDER_FAULTS`
+  against its source, so `effectiveState` reports that source
+  `invalid_payload` to the pane status line, the tab badges, the page verdict,
+  and the favicon rather than calling it live beside an error card.
   `renderPanel` validates `schema_version` BEFORE reading `data`, then enforces
   the envelope invariant (exactly one of a meaningful `data` xor an
   `unavailable` code; zero or both -> `invalid_payload` with no transport
@@ -2837,7 +2850,67 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   names, consumed solely by the thin `QueryAdapter` flat-extraction layer
   (num0 coercion on the numeric half, no rename, no computed model); render
   code reads adapter properties. Per-tab `buildX` functions live in
-  marker-delimited blocks registered in `BUILDERS`
+  marker-delimited blocks registered in `BUILDERS`; `buildOverview` is multi-source
+  (`query` primary, plus `usage` for the seat surface): it renders the scope
+  strip outside the section boundary (so a failed provider-scoped query stays
+  reversible), then provider cards from the query `groups` (each card's scope
+  button re-issues the query with a `provider:` scope through
+  `queryInputChanged`, and carries a default-closed seat disclosure over the
+  usage `quota[]` rows whose seat key names that provider -- the same quota
+  tiles Health renders, so a provider with no quota row gets no affordance and
+  no synthesized tile) and eight KPI tiles from `totals`, each carrying a
+  sparkline over `series.buckets[].metrics` drawn at each bucket's own
+  `start_ms`; the seat read is guarded on the usage record alone, so a usage
+  fault costs the seat surface and leaves the KPI and provider blocks live;
+  `buildUsage` renders the group-by picker (model/alias/provider, re-issuing
+  the non-series query through `queryInputChanged`) outside the section
+  boundary, then one two-line card per query group ranked by requests, with
+  zero-traffic groups omitted and their count reported in the header;
+  `buildRouting` is a MULTI-SOURCE tab (`config` primary, plus `usage_all`
+  and `health`) and is WINDOWLESS (in `WINDOWLESS_TABS` beside Config and
+  Doctor: the picker dims and goes inert, with an "All history" label beside
+  it) -- the configured chains render from the config `aliases` and
+  the live per-target circuit state from health, both as EXACT facts, visually
+  separated from the estimated block whose per-step traffic comes from the sole
+  `deriveStepTraffic(groups, chains)` derivation over the ALL-HISTORY usage
+  `groups`
+  (`~` + whole-percent figures, off-chain recorded models surfaced as their own
+  footnote line, and the later-step headline read off the step distribution
+  rather than the ledger's `fallback_served`); each of the three sources is
+  wrapped in its own `safeSection`, so health going dark costs the state list
+  alone. Every data-age figure (circuit "open for", "last ok",
+  learned-negative age, quota reset) is computed against the as_of of the
+  record it came from, passed down as `nowMs` from `panelNowMs(rec)` -- there
+  is no page-global render clock; `buildHealth` is a MULTI-SOURCE tab (`health` primary, plus
+  `usage`) -- per-target cards collapse a pooled model's seats by nickname
+  through the same worst-circuit rule Routing uses and split into
+  needs-attention / healthy / not-observed sections (a target with no settled
+  outcome is `unknown`, never `Healthy`), while the per-seat quota tiles read
+  the usage panel's `quota[]` discriminated by `provider_kind`, rendering one
+  line per POPULATED utilization field (no synthesized second line, no
+  cross-seat rollup) and distinguishing a missing snapshot, a null
+  utilization, and a measured `0`; each source has its own `safeSection`, so a
+  dark ledger costs the quota tiles alone and a dark health source leaves the
+  quota tiles live; `buildConfig` is single-source (`config`) and FAILS CLOSED
+  for the WHOLE tab -- the payload is validated in one place before any section
+  is built, so a version mismatch or a malformed panel never partially renders
+  config vocabulary -- rendering a source strip (config path, load age, resolved
+  alias/provider counts, listen address, version) above the reference tables for
+  aliases + their ordered chains, models + their winning catalog layer,
+  provider activation, the capability overrides (default-closed disclosure), and
+  the retry-class policy whose columns are exactly retry cap / fallback /
+  breaker debit (the wire's `debits_breaker`) / source; `buildDoctor` is the
+  second single-source FAIL-CLOSED tab (`doctor`) -- `validatedReport` checks
+  every finding severity against the fixed `Pass|Warn|Fail` triad and every
+  reachability verdict against `reachable|degraded|unknown` before a section is
+  built, so an unknown token replaces the whole tab instead of being
+  interpreted -- rendering a verdict card (state dot + headline + the panel's
+  reachability rollup + failed/warning/passed counts), one card per
+  failing/warning finding (severity pill, name, section, detail, and the
+  remediation only when the finding carries one), and the passing checks behind
+  a default-closed `buildExpander`; a report with findings but none needing
+  attention reads as a welcoming all-clear, and a report with no check at all
+  says so rather than claiming health
 
 ### ingress
 
