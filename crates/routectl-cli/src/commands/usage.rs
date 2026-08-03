@@ -21,7 +21,7 @@ use routectl_router::Config;
 use routectl_usage::{
     AggRow, BucketSpec, GroupKey, KCalibration, M1AttributionSummary, OpenError, QueryError,
     QuotaSnapshot, Rates, RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate,
-    estimate_cost_tokens, k_calibration_summary, latest_quota, m1_attribution_summary,
+    estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat, m1_attribution_summary,
     open_readonly, shadow_misfire_summary, ttfbs, would_trim_summary,
 };
 
@@ -443,14 +443,16 @@ pub struct DisplayRow {
 }
 
 /// The full report for one window: the display rows, the latest quota
-/// snapshot (subscription spend signal), and the window-wide footer.
+/// snapshot per seat (subscription spend signal), and the window-wide footer.
 #[derive(Debug, Clone)]
 pub struct WindowReport {
     pub title: String,
     pub by_header: &'static str,
     pub detail: bool,
     pub rows: Vec<DisplayRow>,
-    pub quota: Option<QuotaSnapshot>,
+    /// One latest quota snapshot per credential seat. Not windowed (a quota
+    /// snapshot is a seat's latest known state); empty when nothing reported.
+    pub quota: Vec<QuotaSnapshot>,
     pub cache_hit_rate: Option<f64>,
     pub total_errors: i64,
     /// Window-wide `client_disconnect` outcome count (excluded from
@@ -723,7 +725,7 @@ pub fn build_window_report(
         by_header: dim.header(),
         detail,
         rows: display_rows,
-        quota: latest_quota(db)?,
+        quota: latest_quota_by_seat(db)?,
         cache_hit_rate,
         total_errors,
         client_disconnects,
@@ -1015,7 +1017,7 @@ pub fn render_report(report: &WindowReport) -> String {
         out.push_str(&render_would_trim(report));
         out.push_str(&render_shadow_misfire(report));
     }
-    if let Some(q) = &report.quota {
+    for q in &report.quota {
         out.push_str(&render_quota(q));
     }
     out.push_str(&render_footer(report));
@@ -1161,14 +1163,19 @@ fn render_table(rows: &[Vec<String>]) -> String {
     out
 }
 
+/// One quota line for one seat. An absent `status` renders as `unknown`
+/// (codex sends no status token); the other unreported fields -- `seat`
+/// (pre-seat history, forwarded client credentials), `utilization`,
+/// `overage`, `reset` -- render as `-`.
 fn render_quota(q: &QuotaSnapshot) -> String {
+    let seat = q.seat.as_deref().unwrap_or("-");
     let status = q.status.as_deref().unwrap_or("unknown");
     let util = q
         .utilization
         .map_or_else(|| "-".to_string(), |u| format!("{:.0}%", u * 100.0));
     let overage = q.overage_status.as_deref().unwrap_or("-");
     let reset = q.reset.map_or_else(|| "-".to_string(), format_reset);
-    format!("quota: status={status} utilization={util} overage={overage} reset={reset}\n")
+    format!("quota[{seat}]: status={status} utilization={util} overage={overage} reset={reset}\n")
 }
 
 /// Format a quota-reset epoch (seconds) as a local timestamp. Quota

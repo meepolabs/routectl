@@ -199,6 +199,61 @@ pub(crate) const fn cache_hit_pct(read: u64, prompt: u64) -> u64 {
     read.saturating_mul(100) / prompt
 }
 
+/// Most forward-compat quota entries captured per row. An upstream controls
+/// how many quota headers it sends, and every captured entry is persisted for
+/// every request, so the capture is bounded rather than trusting the peer.
+const MAX_QUOTA_EXTRAS_ENTRIES: usize = 64;
+
+/// Most bytes kept per captured quota-extra value, same rationale.
+const MAX_QUOTA_EXTRA_VALUE_BYTES: usize = 1024;
+
+/// Lift a vendor quota family's forward-compat `extras` pairs into the
+/// shared `quota_extras` JSON column: a flat object of suffix -> raw
+/// string value. `None` for an empty list so the column reads NULL rather
+/// than an empty object. Bounded on both axes (entry count and per-value
+/// length) so a header flood cannot blow up the ledger row.
+fn stamp_quota_extras(extras: &[(String, String)]) -> Option<Value> {
+    if extras.is_empty() {
+        return None;
+    }
+    Some(Value::Object(
+        extras
+            .iter()
+            .take(MAX_QUOTA_EXTRAS_ENTRIES)
+            .map(|(k, v)| {
+                let value = truncate_on_char_boundary(v, MAX_QUOTA_EXTRA_VALUE_BYTES);
+                (k.clone(), Value::String(value.to_string()))
+            })
+            .collect(),
+    ))
+}
+
+/// Whether a parsed utilization FRACTION is storable: finite and within a
+/// generous 0-1000% band. A non-finite value must never reach the REAL
+/// `quota_utilization` column -- SQLite cannot represent NaN, and readers
+/// treat the column as a fraction.
+fn sane_fraction(p: &f64) -> bool {
+    p.is_finite() && (0.0..=10.0).contains(p)
+}
+
+/// Same guard for a value still on the 0-100 PERCENT scale.
+fn sane_percent(p: &f64) -> bool {
+    p.is_finite() && (0.0..=1000.0).contains(p)
+}
+
+/// Longest prefix of `s` that fits in `max_bytes` without splitting a UTF-8
+/// codepoint.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Short, stable error-class token for the `error_class` column. Never
 /// the Display string (which can embed provider names / upstream bodies);
 /// just the routectl error variant family.
@@ -350,6 +405,7 @@ impl UsageCapture {
         self.record.fallback_count = meta.fallback_count;
         self.record.provider = meta.served_provider.clone();
         self.record.provider_kind = meta.served_provider_kind.clone();
+        self.record.seat = meta.served_seat.clone();
         self.record.model = meta.served_model.clone();
         self.record.upstream = meta.served_upstream.clone();
         if meta.served_forwarded_credential {
@@ -553,31 +609,65 @@ impl UsageCapture {
         self.observe_quota(chunk.upstream_meta.as_ref());
     }
 
-    /// Lift the Anthropic unified quota snapshot into the QUOTA columns.
-    /// No-op for non-Anthropic upstreams / when absent. Numeric utilization
-    /// fields parse from their raw header strings; an unparseable value
-    /// stays `None` rather than failing the row.
+    /// Lift whichever vendor quota snapshot the upstream reported into the
+    /// shared QUOTA columns. The arms are INDEPENDENT (only one family is
+    /// ever present on a response) and no-ops when absent. Numeric fields
+    /// parse from their raw header strings; an unparseable value stays
+    /// `None` rather than failing the row.
     fn observe_quota(&mut self, meta: Option<&routectl_core::upstream_meta::UpstreamMeta>) {
-        let Some(q) = meta.and_then(|m| m.anthropic_unified.as_ref()) else {
+        let Some(meta) = meta else {
             return;
         };
+        if let Some(q) = meta.anthropic_unified.as_ref() {
+            self.observe_anthropic_quota(q);
+        }
+        if let Some(q) = meta.codex.as_ref() {
+            self.observe_codex_quota(q);
+        }
+    }
+
+    /// Map the Anthropic unified quota family into the shared QUOTA
+    /// columns. `reset` and the utilization fields arrive as raw strings.
+    /// The utilization values are already 0-1 fractions; a non-finite or
+    /// wildly out-of-range parse is dropped rather than stored, since the
+    /// ledger column is a REAL shared with the Codex arm.
+    fn observe_anthropic_quota(&mut self, q: &routectl_core::AnthropicUnifiedQuota) {
         self.record.quota_claim = q.representative_claim.clone();
         self.record.quota_status = q.status.clone();
         self.record.quota_overage_status = q.overage_status.clone();
-        self.record.quota_utilization = q.utilization.as_deref().and_then(|s| s.parse().ok());
+        self.record.quota_utilization = q
+            .utilization
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(sane_fraction);
         self.record.quota_overage_utilization = q
             .overage_utilization
             .as_deref()
-            .and_then(|s| s.parse().ok());
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(sane_fraction);
         self.record.quota_reset = q.reset.as_deref().and_then(|s| s.parse().ok());
-        if !q.extras.is_empty() {
-            self.record.quota_extras = Some(Value::Object(
-                q.extras
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect(),
-            ));
-        }
+        self.record.quota_extras = stamp_quota_extras(&q.extras);
+    }
+
+    /// Map the Codex quota family into the shared QUOTA columns. Codex
+    /// reports used-percent on a 0-100 integer scale, so it normalizes to
+    /// the column's 0-1 fraction; `primary_reset_at` is already epoch
+    /// SECONDS -- the scale `quota_reset` stores -- so it lands verbatim.
+    /// The Anthropic-only columns (status / overage) have no Codex
+    /// counterpart and stay NULL.
+    fn observe_codex_quota(&mut self, q: &routectl_core::CodexQuota) {
+        self.record.quota_claim = q.active_limit.clone();
+        self.record.quota_utilization = q
+            .primary_used_percent
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(sane_percent)
+            .map(|p| p / 100.0);
+        self.record.quota_reset = q
+            .primary_reset_at
+            .as_deref()
+            .and_then(|s| s.parse::<i64>().ok());
+        self.record.quota_extras = stamp_quota_extras(&q.extras);
     }
 
     /// Stamp the outcome-detail columns from a dispatch / stream error:

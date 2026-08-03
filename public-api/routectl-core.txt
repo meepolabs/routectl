@@ -2436,10 +2436,57 @@ impl<T> core::convert::From<T> for routectl_core::upstream_meta::AnthropicUnifie
 pub fn routectl_core::upstream_meta::AnthropicUnifiedQuota::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::AnthropicUnifiedQuota
 impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::AnthropicUnifiedQuota
+#[non_exhaustive] pub struct routectl_core::upstream_meta::CodexQuota
+pub routectl_core::upstream_meta::CodexQuota::active_limit: core::option::Option<alloc::string::String>
+pub routectl_core::upstream_meta::CodexQuota::extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub routectl_core::upstream_meta::CodexQuota::primary_reset_at: core::option::Option<alloc::string::String>
+pub routectl_core::upstream_meta::CodexQuota::primary_used_percent: core::option::Option<alloc::string::String>
+impl core::clone::Clone for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::clone(&self) -> routectl_core::upstream_meta::CodexQuota
+impl core::cmp::PartialEq for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::eq(&self, &routectl_core::upstream_meta::CodexQuota) -> bool
+impl core::default::Default for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::default() -> routectl_core::upstream_meta::CodexQuota
+impl core::fmt::Debug for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Freeze for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Send for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Sync for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Unpin for routectl_core::upstream_meta::CodexQuota
+impl core::marker::UnsafeUnpin for routectl_core::upstream_meta::CodexQuota
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::upstream_meta::CodexQuota
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::upstream_meta::CodexQuota
+impl<T, U> core::convert::Into<U> for routectl_core::upstream_meta::CodexQuota where U: core::convert::From<T>
+pub fn routectl_core::upstream_meta::CodexQuota::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::upstream_meta::CodexQuota where U: core::convert::Into<T>
+pub type routectl_core::upstream_meta::CodexQuota::Error = core::convert::Infallible
+pub fn routectl_core::upstream_meta::CodexQuota::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::upstream_meta::CodexQuota where U: core::convert::TryFrom<T>
+pub type routectl_core::upstream_meta::CodexQuota::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::upstream_meta::CodexQuota::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::upstream_meta::CodexQuota where T: core::clone::Clone
+pub type routectl_core::upstream_meta::CodexQuota::Owned = T
+pub fn routectl_core::upstream_meta::CodexQuota::clone_into(&self, &mut T)
+pub fn routectl_core::upstream_meta::CodexQuota::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::upstream_meta::CodexQuota where T: 'static + ?core::marker::Sized
+pub fn routectl_core::upstream_meta::CodexQuota::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::upstream_meta::CodexQuota where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::CodexQuota::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::upstream_meta::CodexQuota where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::CodexQuota::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::upstream_meta::CodexQuota where T: core::clone::Clone
+pub unsafe fn routectl_core::upstream_meta::CodexQuota::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::CodexQuota
+impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::CodexQuota
 #[non_exhaustive] pub struct routectl_core::upstream_meta::UpstreamMeta
 pub routectl_core::upstream_meta::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
+pub routectl_core::upstream_meta::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
 impl routectl_core::upstream_meta::UpstreamMeta
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_anthropic_unified(routectl_core::upstream_meta::AnthropicUnifiedQuota) -> Self
+pub const fn routectl_core::upstream_meta::UpstreamMeta::from_codex(routectl_core::upstream_meta::CodexQuota) -> Self
 impl core::clone::Clone for routectl_core::upstream_meta::UpstreamMeta
 pub fn routectl_core::upstream_meta::UpstreamMeta::clone(&self) -> routectl_core::upstream_meta::UpstreamMeta
 impl core::cmp::PartialEq for routectl_core::upstream_meta::UpstreamMeta
@@ -4202,6 +4249,51 @@ pub fn routectl_core::schema::ChunkDelta::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::schema::ChunkDelta where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::schema::ChunkDelta
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ChunkDelta
+#[non_exhaustive] pub struct routectl_core::CodexQuota
+pub routectl_core::CodexQuota::active_limit: core::option::Option<alloc::string::String>
+pub routectl_core::CodexQuota::extras: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub routectl_core::CodexQuota::primary_reset_at: core::option::Option<alloc::string::String>
+pub routectl_core::CodexQuota::primary_used_percent: core::option::Option<alloc::string::String>
+impl core::clone::Clone for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::clone(&self) -> routectl_core::upstream_meta::CodexQuota
+impl core::cmp::PartialEq for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::eq(&self, &routectl_core::upstream_meta::CodexQuota) -> bool
+impl core::default::Default for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::default() -> routectl_core::upstream_meta::CodexQuota
+impl core::fmt::Debug for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Freeze for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Send for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Sync for routectl_core::upstream_meta::CodexQuota
+impl core::marker::Unpin for routectl_core::upstream_meta::CodexQuota
+impl core::marker::UnsafeUnpin for routectl_core::upstream_meta::CodexQuota
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::upstream_meta::CodexQuota
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::upstream_meta::CodexQuota
+impl<T, U> core::convert::Into<U> for routectl_core::upstream_meta::CodexQuota where U: core::convert::From<T>
+pub fn routectl_core::upstream_meta::CodexQuota::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::upstream_meta::CodexQuota where U: core::convert::Into<T>
+pub type routectl_core::upstream_meta::CodexQuota::Error = core::convert::Infallible
+pub fn routectl_core::upstream_meta::CodexQuota::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::upstream_meta::CodexQuota where U: core::convert::TryFrom<T>
+pub type routectl_core::upstream_meta::CodexQuota::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::upstream_meta::CodexQuota::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::upstream_meta::CodexQuota where T: core::clone::Clone
+pub type routectl_core::upstream_meta::CodexQuota::Owned = T
+pub fn routectl_core::upstream_meta::CodexQuota::clone_into(&self, &mut T)
+pub fn routectl_core::upstream_meta::CodexQuota::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::upstream_meta::CodexQuota where T: 'static + ?core::marker::Sized
+pub fn routectl_core::upstream_meta::CodexQuota::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::upstream_meta::CodexQuota where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::CodexQuota::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::upstream_meta::CodexQuota where T: ?core::marker::Sized
+pub fn routectl_core::upstream_meta::CodexQuota::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::upstream_meta::CodexQuota where T: core::clone::Clone
+pub unsafe fn routectl_core::upstream_meta::CodexQuota::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::upstream_meta::CodexQuota
+pub fn routectl_core::upstream_meta::CodexQuota::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::upstream_meta::CodexQuota
+impl<T> tracing::instrument::WithSubscriber for routectl_core::upstream_meta::CodexQuota
 pub struct routectl_core::CustomTool
 pub routectl_core::CustomTool::cache_control: core::option::Option<routectl_core::cache_control::CacheControl>
 pub routectl_core::CustomTool::defer_loading: core::option::Option<bool>
@@ -4908,8 +5000,10 @@ impl<T> tracing::instrument::Instrument for routectl_core::schema::TokenCount
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::TokenCount
 #[non_exhaustive] pub struct routectl_core::UpstreamMeta
 pub routectl_core::UpstreamMeta::anthropic_unified: core::option::Option<routectl_core::upstream_meta::AnthropicUnifiedQuota>
+pub routectl_core::UpstreamMeta::codex: core::option::Option<routectl_core::upstream_meta::CodexQuota>
 impl routectl_core::upstream_meta::UpstreamMeta
 pub const fn routectl_core::upstream_meta::UpstreamMeta::from_anthropic_unified(routectl_core::upstream_meta::AnthropicUnifiedQuota) -> Self
+pub const fn routectl_core::upstream_meta::UpstreamMeta::from_codex(routectl_core::upstream_meta::CodexQuota) -> Self
 impl core::clone::Clone for routectl_core::upstream_meta::UpstreamMeta
 pub fn routectl_core::upstream_meta::UpstreamMeta::clone(&self) -> routectl_core::upstream_meta::UpstreamMeta
 impl core::cmp::PartialEq for routectl_core::upstream_meta::UpstreamMeta

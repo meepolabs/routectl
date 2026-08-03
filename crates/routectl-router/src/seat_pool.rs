@@ -89,6 +89,25 @@ pub fn seat_state_key(nickname: &str, label: Option<&str>) -> String {
     }
 }
 
+/// Derive the persistable credential identity of one dispatch target from
+/// its source `SecretRef`: the `provider#label` seat key (bare `provider`
+/// for the default seat) that `oauth::seat_key` mints, so a usage row
+/// partitions by ACCOUNT rather than by model -- several models sharing one
+/// OAuth account collapse to one identity.
+///
+/// Only the OAuth arm yields an identity. `file://` renders a filesystem
+/// path and `env://` a variable name; neither may be persisted in the usage
+/// ledger, so `None` is the correct -- not merely the conservative --
+/// answer for every other arm.
+pub fn seat_identity(secret_ref: Option<&SecretRef>) -> Option<String> {
+    match secret_ref {
+        Some(SecretRef::OAuth { provider, label }) => {
+            Some(routectl_auth::oauth::seat_key(provider, label.as_deref()))
+        }
+        _ => None,
+    }
+}
+
 /// Per-pool round-robin cursor set. Holds one [`AtomicUsize`] per pooled
 /// model nickname; `RoundRobin` selection advances the cursor by one per
 /// request via `fetch_add`. Lives on the `Router` alongside `state`.
@@ -410,6 +429,56 @@ mod tests {
     #[test]
     fn seat_state_key_labeled_seat_is_hash_joined() {
         assert_eq!(seat_state_key("opus", Some("seat-b")), "opus#seat-b");
+    }
+
+    #[test]
+    fn seat_identity_of_unlabeled_oauth_ref_is_bare_provider() {
+        // Arrange
+        let sr = SecretRef::parse("oauth://codex").expect("parse oauth ref");
+
+        // Act
+        let identity = seat_identity(Some(&sr));
+
+        // Assert: several models over one account collapse to one identity.
+        assert_eq!(identity, Some("codex".to_string()));
+    }
+
+    #[test]
+    fn seat_identity_of_labeled_oauth_ref_is_hash_joined_seat_key() {
+        // Arrange
+        let sr = SecretRef::parse("oauth://anthropic#a").expect("parse oauth ref");
+
+        // Act
+        let identity = seat_identity(Some(&sr));
+
+        // Assert
+        assert_eq!(identity, Some("anthropic#a".to_string()));
+    }
+
+    #[test]
+    fn seat_identity_of_env_ref_is_none() {
+        // Arrange: an env:// ref renders a variable name, which must never
+        // reach the usage ledger.
+        let sr = SecretRef::parse("env://ANTHROPIC_API_KEY").expect("parse env ref");
+
+        // Act / Assert
+        assert_eq!(seat_identity(Some(&sr)), None);
+    }
+
+    #[test]
+    fn seat_identity_of_file_ref_is_none() {
+        // Arrange: a file:// ref renders a filesystem path, likewise barred
+        // from the ledger.
+        let sr = SecretRef::parse("file:///etc/routectl/key").expect("parse file ref");
+
+        // Act / Assert
+        assert_eq!(seat_identity(Some(&sr)), None);
+    }
+
+    #[test]
+    fn seat_identity_of_absent_ref_is_none() {
+        // Arrange / Act / Assert: a target with no credential ref at all.
+        assert_eq!(seat_identity(None), None);
     }
 
     #[test]

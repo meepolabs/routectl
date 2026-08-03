@@ -7,7 +7,7 @@
 //! and maps the result to an aggregates-only DTO. It never caches a
 //! connection, never touches the writer handle, and never exposes request
 //! rows, ids, bodies, or prompts -- only rollups, windowed totals, the
-//! latest quota snapshot, and the would-trim summary.
+//! per-seat quota snapshots, and the would-trim summary.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use routectl_usage::{
     AggRow, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb, WouldTrimSummary, aggregate,
-    errors_by_class, latest_quota, open_readonly_fastfail, would_trim_summary,
+    errors_by_class, latest_quota_by_seat, open_readonly_fastfail, would_trim_summary,
 };
 
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
@@ -30,7 +30,7 @@ use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the usage panel payload.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The `window` query parameter for `GET /status/usage`.
 #[derive(Debug, Deserialize)]
@@ -39,8 +39,8 @@ pub(super) struct WindowQuery {
 }
 
 /// Aggregates-only usage payload. Carries per-`(alias, provider, model,
-/// upstream)` rollups, windowed totals, the latest quota snapshot, and the
-/// would-trim summary. It never carries request rows, ids, bodies, or
+/// upstream)` rollups, windowed totals, one latest quota snapshot per seat,
+/// and the would-trim summary. It never carries request rows, ids, bodies, or
 /// prompts.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct UsagePanel {
@@ -52,7 +52,7 @@ pub(super) struct UsagePanel {
     to_ms: i64,
     totals: UsageTotals,
     groups: Vec<UsageGroup>,
-    quota: Option<UsageQuota>,
+    quota: Vec<UsageQuota>,
     would_trim: UsageWouldTrim,
 }
 
@@ -119,9 +119,20 @@ struct UsageGroup {
     cache_read_present: i64,
 }
 
-/// The latest quota-bearing snapshot in the ledger, if any.
+/// One seat's latest quota-bearing snapshot. The `quota_*` ledger columns are
+/// shared across vendors, so `provider_kind` is the discriminator a client
+/// MUST read to interpret `utilization` (a fraction of a per-provider window)
+/// and to know which of the remaining fields that vendor populates at all.
 #[derive(Debug, Clone, Serialize)]
 struct UsageQuota {
+    /// Credential identity this snapshot belongs to. `null` for pre-seat
+    /// history and forwarded client credentials.
+    seat: Option<String>,
+    /// Provider kind of the row this snapshot came from -- the cross-vendor
+    /// discriminator for every other field here.
+    provider_kind: Option<String>,
+    /// Freshness of THIS snapshot: the `ts_start` of the row it came from,
+    /// epoch-ms. Distinct from the panel envelope's query-time `as_of`.
     ts_start_ms: i64,
     claim: Option<String>,
     status: Option<String>,
@@ -220,7 +231,7 @@ fn collect(
     let rows = aggregate(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     let breakdown =
         errors_by_class(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
-    let quota = latest_quota(db).map_err(|e| query_error_code(&e))?;
+    let quota = latest_quota_by_seat(db).map_err(|e| query_error_code(&e))?;
     let would_trim =
         would_trim_summary(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     Ok(assemble(token, bounds, rows, breakdown, quota, would_trim))
@@ -235,7 +246,7 @@ fn assemble(
     bounds: WindowBounds,
     rows: Vec<AggRow>,
     breakdown: Vec<(GroupKey, String, i64)>,
-    quota: Option<QuotaSnapshot>,
+    quota: Vec<QuotaSnapshot>,
     would_trim: WouldTrimSummary,
 ) -> UsagePanel {
     let mut per_group: std::collections::HashMap<GroupKey, BTreeMap<String, i64>> =
@@ -269,7 +280,7 @@ fn assemble(
         to_ms: bounds.to_ms,
         totals,
         groups,
-        quota: quota.map(map_quota),
+        quota: quota.into_iter().map(map_quota).collect(),
         would_trim: map_would_trim(would_trim),
     }
 }
@@ -300,6 +311,8 @@ fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup 
 
 fn map_quota(snapshot: QuotaSnapshot) -> UsageQuota {
     UsageQuota {
+        seat: snapshot.seat,
+        provider_kind: snapshot.provider_kind,
         ts_start_ms: snapshot.ts_start,
         claim: snapshot.claim,
         status: snapshot.status,
@@ -308,7 +321,7 @@ fn map_quota(snapshot: QuotaSnapshot) -> UsageQuota {
         overage_utilization: snapshot.overage_utilization,
         // Ledger quota resets are epoch SECONDS; scale to ms so the `_ms`
         // field name is truthful and the client's ms formatter is correct.
-        reset_ms: snapshot.reset.map(|s| s * 1000),
+        reset_ms: snapshot.reset.and_then(|s| s.checked_mul(1000)),
     }
 }
 
@@ -486,6 +499,137 @@ mod tests {
         assert_eq!(json["data"]["totals"]["requests"], 0);
         assert_eq!(json["data"]["would_trim"]["candidate_requests"], 0);
         assert_eq!(json["data"]["would_trim"]["verdict_met"], 0);
+        assert_eq!(
+            json["data"]["quota"].as_array().map(Vec::len),
+            Some(0),
+            "an empty ledger reports zero seats, not a missing field: {json}"
+        );
+    }
+
+    /// One seeded quota row: `(request_id, seat, provider_kind, quota_status,
+    /// quota_utilization, quota_reset)`. `quota_reset` is epoch SECONDS, the
+    /// unit the ledger stores.
+    type SeatQuotaSeed<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        Option<&'a str>,
+        Option<f64>,
+        Option<i64>,
+    );
+
+    /// Seed one quota-bearing row per [`SeatQuotaSeed`], each at a distinct
+    /// `ts_start` so the per-seat newest-row resolution is deterministic.
+    fn seed_seat_quota_ledger(path: &Path, rows: &[SeatQuotaSeed<'_>]) {
+        let db = open(path).expect("open ledger");
+        let now = Local::now().timestamp_millis();
+        for (i, (id, seat, provider_kind, status, utilization, reset_s)) in rows.iter().enumerate()
+        {
+            db.conn()
+                .execute(
+                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                     requested_model, alias, model, provider, upstream, stream, outcome, \
+                     latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                     seat, provider_kind, quota_status, quota_utilization, quota_reset) \
+                     VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 'm', 'p', 'u', 0, 'ok', \
+                     5, 0, 0, 1, 0, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        now + i64::try_from(i).unwrap_or(0),
+                        id,
+                        seat,
+                        provider_kind,
+                        status,
+                        utilization,
+                        reset_s
+                    ],
+                )
+                .expect("seed seat quota row");
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_renders_one_entry_per_seat_with_reset_scaled_from_seconds() {
+        // Arrange: two seats reporting different vendor shapes -- an Anthropic
+        // row with a status token and a codex row with utilization only -- plus
+        // an older row for the Anthropic seat that the per-seat read supersedes.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_seat_quota_ledger(
+            &path,
+            &[
+                (
+                    "a-old",
+                    Some("anthropic#a"),
+                    Some("anthropic-api"),
+                    Some("allowed"),
+                    Some(0.1),
+                    Some(1_000),
+                ),
+                (
+                    "a-new",
+                    Some("anthropic#a"),
+                    Some("anthropic-api"),
+                    Some("throttled"),
+                    Some(0.9),
+                    Some(9_000),
+                ),
+                (
+                    "c-1",
+                    Some("codex"),
+                    Some("codex"),
+                    None,
+                    Some(0.16),
+                    Some(1_786_210_114),
+                ),
+            ],
+        );
+
+        // Act
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+
+        // Assert
+        assert_eq!(status, StatusCode::OK);
+        let quota = json["data"]["quota"].as_array().expect("quota array");
+        assert_eq!(quota.len(), 2, "one entry per seat: {json}");
+        let anthropic = quota
+            .iter()
+            .find(|q| q["seat"] == "anthropic#a")
+            .expect("anthropic seat present");
+        assert_eq!(anthropic["provider_kind"], "anthropic-api");
+        assert_eq!(anthropic["status"], "throttled", "the newer row wins");
+        assert_eq!(anthropic["reset_ms"], 9_000_000, "seconds scaled to ms");
+        let codex = quota
+            .iter()
+            .find(|q| q["seat"] == "codex")
+            .expect("codex seat present");
+        assert_eq!(codex["provider_kind"], "codex");
+        assert!(
+            codex["status"].is_null(),
+            "codex reports no status token: {codex}"
+        );
+        assert_eq!(codex["utilization"], 0.16);
+        assert_eq!(codex["reset_ms"], 1_786_210_114_000_i64);
+    }
+
+    #[tokio::test]
+    async fn quota_gives_a_pre_seat_row_a_null_seat_entry() {
+        // Pre-seat history must stay visible under its own null-seat bucket
+        // rather than being filtered or given a synthetic seat token.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_seat_quota_ledger(
+            &path,
+            &[("legacy", None, None, Some("allowed"), Some(0.2), None)],
+        );
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK);
+        let quota = json["data"]["quota"].as_array().expect("quota array");
+        assert_eq!(quota.len(), 1);
+        assert!(quota[0]["seat"].is_null(), "{json}");
+        assert!(quota[0]["reset_ms"].is_null());
     }
 
     #[tokio::test]
@@ -563,8 +707,11 @@ mod tests {
     fn quota_reset_seconds_scaled_to_milliseconds() {
         // The ledger stamps quota resets in epoch SECONDS; the panel field is
         // named `reset_ms`, so the seconds value must be scaled by 1000. A
-        // `None` reset stays `None`.
+        // `None` reset stays `None`. Seat and provider_kind pass through as the
+        // client's discriminator for the shared quota columns.
         let snapshot = QuotaSnapshot {
+            seat: Some("anthropic#a".into()),
+            provider_kind: Some("anthropic-api".into()),
             ts_start: 1_700_000_000_000,
             claim: None,
             status: Some("ok".into()),
@@ -583,8 +730,12 @@ mod tests {
             mapped.ts_start_ms, 1_700_000_000_000,
             "ts_start passes through as ms"
         );
+        assert_eq!(mapped.seat.as_deref(), Some("anthropic#a"));
+        assert_eq!(mapped.provider_kind.as_deref(), Some("anthropic-api"));
 
         let no_reset = QuotaSnapshot {
+            seat: None,
+            provider_kind: None,
             ts_start: 0,
             claim: None,
             status: None,
@@ -593,10 +744,28 @@ mod tests {
             overage_utilization: None,
             reset: None,
         };
+        let mapped = map_quota(no_reset);
+        assert_eq!(mapped.reset_ms, None, "absent reset stays absent");
+        assert_eq!(mapped.seat, None, "a pre-seat row renders a null seat");
+    }
+
+    #[test]
+    fn quota_reset_overflowing_millisecond_scale_maps_to_none() {
+        let snapshot = QuotaSnapshot {
+            seat: None,
+            provider_kind: None,
+            ts_start: 0,
+            claim: None,
+            status: None,
+            overage_status: None,
+            utilization: None,
+            overage_utilization: None,
+            reset: Some(i64::MAX / 1000 + 1),
+        };
+        let mapped = map_quota(snapshot);
         assert_eq!(
-            map_quota(no_reset).reset_ms,
-            None,
-            "absent reset stays absent"
+            mapped.reset_ms, None,
+            "a reset that overflows the ms scale drops the field instead of panicking"
         );
     }
 
@@ -716,7 +885,7 @@ mod tests {
                 "http-5xx".into(),
                 1,
             )],
-            None,
+            Vec::new(),
             WouldTrimSummary::default(),
         );
         let text = serde_json::to_string(&panel).unwrap();
@@ -891,7 +1060,7 @@ mod tests {
             json["unavailable"].is_null(),
             "a migrated v12 DB must read as available: {json}"
         );
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
         assert_eq!(json["data"]["totals"]["requests"], 2);
     }
 
@@ -933,13 +1102,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_panel_reports_schema_version_two() {
+    async fn usage_panel_reports_schema_version_three() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_ledger(&path, &[Local::now().timestamp_millis()]);
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
     }
 
     /// Poll-loop safety: a panel that stays unavailable across repeated polls

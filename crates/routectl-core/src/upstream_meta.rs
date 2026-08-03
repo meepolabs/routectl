@@ -18,7 +18,10 @@
 //! behind a neutral-sounding top-level field like `quota` or
 //! `rate_limit`. A future provider with its own quota-header family adds
 //! its own optional sub-struct (e.g. `openai_*`) next to this one; it
-//! does NOT reinterpret Anthropic vocabulary. The unified-family field
+//! does NOT reinterpret Anthropic vocabulary. `codex` follows that
+//! precedent with Codex-native `x-codex-*` field names; each further
+//! provider quota family likewise gets its own sub-struct in this file
+//! rather than being folded into an existing one. The unified-family field
 //! names (`status`, `overage_status`, `utilization`,
 //! `overage_utilization`, `representative_claim`, `reset`) are Anthropic
 //! wire terms and only ever describe Anthropic data. Generalizing them
@@ -38,6 +41,9 @@ pub struct UpstreamMeta {
     /// no header of the family was present (the common case on the
     /// api-key path, which does not emit the family).
     pub anthropic_unified: Option<AnthropicUnifiedQuota>,
+    /// Codex `x-codex-*` quota family, parsed off the Codex egress
+    /// response headers. `None` when no header of the family was present.
+    pub codex: Option<CodexQuota>,
 }
 
 impl UpstreamMeta {
@@ -47,6 +53,15 @@ impl UpstreamMeta {
     pub const fn from_anthropic_unified(quota: AnthropicUnifiedQuota) -> Self {
         Self {
             anthropic_unified: Some(quota),
+            codex: None,
+        }
+    }
+
+    /// Construct an `UpstreamMeta` carrying only the Codex quota family.
+    pub const fn from_codex(quota: CodexQuota) -> Self {
+        Self {
+            anthropic_unified: None,
+            codex: Some(quota),
         }
     }
 }
@@ -104,6 +119,29 @@ impl AnthropicUnifiedQuota {
     pub fn is_overage(&self) -> bool {
         self.representative_claim.as_deref() == Some(OVERAGE_CLAIM)
     }
+}
+
+/// Codex `x-codex-*` response-header quota family, parsed tolerantly:
+/// every field keeps the RAW string value the upstream sent, and a
+/// weird/unexpected value NEVER fails a request. `#[non_exhaustive]` so
+/// future named fields ship without breaking downstream library
+/// consumers.
+///
+/// Codex-NATIVE field names only: this family has its own quota model and
+/// does not borrow Anthropic vocabulary.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct CodexQuota {
+    /// Raw `x-codex-active-limit` value.
+    pub active_limit: Option<String>,
+    /// Raw `x-codex-primary-used-percent` value.
+    pub primary_used_percent: Option<String>,
+    /// Raw `x-codex-primary-reset-at` value, an epoch timestamp in
+    /// SECONDS (not milliseconds).
+    pub primary_reset_at: Option<String>,
+    /// Any other `x-codex-<suffix>` header captured for forward-compat,
+    /// as `(suffix, value)` pairs in header order.
+    pub extras: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -165,5 +203,54 @@ mod tests {
 
         // Assert
         assert!(meta.anthropic_unified.is_none());
+    }
+
+    #[test]
+    fn from_codex_wraps_quota_in_some_and_leaves_anthropic_unified_none() {
+        // Arrange
+        let quota = CodexQuota {
+            active_limit: Some("weekly".into()),
+            ..Default::default()
+        };
+
+        // Act
+        let meta = UpstreamMeta::from_codex(quota.clone());
+
+        // Assert
+        assert_eq!(meta.codex, Some(quota));
+        assert!(meta.anthropic_unified.is_none());
+    }
+
+    #[test]
+    fn default_upstream_meta_has_no_codex() {
+        // Arrange + Act
+        let meta = UpstreamMeta::default();
+
+        // Assert
+        assert!(meta.codex.is_none());
+    }
+
+    #[test]
+    fn codex_quota_retains_all_named_fields_and_extras() {
+        // Arrange
+        let quota = CodexQuota {
+            active_limit: Some("weekly".into()),
+            primary_used_percent: Some("42.5".into()),
+            primary_reset_at: Some("1754179200".into()),
+            extras: vec![("secondary-used-percent".into(), "7".into())],
+        };
+
+        // Act
+        let echoed = quota.clone();
+
+        // Assert
+        assert_eq!(echoed.active_limit.as_deref(), Some("weekly"));
+        assert_eq!(echoed.primary_used_percent.as_deref(), Some("42.5"));
+        assert_eq!(echoed.primary_reset_at.as_deref(), Some("1754179200"));
+        assert_eq!(
+            echoed.extras,
+            vec![("secondary-used-percent".to_string(), "7".to_string())]
+        );
+        assert_eq!(echoed, quota);
     }
 }

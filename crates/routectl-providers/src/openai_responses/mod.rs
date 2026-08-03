@@ -62,6 +62,7 @@ pub(crate) mod auth;
 pub(crate) mod cookies;
 pub(crate) mod extras;
 pub(crate) mod messages;
+mod quota_headers;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod response_types;
@@ -251,6 +252,11 @@ impl Provider for OpenAiResponsesProvider {
         // stream consumes `resp`. complete() is stream-only, so this
         // is the dir-3 capture point. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
+        // Parse the x-codex-* quota family off the response head BEFORE
+        // `resp` is consumed by the SSE byte stream. None on the api-key
+        // and mantle lanes (family absent), so no auth-kind gate.
+        let upstream_meta = quota_headers::parse_codex_quota(resp.headers())
+            .map(routectl_core::UpstreamMeta::from_codex);
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
         futures::pin_mut!(event_stream);
@@ -376,6 +382,7 @@ impl Provider for OpenAiResponsesProvider {
 
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
+        chat_resp.upstream_meta = upstream_meta;
         Ok(chat_resp)
     }
 
@@ -440,12 +447,21 @@ impl Provider for OpenAiResponsesProvider {
         // both directions emit dir-3. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
+        // Parse the x-codex-* quota family off the response head BEFORE
+        // `resp` is moved into the byte stream. The parsed carrier is
+        // attached to the FIRST canonical chunk yielded by the stream;
+        // consumers must not assume it on later chunks. None on the
+        // api-key and mantle lanes (family absent).
+        let upstream_meta = quota_headers::parse_codex_quota(resp.headers())
+            .map(routectl_core::UpstreamMeta::from_codex);
+
         let provider_id = self.cfg.id.clone();
         let auth_kind = self.cfg.auth_kind;
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
 
         let stream = async_stream::stream! {
+            let mut pending_upstream_meta = upstream_meta;
             let mut state = sse::ResponsesStreamState::new(auth_kind);
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
@@ -472,7 +488,15 @@ impl Provider for OpenAiResponsesProvider {
                                 return;
                             }
                             Ok(chunks) => {
-                                for c in chunks {
+                                for mut c in chunks {
+                                    // Attach the codex-quota carrier to the
+                                    // FIRST canonical chunk only; `take()`
+                                    // leaves None for every subsequent chunk.
+                                    // Held across empty/keepalive events and
+                                    // events that emit zero chunks.
+                                    if pending_upstream_meta.is_some() {
+                                        c.upstream_meta = pending_upstream_meta.take();
+                                    }
                                     yield Ok(c);
                                 }
                             }

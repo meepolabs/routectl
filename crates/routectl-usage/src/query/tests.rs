@@ -85,25 +85,46 @@ fn insert_full_row(
         .expect("insert full row");
 }
 
-fn insert_quota_row(
+/// Insert a quota-bearing row with an explicit `seat` / `provider_kind` and
+/// individually nullable quota columns, so the per-seat partition and the
+/// widened `status OR utilization` eligibility predicate are both exercisable.
+#[allow(clippy::too_many_arguments)]
+fn insert_seat_quota_row(
     db: &UsageDb,
     request_id: &str,
     ts_start: i64,
-    status: &str,
-    utilization: f64,
-    reset: i64,
+    seat: Option<&str>,
+    provider_kind: Option<&str>,
+    status: Option<&str>,
+    utilization: Option<f64>,
+    reset: Option<i64>,
 ) {
     db.conn()
         .execute(
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
              requested_model, alias, stream, outcome, latency_ms, tool_count, \
-             msg_count, attempt_count, fallback_count, quota_status, \
-             quota_utilization, quota_reset) \
+             msg_count, attempt_count, fallback_count, seat, provider_kind, \
+             quota_status, quota_utilization, quota_reset) \
              VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0, \
-             ?3, ?4, ?5)",
-            rusqlite::params![ts_start, request_id, status, utilization, reset],
+             ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                ts_start,
+                request_id,
+                seat,
+                provider_kind,
+                status,
+                utilization,
+                reset
+            ],
         )
         .expect("insert quota row");
+}
+
+fn find_seat<'a>(snaps: &'a [QuotaSnapshot], seat: Option<&str>) -> &'a QuotaSnapshot {
+    snaps
+        .iter()
+        .find(|s| s.seat.as_deref() == seat)
+        .expect("seat bucket present")
 }
 
 fn find_row<'a>(rows: &'a [AggRow], provider: &str, upstream: &str) -> &'a AggRow {
@@ -725,29 +746,239 @@ fn m1_attribution_summary_is_zero_when_no_recorder_rows() {
 }
 
 #[test]
-fn latest_quota_returns_most_recent_quota_row() {
-    // Arrange: two quota rows at different ts_start.
+fn latest_quota_by_seat_returns_the_newest_row_per_seat() {
+    // Arrange: two rows for seatA (old + new) and one for seatB.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
-    insert_quota_row(&db, "q-old", 100, "active", 0.10, 5_000);
-    insert_quota_row(&db, "q-new", 200, "throttled", 0.90, 9_000);
-    // A non-quota row must be ignored.
+    insert_seat_quota_row(
+        &db,
+        "a-old",
+        100,
+        Some("seatA"),
+        Some("anthropic-api"),
+        Some("active"),
+        Some(0.10),
+        Some(5_000),
+    );
+    insert_seat_quota_row(
+        &db,
+        "a-new",
+        200,
+        Some("seatA"),
+        Some("anthropic-api"),
+        Some("throttled"),
+        Some(0.90),
+        Some(9_000),
+    );
+    insert_seat_quota_row(
+        &db,
+        "b-only",
+        150,
+        Some("seatB"),
+        Some("codex"),
+        None,
+        Some(0.16),
+        Some(1_786_210_114),
+    );
+    // A non-quota row must be ignored entirely.
     insert_row(
         &db, "plain", 300, "m", "p", "u", "a", "ok", None, None, 1, None,
     );
 
     // Act
-    let snap = latest_quota(&db).expect("query").expect("some snapshot");
+    let snaps = latest_quota_by_seat(&db).expect("query");
 
-    // Assert: the newer quota row wins.
-    assert_eq!(snap.ts_start, 200);
-    assert_eq!(snap.status.as_deref(), Some("throttled"));
-    assert_eq!(snap.utilization, Some(0.90));
-    assert_eq!(snap.reset, Some(9_000));
+    // Assert: one snapshot per seat, seatA resolved to its newer row.
+    assert_eq!(snaps.len(), 2);
+    let a = find_seat(&snaps, Some("seatA"));
+    assert_eq!(a.ts_start, 200);
+    assert_eq!(a.status.as_deref(), Some("throttled"));
+    assert_eq!(a.utilization, Some(0.90));
+    assert_eq!(a.reset, Some(9_000));
+    assert_eq!(a.provider_kind.as_deref(), Some("anthropic-api"));
+    let b = find_seat(&snaps, Some("seatB"));
+    assert_eq!(b.ts_start, 150);
+    assert_eq!(b.provider_kind.as_deref(), Some("codex"));
 }
 
 #[test]
-fn latest_quota_returns_none_when_no_quota_rows() {
+fn latest_quota_by_seat_breaks_a_ts_start_tie_by_rowid() {
+    // Arrange: two rows for one seat sharing a ts_start -- the later-inserted
+    // row (higher rowid) is the newer snapshot.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    for (id, status) in [("tie-first", "active"), ("tie-second", "throttled")] {
+        insert_seat_quota_row(
+            &db,
+            id,
+            500,
+            Some("seatA"),
+            Some("anthropic-api"),
+            Some(status),
+            Some(0.5),
+            None,
+        );
+    }
+
+    // Act
+    let snaps = latest_quota_by_seat(&db).expect("query");
+
+    // Assert
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].status.as_deref(), Some("throttled"));
+}
+
+#[test]
+fn latest_quota_by_seat_includes_a_utilization_only_row() {
+    // Arrange: a codex-shaped row -- no status token, utilization present.
+    // The widened predicate must keep it visible.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    insert_seat_quota_row(
+        &db,
+        "codex-1",
+        100,
+        Some("codex"),
+        Some("codex"),
+        None,
+        Some(0.16),
+        Some(1_786_210_114),
+    );
+
+    // Act
+    let snaps = latest_quota_by_seat(&db).expect("query");
+
+    // Assert
+    assert_eq!(snaps.len(), 1);
+    assert!(snaps[0].status.is_none());
+    assert_eq!(snaps[0].utilization, Some(0.16));
+    assert_eq!(snaps[0].reset, Some(1_786_210_114));
+}
+
+#[test]
+fn latest_quota_by_seat_includes_a_status_only_row() {
+    // Arrange: an Anthropic-shaped row that reported a status token but no
+    // utilization -- the predicate is an OR, so it must stay visible.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    insert_seat_quota_row(
+        &db,
+        "status-only",
+        100,
+        Some("seatA"),
+        Some("anthropic-api"),
+        Some("allowed"),
+        None,
+        Some(9_000),
+    );
+
+    // Act
+    let snaps = latest_quota_by_seat(&db).expect("query");
+
+    // Assert
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].status.as_deref(), Some("allowed"));
+    assert!(snaps[0].utilization.is_none());
+    assert_eq!(snaps[0].reset, Some(9_000));
+}
+
+#[test]
+fn latest_quota_by_seat_collapses_two_null_seat_rows_to_the_newest() {
+    // Arrange: two pre-seat rows with different ts_start. NULL seats share a
+    // single bucket, so only the newer snapshot may come back.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    insert_seat_quota_row(
+        &db,
+        "null-old",
+        100,
+        None,
+        None,
+        Some("active"),
+        Some(0.2),
+        None,
+    );
+    insert_seat_quota_row(
+        &db,
+        "null-new",
+        200,
+        None,
+        None,
+        Some("throttled"),
+        Some(0.9),
+        None,
+    );
+
+    // Act
+    let snaps = latest_quota_by_seat(&db).expect("query");
+
+    // Assert
+    assert_eq!(snaps.len(), 1, "NULL seats collapse to one bucket");
+    assert_eq!(snaps[0].ts_start, 200);
+    assert_eq!(snaps[0].status.as_deref(), Some("throttled"));
+    assert_eq!(snaps[0].utilization, Some(0.9));
+}
+
+#[test]
+fn latest_quota_by_seat_omits_a_row_with_neither_status_nor_utilization() {
+    // Arrange: a row carrying only a reset -- no quota signal to report.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    insert_seat_quota_row(
+        &db,
+        "reset-only",
+        100,
+        Some("seatA"),
+        Some("codex"),
+        None,
+        None,
+        Some(9_000),
+    );
+
+    // Act + Assert
+    assert!(latest_quota_by_seat(&db).expect("query").is_empty());
+}
+
+#[test]
+fn latest_quota_by_seat_gives_a_null_seat_row_its_own_bucket() {
+    // Arrange: pre-seat history (NULL seat) alongside a seated row. The NULL
+    // bucket must survive rather than being filtered or merged.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    insert_seat_quota_row(
+        &db,
+        "legacy",
+        100,
+        None,
+        None,
+        Some("active"),
+        Some(0.2),
+        None,
+    );
+    insert_seat_quota_row(
+        &db,
+        "seated",
+        200,
+        Some("seatA"),
+        Some("anthropic-api"),
+        Some("throttled"),
+        Some(0.9),
+        None,
+    );
+
+    // Act
+    let snaps = latest_quota_by_seat(&db).expect("query");
+
+    // Assert
+    assert_eq!(snaps.len(), 2);
+    let legacy = find_seat(&snaps, None);
+    assert_eq!(legacy.ts_start, 100);
+    assert!(legacy.provider_kind.is_none());
+    assert_eq!(find_seat(&snaps, Some("seatA")).ts_start, 200);
+}
+
+#[test]
+fn latest_quota_by_seat_is_empty_when_no_quota_rows() {
     // Arrange
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
@@ -756,7 +987,17 @@ fn latest_quota_returns_none_when_no_quota_rows() {
     );
 
     // Act + Assert
-    assert!(latest_quota(&db).expect("query").is_none());
+    assert!(latest_quota_by_seat(&db).expect("query").is_empty());
+}
+
+#[test]
+fn latest_quota_by_seat_on_an_empty_ledger_is_empty() {
+    // Arrange: a migrated ledger with zero rows.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+
+    // Act + Assert
+    assert!(latest_quota_by_seat(&db).expect("query").is_empty());
 }
 
 #[test]
@@ -855,19 +1096,39 @@ fn aggregate_over_readonly_open_matches_seeded_results() {
 }
 
 #[test]
-fn latest_quota_over_readonly_open_matches_seeded_results() {
-    // Arrange: seed quota rows, then drop the writer.
+fn latest_quota_by_seat_over_readonly_open_matches_seeded_results() {
+    // Arrange: seed quota rows for one seat, then drop the writer.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
-    insert_quota_row(&db, "ro-q-old", 100, "active", 0.10, 5_000);
-    insert_quota_row(&db, "ro-q-new", 200, "throttled", 0.90, 9_000);
+    insert_seat_quota_row(
+        &db,
+        "ro-q-old",
+        100,
+        Some("seatA"),
+        Some("anthropic-api"),
+        Some("active"),
+        Some(0.10),
+        Some(5_000),
+    );
+    insert_seat_quota_row(
+        &db,
+        "ro-q-new",
+        200,
+        Some("seatA"),
+        Some("anthropic-api"),
+        Some("throttled"),
+        Some(0.90),
+        Some(9_000),
+    );
     drop(db);
 
     // Act
     let ro = open_readonly(&path).expect("open readonly");
-    let snap = latest_quota(&ro).expect("query").expect("some snapshot");
+    let snaps = latest_quota_by_seat(&ro).expect("query");
 
-    // Assert: same most-recent row as the read-write path returns.
+    // Assert: same per-seat resolution the read-write path returns.
+    assert_eq!(snaps.len(), 1);
+    let snap = find_seat(&snaps, Some("seatA"));
     assert_eq!(snap.ts_start, 200);
     assert_eq!(snap.status.as_deref(), Some("throttled"));
     assert_eq!(snap.utilization, Some(0.90));

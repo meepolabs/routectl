@@ -37,7 +37,8 @@ listed at the bottom of each crate.
   (skip-serialized on `ChatResponse`/`ChatChunk`) for non-canonical upstream
   metadata; today the provider-namespaced `AnthropicUnifiedQuota` (the
   `anthropic-ratelimit-unified-*` quota/overage family, raw strings + `extras`
-  forward-compat + `is_overage()`)
+  forward-compat + `is_overage()`) and `CodexQuota` (the `x-codex-*` family:
+  `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`)
 - `src/content_part.rs` -- typed `ContentPart` enum
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`
@@ -701,6 +702,13 @@ listed at the bottom of each crate.
   `output_index` (Text/Reasoning/ToolUse blocks); carries the lane on
   `ResponsesStreamState::new` so streamed reasoning details bear the same
   lane tag the non-streaming path emits
+- `src/openai_responses/quota_headers.rs` -- tolerant parser for the
+  `x-codex-*` quota response-header family (`parse_codex_quota` ->
+  `CodexQuota`; None when absent, non-UTF8 values skipped, only
+  `active-limit` / `primary-used-percent` / `primary-reset-at` typed and
+  every other suffix captured in `extras`); wired into the egress
+  complete/stream dir-3 sites, attached to the response and to the first
+  stream chunk only
 
 ### gemini
 
@@ -1415,7 +1423,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `DispatchMeta::for_alias`/`mark_target`; `DispatchMeta` carries the additive
   capability ride-alongs `learned_capabilities` / `capability_observations` /
   `cleared_capabilities` plus the `replay_degradation` reasoning-replay
-  degradation record read once by the per-request WARN). Construction + hot-reload lifecycle: `new`,
+  degradation record read once by the per-request WARN, and `served_seat` --
+  the credential identity of the target that ACTUALLY served, copied by
+  `mark_target` from `DispatchTarget.seat` and left `None` on the
+  forwarded-credential path). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_learned_from` reload carries + `note_overlay_revision`, the
@@ -1631,7 +1642,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `try_dispatch`-based read would
 - `src/seat_pool.rs` -- OAuth credential-pool glue: `SeatTarget` (seat-pinned
   provider + per-seat `state_key`), `seat_state_key` (bare nickname for the
-  default seat, `nickname#label` for labeled seats), `seat_order_for_request`
+  default seat, `nickname#label` for labeled seats), `seat_identity` (the
+  persistable `provider#label` credential identity of a `SecretRef`, `None`
+  for every non-OAuth scheme so no path or env-var name reaches the usage
+  ledger), `seat_order_for_request`
   + `RoundRobinCursors` (per-pool `AtomicUsize` rotating the start seat per
   request under `RoundRobin`; `FillFirst` walks a fixed default-first order);
   `StickyLeastLoaded` selection adds `StickyPins` (a bounded-LRU `session_key
@@ -2068,7 +2082,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `UsageWriter`/`CHANNEL_CAPACITY`,
   `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`open_rw`/`OpenError`,
   the read-side query surface
-  (`aggregate`/`ttfbs`/`latest_quota`/`query`/`k_calibration_summary`/`m1_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`
+  (`aggregate`/`ttfbs`/`latest_quota_by_seat`/`query`/`k_calibration_summary`/`m1_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`
   + the capability-ledger reads
   `read_capability_events_after`/`latest_tombstone` + the row/summary types
   `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`M1AttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
@@ -2135,7 +2149,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/query/aggregate.rs` -- aggregate + breakdown queries over the requests
   table; exports `aggregate`, `errors_by_class` (flat per-group failure-class
   breakdown, same window predicate + group key as `aggregate`, sums to
-  `AggRow::errors`), `ttfbs`, `latest_quota`, `QuotaSnapshot`,
+  `AggRow::errors`), `ttfbs`, `latest_quota_by_seat` (newest quota-bearing row
+  PER `seat`, eligibility `quota_status OR quota_utilization` non-NULL, NULL-seat
+  rows kept as their own bucket), `QuotaSnapshot` (carries `seat` +
+  `provider_kind`, the discriminator for the vendor-shared `quota_*` columns),
   `earliest_ts_start` (`MIN(ts_start)` at or after a caller-supplied lower bound,
   `None` when no row qualifies, so a caller can anchor an unbounded window off
   the oldest IN-WINDOW row instead of the epoch). Also
@@ -2657,10 +2674,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
   `guard_panel`'s blocking worker, runs
-  `aggregate`/`errors_by_class`/`latest_quota`/`would_trim_summary` over the
+  `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`would_trim_summary` over the
   `window_bounds` window, and maps to the aggregates-only `UsagePanel` DTO
-  (schema_version 2: per-`(alias,provider,model,upstream)` rollups + windowed
-  totals + quota snapshot + would-trim summary; per-group and totals
+  (schema_version 3: per-`(alias,provider,model,upstream)` rollups + windowed
+  totals + one per-seat quota snapshot each (`seat` + `provider_kind`, per-row
+  `ts_start_ms` freshness) + would-trim summary; per-group and totals
   `errors_by_class` failure-class breakdown, `client_disconnect_total` +
   reporting-only `cache_read_present` denominator; NEVER request
   rows/ids/bodies/prompts). Ledger-open/query failures classify to the shed

@@ -614,6 +614,183 @@ async fn stream_yields_chat_chunks_for_full_session() {
 }
 
 // -----------------------------------------------------------------------
+// x-codex-* quota carrier attach (complete + stream first chunk only)
+// -----------------------------------------------------------------------
+
+/// A minimal slice of the captured success-path family: one typed
+/// feeder plus one extras-bound suffix.
+const CODEX_QUOTA_HEADERS: &[(&str, &str)] = &[
+    ("x-codex-active-limit", "premium"),
+    ("x-codex-primary-used-percent", "16"),
+    ("x-codex-primary-reset-at", "1786210114"),
+    ("x-codex-plan-type", "prolite"),
+];
+
+fn with_codex_quota_headers(mut tmpl: ResponseTemplate) -> ResponseTemplate {
+    for (k, v) in CODEX_QUOTA_HEADERS {
+        tmpl = tmpl.append_header(*k, *v);
+    }
+    tmpl
+}
+
+#[tokio::test]
+async fn complete_populates_upstream_meta_from_codex_headers() {
+    // Arrange
+    let server = MockServer::start().await;
+    let completed_body = serde_json::json!({
+        "id": "resp_q1",
+        "object": "response",
+        "status": "completed",
+        "model": "gpt-5-codex",
+        "output": [{
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "pong"}]
+        }],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    });
+    let event_body = format!(
+        "data: {{\"type\":\"response.completed\",\"response\":{}}}\n\n",
+        serde_json::to_string(&completed_body).unwrap()
+    );
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(with_codex_quota_headers(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(event_body),
+        ))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    // Act
+    let resp = provider.complete(base_req()).await.expect("complete");
+
+    // Assert
+    let quota = resp
+        .upstream_meta
+        .as_ref()
+        .expect("upstream_meta populated from x-codex- headers")
+        .codex
+        .as_ref()
+        .expect("codex quota present");
+    assert_eq!(quota.active_limit.as_deref(), Some("premium"));
+    assert_eq!(quota.primary_used_percent.as_deref(), Some("16"));
+    assert_eq!(quota.primary_reset_at.as_deref(), Some("1786210114"));
+    assert_eq!(
+        quota.extras,
+        vec![("plan-type".to_string(), "prolite".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn complete_upstream_meta_is_none_without_codex_headers() {
+    // Arrange
+    let server = MockServer::start().await;
+    let completed_body = serde_json::json!({
+        "id": "resp_q2",
+        "object": "response",
+        "status": "completed",
+        "model": "gpt-5-codex",
+        "output": [{
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "pong"}]
+        }],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    });
+    let event_body = format!(
+        "data: {{\"type\":\"response.completed\",\"response\":{}}}\n\n",
+        serde_json::to_string(&completed_body).unwrap()
+    );
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(event_body),
+        )
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    // Act
+    let resp = provider.complete(base_req()).await.expect("complete");
+
+    // Assert
+    assert!(
+        resp.upstream_meta.is_none(),
+        "no x-codex- family means no upstream_meta carrier"
+    );
+}
+
+#[tokio::test]
+async fn stream_carries_upstream_meta_on_first_chunk_only() {
+    // Arrange
+    let server = MockServer::start().await;
+    let events = [
+        serde_json::json!({"type": "response.created", "response": {"id":"r","model":"m"}}),
+        serde_json::json!({
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {"type": "message", "id":"m1", "role":"assistant", "content":[]}
+        }),
+        serde_json::json!({"type": "response.output_text.delta", "output_index": 0, "delta": "hi"}),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id":"r", "status":"completed", "model":"m",
+                "output":[{"type":"message","id":"m1","role":"assistant",
+                            "content":[{"type":"output_text","text":"hi"}]}],
+                "usage": {"input_tokens":1, "output_tokens":1, "total_tokens":2}
+            }
+        }),
+    ];
+    let sse_body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(with_codex_quota_headers(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        ))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    // Act
+    let mut s = provider.stream(base_req()).await.expect("stream");
+    let mut chunks: Vec<ChatChunk> = Vec::new();
+    while let Some(item) = s.next().await {
+        chunks.push(item.expect("chunk ok"));
+    }
+
+    // Assert
+    assert!(chunks.len() > 1, "expected a multi-chunk stream");
+    let first = chunks[0]
+        .upstream_meta
+        .as_ref()
+        .expect("first chunk carries upstream_meta");
+    assert_eq!(
+        first
+            .codex
+            .as_ref()
+            .expect("codex quota present")
+            .active_limit
+            .as_deref(),
+        Some("premium")
+    );
+    for (i, c) in chunks.iter().enumerate().skip(1) {
+        assert!(
+            c.upstream_meta.is_none(),
+            "chunk {i} must NOT carry upstream_meta (first-chunk-only contract)"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
 // probe(): free reachability against /models (ApiKey lane only)
 // -----------------------------------------------------------------------
 
