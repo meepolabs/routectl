@@ -5,13 +5,15 @@ mod capability;
 mod grouped;
 mod would_trim;
 
-pub use aggregate::{QuotaSnapshot, aggregate, errors_by_class, latest_quota, ttfbs};
+pub use aggregate::{
+    QuotaSnapshot, aggregate, earliest_ts_start, errors_by_class, latest_quota, ttfbs,
+};
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,
 };
 pub use grouped::{
-    CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySpec, QueryTotals, RowCost,
-    query,
+    BucketSpec, CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
+    QuerySpec, QueryTotals, RowCost, SeriesBucket, query,
 };
 pub use would_trim::{
     KCalibration, M1AttributionSummary, ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary,
@@ -31,6 +33,13 @@ pub enum QueryError {
     /// than reporting the DB as unavailable.
     #[error("usage query exceeded its deadline")]
     Interrupted,
+
+    /// The requested time-bucket grid violated its invariants: a non-positive
+    /// width, or a bucket count outside `1..=1000`. The caller resolves the grid
+    /// and owns those bounds; this is the read path re-checking them rather than
+    /// dividing by zero in SQL or densifying an unbounded vector.
+    #[error("usage query received an unusable bucket grid")]
+    InvalidBucket,
 }
 
 /// The group-key columns shared by the aggregate and the raw-latency rows.

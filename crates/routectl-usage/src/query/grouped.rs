@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use crate::db::UsageDb;
 
-use super::aggregate::{QUERY_AGG_SQL, map_fine_row};
+use super::aggregate::{QUERY_AGG_SQL, SERIES_AGG_SQL, map_fine_row, map_fine_row_bucketed};
 use super::{AggRow, GroupKey, QueryError};
 
 /// How often (in SQLite VM instructions) the deadline is re-checked. Small
@@ -27,8 +27,52 @@ use super::{AggRow, GroupKey, QueryError};
 /// callback is not a measurable share of the query's own work.
 const PROGRESS_OPS: i32 = 10_000;
 
+/// The most buckets a series may carry. The caller resolves the bucket width so
+/// its count fits under this cap; this crate re-checks it as its own trust
+/// boundary, since an unbounded count would densify an unbounded vector.
+const SERIES_BUCKET_CAP: usize = 1000;
+
 /// Label for a group whose grouping column is NULL (no target was dispatched).
 const UNATTRIBUTED: &str = "(unattributed)";
+
+/// A resolved time-bucket grid: uniform-width buckets anchored at
+/// [`QuerySpec::from_ms`].
+///
+/// The caller owns granularity resolution (calendar edges, widening under the
+/// bucket cap) and passes the ALREADY-RESOLVED grid in. Both fields are
+/// re-validated on the query path -- `width_ms` must be strictly positive, since
+/// SQLite's integer division by zero is a silent NULL rather than an error, and
+/// `count` must fall in `1..=1000`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketSpec {
+    /// The bucket width in milliseconds. Strictly positive.
+    pub width_ms: i64,
+    /// How many consecutive buckets the series covers, starting at the window's
+    /// lower bound. Every one of them is emitted, traffic or not.
+    pub count: usize,
+}
+
+/// A dense time series over the same rows the groups were folded from.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct QuerySeries {
+    /// The resolved bucket width in milliseconds. A reader draws each bucket at
+    /// its own `start_ms` rather than assuming this stride.
+    pub bucket_ms: i64,
+    /// One entry per bucket in ascending time order, including the buckets that
+    /// saw no traffic.
+    pub buckets: Vec<SeriesBucket>,
+}
+
+/// One time bucket: when it starts, and the metrics of the rows inside it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SeriesBucket {
+    /// Inclusive lower edge of the bucket, epoch-millis UTC.
+    pub start_ms: i64,
+    /// The bucket's display figures, in the same shape a group carries. A
+    /// zero-traffic bucket reports `requests: 0`, every derived metric absent,
+    /// and `cost_status: unpriced`.
+    pub metrics: QueryMetrics,
+}
 
 /// What to read, how to group it, and how to narrow it.
 ///
@@ -47,6 +91,10 @@ pub struct QuerySpec {
     pub alias_filter: Option<String>,
     /// Restrict to one served provider. `None` matches every provider.
     pub provider_filter: Option<String>,
+    /// Also fold the same rows into a time series over this bucket grid. `None`
+    /// asks for no series at all, and reads the ledger exactly as it would
+    /// without this field.
+    pub bucket: Option<BucketSpec>,
 }
 
 /// The dimension a result set is grouped by.
@@ -144,6 +192,8 @@ pub struct QueryMetrics {
     pub stream_count: i64,
     /// Count of rows whose terminal outcome was `client_disconnect`.
     pub client_disconnect_total: i64,
+    /// Count of requests served only after a fallback (`fallback_count > 0`).
+    pub fallback_served: i64,
     /// Approximate p50 time-to-first-token (request-weighted mean) over
     /// streaming successes, ms. Same population as `ttft_p95_ms`.
     pub ttft_p50_ms: Option<i64>,
@@ -191,6 +241,10 @@ pub struct QueryResult {
     pub groups: Vec<QueryGroup>,
     /// Window-wide totals across every group.
     pub totals: QueryTotals,
+    /// The time series over the same rows, present exactly when
+    /// [`QuerySpec::bucket`] asked for one. Serialized as an explicit `null`
+    /// otherwise, never skipped.
+    pub series: Option<QuerySeries>,
 }
 
 /// Run one windowed, filtered, priced, grouped aggregate.
@@ -239,31 +293,28 @@ impl Drop for ProgressGuard<'_> {
 
 /// The read + fold, split out so [`query`] can scope its progress guard around
 /// the whole of it.
+///
+/// Both paths read ONE statement and fold it. On the series path that single
+/// scan feeds two accumulator maps at once: a second bucket-only statement would
+/// re-scan the ledger for a strict subset of rows already in hand, and each row
+/// is priced exactly once for both folds, so groups, totals and series reconcile
+/// by construction.
 fn read_and_fold(
     db: &UsageDb,
     spec: &QuerySpec,
     price: impl Fn(&AggRow) -> RowCost,
 ) -> Result<QueryResult, QueryError> {
-    let tx = db.conn().unchecked_transaction().map_err(classify)?;
+    if let Some(bucket) = spec.bucket {
+        check_bucket(bucket, spec.from_ms)?;
+    }
     let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
-    {
-        let mut stmt = tx.prepare(QUERY_AGG_SQL).map_err(classify)?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![
-                    spec.from_ms,
-                    spec.to_ms,
-                    spec.alias_filter.as_deref(),
-                    spec.provider_filter.as_deref(),
-                ],
-                map_fine_row,
-            )
-            .map_err(classify)?;
-        for row in rows {
-            let fine = row.map_err(classify)?;
-            let cost = price(&fine.agg);
-            let label = group_label(&fine.agg.key, spec.group_by);
-            groups.entry(label).or_default().add(&fine, cost);
+    let mut buckets: BTreeMap<i64, GroupAcc> = BTreeMap::new();
+
+    let tx = db.conn().unchecked_transaction().map_err(classify)?;
+    match spec.bucket {
+        None => fold_groups(&tx, spec, &price, &mut groups)?,
+        Some(bucket) => {
+            fold_groups_and_buckets(&tx, spec, bucket, &price, &mut groups, &mut buckets)?
         }
     }
     // A read-only transaction has nothing to commit; rolling back releases the
@@ -274,6 +325,9 @@ fn read_and_fold(
     for acc in groups.values() {
         totals.merge(acc);
     }
+    let series = spec
+        .bucket
+        .map(|bucket| densify(bucket, spec.from_ms, buckets));
     let groups = groups
         .into_iter()
         .map(|(label, acc)| QueryGroup {
@@ -284,7 +338,133 @@ fn read_and_fold(
     Ok(QueryResult {
         groups,
         totals: totals.finish(),
+        series,
     })
+}
+
+/// Re-check the caller's bucket-grid invariants at the crate boundary.
+///
+/// A non-positive width would divide by zero in SQL, which SQLite answers with a
+/// silent NULL bucket index rather than an error, and an out-of-range count
+/// would densify an unbounded vector. The last bucket's start is computed in
+/// i128 so a width-times-count product that would not fit an `i64` is refused
+/// here rather than overflowing in [`densify`], whose arithmetic is then
+/// provably in range. All three are the caller's contract to uphold, but a
+/// violation is answered with an error rather than an assertion: this fold is
+/// network-reachable and the release profile aborts on panic.
+const fn check_bucket(bucket: BucketSpec, anchor_ms: i64) -> Result<(), QueryError> {
+    if bucket.width_ms <= 0 || bucket.count == 0 || bucket.count > SERIES_BUCKET_CAP {
+        return Err(QueryError::InvalidBucket);
+    }
+    let last_start = anchor_ms as i128 + (bucket.count as i128 - 1) * bucket.width_ms as i128;
+    if last_start > i64::MAX as i128 {
+        return Err(QueryError::InvalidBucket);
+    }
+    Ok(())
+}
+
+/// Fold the windowed fine rows into the coarse groups.
+fn fold_groups(
+    tx: &rusqlite::Transaction<'_>,
+    spec: &QuerySpec,
+    price: &impl Fn(&AggRow) -> RowCost,
+    groups: &mut BTreeMap<String, GroupAcc>,
+) -> Result<(), QueryError> {
+    let mut stmt = tx.prepare(QUERY_AGG_SQL).map_err(classify)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                spec.from_ms,
+                spec.to_ms,
+                spec.alias_filter.as_deref(),
+                spec.provider_filter.as_deref(),
+            ],
+            map_fine_row,
+        )
+        .map_err(classify)?;
+    for row in rows {
+        let fine = row.map_err(classify)?;
+        let cost = price(&fine.agg);
+        let label = group_label(&fine.agg.key, spec.group_by);
+        groups.entry(label).or_default().add(&fine, cost);
+    }
+    Ok(())
+}
+
+/// Fold the windowed fine-and-bucketed rows into the coarse groups AND the
+/// per-bucket accumulators, in one scan. Each map discards the dimension the
+/// other keeps.
+///
+/// A row whose bucket index falls outside the grid is refused before it reaches
+/// EITHER accumulator: [`densify`] emits only `0..count`, so counting such a row
+/// in the groups and totals while dropping it from the series would make the two
+/// folds disagree silently. Erroring keeps the guarantee absolute -- either every
+/// counted row is representable in the series, or the query fails.
+fn fold_groups_and_buckets(
+    tx: &rusqlite::Transaction<'_>,
+    spec: &QuerySpec,
+    bucket: BucketSpec,
+    price: &impl Fn(&AggRow) -> RowCost,
+    groups: &mut BTreeMap<String, GroupAcc>,
+    buckets: &mut BTreeMap<i64, GroupAcc>,
+) -> Result<(), QueryError> {
+    let mut stmt = tx.prepare(SERIES_AGG_SQL).map_err(classify)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                spec.from_ms,
+                spec.to_ms,
+                spec.alias_filter.as_deref(),
+                spec.provider_filter.as_deref(),
+                bucket.width_ms,
+            ],
+            map_fine_row_bucketed,
+        )
+        .map_err(classify)?;
+    for row in rows {
+        let (fine, bucket_ix) = row.map_err(classify)?;
+        if bucket_ix < 0 || bucket_ix >= bucket.count as i64 {
+            return Err(QueryError::InvalidBucket);
+        }
+        let cost = price(&fine.agg);
+        let label = group_label(&fine.agg.key, spec.group_by);
+        groups.entry(label).or_default().add(&fine, cost);
+        buckets.entry(bucket_ix).or_default().add(&fine, cost);
+    }
+    Ok(())
+}
+
+/// Resolve the per-bucket accumulators into a dense series: one entry per
+/// bucket in the grid, in ascending time order, whether or not it saw traffic.
+/// An absent bucket resolves through the SAME `finish` an empty group would, so
+/// a zero-traffic bucket reports `requests: 0` with every derived metric absent
+/// rather than a fabricated measurement.
+///
+/// A window that matched NO row at all short-circuits that fill and yields an
+/// EMPTY series: it has nothing to plot, and up to a thousand zero buckets would
+/// present an empty ledger as a measured flat line.
+///
+/// The `start_ms` arithmetic is plain i64 because [`check_bucket`] has already
+/// rejected any grid whose last bucket start would not fit one.
+fn densify(
+    bucket: BucketSpec,
+    anchor_ms: i64,
+    mut buckets: BTreeMap<i64, GroupAcc>,
+) -> QuerySeries {
+    let filled = if buckets.is_empty() {
+        Vec::new()
+    } else {
+        (0..bucket.count)
+            .map(|i| SeriesBucket {
+                start_ms: anchor_ms + i as i64 * bucket.width_ms,
+                metrics: buckets.remove(&(i as i64)).unwrap_or_default().finish(),
+            })
+            .collect()
+    };
+    QuerySeries {
+        bucket_ms: bucket.width_ms,
+        buckets: filled,
+    }
 }
 
 /// Map a SQLite failure to [`QueryError`], separating a deadline interrupt from
@@ -330,6 +510,7 @@ struct GroupAcc {
     server_tool_calls: i64,
     stream_count: i64,
     client_disconnect_total: i64,
+    fallback_served: i64,
     ttft_sum: i64,
     ttft_count: i64,
     ttfb_max: Option<i64>,
@@ -363,6 +544,7 @@ impl GroupAcc {
         self.server_tool_calls += agg.server_tool_calls;
         self.stream_count += agg.stream_count;
         self.client_disconnect_total += agg.client_disconnect_total;
+        self.fallback_served += fine.fallback_served;
         self.ttft_sum += fine.ttft_sum;
         self.ttft_count += fine.ttft_count;
         self.ttfb_max = max_opt(self.ttfb_max, fine.ttfb_max);
@@ -404,6 +586,7 @@ impl GroupAcc {
         self.server_tool_calls += other.server_tool_calls;
         self.stream_count += other.stream_count;
         self.client_disconnect_total += other.client_disconnect_total;
+        self.fallback_served += other.fallback_served;
         self.ttft_sum += other.ttft_sum;
         self.ttft_count += other.ttft_count;
         self.ttfb_max = max_opt(self.ttfb_max, other.ttfb_max);
@@ -439,6 +622,7 @@ impl GroupAcc {
             server_tool_calls: self.server_tool_calls,
             stream_count: self.stream_count,
             client_disconnect_total: self.client_disconnect_total,
+            fallback_served: self.fallback_served,
             ttft_p50_ms: mean_i64(self.ttft_sum, self.ttft_count),
             ttft_p95_ms: self.ttfb_max,
             latency_p50_ms: mean_i64(self.latency_sum, self.requests),

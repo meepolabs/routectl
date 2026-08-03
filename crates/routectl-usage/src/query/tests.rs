@@ -760,6 +760,50 @@ fn latest_quota_returns_none_when_no_quota_rows() {
 }
 
 #[test]
+fn earliest_ts_start_returns_the_oldest_rows_timestamp() {
+    // Arrange: rows inserted out of timestamp order.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    for (id, ts) in [("b", 500), ("a", 100), ("c", 900)] {
+        insert_row(&db, id, ts, "m", "p", "u", "a", "ok", None, None, 1, None);
+    }
+
+    // Act + Assert
+    assert_eq!(earliest_ts_start(&db, 0).expect("query"), Some(100));
+}
+
+#[test]
+fn earliest_ts_start_ignores_rows_below_the_lower_bound() {
+    // Arrange: a row the caller's window excludes, plus two it includes. The
+    // bound is the same inclusive one the aggregate applies, so the anchor this
+    // feeds can never widen the row set.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    for (id, ts) in [("pre", -5_000), ("a", 100), ("c", 900)] {
+        insert_row(&db, id, ts, "m", "p", "u", "a", "ok", None, None, 1, None);
+    }
+
+    // Act + Assert
+    assert_eq!(earliest_ts_start(&db, 0).expect("query"), Some(100));
+    assert_eq!(earliest_ts_start(&db, 500).expect("query"), Some(900));
+    assert_eq!(
+        earliest_ts_start(&db, -10_000).expect("query"),
+        Some(-5_000)
+    );
+}
+
+#[test]
+fn earliest_ts_start_on_an_empty_ledger_is_absent_rather_than_an_error() {
+    // Arrange: `MIN` over zero rows is a single NULL row, not an absent row, so
+    // this must not read as a missing-row failure.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+
+    // Act + Assert
+    assert_eq!(earliest_ts_start(&db, 0).expect("query"), None);
+}
+
+#[test]
 fn aggregate_over_readonly_open_matches_seeded_results() {
     // Arrange: seed via the read-write open, then drop it so the file is
     // read through the real CLI path (open_readonly).

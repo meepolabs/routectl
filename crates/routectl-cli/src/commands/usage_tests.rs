@@ -126,6 +126,256 @@ fn resolve_local_midnight_gap_probes_forward_not_now() {
     assert!(resolved < now);
 }
 
+// --- bucket resolution (pure: no DB, no ambient clock) ---
+
+/// `now` at the given local wall-clock instant.
+fn local_now(y: i32, m: u32, d: u32, hour: u32, minute: u32) -> DateTime<Local> {
+    Local
+        .from_local_datetime(
+            &NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(hour, minute, 0)
+                .unwrap(),
+        )
+        .earliest()
+        .unwrap()
+}
+
+/// Assert the grid contract the leaf re-checks at its trust boundary, plus the
+/// coverage property widening must never break.
+fn assert_grid_contract(anchor_ms: i64, spec: BucketSpec, to_ms: i64) {
+    assert!(spec.width_ms > 0, "width must be strictly positive");
+    assert!(
+        (1..=MAX_BUCKETS).contains(&spec.count),
+        "count {} outside 1..={MAX_BUCKETS}",
+        spec.count
+    );
+    let last_start = i128::from(anchor_ms) + (spec.count as i128 - 1) * i128::from(spec.width_ms);
+    assert!(
+        last_start <= i128::from(i64::MAX),
+        "the last bucket start must fit an i64"
+    );
+    let covered = i128::from(anchor_ms) + spec.count as i128 * i128::from(spec.width_ms);
+    assert!(
+        covered >= i128::from(to_ms),
+        "the grid must cover the whole window"
+    );
+    assert!(
+        anchor_ms <= to_ms,
+        "the anchor must precede the upper bound"
+    );
+}
+
+#[test]
+fn today_at_hour_granularity_stays_within_a_day_of_buckets() {
+    let now = local_now(2026, 6, 11, 14, 30);
+    let bounds = window_bounds(WindowFlag::Today, now);
+
+    let (anchor, spec) =
+        resolve_bucket(BucketUnit::Hour, bounds.from_ms, bounds.to_ms, None, now).unwrap();
+
+    assert_eq!(anchor, bounds.from_ms, "a dated window anchors on itself");
+    assert_eq!(spec.width_ms, 3_600_000, "no widening is needed today");
+    // 15 hours elapsed; a DST transition day can shift that by one either way.
+    assert!(
+        spec.count <= 25,
+        "today+hour never exceeds 25: {}",
+        spec.count
+    );
+    assert_grid_contract(anchor, spec, bounds.to_ms);
+}
+
+#[test]
+fn a_full_week_at_day_granularity_is_seven_buckets() {
+    // Sunday 14:30 -- the ISO week's Monday is six days and change back, so the
+    // week is fully spanned.
+    let now = local_now(2026, 6, 14, 14, 30);
+    let bounds = window_bounds(WindowFlag::ThisWeek, now);
+
+    let (anchor, spec) =
+        resolve_bucket(BucketUnit::Day, bounds.from_ms, bounds.to_ms, None, now).unwrap();
+
+    assert_eq!(spec.width_ms, 86_400_000);
+    assert_eq!(spec.count, 7, "a spanned week is seven day buckets");
+    assert_grid_contract(anchor, spec, bounds.to_ms);
+}
+
+#[test]
+fn a_full_month_at_day_granularity_is_one_bucket_per_calendar_day() {
+    // Late on the last day of a 30-day month.
+    let now = local_now(2026, 6, 30, 23, 0);
+    let bounds = window_bounds(WindowFlag::ThisMonth, now);
+
+    let (anchor, spec) =
+        resolve_bucket(BucketUnit::Day, bounds.from_ms, bounds.to_ms, None, now).unwrap();
+
+    assert_eq!(spec.width_ms, 86_400_000, "a month never needs widening");
+    assert!(
+        (28..=31).contains(&spec.count),
+        "a spanned month is 28-31 day buckets, got {}",
+        spec.count
+    );
+    assert_grid_contract(anchor, spec, bounds.to_ms);
+}
+
+#[test]
+fn all_time_anchors_on_the_first_rows_local_midnight() {
+    // The all-time lower bound is the 1970 epoch; bucketing from there would
+    // spend the grid on empty decades, so the earliest row's local midnight is
+    // the real anchor.
+    let now = local_now(2026, 6, 11, 14, 30);
+    let bounds = window_bounds(WindowFlag::All, now);
+    let first_row = day_start_ms(2026, 6, 9) + 9 * 3_600_000;
+
+    let (anchor, spec) = resolve_bucket(
+        BucketUnit::Day,
+        bounds.from_ms,
+        bounds.to_ms,
+        Some(first_row),
+        now,
+    )
+    .unwrap();
+
+    assert_eq!(
+        anchor,
+        day_start_ms(2026, 6, 9),
+        "anchored at local midnight"
+    );
+    assert!(
+        anchor < first_row,
+        "the anchor precedes the row it resolved"
+    );
+    assert_eq!(spec.width_ms, 86_400_000);
+    assert_eq!(spec.count, 3, "Jun 9, 10, and the partial 11th");
+    assert_grid_contract(anchor, spec, bounds.to_ms);
+}
+
+#[test]
+fn all_time_at_day_granularity_past_the_cap_widens_to_whole_days() {
+    let now = local_now(2026, 6, 11, 14, 30);
+    let bounds = window_bounds(WindowFlag::All, now);
+    let first_row = now.timestamp_millis() - 2_500 * 86_400_000;
+
+    let (anchor, spec) = resolve_bucket(
+        BucketUnit::Day,
+        bounds.from_ms,
+        bounds.to_ms,
+        Some(first_row),
+        now,
+    )
+    .unwrap();
+
+    // 2501 day buckets would exceed the cap, so the width becomes a 3-day
+    // multiple and the count falls back under it.
+    assert_eq!(spec.width_ms, 3 * 86_400_000, "widened to a whole multiple");
+    assert!(spec.count <= MAX_BUCKETS);
+    assert_grid_contract(anchor, spec, bounds.to_ms);
+}
+
+#[test]
+fn all_time_at_hour_granularity_widens_to_whole_hours() {
+    let now = local_now(2026, 6, 11, 14, 30);
+    let bounds = window_bounds(WindowFlag::All, now);
+    let first_row = now.timestamp_millis() - 400 * 86_400_000;
+
+    let (anchor, spec) = resolve_bucket(
+        BucketUnit::Hour,
+        bounds.from_ms,
+        bounds.to_ms,
+        Some(first_row),
+        now,
+    )
+    .unwrap();
+
+    assert!(spec.width_ms > 3_600_000, "the hour grid widened");
+    assert_eq!(
+        spec.width_ms % 3_600_000,
+        0,
+        "the widened width stays a whole multiple of the requested unit"
+    );
+    assert!(spec.count <= MAX_BUCKETS);
+    assert_grid_contract(anchor, spec, bounds.to_ms);
+}
+
+#[test]
+fn an_empty_ledger_under_all_time_has_nothing_to_bucket() {
+    // No earliest row means no defensible anchor -- the caller reports an empty
+    // series rather than a grid over the whole epoch.
+    let now = local_now(2026, 6, 11, 14, 30);
+    let bounds = window_bounds(WindowFlag::All, now);
+
+    assert!(resolve_bucket(BucketUnit::Day, bounds.from_ms, bounds.to_ms, None, now).is_none());
+    assert!(resolve_bucket(BucketUnit::Hour, bounds.from_ms, bounds.to_ms, None, now).is_none());
+}
+
+#[test]
+fn a_dated_window_ignores_the_earliest_row() {
+    // Only all-time re-anchors; a dated window's lower bound IS its anchor, even
+    // when an earlier row exists.
+    let now = local_now(2026, 6, 11, 14, 30);
+    let bounds = window_bounds(WindowFlag::ThisMonth, now);
+    let older = day_start_ms(2020, 1, 1);
+
+    let (anchor, spec) = resolve_bucket(
+        BucketUnit::Day,
+        bounds.from_ms,
+        bounds.to_ms,
+        Some(older),
+        now,
+    )
+    .unwrap();
+
+    assert_eq!(anchor, bounds.from_ms);
+    assert_eq!(spec.width_ms, 86_400_000);
+}
+
+#[test]
+fn a_window_with_no_span_has_nothing_to_bucket() {
+    let now = local_now(2026, 6, 11, 14, 30);
+    let point = now.timestamp_millis();
+
+    assert!(resolve_bucket(BucketUnit::Hour, point, point, None, now).is_none());
+    assert!(resolve_bucket(BucketUnit::Day, point, point - 1, None, now).is_none());
+}
+
+#[test]
+fn a_dst_transition_day_still_yields_a_covering_grid() {
+    // The host TZ is whatever the test machine uses, so the transition itself is
+    // not assertable here; what IS assertable host-independently is that a `now`
+    // on either US transition day -- spring-forward, fall-back, and the days
+    // around them -- still resolves to a grid the leaf accepts and that covers
+    // the whole window at both granularities.
+    for (y, m, d) in [
+        (2026, 3, 7),
+        (2026, 3, 8),
+        (2026, 3, 9),
+        (2026, 10, 31),
+        (2026, 11, 1),
+        (2026, 11, 2),
+    ] {
+        let now = local_now(y, m, d, 12, 0);
+        for unit in [BucketUnit::Hour, BucketUnit::Day] {
+            for flag in [
+                WindowFlag::Today,
+                WindowFlag::ThisWeek,
+                WindowFlag::ThisMonth,
+            ] {
+                let bounds = window_bounds(flag, now);
+                let (anchor, spec) = resolve_bucket(unit, bounds.from_ms, bounds.to_ms, None, now)
+                    .unwrap_or_else(|| panic!("{y}-{m}-{d} {unit:?} {flag:?} has a grid"));
+                assert_grid_contract(anchor, spec, bounds.to_ms);
+            }
+            // All-time across the transition, anchored a fortnight before it.
+            let bounds = window_bounds(WindowFlag::All, now);
+            let first_row = now.timestamp_millis() - 14 * 86_400_000;
+            let (anchor, spec) =
+                resolve_bucket(unit, bounds.from_ms, bounds.to_ms, Some(first_row), now)
+                    .unwrap_or_else(|| panic!("{y}-{m}-{d} {unit:?} all-time has a grid"));
+            assert_grid_contract(anchor, spec, bounds.to_ms);
+        }
+    }
+}
+
 // --- DB-backed rollup + cost tests ---
 
 #[allow(clippy::too_many_arguments)]

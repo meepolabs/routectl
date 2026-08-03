@@ -263,6 +263,7 @@ impl<T> tracing::instrument::Instrument for routectl_usage::Outcome
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::Outcome
 pub enum routectl_usage::QueryError
 pub routectl_usage::QueryError::Interrupted
+pub routectl_usage::QueryError::InvalidBucket
 pub routectl_usage::QueryError::Sqlite(rusqlite::error::Error)
 impl core::convert::From<rusqlite::error::Error> for routectl_usage::QueryError
 pub fn routectl_usage::QueryError::from(rusqlite::error::Error) -> Self
@@ -403,6 +404,51 @@ impl<T> core::convert::From<T> for routectl_usage::AggRow
 pub fn routectl_usage::AggRow::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::AggRow
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::AggRow
+pub struct routectl_usage::BucketSpec
+pub routectl_usage::BucketSpec::count: usize
+pub routectl_usage::BucketSpec::width_ms: i64
+impl core::clone::Clone for routectl_usage::BucketSpec
+pub fn routectl_usage::BucketSpec::clone(&self) -> routectl_usage::BucketSpec
+impl core::cmp::Eq for routectl_usage::BucketSpec
+impl core::cmp::PartialEq for routectl_usage::BucketSpec
+pub fn routectl_usage::BucketSpec::eq(&self, &routectl_usage::BucketSpec) -> bool
+impl core::fmt::Debug for routectl_usage::BucketSpec
+pub fn routectl_usage::BucketSpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::BucketSpec
+impl core::marker::StructuralPartialEq for routectl_usage::BucketSpec
+impl core::marker::Freeze for routectl_usage::BucketSpec
+impl core::marker::Send for routectl_usage::BucketSpec
+impl core::marker::Sync for routectl_usage::BucketSpec
+impl core::marker::Unpin for routectl_usage::BucketSpec
+impl core::marker::UnsafeUnpin for routectl_usage::BucketSpec
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::BucketSpec
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::BucketSpec
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::BucketSpec where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::BucketSpec::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::BucketSpec where U: core::convert::From<T>
+pub fn routectl_usage::BucketSpec::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::BucketSpec where U: core::convert::Into<T>
+pub type routectl_usage::BucketSpec::Error = core::convert::Infallible
+pub fn routectl_usage::BucketSpec::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::BucketSpec where U: core::convert::TryFrom<T>
+pub type routectl_usage::BucketSpec::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::BucketSpec::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::BucketSpec where T: core::clone::Clone
+pub type routectl_usage::BucketSpec::Owned = T
+pub fn routectl_usage::BucketSpec::clone_into(&self, &mut T)
+pub fn routectl_usage::BucketSpec::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::BucketSpec where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::BucketSpec::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::BucketSpec where T: ?core::marker::Sized
+pub fn routectl_usage::BucketSpec::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::BucketSpec where T: ?core::marker::Sized
+pub fn routectl_usage::BucketSpec::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::BucketSpec where T: core::clone::Clone
+pub unsafe fn routectl_usage::BucketSpec::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::BucketSpec
+pub fn routectl_usage::BucketSpec::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::BucketSpec
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::BucketSpec
 pub struct routectl_usage::CapabilityEvent
 pub routectl_usage::CapabilityEvent::capability: alloc::string::String
 pub routectl_usage::CapabilityEvent::catalog_version: i64
@@ -826,6 +872,7 @@ pub routectl_usage::QueryMetrics::cost_usd: core::option::Option<f64>
 pub routectl_usage::QueryMetrics::ctx_avg: core::option::Option<i64>
 pub routectl_usage::QueryMetrics::ctx_peak: core::option::Option<i64>
 pub routectl_usage::QueryMetrics::errors: i64
+pub routectl_usage::QueryMetrics::fallback_served: i64
 pub routectl_usage::QueryMetrics::input_tokens: i64
 pub routectl_usage::QueryMetrics::latency_p50_ms: core::option::Option<i64>
 pub routectl_usage::QueryMetrics::latency_p95_ms: core::option::Option<i64>
@@ -882,6 +929,7 @@ impl<T> tracing::instrument::Instrument for routectl_usage::QueryMetrics
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::QueryMetrics
 pub struct routectl_usage::QueryResult
 pub routectl_usage::QueryResult::groups: alloc::vec::Vec<routectl_usage::QueryGroup>
+pub routectl_usage::QueryResult::series: core::option::Option<routectl_usage::QuerySeries>
 pub routectl_usage::QueryResult::totals: routectl_usage::QueryTotals
 impl core::clone::Clone for routectl_usage::QueryResult
 pub fn routectl_usage::QueryResult::clone(&self) -> routectl_usage::QueryResult
@@ -923,8 +971,52 @@ impl<T> core::convert::From<T> for routectl_usage::QueryResult
 pub fn routectl_usage::QueryResult::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::QueryResult
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::QueryResult
+pub struct routectl_usage::QuerySeries
+pub routectl_usage::QuerySeries::bucket_ms: i64
+pub routectl_usage::QuerySeries::buckets: alloc::vec::Vec<routectl_usage::SeriesBucket>
+impl core::clone::Clone for routectl_usage::QuerySeries
+pub fn routectl_usage::QuerySeries::clone(&self) -> routectl_usage::QuerySeries
+impl core::cmp::PartialEq for routectl_usage::QuerySeries
+pub fn routectl_usage::QuerySeries::eq(&self, &routectl_usage::QuerySeries) -> bool
+impl core::fmt::Debug for routectl_usage::QuerySeries
+pub fn routectl_usage::QuerySeries::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::QuerySeries
+impl serde_core::ser::Serialize for routectl_usage::QuerySeries
+pub fn routectl_usage::QuerySeries::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_usage::QuerySeries
+impl core::marker::Send for routectl_usage::QuerySeries
+impl core::marker::Sync for routectl_usage::QuerySeries
+impl core::marker::Unpin for routectl_usage::QuerySeries
+impl core::marker::UnsafeUnpin for routectl_usage::QuerySeries
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::QuerySeries
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::QuerySeries
+impl<T, U> core::convert::Into<U> for routectl_usage::QuerySeries where U: core::convert::From<T>
+pub fn routectl_usage::QuerySeries::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::QuerySeries where U: core::convert::Into<T>
+pub type routectl_usage::QuerySeries::Error = core::convert::Infallible
+pub fn routectl_usage::QuerySeries::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::QuerySeries where U: core::convert::TryFrom<T>
+pub type routectl_usage::QuerySeries::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::QuerySeries::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::QuerySeries where T: core::clone::Clone
+pub type routectl_usage::QuerySeries::Owned = T
+pub fn routectl_usage::QuerySeries::clone_into(&self, &mut T)
+pub fn routectl_usage::QuerySeries::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::QuerySeries where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::QuerySeries::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::QuerySeries where T: ?core::marker::Sized
+pub fn routectl_usage::QuerySeries::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::QuerySeries where T: ?core::marker::Sized
+pub fn routectl_usage::QuerySeries::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::QuerySeries where T: core::clone::Clone
+pub unsafe fn routectl_usage::QuerySeries::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::QuerySeries
+pub fn routectl_usage::QuerySeries::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::QuerySeries
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::QuerySeries
 pub struct routectl_usage::QuerySpec
 pub routectl_usage::QuerySpec::alias_filter: core::option::Option<alloc::string::String>
+pub routectl_usage::QuerySpec::bucket: core::option::Option<routectl_usage::BucketSpec>
 pub routectl_usage::QuerySpec::from_ms: i64
 pub routectl_usage::QuerySpec::group_by: routectl_usage::GroupDim
 pub routectl_usage::QuerySpec::provider_filter: core::option::Option<alloc::string::String>
@@ -1101,6 +1193,49 @@ impl<T> core::convert::From<T> for routectl_usage::ReuseSampleRow
 pub fn routectl_usage::ReuseSampleRow::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::ReuseSampleRow
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::ReuseSampleRow
+pub struct routectl_usage::SeriesBucket
+pub routectl_usage::SeriesBucket::metrics: routectl_usage::QueryMetrics
+pub routectl_usage::SeriesBucket::start_ms: i64
+impl core::clone::Clone for routectl_usage::SeriesBucket
+pub fn routectl_usage::SeriesBucket::clone(&self) -> routectl_usage::SeriesBucket
+impl core::cmp::PartialEq for routectl_usage::SeriesBucket
+pub fn routectl_usage::SeriesBucket::eq(&self, &routectl_usage::SeriesBucket) -> bool
+impl core::fmt::Debug for routectl_usage::SeriesBucket
+pub fn routectl_usage::SeriesBucket::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::SeriesBucket
+impl serde_core::ser::Serialize for routectl_usage::SeriesBucket
+pub fn routectl_usage::SeriesBucket::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for routectl_usage::SeriesBucket
+impl core::marker::Send for routectl_usage::SeriesBucket
+impl core::marker::Sync for routectl_usage::SeriesBucket
+impl core::marker::Unpin for routectl_usage::SeriesBucket
+impl core::marker::UnsafeUnpin for routectl_usage::SeriesBucket
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::SeriesBucket
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::SeriesBucket
+impl<T, U> core::convert::Into<U> for routectl_usage::SeriesBucket where U: core::convert::From<T>
+pub fn routectl_usage::SeriesBucket::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::SeriesBucket where U: core::convert::Into<T>
+pub type routectl_usage::SeriesBucket::Error = core::convert::Infallible
+pub fn routectl_usage::SeriesBucket::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::SeriesBucket where U: core::convert::TryFrom<T>
+pub type routectl_usage::SeriesBucket::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::SeriesBucket::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::SeriesBucket where T: core::clone::Clone
+pub type routectl_usage::SeriesBucket::Owned = T
+pub fn routectl_usage::SeriesBucket::clone_into(&self, &mut T)
+pub fn routectl_usage::SeriesBucket::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::SeriesBucket where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::SeriesBucket::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::SeriesBucket where T: ?core::marker::Sized
+pub fn routectl_usage::SeriesBucket::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::SeriesBucket where T: ?core::marker::Sized
+pub fn routectl_usage::SeriesBucket::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::SeriesBucket where T: core::clone::Clone
+pub unsafe fn routectl_usage::SeriesBucket::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::SeriesBucket
+pub fn routectl_usage::SeriesBucket::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::SeriesBucket
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::SeriesBucket
 pub struct routectl_usage::ShadowMisfireSummary
 pub routectl_usage::ShadowMisfireSummary::compared_turns: i64
 pub routectl_usage::ShadowMisfireSummary::misfire_turns: i64
@@ -1449,6 +1584,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_usage::WouldTrimSummary
 pub const routectl_usage::CHANNEL_CAPACITY: usize
 pub const routectl_usage::SCHEMA_VERSION: i64
 pub fn routectl_usage::aggregate(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<routectl_usage::AggRow>, routectl_usage::QueryError>
+pub fn routectl_usage::earliest_ts_start(&routectl_usage::UsageDb, i64) -> core::result::Result<core::option::Option<i64>, routectl_usage::QueryError>
 pub fn routectl_usage::errors_by_class(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, alloc::string::String, i64)>, routectl_usage::QueryError>
 pub fn routectl_usage::estimate_cost_tokens(i64, i64, i64, i64, i64, i64, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>
 pub fn routectl_usage::insert_capability_event(&rusqlite::Connection, &routectl_usage::CapabilityEvent) -> core::result::Result<usize, rusqlite::error::Error>
