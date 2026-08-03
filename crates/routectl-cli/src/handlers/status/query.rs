@@ -169,7 +169,11 @@ impl QueryBucket {
 /// The bucket GRID is not resolved here: an all-time series anchors on the
 /// ledger's earliest row, which is a read, so the grid is resolved on the
 /// blocking worker that already owns the connection.
-fn spec_from_body(
+///
+/// Visible to the rest of the status module so the dashboard's drift test can
+/// validate the request shapes the page declares against THIS parser rather
+/// than a second copy of the vocabulary.
+pub(super) fn spec_from_body(
     body: &[u8],
     now: DateTime<Local>,
 ) -> Result<(QuerySpec, Option<BucketUnit>), ()> {
