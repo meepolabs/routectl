@@ -103,7 +103,7 @@ pub use config::{
     BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig, BedrockMantleConfig,
 };
 pub use config_effective::{
-    ClassPolicyCell, ClassPolicySource, EffectiveView, ModelCell, derive_effective_view,
+    AliasChain, ClassPolicyCell, ClassPolicySource, EffectiveView, ModelCell, derive_effective_view,
 };
 pub use config_error::parse_config;
 pub use config_locate::locate_dotted_path;
@@ -155,4 +155,5 @@ pub use override_registry::{
 pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions,
+    class_debits,
 };

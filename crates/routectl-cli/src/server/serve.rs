@@ -207,6 +207,12 @@ pub async fn serve_on_listener_with_overlay(
         .local_addr()
         .map_err(|e| Error::Internal(format!("local_addr: {e}")))?;
 
+    // The bound address is fixed for the process; the config-load stamp lands
+    // now (the config in `config` IS the one about to go live) and is
+    // re-stamped by the reload coordinator on every later successful load.
+    let daemon_meta = Arc::new(crate::handlers::status::DaemonMeta::new(bound.to_string()));
+    daemon_meta.stamp_config_loaded();
+
     let alias_list: Vec<&str> = config.aliases.keys().map(String::as_str).collect();
     tracing::info!(
         addr = %bound,
@@ -355,12 +361,20 @@ pub async fn serve_on_listener_with_overlay(
         activation_swap,
         usage_handle,
         shutdown_rx,
+        daemon_meta.clone(),
     );
     if let Some(handle) = mitm_proxy_handle {
         reload_handles.push(handle);
     }
 
-    let app = build_axum_router(state, token_set, max_body_bytes, config_path.clone(), bound);
+    let app = build_axum_router(
+        state,
+        token_set,
+        max_body_bytes,
+        config_path.clone(),
+        bound,
+        daemon_meta,
+    );
 
     let serve_result = serve_with_bounded_drain(listener, app).await;
 
@@ -694,6 +708,7 @@ fn build_axum_router(
     max_body_bytes: usize,
     config_path: Option<PathBuf>,
     bound: std::net::SocketAddr,
+    daemon_meta: Arc<crate::handlers::status::DaemonMeta>,
 ) -> AxumRouter {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
@@ -762,7 +777,8 @@ fn build_axum_router(
     // budget. A zero-I/O `&'static str` response cannot stall or hold a permit,
     // and keeping it off that budget means an overload sheds status DATA while
     // the operator's incident window (the shell) still loads.
-    let status_state = crate::handlers::status::StatusState::from_app(&state, config_path);
+    let status_state =
+        crate::handlers::status::StatusState::from_app(&state, config_path, daemon_meta);
     let status_allowlist = status_gate::StatusHostAllowlist::new(bound);
     let status_json = status_gate::apply_overload_layers(
         crate::handlers::status::status_router().with_state(Arc::new(status_state)),

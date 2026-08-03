@@ -431,6 +431,7 @@ async fn failed_config_reload_keeps_previous_activation() {
         router_swap,
         activation_swap: activation_swap.clone(),
         usage,
+        daemon_meta: crate::handlers::status::DaemonMeta::for_test(),
     };
 
     // Act

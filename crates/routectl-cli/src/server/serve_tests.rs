@@ -691,7 +691,14 @@ async fn declared_auth_gated_routes_challenge_unauthenticated_requests() {
     let (state, _usage_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let bound: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let token_set = Arc::new(TokenSet::new(vec!["secret".to_string()]));
-    let app = build_axum_router(state, token_set, 1024, None, bound);
+    let app = build_axum_router(
+        state,
+        token_set,
+        1024,
+        None,
+        bound,
+        crate::handlers::status::DaemonMeta::for_test(),
+    );
 
     // Act + Assert: no credential -> 401 on every auth-gated path.
     for path in AUTH_GATED_ROUTES {
@@ -751,7 +758,14 @@ async fn token_less_loopback_serves_auth_gated_routes_without_credentials() {
     let router = routectl_router::Router::new(Arc::new(Config::default()));
     let (state, _usage_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let bound: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let app = build_axum_router(state, Arc::new(TokenSet::default()), 1024, None, bound);
+    let app = build_axum_router(
+        state,
+        Arc::new(TokenSet::default()),
+        1024,
+        None,
+        bound,
+        crate::handlers::status::DaemonMeta::for_test(),
+    );
 
     // Act
     let response = app

@@ -380,6 +380,7 @@ pub(super) const fn busy_or_unavailable(code: Option<ErrorCode>) -> &'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::status::DaemonMeta;
     use crate::server::AppState;
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
@@ -400,7 +401,7 @@ mod tests {
         // The writer's tempdir is unused here (the status panel never touches
         // the writer handle); let it drop.
         let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
-        let mut status = StatusState::from_app(&app, None);
+        let mut status = StatusState::from_app(&app, None, DaemonMeta::for_test());
         status.usage_db_path = db_path;
         Arc::new(status)
     }

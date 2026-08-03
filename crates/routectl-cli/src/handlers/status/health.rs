@@ -220,6 +220,7 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 mod tests {
     use super::super::vocabulary;
     use super::*;
+    use crate::handlers::status::DaemonMeta;
     use crate::server::AppState;
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
@@ -233,7 +234,7 @@ mod tests {
     fn test_state() -> Arc<StatusState> {
         let router = Router::new(Arc::new(Config::default()));
         let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
-        Arc::new(StatusState::from_app(&app, None))
+        Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()))
     }
 
     fn sample_target(circuit: CircuitPhase) -> RouteTargetStatus {

@@ -2578,7 +2578,7 @@ pub(super) fn apply_remap(
 /// Deliberately independent of the fallback/retry decision: routing
 /// (whether to advance the chain) and health accounting (whether the seat
 /// looks unhealthy) are separate concerns.
-pub(super) const fn class_debits(class: &FailureClass) -> bool {
+pub const fn class_debits(class: &FailureClass) -> bool {
     matches!(
         class,
         FailureClass::RateLimited

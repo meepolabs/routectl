@@ -574,6 +574,7 @@ async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
         Arc::new(ArcSwap::from_pointee(ActivationState::default())),
         usage,
         shutdown_rx,
+        crate::handlers::status::DaemonMeta::for_test(),
     );
 
     // Settle the watch install before writing.
