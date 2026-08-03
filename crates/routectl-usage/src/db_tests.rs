@@ -1452,13 +1452,17 @@ fn migration_rejects_newer_db_version() {
     assert!(matches!(result, Err(MigrateError::VersionTooNew { .. })));
 }
 
-/// `requests` must carry exactly one column per `UsageRecord` field,
-/// with matching null-ability. record.rs is the source of truth; this
-/// test fails loudly if the schema and the struct drift apart.
+/// Pins the physical `requests` DDL shape: 57 columns, in this exact
+/// order, with this exact null-ability. The set intentionally EXCEEDS the
+/// `UsageRecord` field set by three write-stopped legacy columns
+/// (`strategy`, `reduction_strategy`, `selection_decision`), which the DDL
+/// retains so old databases keep opening and historical values stay
+/// readable. This test fails loudly if the physical schema drifts.
 #[test]
-fn requests_columns_match_usage_record() {
-    // Arrange: (column name, expected NOT NULL). Mirrors record.rs --
-    // non-Option fields are NOT NULL, Option<T> fields are NULLable.
+fn requests_columns_match_physical_schema() {
+    // Arrange: (column name, expected NOT NULL). Written columns mirror
+    // record.rs -- non-Option fields are NOT NULL, Option<T> fields are
+    // NULLable; the three retained write-stopped columns are NULLable.
     let expected: &[(&str, bool)] = &[
         ("ts_start", true),
         ("ts_end", true),
@@ -1537,7 +1541,7 @@ fn requests_columns_match_usage_record() {
     assert_eq!(
         rows.len(),
         expected.len(),
-        "column count drifted from UsageRecord field count"
+        "column count drifted from the pinned physical schema"
     );
     for ((actual_name, actual_notnull), (exp_name, exp_notnull)) in rows.iter().zip(expected.iter())
     {

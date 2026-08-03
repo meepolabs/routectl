@@ -2079,7 +2079,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `MigrateError`, and the `SCHEMA_VERSION` constant; carries
   `#![warn(missing_docs)]`. `prune`/`prune_capability_events`/`PruneOutcome`
   and the `META_*` schema keys are crate-internal (not re-exported)
-- `src/record.rs` -- `UsageRecord` (one field per capture column; epoch-ms
+- `src/record.rs` -- `UsageRecord` (one field per WRITTEN capture column --
+  the three write-stopped legacy decision columns carry no field; epoch-ms
   `i64` timestamps, nullable `Option<T>` columns) and the closed `Outcome`
   enum (`ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled`,
   `gate_blocked`) with `as_str`/`FromStr` wire tokens that mirror the DB CHECK
@@ -2220,13 +2221,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   v2 added the nullable `strategy TEXT` column (the per-request auto-cache
   decision token) via the migrate-on-open ladder (`ALTER TABLE requests ADD
   COLUMN strategy`, same end shape whether created fresh at v2 or migrated
-  from v1); v3 added the nullable `reduction_strategy TEXT` column (the
+  from v1) -- WRITE-STOPPED as of 0.9.x: the column is retained in the DDL
+  but the writer no longer binds it, so rows written by this version onward
+  read NULL; v3 added the nullable `reduction_strategy TEXT` column (the
   per-request context-reduction decision token) the same way (`ALTER TABLE
-  requests ADD COLUMN reduction_strategy`); v4 added the nullable
+  requests ADD COLUMN reduction_strategy`) -- also WRITE-STOPPED as of
+  0.9.x; v4 added the nullable
   `selection_decision TEXT` column (the per-request seat-selection decision
   token: birth_pick / sticky_stay / overflow_repin / defer_no_healthy /
   keyless_fill_first) the same way (`ALTER TABLE requests ADD COLUMN
-  selection_decision`); v5 added the steady-state would-trim advisory pair
+  selection_decision`) -- also WRITE-STOPPED as of 0.9.x (none of the three
+  tokens is persisted any more; each is only partially visible in the trace
+  logs -- cache via `cache_auto_decision`, reduction only when bytes were
+  stripped, selection only on sticky birth/repin); v5 added the
+  steady-state would-trim
+  advisory pair
   `would_trim_tokens` (the candidate freed-token count `d`) +
   `would_trim_break_even_k` (the break-even reuse count K*) the same way
   (`ALTER TABLE requests ADD COLUMN ...`); v6 added the nullable

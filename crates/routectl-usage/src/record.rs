@@ -167,23 +167,6 @@ pub struct UsageRecord {
     pub attempt_count: u32,
     /// Number of fallbacks past the first target.
     pub fallback_count: u32,
-    /// Stable auto-cache decision token for the served target (e.g.
-    /// `auto_emitted`, `caller_supplied`, `auto_skipped:no_capability`).
-    /// `None` when no target was dispatched (count_tokens, unknown alias,
-    /// or a gate failure before any injection point ran).
-    pub strategy: Option<String>,
-    /// Stable context-reduction decision token for the served target (e.g.
-    /// `applied`, `skipped:disabled`, `skipped:no-tail`,
-    /// `skipped:nothing-to-strip`). `None` when no target was dispatched
-    /// (count_tokens, unknown alias, or a gate failure before any reduction
-    /// point ran).
-    pub reduction_strategy: Option<String>,
-    /// Stable seat-selection decision token for the served target's home
-    /// seat (e.g. `birth_pick`, `sticky_stay`, `overflow_repin`,
-    /// `defer_no_healthy`, `keyless_fill_first`). `None` for non-sticky /
-    /// single-seat pools, non-pooled aliases, and when the served target was
-    /// not the sticky home (a fallback past the home records NULL).
-    pub selection_decision: Option<String>,
     /// Non-mutating steady-state would-trim advisory: the freed-token count
     /// `d` of the trimmer's would-cut candidate for this request. `None` when
     /// the steady-state trimmer proposed no cut. The live request is NEVER
@@ -401,9 +384,6 @@ mod tests {
             finish_reason: Some("stop".to_string()),
             attempt_count: 1,
             fallback_count: 0,
-            strategy: Some("auto_emitted".to_string()),
-            reduction_strategy: Some("applied".to_string()),
-            selection_decision: Some("sticky_stay".to_string()),
             would_trim_tokens: Some(40_000),
             would_trim_break_even_k: Some(50.0),
             would_trim_k_floor: Some(60.0),
@@ -469,9 +449,6 @@ mod tests {
             finish_reason: None,
             attempt_count: 1,
             fallback_count: 0,
-            strategy: None,
-            reduction_strategy: None,
-            selection_decision: None,
             would_trim_tokens: None,
             would_trim_break_even_k: None,
             would_trim_k_floor: None,

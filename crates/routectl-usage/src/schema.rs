@@ -1,8 +1,12 @@
 //! SQLite DDL for the usage-accounting store.
 //!
-//! One column per `UsageRecord` field (see `record.rs`, the single
-//! source of truth for the column set and null-ability). `Option<T>`
-//! fields are NULLable; non-`Option` fields are NOT NULL. Timestamps
+//! One column per `UsageRecord` field (see `record.rs`) for every WRITTEN
+//! column, with matching null-ability: `Option<T>` fields are NULLable;
+//! non-`Option` fields are NOT NULL. The DDL additionally retains three
+//! intentionally write-stopped legacy columns (`strategy`,
+//! `reduction_strategy`, `selection_decision`) that have no `UsageRecord`
+//! field, so old databases keep opening and historical values stay
+//! readable. Timestamps
 //! are epoch-millis `INTEGER`; JSON columns are `TEXT` (JSON1-queryable);
 //! the two quota-utilization ratios are `REAL`.
 
@@ -95,24 +99,26 @@ CREATE TABLE IF NOT EXISTS requests (
     -- EXTENSIBILITY
     extra           TEXT,
 
-    -- AUTO-CACHE DECISION (v2): the per-request strategy token recorded by
-    -- the router. Appended last so this column lands in the same ordinal
-    -- position whether the DB was created fresh at v2 or migrated from v1
-    -- via `ALTER TABLE ... ADD COLUMN strategy` (which always appends).
+    -- AUTO-CACHE DECISION (v2): the per-request auto-cache strategy token.
+    -- DEPRECATED (0.9.x): write-stopped; NULL for rows written at or after
+    -- this version. Retained so the fresh and migrated shapes stay
+    -- identical (a v1 DB reaches this shape via
+    -- `ALTER TABLE ... ADD COLUMN strategy`, which always appends).
     strategy        TEXT,
 
     -- CONTEXT-REDUCTION DECISION (v3): the per-request reduction strategy
-    -- token recorded by the router. Appended last so this column lands in
-    -- the same ordinal position whether the DB was created fresh at v3 or
-    -- migrated from v2 via `ALTER TABLE ... ADD COLUMN reduction_strategy`
-    -- (which always appends).
+    -- token. DEPRECATED (0.9.x): write-stopped; NULL for rows written at or
+    -- after this version. Retained so the fresh and migrated shapes stay
+    -- identical (a v2 DB reaches this shape via
+    -- `ALTER TABLE ... ADD COLUMN reduction_strategy`, which always appends).
     reduction_strategy TEXT,
 
     -- SEAT-SELECTION DECISION (v4): the per-request seat-selection decision
-    -- token recorded by the router for the served target's home seat.
-    -- Appended last so this column lands in the same ordinal position
-    -- whether the DB was created fresh at v4 or migrated from v3 via
-    -- `ALTER TABLE ... ADD COLUMN selection_decision` (which always appends).
+    -- token for the served target's home seat. DEPRECATED (0.9.x):
+    -- write-stopped; NULL for rows written at or after this version.
+    -- Retained so the fresh and migrated shapes stay identical (a v3 DB
+    -- reaches this shape via `ALTER TABLE ... ADD COLUMN
+    -- selection_decision`, which always appends).
     selection_decision TEXT,
 
     -- STEADY-STATE WOULD-TRIM ADVISORY (v5): the non-mutating record of the

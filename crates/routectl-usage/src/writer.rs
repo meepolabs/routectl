@@ -494,11 +494,13 @@ fn capped_raw_marks_text(value: &Option<serde_json::Value>) -> Option<String> {
     Some(format!("[{}]", kept.join(",")))
 }
 
-/// `INSERT OR IGNORE` one record, binding every column from
-/// `UsageRecord` in schema order. Duplicate `request_id`s are silently
-/// ignored (the idempotency contract). All values are bound parameters.
-/// Returns the number of rows actually inserted (1 for a new row, 0 for
-/// an ignored duplicate).
+/// `INSERT OR IGNORE` one record, binding every column `UsageRecord`
+/// carries, in schema order. The three write-stopped legacy decision
+/// columns (`strategy`, `reduction_strategy`, `selection_decision`) are
+/// intentionally omitted, so a newly inserted row stores NULL for them.
+/// Duplicate `request_id`s are silently ignored (the idempotency
+/// contract). All values are bound parameters. Returns the number of rows
+/// actually inserted (1 for a new row, 0 for an ignored duplicate).
 fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::Error> {
     let server_tool_use = json_text(&r.server_tool_use);
     let quota_extras = json_text(&r.quota_extras);
@@ -549,9 +551,6 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.quota_reset,
             quota_extras,
             extra,
-            r.strategy,
-            r.reduction_strategy,
-            r.selection_decision,
             r.would_trim_tokens,
             r.would_trim_break_even_k,
             r.would_trim_k_floor,
@@ -569,7 +568,9 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?57` positions match the params list above.
+/// `schema.rs` exactly; `?1..?54` positions match the params list above.
+/// The DDL's three write-stopped legacy decision columns are absent from
+/// this list on purpose -- an omitted nullable column stores NULL.
 const INSERT_SQL: &str = "\
 INSERT OR IGNORE INTO requests (
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
@@ -583,9 +584,6 @@ INSERT OR IGNORE INTO requests (
     quota_claim, quota_status, quota_overage_status, quota_utilization,
     quota_overage_utilization, quota_reset, quota_extras,
     extra,
-    strategy,
-    reduction_strategy,
-    selection_decision,
     would_trim_tokens,
     would_trim_break_even_k,
     would_trim_k_floor,
@@ -621,10 +619,7 @@ INSERT OR IGNORE INTO requests (
     ?51,
     ?52,
     ?53,
-    ?54,
-    ?55,
-    ?56,
-    ?57
+    ?54
 )";
 
 #[cfg(test)]
@@ -683,9 +678,6 @@ mod tests {
             quota_reset: None,
             quota_extras: None,
             extra: None,
-            strategy: None,
-            reduction_strategy: None,
-            selection_decision: None,
             would_trim_tokens: None,
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
@@ -727,7 +719,9 @@ mod tests {
 
     #[tokio::test]
     async fn try_send_round_trips_a_representative_row() {
-        // Arrange
+        // Arrange: `would_trim_tokens` is the first column bound after the
+        // write-stopped legacy gap and `resolved_class` is the last bound
+        // column, so distinct values in both catch a placeholder shift.
         let (_dir, path) = temp_path();
         let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
         let mut rec = record("rt-1");
@@ -735,8 +729,8 @@ mod tests {
         rec.stream = true;
         rec.input_tokens = Some(42);
         rec.quota_extras = Some(json!({"plan": "pro"}));
-        rec.reduction_strategy = Some("applied".into());
-        rec.selection_decision = Some("sticky_stay".into());
+        rec.would_trim_tokens = Some(31_337);
+        rec.resolved_class = Some("upstream-timeout".into());
 
         // Act
         handle.try_send(rec);
@@ -745,16 +739,16 @@ mod tests {
 
         // Assert: exact bound values for the representative row.
         let conn = Connection::open(&path).expect("read");
-        let (outcome, stream, input, extras, reduction, selection): (
+        let (outcome, stream, input, extras, would_trim_tokens, resolved_class): (
             String,
             i64,
             i64,
             String,
-            String,
+            i64,
             String,
         ) = conn
             .query_row(
-                "SELECT outcome, stream, input_tokens, quota_extras, reduction_strategy, selection_decision FROM requests WHERE request_id='rt-1'",
+                "SELECT outcome, stream, input_tokens, quota_extras, would_trim_tokens, resolved_class FROM requests WHERE request_id='rt-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
@@ -763,8 +757,37 @@ mod tests {
         assert_eq!(stream, 1);
         assert_eq!(input, 42);
         assert_eq!(extras, "{\"plan\":\"pro\"}");
-        assert_eq!(reduction, "applied");
-        assert_eq!(selection, "sticky_stay");
+        assert_eq!(would_trim_tokens, 31_337);
+        assert_eq!(resolved_class, "upstream-timeout");
+    }
+
+    /// The three legacy decision columns survive in the DDL but are no
+    /// longer bound by the INSERT, so every newly written row stores NULL.
+    /// Fails loudly if a binding is ever re-added.
+    #[tokio::test]
+    async fn insert_leaves_write_stopped_decision_columns_null() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+
+        // Act
+        handle.try_send(record("ws-1"));
+        assert!(wait_persisted(handle.counters(), 1), "row not persisted");
+        writer.shutdown();
+
+        // Assert
+        let conn = Connection::open(&path).expect("read");
+        let (strategy, reduction, selection): (Option<String>, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT strategy, reduction_strategy, selection_decision \
+                 FROM requests WHERE request_id='ws-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(strategy, None, "strategy must be write-stopped");
+        assert_eq!(reduction, None, "reduction_strategy must be write-stopped");
+        assert_eq!(selection, None, "selection_decision must be write-stopped");
     }
 
     #[tokio::test]

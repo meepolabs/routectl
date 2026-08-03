@@ -409,8 +409,10 @@ made for that target.
 | `model`    | The resolved model id.                                         |
 | `strategy` | The stable decision token (vocabulary below).                  |
 
-The `strategy` token is a stable contract (recorded in the same form in
-the usage DB `strategy` column; see `routectl usage`):
+The `strategy` token is a stable contract, but a LOG-ONLY one: the usage
+DB's `strategy` column is write-stopped (retained in the schema, NULL for
+every row written by this version onward), so this DEBUG line is the only
+place the token appears -- it is not persisted anywhere:
 
 | Token                                  | Meaning                                                                 |
 |----------------------------------------|-------------------------------------------------------------------------|
@@ -552,8 +554,8 @@ message bodies, tool content, prompt text, or secrets.
 Emitted once per dispatch when the whitespace-only minify pass changed at
 least one JSON-valued string in the mutable tail. A request where
 reduction is disabled, has no mutable tail, or finds nothing to strip
-logs nothing here -- its decision still lands in the usage DB
-`reduction_strategy` column (below).
+logs nothing here -- and its decision is NOT persisted either: the usage
+DB's `reduction_strategy` column is write-stopped (see below).
 
 | Field             | Meaning                                                       |
 |-------------------|---------------------------------------------------------------|
@@ -564,8 +566,14 @@ logs nothing here -- its decision still lands in the usage DB
 | `bytes_saved`     | Total bytes removed across those strings.                     |
 | `est_tokens_saved`| Estimated tokens saved (a byte-derived approximation).        |
 
-The `strategy` token is a stable contract, recorded in the same form in
-the usage DB `reduction_strategy` column (see `routectl usage`):
+The `strategy` token is a stable contract, but a LOG-ONLY one: the usage
+DB's `reduction_strategy` column is write-stopped (retained in the schema,
+NULL for every row written by this version onward). Observability is
+PARTIAL -- only the `applied` token ever reaches a log line, because
+`context_reduction` is emitted only when reduction actually stripped
+bytes. The `skipped:*` tokens below are the vocabulary of the reducer's
+decision, not of anything observable: they are neither logged nor
+persisted:
 
 | Token                       | Meaning                                                                  |
 |-----------------------------|--------------------------------------------------------------------------|
@@ -576,8 +584,8 @@ the usage DB `reduction_strategy` column (see `routectl usage`):
 | `skipped:unknown`           | Reduction ran but produced an outcome this build does not map (forward-compat catch-all). |
 
 Only `applied` emits a `context_reduction` log line; the `skipped:*`
-tokens are recorded in the usage DB but produce no log line (there is
-nothing to report).
+tokens produce no log line and, since the ledger column is write-stopped,
+leave no record at all.
 
 ## Stream first-activity mark
 
