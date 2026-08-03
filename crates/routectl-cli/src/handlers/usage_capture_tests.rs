@@ -429,6 +429,38 @@ async fn observe_meta_forwarded_credential_preserves_existing_extra_keys() {
     );
 }
 
+// -------- observe_meta: seat (credential identity) ------------------------
+
+#[tokio::test]
+async fn observe_meta_copies_served_seat_into_the_seat_column() {
+    // Arrange: a served OAuth seat identity on the router-built meta.
+    let mut meta = any_dispatch_meta().await;
+    meta.served_seat = Some("anthropic#a".to_string());
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+
+    // Assert
+    assert_eq!(cap.record.seat, Some("anthropic#a".to_string()));
+}
+
+#[tokio::test]
+async fn observe_meta_leaves_seat_null_when_no_seat_was_served() {
+    // Arrange: the file:// -backed chain in `any_dispatch_meta` yields no
+    // credential identity, so the meta carries none.
+    let meta = any_dispatch_meta().await;
+    assert!(meta.served_seat.is_none(), "sanity: non-oauth credential");
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+
+    // Assert: the ledger column stays NULL rather than inheriting a draft
+    // value.
+    assert_eq!(cap.record.seat, None);
+}
+
 // -------- observe_meta: unified capability-event drain --------------------
 //
 // `observe_meta` drains `DispatchMeta`'s captured capability signals into the
@@ -1066,7 +1098,116 @@ async fn disconnect_drop_emits_single_row_with_null_resolved_class() {
     );
 }
 
-/// Build a terminal chunk carrying an Anthropic unified-quota snapshot
+/// Build a terminal chunk carrying a Codex quota snapshot in its
+/// `upstream_meta`, so `observe_chunk` -> `observe_quota` routes it
+/// through the codex arm.
+fn chunk_with_codex_quota(quota: routectl_core::CodexQuota) -> ChatChunk {
+    ChatChunk {
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        upstream_meta: Some(routectl_core::upstream_meta::UpstreamMeta::from_codex(
+            quota,
+        )),
+        ..Default::default()
+    }
+}
+
+/// A Codex snapshot matching the captured live wire values.
+fn codex_quota_sample() -> routectl_core::CodexQuota {
+    let mut quota = routectl_core::CodexQuota::default();
+    quota.active_limit = Some("premium".into());
+    quota.primary_used_percent = Some("16".into());
+    quota.primary_reset_at = Some("1786210114".into());
+    quota.extras = vec![
+        ("secondary-used-percent".into(), "0".into()),
+        ("bengalfox-limit-name".into(), "GPT-5.3-Codex-Spark".into()),
+    ];
+    quota
+}
+
+#[test]
+fn observe_quota_normalizes_codex_percent_and_keeps_reset_in_seconds() {
+    // Arrange: Codex reports used-percent on a 0-100 scale and
+    // `primary-reset-at` as epoch SECONDS.
+    let (mut cap, _w, _dir) = capture();
+    let chunk = chunk_with_codex_quota(codex_quota_sample());
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert: percent normalized to a 0-1 fraction, reset stored verbatim
+    // (NOT multiplied to millis), claim from the active limit.
+    assert_eq!(cap.record.quota_utilization, Some(0.16_f64));
+    assert_eq!(cap.record.quota_reset, Some(1_786_210_114_i64));
+    assert_eq!(cap.record.quota_claim.as_deref(), Some("premium"));
+    assert_eq!(
+        cap.record.quota_extras,
+        Some(serde_json::json!({
+            "secondary-used-percent": "0",
+            "bengalfox-limit-name": "GPT-5.3-Codex-Spark"
+        }))
+    );
+}
+
+#[test]
+fn observe_quota_leaves_unparseable_codex_numerics_none_without_failing_the_row() {
+    // Arrange: garbage percent + an empty reset (the wire sends "" for an
+    // unused window) must degrade to None while the row still stamps.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = codex_quota_sample();
+    quota.primary_used_percent = Some("abc".into());
+    quota.primary_reset_at = Some(String::new());
+    let chunk = chunk_with_codex_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert
+    assert_eq!(cap.record.quota_utilization, None);
+    assert_eq!(cap.record.quota_reset, None);
+    assert_eq!(cap.record.quota_claim.as_deref(), Some("premium"));
+    assert!(cap.record.quota_extras.is_some());
+}
+
+#[test]
+fn observe_quota_leaves_anthropic_only_columns_null_for_a_codex_response() {
+    // Arrange: Codex has no status / overage counterpart.
+    let (mut cap, _w, _dir) = capture();
+    let chunk = chunk_with_codex_quota(codex_quota_sample());
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert
+    assert_eq!(cap.record.quota_status, None);
+    assert_eq!(cap.record.quota_overage_status, None);
+    assert_eq!(cap.record.quota_overage_utilization, None);
+}
+
+#[test]
+fn observe_quota_populates_anthropic_only_columns_for_an_anthropic_response() {
+    // Arrange: the reverse direction -- the codex arm must not have
+    // displaced the Anthropic-only mapping.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = routectl_core::upstream_meta::AnthropicUnifiedQuota::default();
+    quota.status = Some("allowed".into());
+    quota.overage_status = Some("disabled".into());
+    quota.overage_utilization = Some("0.05".into());
+    let chunk = chunk_with_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert
+    assert_eq!(cap.record.quota_status.as_deref(), Some("allowed"));
+    assert_eq!(cap.record.quota_overage_status.as_deref(), Some("disabled"));
+    assert_eq!(cap.record.quota_overage_utilization, Some(0.05_f64));
+}
+
 /// in its `upstream_meta`, so `observe_chunk` -> `observe_quota` lifts it
 /// into the QUOTA columns.
 fn chunk_with_quota(quota: routectl_core::upstream_meta::AnthropicUnifiedQuota) -> ChatChunk {
@@ -1132,6 +1273,120 @@ fn observe_quota_leaves_unparseable_utilization_none_without_failing_the_row() {
     assert_eq!(cap.record.quota_claim.as_deref(), Some("five_hour"));
     assert_eq!(cap.record.quota_utilization, None);
     assert_eq!(cap.record.quota_reset, None);
+}
+
+#[test]
+fn observe_quota_rejects_non_finite_codex_utilization_while_stamping_the_row() {
+    // Arrange: a hostile / broken upstream can send a percent that parses as
+    // a float but is not storable in a REAL column.
+    for raw in ["NaN", "inf", "-inf", "1e400", "-1"] {
+        let (mut cap, _w, _dir) = capture();
+        let mut quota = codex_quota_sample();
+        quota.primary_used_percent = Some(raw.into());
+        let chunk = chunk_with_codex_quota(quota);
+
+        // Act
+        cap.observe_chunk(&chunk);
+
+        // Assert: utilization dropped, the rest of the row still stamps.
+        assert_eq!(
+            cap.record.quota_utilization, None,
+            "{raw} must not reach the utilization column"
+        );
+        assert_eq!(cap.record.quota_claim.as_deref(), Some("premium"));
+        assert_eq!(cap.record.quota_reset, Some(1_786_210_114_i64));
+    }
+}
+
+#[test]
+fn observe_quota_keeps_codex_utilization_above_one_hundred_percent() {
+    // Arrange: an over-100% report is plausible (overage) and stays in band.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = codex_quota_sample();
+    quota.primary_used_percent = Some("101".into());
+    let chunk = chunk_with_codex_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert
+    assert_eq!(cap.record.quota_utilization, Some(1.01_f64));
+}
+
+#[test]
+fn observe_quota_rejects_non_finite_anthropic_utilization_while_stamping_the_row() {
+    // Arrange: the Anthropic arm shares the same REAL columns, so it needs
+    // the same guard.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = routectl_core::upstream_meta::AnthropicUnifiedQuota::default();
+    quota.status = Some("allowed".into());
+    quota.representative_claim = Some("five_hour".into());
+    quota.utilization = Some("NaN".into());
+    quota.overage_utilization = Some("inf".into());
+    let chunk = chunk_with_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert
+    assert_eq!(cap.record.quota_utilization, None);
+    assert_eq!(cap.record.quota_overage_utilization, None);
+    assert_eq!(cap.record.quota_status.as_deref(), Some("allowed"));
+    assert_eq!(cap.record.quota_claim.as_deref(), Some("five_hour"));
+}
+
+#[test]
+fn observe_quota_caps_extras_entry_count_and_value_length() {
+    // Arrange: a header flood -- 200 entries, every value far over the
+    // per-value byte cap.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = routectl_core::upstream_meta::AnthropicUnifiedQuota::default();
+    quota.extras = (0..200)
+        .map(|i| (format!("suffix-{i}"), "x".repeat(4096)))
+        .collect();
+    let chunk = chunk_with_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert
+    let extras = cap.record.quota_extras.as_ref().expect("extras stamped");
+    let object = extras.as_object().expect("extras is a JSON object");
+    assert!(
+        object.len() <= 64,
+        "extras kept {} entries, cap is 64",
+        object.len()
+    );
+    for (key, value) in object {
+        let text = value.as_str().expect("extras values are strings");
+        assert!(
+            text.len() <= 1024,
+            "{key} kept {} bytes, cap is 1024",
+            text.len()
+        );
+    }
+}
+
+#[test]
+fn observe_quota_truncates_multibyte_extras_value_on_a_char_boundary() {
+    // Arrange: a value whose 1024-byte cut lands mid-codepoint.
+    let (mut cap, _w, _dir) = capture();
+    let mut quota = routectl_core::upstream_meta::AnthropicUnifiedQuota::default();
+    quota.extras = vec![("wide".into(), "e\u{0301}".repeat(2000))];
+    let chunk = chunk_with_quota(quota);
+
+    // Act
+    cap.observe_chunk(&chunk);
+
+    // Assert: valid UTF-8 (guaranteed by the &str type) and within the cap.
+    let extras = cap.record.quota_extras.as_ref().expect("extras stamped");
+    let value = extras["wide"].as_str().expect("string value");
+    assert!(value.len() <= 1024, "kept {} bytes", value.len());
+    assert!(
+        value.len() >= 1021,
+        "truncation must keep the longest valid prefix, kept {}",
+        value.len()
+    );
 }
 
 #[test]

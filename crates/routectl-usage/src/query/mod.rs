@@ -6,7 +6,7 @@ mod grouped;
 mod would_trim;
 
 pub use aggregate::{
-    QuotaSnapshot, aggregate, earliest_ts_start, errors_by_class, latest_quota, ttfbs,
+    QuotaSnapshot, aggregate, earliest_ts_start, errors_by_class, latest_quota_by_seat, ttfbs,
 };
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,

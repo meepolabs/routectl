@@ -925,7 +925,7 @@
     // co-versioning note in the document head: same-binary, so a mismatch
     // should never occur in practice; the check is a graceful-degrade
     // guard, not version negotiation.
-    var EXPECTED = { usage: 2, health: 5, config: 1, doctor: 4 };
+    var EXPECTED = { usage: 3, health: 5, config: 1, doctor: 4 };
     var PANELS = ['usage', 'health', 'config', 'doctor'];
     var WINDOWS = ['today', 'week', 'month', 'all'];
 
@@ -2319,22 +2319,28 @@
         });
       }
 
-      if (d.quota) {
+      if (d.quota && d.quota.length) {
         subhead(c, 'Quota');
-        var q = d.quota;
-        var qt = mkTable('Latest quota snapshot', [
-          R('window start'), C('claim'), C('status'), C('overage'),
-          N('utilization'), N('overage util'), C('reset')
+        // One row per credential seat. The quota_* fields are vendor-shared, so
+        // `provider` (provider_kind) is the discriminator for reading them --
+        // utilization is a fraction of a PER-PROVIDER window, and a vendor that
+        // reports no status / overage state renders those cells as "-".
+        var qt = mkTable('Latest quota snapshot per seat', [
+          R('seat'), C('provider'), C('snapshot'), C('claim'), C('status'),
+          C('overage'), N('utilization'), N('overage util'), C('reset')
         ]);
-        var utilNum = (q.utilization === null || q.utilization === undefined)
-          ? NaN : Number(q.utilization) * 100;
-        trow(qt, [
-          fmtTs(q.ts_start_ms), labelCell('claim', q.claim),
-          tokLabeled('qstatus', 'qstatus', q.status),
-          tokLabeled('qstatus', 'qstatus', q.overage_status),
-          ringGauge(utilNum, pctFrac(q.utilization), true),
-          pctFrac(q.overage_utilization), quotaResetCell(q.reset_ms)
-        ]);
+        d.quota.forEach(function (q) {
+          var utilNum = (q.utilization === null || q.utilization === undefined)
+            ? NaN : Number(q.utilization) * 100;
+          trow(qt, [
+            q.seat, q.provider_kind, fmtTs(q.ts_start_ms),
+            labelCell('claim', q.claim),
+            tokLabeled('qstatus', 'qstatus', q.status),
+            tokLabeled('qstatus', 'qstatus', q.overage_status),
+            ringGauge(utilNum, pctFrac(q.utilization), true),
+            pctFrac(q.overage_utilization), quotaResetCell(q.reset_ms)
+          ]);
+        });
         c.appendChild(qt.t);
       }
 

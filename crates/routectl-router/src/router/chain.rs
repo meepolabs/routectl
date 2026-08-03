@@ -351,6 +351,7 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         // v0.6.0 dispatch keys the breaker by nickname so two models
         // on one provider quarantine independently.
         state_key: m.nickname.clone(),
+        seat: crate::seat_pool::seat_identity(m.auth_secret_ref.as_ref()),
         upstream: m.upstream.clone(),
         provider: Some(m.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,
@@ -403,6 +404,7 @@ pub(super) fn dispatch_target_for_seat(
         provider_kind,
         use_forwarded_credential: false,
         state_key: seat.state_key.clone(),
+        seat: crate::seat_pool::seat_identity(seat.auth_secret_ref.as_ref()),
         upstream: m.upstream.clone(),
         provider: Some(seat.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,

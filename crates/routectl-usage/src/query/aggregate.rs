@@ -6,10 +6,23 @@ use crate::db::UsageDb;
 
 use super::{AggRow, GroupKey, QueryError};
 
-/// The most recent quota-bearing snapshot in the DB. Mirrors the `quota_*`
+/// The most recent quota-bearing snapshot for one seat. Mirrors the `quota_*`
 /// columns the daemon stamps on a row when an upstream reports quota data.
+///
+/// The `quota_*` columns are SHARED across vendors, so `provider_kind` is the
+/// discriminator a consumer MUST read to interpret them: `utilization` is a
+/// fraction of a PER-PROVIDER window (Anthropic's rolling 5h vs codex's
+/// weekly), and a codex row populates `claim` / `utilization` / `reset` only,
+/// leaving `status` and both overage fields `None`.
 #[derive(Debug, Clone)]
 pub struct QuotaSnapshot {
+    /// Credential identity this snapshot belongs to (`seat_key(provider,
+    /// label)`, e.g. `codex`, `anthropic#a`). `None` for rows written before
+    /// the seat column was populated, and for forwarded client credentials.
+    pub seat: Option<String>,
+    /// Provider kind of the row this snapshot came from -- the cross-vendor
+    /// discriminator for the shared `quota_*` columns. `None` when absent.
+    pub provider_kind: Option<String>,
     /// Start time of the row this snapshot came from, epoch-millis UTC.
     pub ts_start: i64,
     /// Quota claim token. `None` when absent.
@@ -22,7 +35,8 @@ pub struct QuotaSnapshot {
     pub utilization: Option<f64>,
     /// Overage-quota utilization ratio. `None` when absent.
     pub overage_utilization: Option<f64>,
-    /// Quota reset time, epoch-millis UTC. `None` when absent.
+    /// Quota reset time, epoch-SECONDS UTC (stored verbatim as the upstream
+    /// reports it). `None` when absent.
     pub reset: Option<i64>,
 }
 
@@ -412,37 +426,52 @@ pub fn errors_by_class(
     Ok(rows)
 }
 
-const LATEST_QUOTA_SQL: &str = "\
-SELECT ts_start, quota_claim, quota_status, quota_overage_status,
-       quota_utilization, quota_overage_utilization, quota_reset
-FROM requests
-WHERE quota_status IS NOT NULL
-ORDER BY ts_start DESC, rowid DESC
-LIMIT 1";
+const LATEST_QUOTA_BY_SEAT_SQL: &str = "\
+SELECT seat, provider_kind, ts_start, quota_claim, quota_status,
+       quota_overage_status, quota_utilization, quota_overage_utilization,
+       quota_reset
+FROM (
+    SELECT seat, provider_kind, ts_start, quota_claim, quota_status,
+           quota_overage_status, quota_utilization, quota_overage_utilization,
+           quota_reset,
+           ROW_NUMBER() OVER (
+               PARTITION BY seat ORDER BY ts_start DESC, rowid DESC) AS rn
+    FROM requests
+    WHERE quota_status IS NOT NULL OR quota_utilization IS NOT NULL
+)
+WHERE rn = 1
+ORDER BY seat";
 
-/// The most recent row carrying quota data (`quota_status IS NOT NULL`),
-/// or `None` if no row has quota data. Not windowed: the CLI's quota line
-/// reflects the latest known snapshot regardless of the report window.
-pub fn latest_quota(db: &UsageDb) -> Result<Option<QuotaSnapshot>, QueryError> {
-    let mut stmt = db.conn().prepare(LATEST_QUOTA_SQL)?;
-    let snapshot = stmt
-        .query_row([], |row| {
+/// The most recent quota-bearing row PER SEAT -- one snapshot per credential
+/// identity, newest first within each seat (`ts_start DESC, rowid DESC`).
+/// Empty when no row carries quota data.
+///
+/// Eligibility is `quota_status IS NOT NULL OR quota_utilization IS NOT NULL`:
+/// not every vendor reports a status token (codex reports utilization only), so
+/// a status-only predicate would make those rows invisible. Rows whose `seat`
+/// is NULL are NOT filtered out -- they form their own bucket, so pre-seat
+/// history stays visible rather than being dropped or given a synthetic seat.
+///
+/// Not windowed: a quota snapshot is the latest known state of a seat,
+/// independent of any report window.
+pub fn latest_quota_by_seat(db: &UsageDb) -> Result<Vec<QuotaSnapshot>, QueryError> {
+    let mut stmt = db.conn().prepare(LATEST_QUOTA_BY_SEAT_SQL)?;
+    let snapshots = stmt
+        .query_map([], |row| {
             Ok(QuotaSnapshot {
-                ts_start: row.get(0)?,
-                claim: row.get(1)?,
-                status: row.get(2)?,
-                overage_status: row.get(3)?,
-                utilization: row.get(4)?,
-                overage_utilization: row.get(5)?,
-                reset: row.get(6)?,
+                seat: row.get(0)?,
+                provider_kind: row.get(1)?,
+                ts_start: row.get(2)?,
+                claim: row.get(3)?,
+                status: row.get(4)?,
+                overage_status: row.get(5)?,
+                utilization: row.get(6)?,
+                overage_utilization: row.get(7)?,
+                reset: row.get(8)?,
             })
-        })
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })?;
-    Ok(snapshot)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(snapshots)
 }
 
 const TTFBS_SQL: &str = "\

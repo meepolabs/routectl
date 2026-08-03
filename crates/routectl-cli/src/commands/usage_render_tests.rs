@@ -791,18 +791,45 @@ fn insert_quota_row(
     quota_overage_status: &str,
     quota_reset_s: i64,
 ) {
+    insert_seat_quota_row(
+        db,
+        request_id,
+        ts_start,
+        None,
+        Some(quota_status),
+        Some(quota_utilization),
+        Some(quota_overage_status),
+        Some(quota_reset_s),
+    );
+}
+
+/// Insert a quota-bearing row with an explicit `seat` and individually
+/// nullable quota columns, so the per-seat render loop and a vendor that
+/// reports utilization without a status token are both exercisable.
+#[allow(clippy::too_many_arguments)]
+fn insert_seat_quota_row(
+    db: &UsageDb,
+    request_id: &str,
+    ts_start: i64,
+    seat: Option<&str>,
+    quota_status: Option<&str>,
+    quota_utilization: Option<f64>,
+    quota_overage_status: Option<&str>,
+    quota_reset_s: Option<i64>,
+) {
     db.conn()
         .execute(
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
              requested_model, alias, model, provider, upstream, stream, outcome, \
              latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
-             input_tokens, output_tokens, quota_status, quota_utilization, \
+             input_tokens, output_tokens, seat, quota_status, quota_utilization, \
              quota_overage_status, quota_reset) \
              VALUES (?1, ?1, ?2, 'openai', 'req-model', 'al', 'm', 'sub', 'up-sub', 0, 'ok', \
-             10, 0, 0, 1, 0, 100, 50, ?3, ?4, ?5, ?6)",
+             10, 0, 0, 1, 0, 100, 50, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 ts_start,
                 request_id,
+                seat,
                 quota_status,
                 quota_utilization,
                 quota_overage_status,
@@ -813,7 +840,7 @@ fn insert_quota_row(
 }
 
 #[test]
-fn build_report_surfaces_latest_quota_snapshot() {
+fn build_report_surfaces_latest_quota_snapshot_per_seat() {
     // Arrange
     let (_dir, _path, db) = temp_db();
     insert_quota_row(&db, "q1", 1000, "allowed", 0.22, "none", 1_800_000_000);
@@ -822,7 +849,9 @@ fn build_report_surfaces_latest_quota_snapshot() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Assert
-    let quota = report.quota.expect("quota snapshot present");
+    assert_eq!(report.quota.len(), 1);
+    let quota = &report.quota[0];
+    assert_eq!(quota.seat, None, "the seeded row carries no seat");
     assert_eq!(quota.status.as_deref(), Some("allowed"));
     assert_eq!(quota.utilization, Some(0.22));
     assert_eq!(quota.overage_status.as_deref(), Some("none"));
@@ -840,14 +869,88 @@ fn render_report_includes_quota_line() {
     let out = render_report(&report);
     let quota_line = out
         .lines()
-        .find(|l| l.starts_with("quota:"))
+        .find(|l| l.starts_with("quota["))
         .expect("quota line present");
 
-    // Assert: 0.22 renders as a 0-decimal percent (22%).
+    // Assert: a seatless row labels as "-"; 0.22 renders as 22%.
+    assert!(quota_line.starts_with("quota[-]:"), "{quota_line}");
     assert!(quota_line.contains("status=allowed"));
     assert!(quota_line.contains("utilization=22%"));
     assert!(quota_line.contains("overage=none"));
     assert!(quota_line.contains("reset="));
+}
+
+#[test]
+fn render_report_includes_one_quota_line_per_seat() {
+    // Arrange: two seats, the second reporting utilization with no status
+    // token or overage state (the codex shape), plus a superseded older row
+    // for the first seat.
+    let (_dir, _path, db) = temp_db();
+    insert_seat_quota_row(
+        &db,
+        "a-old",
+        1000,
+        Some("anthropic#a"),
+        Some("allowed"),
+        Some(0.10),
+        Some("none"),
+        Some(1_800_000_000),
+    );
+    insert_seat_quota_row(
+        &db,
+        "a-new",
+        2000,
+        Some("anthropic#a"),
+        Some("throttled"),
+        Some(0.90),
+        Some("none"),
+        Some(1_800_000_000),
+    );
+    insert_seat_quota_row(
+        &db,
+        "c-1",
+        1500,
+        Some("codex"),
+        None,
+        Some(0.16),
+        None,
+        Some(1_786_210_114),
+    );
+    let report = report_all(&db, &cost_config(), None, false);
+
+    // Act
+    let out = render_report(&report);
+    let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("quota[")).collect();
+
+    // Assert: one line per seat, each carrying that seat's newest snapshot.
+    assert_eq!(lines.len(), 2, "{out}");
+    let anthropic = lines
+        .iter()
+        .find(|l| l.starts_with("quota[anthropic#a]:"))
+        .expect("anthropic seat line");
+    assert!(anthropic.contains("status=throttled"), "{anthropic}");
+    assert!(anthropic.contains("utilization=90%"), "{anthropic}");
+    let codex = lines
+        .iter()
+        .find(|l| l.starts_with("quota[codex]:"))
+        .expect("codex seat line");
+    assert!(codex.contains("status=unknown"), "{codex}");
+    assert!(codex.contains("utilization=16%"), "{codex}");
+    assert!(codex.contains("overage=-"), "{codex}");
+}
+
+#[test]
+fn render_report_omits_the_quota_line_when_nothing_reported() {
+    // Arrange: a window with request rows but no quota-bearing row.
+    let (_dir, _path, db) = temp_db();
+    let report = report_all(&db, &cost_config(), None, false);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert
+    assert!(report.quota.is_empty());
+    assert!(!out.contains("quota["), "{out}");
 }
 
 #[test]

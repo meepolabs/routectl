@@ -93,7 +93,10 @@ fn pooled_router_with_labels(
             label: label.clone(),
             state_key: crate::seat_pool::seat_state_key("opus", label.as_deref()),
             provider,
-            auth_secret_ref: None,
+            auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
+                provider: "anthropic".to_string(),
+                label: label.clone(),
+            }),
         });
     }
     let default_provider = seats[0].provider.clone();
@@ -219,6 +222,56 @@ fn mark_target_copies_selection_decision_into_meta() {
     let mut meta = DispatchMeta::for_alias("opus");
     meta.mark_target(home, "opus");
     assert_eq!(meta.selection_decision, Some("birth_pick"));
+}
+
+#[test]
+fn mark_target_records_the_served_seats_identity_not_the_first() {
+    // Arrange: a three-seat pool whose targets carry per-seat OAuth refs.
+    let (router, _counters) = pooled_router(SeatSelection::FillFirst);
+    let chain = router.dispatch_chain("opus", None).expect("chain resolves");
+    let mut meta = DispatchMeta::for_alias("opus");
+
+    // Act: the walk falls back past the first seat, so the SECOND target
+    // is the one that served.
+    meta.mark_target(&chain[0], "opus");
+    meta.mark_target(&chain[1], "opus");
+
+    // Assert: the served seat's credential identity, not the first's.
+    assert_eq!(meta.served_seat, Some("anthropic#seat-b".to_string()));
+}
+
+#[test]
+fn mark_target_leaves_served_seat_none_for_a_non_oauth_credential() {
+    // Arrange: a non-pooled model authenticating with a file:// ref -- a
+    // filesystem path that must never reach the usage ledger.
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "openai".to_string(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "file:///etc/routectl/key"),
+    );
+    let cfg = Arc::new(Config {
+        providers,
+        ..Config::default()
+    });
+    let mut router = Router::new(cfg);
+    let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
+        id: "openai".to_string(),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let model = ResolvedModel::new("gpt", "openai", provider, "gpt-4o").with_auth_secret_ref(
+        routectl_auth::SecretRef::parse("file:///etc/routectl/key").expect("parse file ref"),
+    );
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert("gpt".to_string(), Arc::new(model));
+    router.install_resolved_models(models);
+    let chain = router.dispatch_chain("gpt", None).expect("chain resolves");
+    let mut meta = DispatchMeta::for_alias("gpt");
+
+    // Act
+    meta.mark_target(&chain[0], "gpt");
+
+    // Assert
+    assert_eq!(meta.served_seat, None);
 }
 
 #[tokio::test]

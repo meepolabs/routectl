@@ -32,9 +32,9 @@ pub use query::{
     M1AttributionSummary, QueryError, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
     QuerySpec, QueryTotals, QuotaSnapshot, ReuseSampleRow, RowCost, SeriesBucket,
     ShadowMisfireSummary, TombstoneRow, WouldTrimSummary, aggregate, earliest_ts_start,
-    errors_by_class, k_calibration_summary, latest_quota, latest_tombstone, m1_attribution_summary,
-    query, read_capability_events_after, read_reuse_samples_since, shadow_misfire_summary, ttfbs,
-    would_trim_summary,
+    errors_by_class, k_calibration_summary, latest_quota_by_seat, latest_tombstone,
+    m1_attribution_summary, query, read_capability_events_after, read_reuse_samples_since,
+    shadow_misfire_summary, ttfbs, would_trim_summary,
 };
 pub use record::{Outcome, ParseOutcomeError, UsageRecord};
 pub use schema::SCHEMA_VERSION;

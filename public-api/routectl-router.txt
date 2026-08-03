@@ -2926,6 +2926,7 @@ pub routectl_router::router::DispatchMeta::served_forwarded_credential: bool
 pub routectl_router::router::DispatchMeta::served_model: core::option::Option<alloc::string::String>
 pub routectl_router::router::DispatchMeta::served_provider: core::option::Option<alloc::string::String>
 pub routectl_router::router::DispatchMeta::served_provider_kind: core::option::Option<alloc::string::String>
+pub routectl_router::router::DispatchMeta::served_seat: core::option::Option<alloc::string::String>
 pub routectl_router::router::DispatchMeta::served_upstream: core::option::Option<alloc::string::String>
 pub routectl_router::router::DispatchMeta::would_trim_break_even_k: core::option::Option<f64>
 pub routectl_router::router::DispatchMeta::would_trim_context_fraction: core::option::Option<f64>
@@ -7699,6 +7700,7 @@ pub routectl_router::DispatchMeta::served_forwarded_credential: bool
 pub routectl_router::DispatchMeta::served_model: core::option::Option<alloc::string::String>
 pub routectl_router::DispatchMeta::served_provider: core::option::Option<alloc::string::String>
 pub routectl_router::DispatchMeta::served_provider_kind: core::option::Option<alloc::string::String>
+pub routectl_router::DispatchMeta::served_seat: core::option::Option<alloc::string::String>
 pub routectl_router::DispatchMeta::served_upstream: core::option::Option<alloc::string::String>
 pub routectl_router::DispatchMeta::would_trim_break_even_k: core::option::Option<f64>
 pub routectl_router::DispatchMeta::would_trim_context_fraction: core::option::Option<f64>

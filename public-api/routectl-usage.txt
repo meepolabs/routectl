@@ -1060,7 +1060,9 @@ pub struct routectl_usage::QuotaSnapshot
 pub routectl_usage::QuotaSnapshot::claim: core::option::Option<alloc::string::String>
 pub routectl_usage::QuotaSnapshot::overage_status: core::option::Option<alloc::string::String>
 pub routectl_usage::QuotaSnapshot::overage_utilization: core::option::Option<f64>
+pub routectl_usage::QuotaSnapshot::provider_kind: core::option::Option<alloc::string::String>
 pub routectl_usage::QuotaSnapshot::reset: core::option::Option<i64>
+pub routectl_usage::QuotaSnapshot::seat: core::option::Option<alloc::string::String>
 pub routectl_usage::QuotaSnapshot::status: core::option::Option<alloc::string::String>
 pub routectl_usage::QuotaSnapshot::ts_start: i64
 pub routectl_usage::QuotaSnapshot::utilization: core::option::Option<f64>
@@ -1586,7 +1588,7 @@ pub fn routectl_usage::errors_by_class(&routectl_usage::UsageDb, i64, i64) -> co
 pub fn routectl_usage::estimate_cost_tokens(i64, i64, i64, i64, i64, i64, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>
 pub fn routectl_usage::insert_capability_event(&rusqlite::Connection, &routectl_usage::CapabilityEvent) -> core::result::Result<usize, rusqlite::error::Error>
 pub fn routectl_usage::k_calibration_summary(&routectl_usage::UsageDb) -> core::result::Result<routectl_usage::KCalibration, routectl_usage::QueryError>
-pub fn routectl_usage::latest_quota(&routectl_usage::UsageDb) -> core::result::Result<core::option::Option<routectl_usage::QuotaSnapshot>, routectl_usage::QueryError>
+pub fn routectl_usage::latest_quota_by_seat(&routectl_usage::UsageDb) -> core::result::Result<alloc::vec::Vec<routectl_usage::QuotaSnapshot>, routectl_usage::QueryError>
 pub fn routectl_usage::latest_tombstone(&rusqlite::Connection) -> rusqlite::Result<core::option::Option<routectl_usage::TombstoneRow>>
 pub fn routectl_usage::m1_attribution_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::M1AttributionSummary, routectl_usage::QueryError>
 pub fn routectl_usage::open(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>

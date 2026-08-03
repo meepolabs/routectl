@@ -270,7 +270,7 @@ pub struct UsageRecord {
     pub quota_utilization: Option<f64>,
     /// Overage-quota utilization ratio. `None` when absent.
     pub quota_overage_utilization: Option<f64>,
-    /// Quota reset time, epoch-millis UTC. `None` when absent.
+    /// Quota reset time, epoch SECONDS UTC. `None` when absent.
     pub quota_reset: Option<i64>,
     /// Remaining quota fields as a JSON map. `None` when absent.
     pub quota_extras: Option<Value>,

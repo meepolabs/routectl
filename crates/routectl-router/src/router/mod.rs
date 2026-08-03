@@ -617,6 +617,14 @@ pub struct DispatchMeta {
     /// forwarded target from a coexisting own-credential one in the same
     /// chain.
     pub served_forwarded_credential: bool,
+    /// Persistable credential identity of the served / terminal target
+    /// (`DispatchTarget::seat`): the `provider#label` OAuth seat key, bare
+    /// `provider` for a default seat. `None` when no target was dispatched
+    /// (a pre-dispatch failure), when the served target authenticated with
+    /// a non-OAuth ref, and on the forwarded-credential path (routectl does
+    /// not own the client's seat). A fallback records the seat that ACTUALLY
+    /// served, not the first target's.
+    pub served_seat: Option<String>,
     /// The resolved alias key the request routed under (the incoming
     /// `req.model`). Always populated, even when resolution then failed.
     pub resolved_alias: String,
@@ -794,6 +802,7 @@ impl DispatchMeta {
             served_model: None,
             served_upstream: None,
             served_forwarded_credential: false,
+            served_seat: None,
             resolved_alias: alias.to_string(),
             cache_strategy: None,
             reduction_strategy: None,
@@ -836,6 +845,15 @@ impl DispatchMeta {
             target.upstream.clone()
         });
         self.served_forwarded_credential = target.use_forwarded_credential;
+        // A forwarded target authenticates with the client's own bearer, so
+        // routectl owns no seat for that row. Gated here rather than relying
+        // on the empty-`api_key_ref` validation that keeps such a target's
+        // ref unparseable, so the ledger guarantee holds locally.
+        self.served_seat = if target.use_forwarded_credential {
+            None
+        } else {
+            target.seat.clone()
+        };
         self.selection_decision = target.selection_decision;
     }
 }
@@ -901,6 +919,12 @@ struct DispatchTarget {
     /// Key into `Router.state` for the per-attempt rate-limit + circuit-
     /// breaker check.
     state_key: String,
+    /// Persistable credential identity of this target's own credential
+    /// (see [`crate::seat_pool::seat_identity`]): the `provider#label`
+    /// seat key for an `oauth://` ref, `None` for every other scheme and
+    /// for a target with no ref. Surfaced through `DispatchMeta` so usage
+    /// accounting partitions rows by ACCOUNT rather than by model.
+    seat: Option<String>,
     /// Wire model id sent to the provider.
     upstream: String,
     /// Concrete provider instance.
