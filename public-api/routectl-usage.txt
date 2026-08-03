@@ -1428,16 +1428,13 @@ pub routectl_usage::UsageRecord::quota_reset: core::option::Option<i64>
 pub routectl_usage::UsageRecord::quota_status: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::quota_utilization: core::option::Option<f64>
 pub routectl_usage::UsageRecord::reasoning_tokens: core::option::Option<u64>
-pub routectl_usage::UsageRecord::reduction_strategy: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::request_id: alloc::string::String
 pub routectl_usage::UsageRecord::requested_model: alloc::string::String
 pub routectl_usage::UsageRecord::resolved_class: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::seat: core::option::Option<alloc::string::String>
-pub routectl_usage::UsageRecord::selection_decision: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::server_tool_use: core::option::Option<serde_json::value::Value>
 pub routectl_usage::UsageRecord::service_tier: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::session_id: core::option::Option<alloc::string::String>
-pub routectl_usage::UsageRecord::strategy: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::stream: bool
 pub routectl_usage::UsageRecord::thinking_req: core::option::Option<u32>
 pub routectl_usage::UsageRecord::thinking_req_kind: core::option::Option<alloc::string::String>

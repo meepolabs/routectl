@@ -73,7 +73,7 @@ list with more narrative.
   - **Conservative per-provider capability.** A per-kind `cache_capability` default decides whether a provider honors a top-level breakpoint at all (anthropic-api / bedrock yes; openai-compat / unknown kinds no), overridable per entry. A `kind = "anthropic-api"` entry pointed at a non-default base URL fails closed until the operator opts in with an explicit `cache_capability`.
   - **Structural volatile-prefix veto.** A pure, non-mutating detector vetoes auto-caching a prefix that carries high-confidence per-request-volatile tokens (UUIDs, RFC3339 timestamps, JWTs, long hex blobs), so a churning prefix is never cached without payoff.
 - **Ingress provenance** -- the canonical request now records which ingress dialect produced it (`Library` / `AnthropicIngress` / `OpenaiIngress`).
-- **Per-request cache strategy in `routectl usage`** -- each row records the auto-cache decision token (`auto_emitted`, `caller_supplied`, `volatile_vetoed`, `auto_skipped:<reason>`) in a new `strategy` column (usage DB schema v2; migrate-on-open). A `cache_auto_outcome` log warns on cache thrash (an auto-emitted breakpoint that created a cache entry but got no read).
+- **Per-request cache strategy in `routectl usage`** -- the auto-cache decision token (`auto_emitted`, `caller_supplied`, `volatile_vetoed`, `auto_skipped:<reason>`) got a dedicated nullable `strategy` column in the usage DB (schema v2; migrate-on-open). The column exists in the schema but is write-stopped (see `Changed` below), so rows carry NULL and the decision is visible in the `cache_auto_decision` log instead. A `cache_auto_outcome` log warns on cache thrash (an auto-emitted breakpoint that created a cache entry but got no read).
 
 ### Changed
 
@@ -97,6 +97,22 @@ list with more narrative.
   ```
   No `api_key_ref` line -- a forwarded provider has no configured credential of its own.
   `GET /v1/models` also proxies through to Anthropic's live model list on the MITM reinject leg when a forwarded provider is configured and the request carries a captured client bearer; it falls back to the local alias list on every other case, including a proxy-side failure.
+- **Usage ledger: three decision columns are write-stopped** -- the
+  `requests` table's `strategy`, `reduction_strategy`, and
+  `selection_decision` columns are no longer written. An audit confirmed
+  no reader ever queried them back. The physical columns and the
+  migrate-on-open ladder are unchanged, so existing databases open as
+  before and historical values stay readable; rows written from this
+  version onward store NULL. The three decision tokens are no longer
+  persisted anywhere; they are visible only through the existing partial
+  trace logging -- the auto-cache token in the `cache_auto_decision` /
+  `cache_auto_outcome` lines (per dispatch), the reduction token only via
+  a `context_reduction` line, which is emitted only when reduction
+  actually stripped bytes (the `skipped:*` outcomes log nothing), and the
+  seat-selection outcome only via the sticky birth-pick / overflow-repin
+  DEBUG lines (`sticky_stay`, `defer_no_healthy` and the keyless
+  fall-through log nothing). `UsageRecord` loses the three matching
+  fields.
 
 ### Fixed
 

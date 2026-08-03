@@ -66,9 +66,11 @@ pub(super) enum CacheInjection {
 }
 
 impl CacheInjection {
-    /// Stable operator-facing token for this decision, recorded in the
-    /// usage DB (`requests.strategy`) and emitted in the
-    /// `cache_auto_decision` log. These tokens are a CONTRACT: do not
+    /// Stable operator-facing token for this decision, emitted in the
+    /// `cache_auto_decision` log. Not persisted: the usage DB's
+    /// `requests.strategy` column is write-stopped as of 0.9.x, so the log
+    /// line is the only place the token appears. These tokens are a
+    /// CONTRACT: do not
     /// rename or repurpose them, only add new ones. The `auto_skipped:`
     /// prefix groups the variants where auto-emit ran but declined.
     /// `caller_supplied` is a request-level fact evaluated FIRST and takes

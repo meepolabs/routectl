@@ -2291,10 +2291,14 @@ base_url = "https://example.invalid/v1"
 reduction_enabled = false
 ```
 
-The per-request decision token is recorded in the usage DB
-`reduction_strategy` column and, when reduction actually strips bytes, a
-`context_reduction` line is logged at DEBUG (counts only -- no bodies).
-See [LOGGING.md](LOGGING.md).
+The per-request decision token is not persisted, and it is only partially
+observable: when reduction actually strips bytes a `context_reduction`
+line is logged at DEBUG (counts only -- no bodies), and that is the only
+outcome that surfaces anywhere. A request whose reduction was skipped
+(disabled, no mutable tail, nothing to strip) logs nothing. The usage DB's
+`reduction_strategy` column is write-stopped (retained in the schema, NULL
+for every row written by this version onward). See
+[LOGGING.md](LOGGING.md).
 
 ## Steady-state advisory trim (`[trim]`)
 
@@ -2812,10 +2816,13 @@ seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sti
   when the original recovers. Requires an inbound per-conversation key
   (the `x-claude-code-session-id` header Claude Code sends, or body
   `metadata.session_id`); a request without one falls back to
-  `fill-first`. The per-request decision is recorded in the usage
-  ledger's `selection_decision` column (birth_pick / sticky_stay /
-  overflow_repin / defer_no_healthy / keyless_fill_first) for
-  diagnostics.
+  `fill-first`. The per-request decision (birth_pick / sticky_stay /
+  overflow_repin / defer_no_healthy / keyless_fill_first) is not
+  persisted, and only partially logged: a DEBUG line marks a birth pick
+  and an overflow repin, while `sticky_stay`, `defer_no_healthy` and the
+  keyless fall-through emit nothing. The usage ledger's
+  `selection_decision` column is write-stopped (retained in the schema,
+  NULL for every row written by this version onward).
 
 These strategies are applied at dispatch time -- `fill-first` always
 starts from seat 0 (fixed priority order), `round-robin` advances the

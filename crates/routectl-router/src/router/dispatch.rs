@@ -340,7 +340,8 @@ impl Router {
                     .unwrap_or(true),
             );
             // T6 observability: stamp the per-request decision token so the
-            // usage DB and the outcome log can see what was decided, and
+            // outcome log can see what was decided (the usage DB's
+            // `strategy` column is write-stopped), and
             // emit the per-request decision at debug. No bodies / secrets:
             // only provider name, model id, and the stable strategy token.
             let strategy_token = cache_injection.strategy_str();

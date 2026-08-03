@@ -73,9 +73,6 @@ pub(crate) fn build_usage_draft(
         finish_reason: None,
         attempt_count: 0,
         fallback_count: 0,
-        strategy: None,
-        reduction_strategy: None,
-        selection_decision: None,
         would_trim_tokens: None,
         would_trim_break_even_k: None,
         would_trim_k_floor: None,
@@ -289,6 +286,10 @@ pub(crate) struct UsageCapture {
     last_prompt: u32,
     last_completion: u32,
     last_total: u32,
+    /// The dispatch's auto-cache decision token, read PRE-persistence by
+    /// the cache-outcome / cache-summary log emitters. Log-only: the ledger
+    /// no longer persists it.
+    cache_strategy: Option<&'static str>,
 }
 
 impl UsageCapture {
@@ -305,6 +306,7 @@ impl UsageCapture {
             last_prompt: 0,
             last_completion: 0,
             last_total: 0,
+            cache_strategy: None,
         }
     }
 
@@ -361,13 +363,7 @@ impl UsageCapture {
                 "usage row disambiguated as forwarded-credential dispatch",
             );
         }
-        self.record.strategy = meta.cache_strategy.map(std::string::ToString::to_string);
-        self.record.reduction_strategy = meta
-            .reduction_strategy
-            .map(std::string::ToString::to_string);
-        self.record.selection_decision = meta
-            .selection_decision
-            .map(std::string::ToString::to_string);
+        self.cache_strategy = meta.cache_strategy;
         self.record.would_trim_tokens = meta.would_trim_tokens;
         self.record.would_trim_break_even_k = meta.would_trim_break_even_k;
         self.record.would_trim_k_floor = meta.would_trim_k_floor;
@@ -729,7 +725,7 @@ impl UsageCapture {
     /// 5m + 1h write the upstream reported (the per-TTL columns already on
     /// the record); `cache_read` is the read count.
     fn emit_cache_outcome(&self) {
-        let strategy = self.record.strategy.as_deref();
+        let strategy = self.cache_strategy;
         if strategy != Some("auto_emitted") {
             return;
         }
@@ -787,7 +783,7 @@ impl UsageCapture {
             .saturating_add(cache_read)
             .saturating_add(cache_creation);
         let pct = cache_hit_pct(cache_read, prompt);
-        let strategy = self.record.strategy.as_deref().unwrap_or("");
+        let strategy = self.cache_strategy.unwrap_or("");
         let provider = self.record.provider.as_deref().unwrap_or("");
         let model = self.record.model.as_deref().unwrap_or("");
         let request_id = self.record.request_id.as_str();

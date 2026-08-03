@@ -975,8 +975,9 @@ struct DispatchTarget {
     /// Stable seat-selection decision token for THIS target, set only on
     /// the home (first) seat target of a sticky / keyless-collapse pool by
     /// `push_seat_targets`. `None` on every other target. Propagated to
-    /// `DispatchMeta::selection_decision` via `mark_target` so usage
-    /// accounting can record how the seat was chosen. Observability only --
+    /// `DispatchMeta::selection_decision` via `mark_target` for
+    /// observability; usage accounting no longer records it (the ledger's
+    /// `selection_decision` column is write-stopped). Observability only --
     /// never affects seat order, the target set, or dispatch.
     selection_decision: Option<&'static str>,
     /// Per-status failure-class remap for this target's provider, adapted
