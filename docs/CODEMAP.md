@@ -2127,36 +2127,55 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   capability_events_dropped_full / capability_events_persisted)
 - `src/query/mod.rs` -- read-query facade: owns the shared row/error types
   `QueryError` (`Sqlite` + `Interrupted`, the latter distinguishing a fired
-  query deadline from a real DB fault), `GroupKey`, `AggRow` and re-exports the
-  whole read-side surface from the four submodules so every symbol stays at
+  query deadline from a real DB fault, + `InvalidBucket` for a time-bucket grid
+  that violates its width/count invariants), `GroupKey`, `AggRow` and re-exports
+  the whole read-side surface from the four submodules so every symbol stays at
   `routectl_usage::` unchanged
 - `src/query/aggregate.rs` -- aggregate + breakdown queries over the requests
   table; exports `aggregate`, `errors_by_class` (flat per-group failure-class
   breakdown, same window predicate + group key as `aggregate`, sums to
-  `AggRow::errors`), `ttfbs`, `latest_quota`, `QuotaSnapshot`. Also holds
-  `QUERY_AGG_SQL` + `FineRow` (crate-internal): the grouped-query statement,
-  which shares this module's base column list and GROUP BY verbatim through
-  `concat!` macros so the two statements cannot drift past the one shared row
-  mapper
+  `AggRow::errors`), `ttfbs`, `latest_quota`, `QuotaSnapshot`,
+  `earliest_ts_start` (`MIN(ts_start)` at or after a caller-supplied lower bound,
+  `None` when no row qualifies, so a caller can anchor an unbounded window off
+  the oldest IN-WINDOW row instead of the epoch). Also
+  holds `QUERY_AGG_SQL` / `SERIES_AGG_SQL` + `FineRow` (crate-internal): the
+  grouped-query statement and its bucketed twin, both assembled from the same
+  `query_agg_select!` / `query_agg_from_where!` / `agg_group_by!` `concat!`
+  macros over this module's base column list, so no statement can drift past the
+  shared row mappers -- the series statement is the SAME select plus one trailing
+  `(ts_start - ?1) / ?5 AS bucket` column and `, bucket` on the GROUP BY
 - `src/query/grouped.rs` -- the grouped, priced, deadline-bounded aggregate:
   exports `query(db, &QuerySpec, price, deadline)` plus `QuerySpec`,
   `GroupDim`, `RowCost`, `QueryResult`, `QueryGroup`, `QueryMetrics` /
-  `QueryTotals`, `CostStatus`. One statement reads at the fine
+  `QueryTotals`, `CostStatus`, and the time-series types `BucketSpec` /
+  `QuerySeries` / `SeriesBucket`. One statement reads at the fine
   `(model, provider, upstream, alias)` grain with alias/provider filters as
   BIND params; the fold prices each fine row through the caller's closure
   BEFORE upstream is dropped, rolls to the coarse `GroupDim` (sums additive,
   MAX-across-MAX, ratios kept as numerator/denominator pairs), derives the
   display metrics as `Option` (absent, never 0, when no row was eligible), and
-  folds totals from the same accumulators. Cost enters only via the closure, so
-  the crate stays a leaf; a `progress_handler` deadline surfaces as
-  `QueryError::Interrupted` and is detached by an RAII guard on every exit path,
-  unwinding included; a cost sum that an extreme configured rate overflowed to
-  non-finite is a VALUE outcome (`cost_usd: None` + `unpriced`), never an
-  assert, because the fold is network-reachable and the release profile aborts
-  on panic. `QueryResult`/`QueryGroup`/`QueryMetrics`/`CostStatus`
+  folds totals from the same accumulators. `QuerySpec::bucket` switches on the
+  bucketed statement and folds each row ONCE into both the coarse groups and a
+  per-bucket accumulator map, so groups / totals / series reconcile by
+  construction; the caller-resolved grid is re-checked here (`width_ms > 0`,
+  `count` in `1..=1000`, and the last bucket start computed in `i128` so it
+  cannot overflow the dense fill) as this crate's trust boundary, and a row whose
+  bucket index falls outside the grid is refused before it reaches either
+  accumulator -- all as `QueryError::InvalidBucket` rather than asserted; absent
+  buckets densify
+  through the same `finish` an empty group takes, while a window matching no row
+  at all yields an EMPTY series rather than a thousand synthetic zeros. Cost
+  enters only via the closure, so the crate stays a leaf; a `progress_handler`
+  deadline surfaces as `QueryError::Interrupted` and is detached by an RAII guard
+  on every exit path, unwinding included; a cost sum that an extreme configured
+  rate overflowed to non-finite is a VALUE outcome (`cost_usd: None` +
+  `unpriced`), never an assert, because the fold is network-reachable and the
+  release profile aborts on panic.
+  `QueryResult`/`QueryGroup`/`QueryMetrics`/`CostStatus`/`QuerySeries`/`SeriesBucket`
   derive `Serialize`: the metric field names ARE the `/status/query` wire
-  vocabulary, absent `Option`s serialize as explicit `null` (never skipped), and
-  `CostStatus` renames to the same lowercase tokens `as_str` returns
+  vocabulary, absent `Option`s serialize as explicit `null` (never skipped,
+  `series` included), and `CostStatus` renames to the same lowercase tokens
+  `as_str` returns
 - `src/query/would_trim.rs` -- would-trim + K-calibration read queries;
   exports `would_trim_summary`, `shadow_misfire_summary`,
   `m1_attribution_summary`, `k_calibration_summary`,
@@ -2545,7 +2564,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   handler is structurally incapable of mutation, of reaching a raw
   `Router`/`.config`/dispatch, or of touching the forwarding seam;
   `PanelObservability`/`PanelCounters` are the per-panel last-availability +
-  shed-count scaffold (minimal `record` hook now, read side wired later).
+  shed-count scaffold (minimal `record` hook now, read side wired later), with
+  `/status/query`'s two request modes on SEPARATE detectors (`status_query` /
+  `status_query_series`) so a healthy aggregate poll cannot mask a consistently
+  failing series poll.
   `status_router() -> Router<Arc<StatusState>>` registers GET-only panel routes
   (`/status`, `/status/{usage,health,config,doctor}`; non-GET gets 405) plus the
   ONE method carve-out `/status/query`, registered with `any()` because axum's
@@ -2580,7 +2602,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the grouped windowed aggregate. Three EXCLUSIVE regimes: 405 (method is not
   `QUERY`, guarded by the handler's first extractor), 400 (body outside the
   closed vocabulary -- `deny_unknown_fields` + closed `window`
-  {today,week,month,all} / `group_by` {model,provider,alias} enums + optional
+  {today,week,month,all} / `group_by` {model,provider,alias} / `bucket`
+  {hour,day} enums + optional
   alias/provider filters -- or over `MAX_BODY_BYTES` (8 KiB), or still arriving
   at the `BODY_READ_TIMEOUT` (2s) read deadline that stops a stalled send from
   parking a concurrency permit; all refused with the FIXED envelope
@@ -2596,7 +2619,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   failure arm would be a bare 500 outside the three regimes -- a render failure
   degrades to the unavailable panel instead), so the metric field names ARE the
   wire vocabulary (contracts sec 15), with absent `Option` metrics as explicit
-  `null`
+  `null`. A PRESENT `bucket` selects the series mode: the grid is resolved on the
+  blocking worker via `commands::usage::resolve_bucket` (reading
+  `earliest_ts_start` first, and ONLY for `window: all`, whose epoch lower bound
+  is re-anchored to the oldest in-window row's local midnight, clamped never to
+  fall below that bound -- an identical row set, so groups/totals match the
+  non-series path), then handed to the leaf as a plain
+  `BucketSpec`; an all-time window over an empty ledger has no anchor and answers
+  with an EMPTY series at the requested unit's width rather than an error. All
+  local-calendar math stays here, keeping `routectl-usage` chrono-free
 - `src/handlers/status/router_view.rs` -- the read-only router facade that
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
@@ -3193,7 +3224,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a degenerate `den <= 0`, rendered `-` not `0%`), so a mixed-provider window
   can never show two contradictory hit%. Footer also reports the total error
   count. `OpenError::NoData` -> friendly stdout + exit 0; `VersionTooNew` ->
-  hard error
+  hard error. Also the project's LOCAL-CALENDAR AUTHORITY for the read surfaces:
+  beside the window math it owns `MAX_BUCKETS` and `resolve_bucket(unit, from,
+  to, first_row, now)`, the pure DB-free resolver `/status/query`'s series mode
+  calls -- it re-anchors an all-time window to the earliest row's local midnight
+  (clamped never below the window's own lower bound), then widens the requested
+  `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
+  the cap, so the grid always covers the window and never exceeds it
 - `src/commands/catalog/` -- `routectl catalog` (hidden alias `pricing`,
   dropped at 1.0), split into a command-entry facade plus three concern
   modules; every original

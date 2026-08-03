@@ -97,6 +97,11 @@ pub struct PanelObservability {
     pub config: PanelCounters,
     pub doctor: PanelCounters,
     pub query: PanelCounters,
+    /// The `/status/query` series mode. Tracked apart from `query` because a
+    /// series read fails on its own terms (a wider GROUP BY over a larger temp
+    /// b-tree), and one shared detector would let a healthy aggregate poll mask
+    /// a consistently failing series poll.
+    pub query_series: PanelCounters,
 }
 
 impl Default for PanelObservability {
@@ -107,6 +112,7 @@ impl Default for PanelObservability {
             config: PanelCounters::new("config"),
             doctor: PanelCounters::new("doctor"),
             query: PanelCounters::new("status_query"),
+            query_series: PanelCounters::new("status_query_series"),
         }
     }
 }

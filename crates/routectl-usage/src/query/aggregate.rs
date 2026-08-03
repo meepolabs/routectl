@@ -125,9 +125,78 @@ macro_rules! cache_prompt_total {
     };
 }
 
-/// The `/status/query` aggregate: [`AGG_SQL`]'s base columns at the SAME fine
-/// grain, plus the eleven expressions the derived display metrics need, plus the
-/// two optional filters as BIND PARAMS (never interpolated identifiers).
+/// The `/status/query` SELECT clause: [`AGG_SQL`]'s base columns at the SAME
+/// fine grain, plus the thirteen expressions the derived display metrics need.
+///
+/// A macro rather than a `const` for the same reason [`agg_base_columns`] is:
+/// both [`QUERY_AGG_SQL`] and [`SERIES_AGG_SQL`] assemble it with `concat!` at
+/// compile time, so the two can never present different columns to the shared
+/// [`map_fine_row`] ordinals.
+///
+/// Every zero-row-able SUM is COALESCEd (an empty group set returns NO rows,
+/// but a group whose rows are all NULL in a column returns SQL NULL, which
+/// would fail an `i64` column read); every MAX is read as `Option`, since a MAX
+/// over no non-NULL values is legitimately absent.
+macro_rules! query_agg_select {
+    () => {
+        concat!(
+            "SELECT\n",
+            agg_base_columns!(),
+            ",
+    MAX(CASE WHEN ",
+            ttft_eligible!(),
+            " THEN ttfb_ms END)                                 AS ttfb_max,
+    COALESCE(SUM(CASE WHEN ",
+            ttft_eligible!(),
+            " THEN ttfb_ms ELSE 0 END), 0)                      AS ttft_sum,
+    COALESCE(SUM(CASE WHEN ",
+            ttft_eligible!(),
+            " THEN 1 ELSE 0 END), 0)                            AS ttft_count,
+    COALESCE(SUM(latency_ms), 0)                        AS latency_sum,
+    MAX(latency_ms)                                     AS latency_max,
+    MAX(input_tokens)                                   AS input_tokens_max,
+    COUNT(input_tokens)                                 AS input_tokens_present,
+    COALESCE(SUM(CASE WHEN ",
+            tok_s_eligible!(),
+            "
+        THEN CAST(output_tokens AS REAL) * 1000.0
+             / CAST(latency_ms - ttfb_ms AS REAL)
+        ELSE 0.0 END), 0.0)                             AS tok_s_sum,
+    COALESCE(SUM(CASE WHEN ",
+            tok_s_eligible!(),
+            "
+        THEN 1 ELSE 0 END), 0)                          AS tok_s_count,
+    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
+            cache_prompt_total!(),
+            " > 0
+        THEN CAST(cache_read AS REAL) / CAST(",
+            cache_prompt_total!(),
+            " AS REAL)
+        ELSE 0.0 END), 0.0)                             AS cache_hit_sum,
+    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
+            cache_prompt_total!(),
+            " > 0
+        THEN 1 ELSE 0 END), 0)                          AS cache_hit_count,
+    COALESCE(SUM(CASE WHEN fallback_count > 0
+        THEN 1 ELSE 0 END), 0)                          AS fallback_served"
+        )
+    };
+}
+
+/// The window predicate and the two optional filters, as BIND PARAMS (never
+/// interpolated identifiers). Shared by both query statements so a filter can
+/// never apply to one and not the other.
+macro_rules! query_agg_from_where {
+    () => {
+        "
+FROM requests AS r
+WHERE ts_start >= ?1 AND ts_start < ?2
+  AND (?3 IS NULL OR alias = ?3)
+  AND (?4 IS NULL OR provider = ?4)\n"
+    };
+}
+
+/// The `/status/query` aggregate.
 ///
 /// A SEPARATE statement rather than more columns on `AGG_SQL`: the existing
 /// panel binds exactly two params and maps exactly the base columns, so adding
@@ -135,54 +204,28 @@ macro_rules! cache_prompt_total {
 /// existing caller's call shape for no benefit. The base column list and the
 /// GROUP BY are shared verbatim through macros, so the fine grain and the
 /// `map_agg_row` ordinals stay identical by construction.
-///
-/// Every zero-row-able SUM is COALESCEd (an empty group set returns NO rows,
-/// but a group whose rows are all NULL in a column returns SQL NULL, which
-/// would fail an `i64` column read); every MAX is read as `Option`, since a MAX
-/// over no non-NULL values is legitimately absent.
 pub(super) const QUERY_AGG_SQL: &str = concat!(
-    "SELECT\n",
-    agg_base_columns!(),
-    ",
-    MAX(CASE WHEN ",
-    ttft_eligible!(),
-    " THEN ttfb_ms END)                                 AS ttfb_max,
-    COALESCE(SUM(CASE WHEN ",
-    ttft_eligible!(),
-    " THEN ttfb_ms ELSE 0 END), 0)                      AS ttft_sum,
-    COALESCE(SUM(CASE WHEN ",
-    ttft_eligible!(),
-    " THEN 1 ELSE 0 END), 0)                            AS ttft_count,
-    COALESCE(SUM(latency_ms), 0)                        AS latency_sum,
-    MAX(latency_ms)                                     AS latency_max,
-    MAX(input_tokens)                                   AS input_tokens_max,
-    COUNT(input_tokens)                                 AS input_tokens_present,
-    COALESCE(SUM(CASE WHEN ",
-    tok_s_eligible!(),
-    "
-        THEN CAST(output_tokens AS REAL) * 1000.0
-             / CAST(latency_ms - ttfb_ms AS REAL)
-        ELSE 0.0 END), 0.0)                             AS tok_s_sum,
-    COALESCE(SUM(CASE WHEN ",
-    tok_s_eligible!(),
-    "
-        THEN 1 ELSE 0 END), 0)                          AS tok_s_count,
-    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
-    cache_prompt_total!(),
-    " > 0
-        THEN CAST(cache_read AS REAL) / CAST(",
-    cache_prompt_total!(),
-    " AS REAL)
-        ELSE 0.0 END), 0.0)                             AS cache_hit_sum,
-    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
-    cache_prompt_total!(),
-    " > 0
-        THEN 1 ELSE 0 END), 0)                          AS cache_hit_count
-FROM requests AS r
-WHERE ts_start >= ?1 AND ts_start < ?2
-  AND (?3 IS NULL OR alias = ?3)
-  AND (?4 IS NULL OR provider = ?4)\n",
+    query_agg_select!(),
+    query_agg_from_where!(),
     agg_group_by!()
+);
+
+/// [`QUERY_AGG_SQL`]'s statement at the SAME fine grain, plus a bucket index as
+/// one further GROUP BY dimension, so one scan feeds both the coarse groups and
+/// the time series.
+///
+/// `?5` is the bucket WIDTH in milliseconds and `?1` doubles as the bucket
+/// ANCHOR. The numerator `ts_start - ?1` is never negative, because the same
+/// `?1` is the window's inclusive lower bound in the WHERE. A zero `?5` would
+/// make every bucket index a silent SQL NULL rather than an error, which is why
+/// the caller's `width_ms > 0` invariant is re-checked before this statement
+/// runs.
+pub(super) const SERIES_AGG_SQL: &str = concat!(
+    query_agg_select!(),
+    ",\n    (ts_start - ?1) / ?5                                AS bucket",
+    query_agg_from_where!(),
+    agg_group_by!(),
+    ", bucket"
 );
 
 /// One [`QUERY_AGG_SQL`] row: the shared base aggregate plus the raw
@@ -221,6 +264,10 @@ pub(super) struct FineRow {
     /// Count of cache-reporting rows with a positive prompt total (the
     /// `cache_hit_sum` divisor).
     pub cache_hit_count: i64,
+    /// Rows served only after a fallback (`fallback_count > 0`). Additive, not
+    /// a ratio: `fallback_count` is NOT NULL in the schema, so this is a plain
+    /// count of rows where the router had to try more than its first choice.
+    pub fallback_served: i64,
 }
 
 /// Windowed aggregate grouped by `(model, provider, upstream, alias)`.
@@ -235,7 +282,7 @@ pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, 
 }
 
 /// Build a [`FineRow`] from a [`QUERY_AGG_SQL`] result row: the base columns
-/// through the shared mapper, then the eleven extra columns by ordinal.
+/// through the shared mapper, then the twelve extra columns by ordinal.
 pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
     Ok(FineRow {
         agg: map_agg_row(row)?,
@@ -250,7 +297,37 @@ pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
         tok_s_count: row.get(36)?,
         cache_hit_sum: row.get(37)?,
         cache_hit_count: row.get(38)?,
+        fallback_served: row.get(39)?,
     })
+}
+
+/// Build a [`FineRow`] plus its bucket index from a [`SERIES_AGG_SQL`] result
+/// row. That statement is [`QUERY_AGG_SQL`] with ONE trailing column appended,
+/// so the shared mapper reads every column it already knows and only the bucket
+/// index is read here.
+pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64)> {
+    let fine = map_fine_row(row)?;
+    let bucket = row.get(40)?;
+    Ok((fine, bucket))
+}
+
+const EARLIEST_TS_START_SQL: &str = "SELECT MIN(ts_start) FROM requests WHERE ts_start >= ?1";
+
+/// The `ts_start` of the oldest row at or after `from_ms`, or `None` when no row
+/// qualifies. A `MIN` over a range of an indexed column, so this is an index seek
+/// rather than a scan.
+///
+/// The caller uses it to anchor an unbounded window: bucketing an all-history
+/// window from the epoch would emit tens of thousands of empty leading buckets.
+/// The lower bound matters even for that window: `from_ms` is the same inclusive
+/// bound the aggregate applies, so an anchor derived from this can never pull in
+/// a row the unbucketed query excludes.
+pub fn earliest_ts_start(db: &UsageDb, from_ms: i64) -> Result<Option<i64>, QueryError> {
+    let mut stmt = db.conn().prepare(EARLIEST_TS_START_SQL)?;
+    // `MIN` over zero rows is a single SQL NULL row, not an absent row, so the
+    // empty ledger arrives as `Ok(None)` rather than `QueryReturnedNoRows`.
+    let earliest = stmt.query_row([from_ms], |row| row.get::<_, Option<i64>>(0))?;
+    Ok(earliest)
 }
 
 /// Build an `AggRow` from a result row. The column order matches `AGG_SQL`.

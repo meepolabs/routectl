@@ -19,8 +19,8 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    AggRow, GroupKey, KCalibration, M1AttributionSummary, OpenError, QueryError, QuotaSnapshot,
-    Rates, RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate,
+    AggRow, BucketSpec, GroupKey, KCalibration, M1AttributionSummary, OpenError, QueryError,
+    QuotaSnapshot, Rates, RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate,
     estimate_cost_tokens, k_calibration_summary, latest_quota, m1_attribution_summary,
     open_readonly, shadow_misfire_summary, ttfbs, would_trim_summary,
 };
@@ -102,6 +102,7 @@ const COMPACT_COUNT_FLOOR: i64 = 10_000;
 const MS_PER_SECOND: i64 = 1_000;
 const MS_PER_MINUTE: i64 = 60_000;
 const MS_PER_HOUR: i64 = 3_600_000;
+const MS_PER_DAY: i64 = 86_400_000;
 
 /// Compact a count: below 10_000 the plain integer; otherwise a one-decimal
 /// figure with a K/M/B suffix, trimming a trailing `.0`.
@@ -198,6 +199,19 @@ fn resolve_local_midnight(naive: NaiveDateTime, now: DateTime<Local>) -> DateTim
     }
 }
 
+/// Local midnight (00:00:00.000) on the calendar day the epoch-ms instant
+/// `ts_ms` falls on, resolved through the same DST handling as every other
+/// window edge.
+///
+/// `None` only when `ts_ms` is outside the representable date range, which no
+/// ledger timestamp reaches; the caller treats that as nothing to bucket rather
+/// than substituting a wrong anchor.
+fn local_midnight_of(ts_ms: i64, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    let instant = Local.timestamp_millis_opt(ts_ms).single()?;
+    let naive = instant.date_naive().and_hms_opt(0, 0, 0)?;
+    Some(resolve_local_midnight(naive, now))
+}
+
 /// Local midnight (00:00:00.000) on the calendar day of `now`.
 fn local_midnight(now: DateTime<Local>) -> DateTime<Local> {
     let naive = now
@@ -236,6 +250,98 @@ pub fn window_bounds(flag: WindowFlag, now: DateTime<Local>) -> WindowBounds {
         from_ms: from.timestamp_millis(),
         to_ms,
     }
+}
+
+// --- time-series bucket resolution --------------------------------------
+
+/// Ceiling on how many buckets one series may carry. A wider window does not
+/// return more points: it returns proportionally WIDER ones, so a response is
+/// bounded no matter how much history the ledger holds.
+pub const MAX_BUCKETS: usize = 1000;
+
+/// The granularity a series is requested at. The resolved width can be a
+/// MULTIPLE of the requested unit once the cap widens the grid, so a reader
+/// takes the width from the resolved [`BucketSpec`], never from this token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketUnit {
+    Hour,
+    Day,
+}
+
+impl BucketUnit {
+    /// The unwidened width of one bucket, in milliseconds. Also the width an
+    /// EMPTY series reports, since nothing was measured to widen against.
+    pub const fn base_width_ms(self) -> i64 {
+        match self {
+            Self::Hour => MS_PER_HOUR,
+            Self::Day => MS_PER_DAY,
+        }
+    }
+}
+
+/// Resolve a requested granularity into the grid a series is folded over: the
+/// anchor its buckets are measured from, and the width/count that cover
+/// `[anchor, to_ms)` without exceeding [`MAX_BUCKETS`].
+///
+/// `from_ms == 0` is the all-time window, whose literal lower bound is the 1970
+/// epoch; bucketing from there would spend the whole grid on decades of empty
+/// history, so it re-anchors to the local midnight of the ledger's earliest row.
+/// The re-anchor is clamped to `from_ms`, so it can only ever move the lower
+/// bound FORWARD past rows the window already excluded -- the row set stays
+/// identical and the groups and totals folded from the same scan are unchanged.
+/// The clamp is load-bearing: local midnight of a small positive timestamp is
+/// itself negative in a positive-UTC-offset zone.
+///
+/// `None` means there is nothing to bucket: an empty ledger under all-time (no
+/// earliest row to anchor on), or a window whose span is not positive.
+///
+/// Pure by construction -- `now` and `first_row_ms` are passed in, so the whole
+/// widening ladder and every DST edge are exercised without a database.
+///
+/// The returned grid always satisfies the leaf's contract: `width_ms > 0`,
+/// `count` in `1..=MAX_BUCKETS`, and a last bucket start that fits an `i64`.
+/// Every intermediate is computed in `i128` so neither the span nor the widened
+/// width can wrap on the way there.
+pub fn resolve_bucket(
+    unit: BucketUnit,
+    from_ms: i64,
+    to_ms: i64,
+    first_row_ms: Option<i64>,
+    now: DateTime<Local>,
+) -> Option<(i64, BucketSpec)> {
+    let anchor = if from_ms == 0 {
+        local_midnight_of(first_row_ms?, now)?
+            .timestamp_millis()
+            .max(from_ms)
+    } else {
+        from_ms
+    };
+    let span = i128::from(to_ms) - i128::from(anchor);
+    if span <= 0 {
+        return None;
+    }
+    let base = i128::from(unit.base_width_ms());
+    let mut width = base;
+    let mut count = div_ceil_positive(span, width);
+    if count > MAX_BUCKETS as i128 {
+        // Widen to the smallest whole multiple of the requested unit that fits
+        // the cap. `hour` past ~41 days lands on a whole day and beyond as
+        // multiples of it, so no separate unit ladder is needed.
+        width = base * div_ceil_positive(count, MAX_BUCKETS as i128);
+        count = div_ceil_positive(span, width);
+    }
+    // `count * width >= span` by construction and `count <= MAX_BUCKETS`, so the
+    // last start is at most `anchor + span`, i.e. at most `to_ms` -- an i64.
+    let width_ms = i64::try_from(width).ok()?;
+    let count = usize::try_from(count).ok()?;
+    Some((anchor, BucketSpec { width_ms, count }))
+}
+
+/// Ceiling division for strictly positive operands. `i128::div_ceil` is not
+/// stable on the pinned toolchain, and the signed-operand rounding rules do not
+/// apply here: both arguments are positive by construction at every call site.
+const fn div_ceil_positive(numerator: i128, denominator: i128) -> i128 {
+    (numerator + denominator - 1) / denominator
 }
 
 /// Bounds for an ad-hoc `--since D [--until E]` range, anchored at `now`

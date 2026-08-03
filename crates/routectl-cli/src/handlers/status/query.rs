@@ -31,13 +31,16 @@ use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use chrono::Local;
+use chrono::{DateTime, Local};
 use serde::Deserialize;
 use serde_json::json;
 
-use routectl_usage::{GroupDim, QueryError, QueryResult, QuerySpec, open_readonly_fastfail, query};
+use routectl_usage::{
+    GroupDim, QueryError, QueryResult, QuerySeries, QuerySpec, earliest_ts_start,
+    open_readonly_fastfail, query,
+};
 
-use crate::commands::usage::{WindowFlag, window_bounds};
+use crate::commands::usage::{BucketUnit, WindowFlag, resolve_bucket, window_bounds};
 use crate::server::status_gate::QUERY_BUDGET_MS;
 
 use super::router_view::QueryPricer;
@@ -89,6 +92,10 @@ struct QueryRequest {
     /// Restrict to one served provider. Absent matches every provider.
     #[serde(default)]
     provider: Option<String>,
+    /// Also return a time series at this granularity. ABSENT means no series at
+    /// all -- the ledger is read exactly as it would be without this field.
+    #[serde(default)]
+    bucket: Option<QueryBucket>,
 }
 
 /// The closed `window` vocabulary. Bucketed / time-series shapes are reserved
@@ -113,6 +120,17 @@ enum QueryGroupBy {
     Alias,
 }
 
+/// The closed `bucket` vocabulary: the granularity a series is REQUESTED at.
+/// Coarser tokens are deliberately absent -- the server widens the grid itself
+/// under the bucket cap and reports the resolved width, so a client never needs
+/// to name one.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum QueryBucket {
+    Hour,
+    Day,
+}
+
 impl QueryWindow {
     const fn flag(self) -> WindowFlag {
         match self {
@@ -134,19 +152,38 @@ impl QueryGroupBy {
     }
 }
 
-/// Parse a request body into the query spec, resolving the window against
-/// `now`. Every failure is the SAME opaque unit error: the caller emits one
-/// fixed code, so no parse detail can reach the wire.
-fn spec_from_body(body: &[u8], now: chrono::DateTime<Local>) -> Result<QuerySpec, ()> {
+impl QueryBucket {
+    const fn unit(self) -> BucketUnit {
+        match self {
+            Self::Hour => BucketUnit::Hour,
+            Self::Day => BucketUnit::Day,
+        }
+    }
+}
+
+/// Parse a request body into the query spec plus the requested series
+/// granularity, resolving the window against `now`. Every failure is the SAME
+/// opaque unit error: the caller emits one fixed code, so no parse detail can
+/// reach the wire.
+///
+/// The bucket GRID is not resolved here: an all-time series anchors on the
+/// ledger's earliest row, which is a read, so the grid is resolved on the
+/// blocking worker that already owns the connection.
+fn spec_from_body(
+    body: &[u8],
+    now: DateTime<Local>,
+) -> Result<(QuerySpec, Option<BucketUnit>), ()> {
     let request: QueryRequest = serde_json::from_slice(body).map_err(|_| ())?;
     let bounds = window_bounds(request.window.flag(), now);
-    Ok(QuerySpec {
+    let spec = QuerySpec {
         from_ms: bounds.from_ms,
         to_ms: bounds.to_ms,
         group_by: request.group_by.dim(),
         alias_filter: filter_value(request.alias)?,
         provider_filter: filter_value(request.provider)?,
-    })
+        bucket: None,
+    };
+    Ok((spec, request.bucket.map(QueryBucket::unit)))
 }
 
 /// Validate one optional filter. A present-but-blank filter matches nothing and
@@ -182,10 +219,11 @@ pub(super) async fn handler(
     let Ok(Ok(body)) = read else {
         return invalid_query();
     };
-    let Ok(spec) = spec_from_body(&body, Local::now()) else {
+    let now = Local::now();
+    let Ok((spec, bucket)) = spec_from_body(&body, now) else {
         return invalid_query();
     };
-    render(build(&state, spec).await)
+    render(build(&state, spec, bucket, now).await)
 }
 
 /// Serialize a finished panel. Rendering is EXPLICIT rather than through the
@@ -227,7 +265,17 @@ fn invalid_query() -> Response {
 }
 
 /// Run the aggregate under panel isolation and record its availability edge.
-async fn build(state: &StatusState, spec: QuerySpec) -> Panel<QueryResult> {
+///
+/// The two request modes have their own edge detectors: a series read has a
+/// distinct failure profile (a wider GROUP BY over a larger temp b-tree), so
+/// sharing one detector would let a healthy aggregate poll mask a consistently
+/// failing series poll. Exactly ONE of them sees each request.
+async fn build(
+    state: &StatusState,
+    spec: QuerySpec,
+    bucket: Option<BucketUnit>,
+    now: DateTime<Local>,
+) -> Panel<QueryResult> {
     let db_path = state.usage_db_path.clone();
     // ONE pinned config snapshot for the whole request's pricing.
     let pricer = state.router.pricer();
@@ -235,10 +283,14 @@ async fn build(state: &StatusState, spec: QuerySpec) -> Panel<QueryResult> {
     // freshness marker.
     let as_of = now_utc_rfc3339();
     let panel = guard_panel(SCHEMA_VERSION, codes::DB_UNAVAILABLE, move || {
-        build_panel(&db_path, &spec, &pricer, as_of)
+        build_panel(&db_path, spec, bucket, &pricer, as_of, now)
     })
     .await;
-    state.observability.query.record(&panel);
+    if bucket.is_some() {
+        state.observability.query_series.record(&panel);
+    } else {
+        state.observability.query.record(&panel);
+    }
     panel
 }
 
@@ -249,19 +301,64 @@ async fn build(state: &StatusState, spec: QuerySpec) -> Panel<QueryResult> {
 /// The deadline is anchored here rather than at request arrival so the budget
 /// measures the QUERY, not the time the request spent waiting for a
 /// concurrency permit or a blocking worker.
+///
+/// A requested series resolves its grid here, since an all-time window anchors
+/// on the ledger's earliest row -- an O(log n) index probe, run before the
+/// aggregate and only for that window. The probe carries the window's own lower
+/// bound and the resolved anchor never falls below it, so replacing
+/// `spec.from_ms` with that anchor selects the SAME rows and leaves the groups
+/// and totals identical to the non-series path.
 fn build_panel(
     db_path: &Path,
-    spec: &QuerySpec,
+    mut spec: QuerySpec,
+    bucket: Option<BucketUnit>,
     pricer: &QueryPricer,
     as_of: String,
+    now: DateTime<Local>,
 ) -> Panel<QueryResult> {
     let deadline = Instant::now() + Duration::from_millis(QUERY_BUDGET_MS);
     let db = match open_readonly_fastfail(db_path) {
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
-    match query(&db, spec, |row| pricer.price(row), deadline) {
-        Ok(result) => Panel::available(SCHEMA_VERSION, as_of, result),
+    let empty_series = match bucket {
+        None => None,
+        Some(unit) => {
+            let first_row_ms = if spec.from_ms == 0 {
+                match earliest_ts_start(&db, spec.from_ms) {
+                    Ok(earliest) => earliest,
+                    Err(err) => {
+                        return Panel::unavailable(SCHEMA_VERSION, query_error_code(&err));
+                    }
+                }
+            } else {
+                None
+            };
+            match resolve_bucket(unit, spec.from_ms, spec.to_ms, first_row_ms, now) {
+                Some((anchor_ms, resolved)) => {
+                    spec.from_ms = anchor_ms;
+                    spec.bucket = Some(resolved);
+                    None
+                }
+                // Nothing to bucket -- an all-time window over an empty ledger
+                // has no earliest row to anchor a grid on. The series is still
+                // REPORTED, as the empty one it is, so a series request always
+                // answers in the series shape rather than looking like a
+                // non-series request that dropped the field.
+                None => Some(QuerySeries {
+                    bucket_ms: unit.base_width_ms(),
+                    buckets: Vec::new(),
+                }),
+            }
+        }
+    };
+    match query(&db, &spec, |row| pricer.price(row), deadline) {
+        Ok(mut result) => {
+            if let Some(series) = empty_series {
+                result.series = Some(series);
+            }
+            Panel::available(SCHEMA_VERSION, as_of, result)
+        }
         Err(err) => Panel::unavailable(SCHEMA_VERSION, query_error_code(&err)),
     }
 }
@@ -274,6 +371,10 @@ fn query_error_code(err: &QueryError) -> &'static str {
     match err {
         QueryError::Sqlite(source) => busy_or_unavailable(source.sqlite_error_code()),
         QueryError::Interrupted => codes::QUERY_TIMEOUT,
+        // The bucket grid is resolved server-side, so an unusable one is a bug
+        // here rather than operator input. Mapped rather than panicked so the
+        // never-500 posture holds.
+        QueryError::InvalidBucket => codes::DB_UNAVAILABLE,
     }
 }
 
