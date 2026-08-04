@@ -104,8 +104,7 @@
   var lastSuccess = null;          // wall time of the last good aggregate round
   var backingOff = false;          // reflects GET backoff state in the clock
   var nextDueAtMs = 0;             // wall-clock instant the next round is due
-  var countdownTimer = null;       // 1s interval driving the poll indicator
-  var remainingSec = 0;            // seconds until the next scheduled round
+  var ageTimer = null;             // 1s interval advancing the as_of age label
 
   // Expansion state keyed by table caption -> { rowKey: true }. Survives the
   // per-poll DOM rebuild so an operator's expanded row stays open across
@@ -203,9 +202,11 @@
     return fmtTs(ms);
   }
 
-  // Relative age of an as_of instant in seconds -> humane phrase.
+  // Relative age of an as_of instant in seconds -> humane phrase. Seconds stay
+  // exact below a minute: on a 5s cadence the figures are only ever a handful of
+  // seconds old, and coarsening that range to a word would make the one label
+  // that reports freshness look frozen.
   function relAge(sec) {
-    if (sec < 10) { return 'just now'; }
     if (sec < 60) { return sec + 's ago'; }
     if (sec < 3600) { return Math.floor(sec / 60) + 'm ago'; }
     return Math.floor(sec / 3600) + 'h ago';
@@ -783,7 +784,7 @@
     var delay = backoffIndex < 0 ? BASE_MS : BACKOFF_STEPS_MS[backoffIndex];
     backingOff = backoffIndex >= 0;
     nextDueAtMs = Date.now() + delay;
-    startCountdown(Math.round(delay / 1000));
+    startAgeTicker();
     clearTimeout(timer);
     timer = setTimeout(tick, delay);
     syncRefreshBtn();
@@ -1058,6 +1059,11 @@
     var primary = SOURCES[TAB_SOURCES[tab][0]];
     var pass = { faults: Object.create(null), touched: Object.create(null) };
     renderPass = pass;
+    // The overlay host is emptied here and refilled by the one section that
+    // owns it, so an overlay whose owning section is no longer drawn -- another
+    // tab, a state card in its place -- cannot outlive it.
+    var host = el('modal-host');
+    if (host) { host.replaceChildren(); }
     try {
       body.replaceChildren(BUILDERS[tab](primary));
     } catch (e) {
@@ -1154,6 +1160,10 @@
     }
   }
 
+  // The pane's status line reports a source that is NOT current, and nothing
+  // else. A live source says nothing here: the verdict strip already carries the
+  // as_of age of the visible tab's data, and repeating it per pane would show
+  // the same fact twice.
   function renderSectionStatus(status, rec) {
     if (!status) { return; }
     var state = effectiveState(rec);
@@ -1162,55 +1172,28 @@
       status.appendChild(document.createTextNode('loading'));
       return;
     }
-    status.appendChild(makeLiveDot());
     if (state === 'stale' || state === 'dead') {
       var note = lastSuccess
         ? 'last success at ' + lastSuccess.toLocaleTimeString()
         : 'no successful poll yet';
       var lead = state === 'stale' ? 'stale: ' : 'no current data: ';
+      status.appendChild(makeLiveDot());
       status.appendChild(document.createTextNode(lead + note));
       return;
     }
     if (state === 'invalid_payload') {
+      status.appendChild(makeLiveDot());
       status.appendChild(document.createTextNode(
         'invalid payload: a section could not be rendered'));
-      return;
     }
-    status.appendChild(document.createTextNode(formatAsOf(rec.asOf)));
-    pulse(status);
   }
 
-  // The small round status indicator shared by the fresh-render and
-  // transport-down status lines.
+  // The small round indicator beside a not-current status line.
   function makeLiveDot() {
     var dot = document.createElement('span');
     dot.className = 'live-dot';
     dot.setAttribute('aria-hidden', 'true');
     return dot;
-  }
-
-  // Brief opacity pulse to signal a fresh poll landed. Re-triggered each
-  // round by clearing and re-adding the class (a reflow read restarts the
-  // animation); prefers-reduced-motion nulls the animation in CSS.
-  function pulse(node) {
-    node.classList.remove('pulse');
-    void node.offsetWidth;
-    node.classList.add('pulse');
-  }
-
-  // as_of age as a humane relative phrase plus a compact absolute local
-  // time. If as_of is in the future beyond a small tolerance, label clock
-  // skew rather than showing a negative age.
-  function formatAsOf(asOf) {
-    if (!asOf) { return ''; }
-    var then = new Date(asOf);
-    if (isNaN(then.getTime())) { return 'as of ' + asOf; }
-    var ageSec = Math.round((Date.now() - then.getTime()) / 1000);
-    if (ageSec < -SKEW_TOLERANCE_SEC) {
-      return 'clock skew: source clock ahead (' + then.toLocaleTimeString() + ')';
-    }
-    if (ageSec < 0) { ageSec = 0; }
-    return relAge(ageSec) + ' - ' + then.toLocaleTimeString();
   }
 
   // ---- per-source state presentation -----------------------------------
@@ -1301,7 +1284,7 @@
     clearTimeout(timer);
     clearTimeout(queryTimer);
     clearTimeout(usageAllTimer);
-    clearInterval(countdownTimer);
+    clearInterval(ageTimer);
     if (queryCtrl) { queryCtrl.abort(); queryCtrl = null; }
     if (usageAllCtrl) { usageAllCtrl.abort(); usageAllCtrl = null; }
     usageAllGeneration += 1;
@@ -1401,6 +1384,12 @@
     return span;
   }
 
+  // The poll indicator reports the AGE of the data on screen, not a countdown to
+  // the next round: how stale the figures are is the fact an operator needs, and
+  // the cadence is a fixed 5s they cannot change. The age comes from the ACTIVE
+  // tab's primary source, so it describes the numbers actually visible; the 1s
+  // countdown interval re-renders it, so it advances rather than sitting frozen
+  // between rounds.
   function renderPollIndicator() {
     var poll = el('poll');
     poll.classList.remove('poll--warn', 'poll--dead', 'poll--idle');
@@ -1410,14 +1399,28 @@
       label = 'polling stopped';
     } else if (backingOff) {
       poll.classList.add('poll--warn');
-      label = 'reconnecting - retry in ' + remainingSec + 's';
+      label = 'reconnecting - stale ' + activeAgeText();
     } else if (lastSuccess === null) {
       poll.classList.add('poll--idle');
       label = 'polling';
     } else {
-      label = 'live - next in ' + remainingSec + 's';
+      label = 'live - ' + activeAgeText();
     }
     el('poll-label').textContent = label;
+  }
+
+  // The as_of age of the active tab's primary source as a humane phrase, or a
+  // word when there is no usable stamp to age against. A stamp ahead of the
+  // local clock beyond the skew tolerance says so rather than reading as a
+  // negative age.
+  function activeAgeText() {
+    var asOf = SOURCES[TAB_SOURCES[activeTab][0]].asOf;
+    if (!asOf) { return 'age unknown'; }
+    var then = new Date(asOf);
+    if (isNaN(then.getTime())) { return 'age unknown'; }
+    var ageSec = Math.round((Date.now() - then.getTime()) / 1000);
+    if (ageSec < -SKEW_TOLERANCE_SEC) { return 'clock skew'; }
+    return relAge(Math.max(0, ageSec));
   }
 
   // ---- tab badges ------------------------------------------------------
@@ -1787,17 +1790,23 @@
   // Hand-rolled trend sparkline over `{t, v}` samples (a query series'
   // buckets, keyed by bucket start). The polyline splits into independent
   // segments wherever the inter-sample gap exceeds `gapMs`, so a hole in the
-  // grid renders as a break, never a line drawn across it. `seriesB` picks the
-  // second, non-semantic data hue.
-  function sparkline(samples, gapMs, seriesB) {
-    return sparkSvg([{ samples: samples, b: !!seriesB }], gapMs);
+  // grid renders as a break, never a line drawn across it.
+  function sparkline(samples, gapMs) {
+    return sparkSvg([{ samples: samples, b: false, fill: false }], gapMs);
+  }
+
+  // A single-series sparkline whose area under the curve is filled. The fill
+  // belongs to a series that stands alone: two series sharing one scale would
+  // occlude each other, so a pair stays lines.
+  function sparkArea(samples, gapMs) {
+    return sparkSvg([{ samples: samples, b: false, fill: true }], gapMs);
   }
 
   // Two series on ONE shared vertical scale so the pair is comparable at a
   // glance (per-series scaling would make a small series look like a large
   // one). The second rides the second data hue.
   function sparklinePair(a, b, gapMs) {
-    return sparkSvg([{ samples: a, b: false }, { samples: b, b: true }], gapMs);
+    return sparkSvg([{ samples: a, b: false, fill: false }, { samples: b, b: true, fill: false }], gapMs);
   }
 
   // The shared sparkline geometry. The vertical scale fits the min/max of
@@ -1828,17 +1837,21 @@
       return x.toFixed(1) + ',' + y.toFixed(1);
     }
     series.forEach(function (s) {
-      if (s.samples && s.samples.length >= 2) { drawSegments(svg, s, gapMs, px); }
+      if (s.samples && s.samples.length >= 2) { drawSegments(svg, s, gapMs, px, H); }
     });
     return svg;
   }
 
-  // Append one series as one polyline per gap-free run of samples.
-  function drawSegments(svg, series, gapMs, px) {
+  // Append one series as one polyline per gap-free run of samples, each run
+  // optionally backed by the area under it. The area is a polygon closed on the
+  // baseline rather than a filled polyline, so a run with a hole beside it
+  // fills only its own span.
+  function drawSegments(svg, series, gapMs, px, H) {
     var samples = series.samples;
     var seg = [];
     function flush() {
       if (seg.length >= 2) {
+        if (series.fill) { svg.appendChild(areaPolygon(seg, H)); }
         var pl = document.createElementNS(SVG_NS, 'polyline');
         pl.setAttribute('points', seg.join(' '));
         if (series.b) { pl.setAttribute('class', 'series-b'); }
@@ -1851,6 +1864,18 @@
       seg.push(px(samples[i]));
     }
     flush();
+  }
+
+  // The run's own points plus the two baseline corners under its first and last
+  // sample. Every coordinate is numeric-by-construction, exactly as the
+  // polyline points are.
+  function areaPolygon(seg, H) {
+    var firstX = seg[0].split(',')[0];
+    var lastX = seg[seg.length - 1].split(',')[0];
+    var poly = document.createElementNS(SVG_NS, 'polygon');
+    poly.setAttribute('points',
+      firstX + ',' + H + ' ' + seg.join(' ') + ' ' + lastX + ',' + H);
+    return poly;
   }
 
   // A title + optional hint header row. Shared by `card` and by sections that
@@ -1994,13 +2019,43 @@
   // a line across it.
   var SERIES_GAP_FACTOR = 1.5;
 
-  // The scope strip renders OUTSIDE the section boundary: a provider-scoped
-  // query that comes back unavailable or refused must still be reversible, and
-  // the state card that replaces the content cannot carry that affordance.
+  // How many provider cards the row shows before the rest collapse behind one
+  // overflow card. Few providers is the common case, so the overflow rarely
+  // engages -- but a machine with a dozen credentials must not push the KPI
+  // grid off the first screen.
+  var PROVIDER_CARD_CAP = 3;
+
+  // Whether the overflow list under the provider row is open. View state only:
+  // it survives the per-poll rebuild and reaches no fetch.
+  var providerOverflowOpen = false;
+
+  // The last UNSCOPED Overview view: its `{groups, totals}` are the whole
+  // provider row and the share each provider holds of it.
+  //
+  // A provider-scoped QUERY narrows `groups` to the one scoped provider, so the
+  // scoped response alone cannot draw the row the scope was set from -- and the
+  // design requires every card to stay on screen while scoped, so the operator
+  // can move the scope or reset it there. Held from the unscoped read and
+  // refreshed every time one lands, so the row is never older than the last
+  // unscoped poll and never invented from the scoped totals.
+  //
+  // Keyed by the window it was read for: a retained row from another window
+  // would put one window's shares beside another window's tiles.
+  var providerRowView = null;
+  var providerRowWindow = null;
+
+  // The provider scope lives on the provider cards themselves (the aggregate
+  // card is the reset), so this tab carries no separate scope strip. But those
+  // cards are part of the query-backed content: when a provider-scoped query is
+  // unavailable or refused, the state card that replaces the content carries no
+  // affordance at all, so the scope would be irreversible. The lone reset line
+  // below renders ONLY in that case.
   function buildOverview(rec) {
+    var section = safeSection(rec, buildOverviewLive);
+    if (!selectedProvider || !stateCard(rec)) { return section; }
     var stack = tabStack();
-    if (selectedProvider) { stack.appendChild(scopeStrip()); }
-    stack.appendChild(safeSection(rec, buildOverviewLive));
+    stack.appendChild(scopeRecovery());
+    stack.appendChild(section);
     return stack;
   }
 
@@ -2014,9 +2069,14 @@
     if (!view || !view.series) {
       throw new Error('overview query payload carries no series');
     }
+    if (!selectedProvider) {
+      providerRowView = view;
+      providerRowWindow = selectedWindow;
+    }
     if (num0(view.totals.requests) <= 0) { return overviewEmpty(); }
+    var row = providerRowWindow === selectedWindow ? providerRowView : null;
     var stack = tabStack();
-    stack.appendChild(providerSection(view));
+    stack.appendChild(providerSection(row || view));
     stack.appendChild(kpiSection(view));
     return stack;
   }
@@ -2030,56 +2090,183 @@
       ['polling every 5s', WINDOW_SPAN[selectedWindow]]);
   }
 
-  // Scope every figure on this tab to one provider, or lift the scope when the
-  // provider already scoping it is picked again. The query is re-issued
-  // through the standard input-changed path (which aborts the in-flight
-  // request and bumps the generation, so a late response for the previous
-  // scope cannot repaint this one), and only this tab repaints -- the
-  // GET-backed siblings read no query source.
+  // Scope every figure on this tab to one provider. Picking a DIFFERENT provider
+  // while scoped moves the scope rather than lifting it; the aggregate card
+  // (label null) is the reset. The query is re-issued through the standard
+  // input-changed path (which aborts the in-flight request and bumps the
+  // generation, so a late response for the previous scope cannot repaint this
+  // one), and only this tab repaints -- the GET-backed siblings read no query
+  // source.
   function onProviderScope(label) {
-    selectedProvider = (selectedProvider === label) ? null : label;
+    if (selectedProvider === label) { return; }
+    selectedProvider = label;
     queryInputChanged();
     renderActiveTab();
     renderVerdict();
   }
 
-  // The scoped-to-one-provider header, with the affordance that lifts it.
-  function scopeStrip() {
+  function onProviderOverflow() {
+    providerOverflowOpen = !providerOverflowOpen;
+    renderActiveTab();
+  }
+
+  // The reset affordance of last resort: shown only when the scoped query is
+  // unrenderable, so the cards that normally carry the reset are not on screen.
+  function scopeRecovery() {
+    return scopeStrip('this provider scope has no renderable data');
+  }
+
+  // A scoped-to-one-provider header carrying the affordance that lifts the
+  // scope. Overview normally resets through its aggregate provider card, so this
+  // serves Usage (which has no provider cards) and Overview's recovery case.
+  function scopeStrip(hint) {
     var wrap = document.createElement('div');
     wrap.className = 'ovsection';
-    var head = sectionHead('Scoped to ' + selectedProvider,
-      'every figure below is this provider only');
+    var head = sectionHead('Scoped to ' + selectedProvider, hint);
     var reset = document.createElement('button');
     reset.type = 'button';
     reset.className = 'scope-reset';
     reset.textContent = 'all providers';
-    reset.addEventListener('click', function () { onProviderScope(selectedProvider); });
+    reset.addEventListener('click', function () { onProviderScope(null); });
     head.appendChild(reset);
     wrap.appendChild(head);
     return wrap;
   }
 
-  // The provider cards: one per query group, each a scope affordance. Cards,
-  // not a table -- a provider is a separate object an operator acts on. The
-  // seat quota rides on the card because a provider's credential headroom is a
-  // fact about that provider; it comes from the usage source, not the query
-  // one, so it is read through the seat index below and a usage failure costs
-  // the seat surface alone.
+  // The provider row: the all-providers aggregate card, then the busiest
+  // PROVIDER_CARD_CAP providers, then -- only when more remain -- one overflow
+  // card whose expansion lists the rest. Cards, not a table: a provider is a
+  // separate object an operator acts on.
+  //
+  // Every card stays visible while a provider is scoped (the scoped one is
+  // highlighted), so the operator can move the scope or reset it from the same
+  // row they set it in. The seat quota rides on the card because a provider's
+  // credential headroom is a fact about that provider; it comes from the usage
+  // source, not the query one, so it is read through the seat index below and a
+  // usage failure costs the seat surface alone.
   function providerSection(view) {
     var wrap = document.createElement('div');
     wrap.className = 'ovsection';
-    wrap.appendChild(sectionHead('Providers', selectedProvider
-      ? 'pick this card again to see every provider'
-      : 'pick one to scope these figures'));
-    var grid = document.createElement('div');
-    grid.className = 'provgrid';
+    wrap.appendChild(sectionHead('Providers', 'pick one to scope the whole page'));
     var totalReq = num0(view.totals.requests);
     var seats = seatIndex(SOURCES.usage);
-    view.groups.forEach(function (g) {
+    var ranked = view.groups.slice().sort(function (a, b) {
+      return num0(b.metrics.requests) - num0(a.metrics.requests);
+    });
+    var shown = ranked.slice(0, PROVIDER_CARD_CAP);
+    var rest = ranked.slice(PROVIDER_CARD_CAP);
+    var grid = document.createElement('div');
+    grid.className = 'provgrid';
+    grid.appendChild(aggregateCard(view.totals, seats));
+    shown.forEach(function (g) {
       grid.appendChild(providerCard(g, totalReq, seats));
     });
+    if (rest.length) { grid.appendChild(overflowCard(rest, totalReq)); }
     wrap.appendChild(grid);
+    if (rest.length && providerOverflowOpen) {
+      wrap.appendChild(providerOverflowList(rest, totalReq, seats));
+    }
+    renderSeatModal(seats);
     return wrap;
+  }
+
+  // The leading card: the window's TOTALS, not a group -- one hundred percent of
+  // the traffic by construction, and the affordance that lifts a provider scope.
+  function aggregateCard(totals, seats) {
+    var card = provCardShell(null, totals, 'all providers',
+      humanCount(totals.requests) + ' req', 100, seats);
+    card.classList.add('provcard--all');
+    return card;
+  }
+
+  function providerCard(group, totalReq, seats) {
+    var m = group.metrics;
+    var share = totalReq > 0 ? num0(m.requests) / totalReq * 100 : 0;
+    return provCardShell(group.label, m, group.label,
+      humanCount(m.requests) + ' req', share, seats);
+  }
+
+  // The shared card face: name, cost, the design's two facts (requests and the
+  // share of traffic they are), the share bar, and the provider's seat
+  // affordance. The scope affordance is its own button INSIDE the card so the
+  // seat control beside it is separate -- a button cannot contain one, and a
+  // card-wide handler would fire the scope change on every seat click.
+  function provCardShell(label, m, name, reqFact, share, seats) {
+    var scoped = selectedProvider === label;
+    var cardEl = document.createElement('div');
+    cardEl.className = 'provcard' + (scoped ? ' provcard--on' : '');
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'provcard-scope';
+    btn.setAttribute('aria-pressed', scoped ? 'true' : 'false');
+
+    var nameEl = document.createElement('span');
+    nameEl.className = 'provcard-name';
+    nameEl.textContent = name;
+    btn.appendChild(nameEl);
+
+    var cost = document.createElement('span');
+    cost.className = 'provcard-cost';
+    cost.appendChild(costFigure(m));
+    btn.appendChild(cost);
+
+    var facts = document.createElement('span');
+    facts.className = 'provcard-facts';
+    facts.textContent = reqFact + ' - ' + Math.round(share) + '% of traffic';
+    btn.appendChild(facts);
+
+    btn.appendChild(shareBar(share));
+    btn.addEventListener('click', function () { onProviderScope(label); });
+    cardEl.appendChild(btn);
+
+    if (label !== null) {
+      var seatBlock = providerSeats(label, seats);
+      if (seatBlock) { cardEl.appendChild(seatBlock); }
+    }
+    return cardEl;
+  }
+
+  // The overflow card: how many providers are folded away, their combined
+  // requests, and the control that lists them. Not a scope affordance -- a set
+  // of providers is not a provider, and the QUERY scopes to one.
+  function overflowCard(rest, totalReq) {
+    var reqs = rest.reduce(function (a, g) { return a + num0(g.metrics.requests); }, 0);
+    var share = totalReq > 0 ? reqs / totalReq * 100 : 0;
+    var cardEl = document.createElement('div');
+    cardEl.className = 'provcard provcard--more';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'provcard-scope';
+    btn.setAttribute('aria-expanded', providerOverflowOpen ? 'true' : 'false');
+
+    var nameEl = document.createElement('span');
+    nameEl.className = 'provcard-name';
+    nameEl.textContent = rest.length + phrase(rest.length, ' more provider', ' more providers');
+    btn.appendChild(nameEl);
+
+    var facts = document.createElement('span');
+    facts.className = 'provcard-facts';
+    facts.textContent = humanCount(reqs) + ' req - ' +
+      (providerOverflowOpen ? 'hide' : 'show all');
+    btn.appendChild(facts);
+
+    btn.appendChild(shareBar(share));
+    btn.addEventListener('click', onProviderOverflow);
+    cardEl.appendChild(btn);
+    return cardEl;
+  }
+
+  // The expanded overflow: the folded providers as their own cards, so a
+  // provider reached through the overflow carries the same reading and the same
+  // scope affordance as one on the row above.
+  function providerOverflowList(rest, totalReq, seats) {
+    var grid = document.createElement('div');
+    grid.className = 'provgrid provgrid--rest';
+    rest.forEach(function (g) {
+      grid.appendChild(providerCard(g, totalReq, seats));
+    });
+    return grid;
   }
 
   // The usage panel's quota rows grouped by the provider whose credential each
@@ -2128,57 +2315,9 @@
   // mutation-channel scan in page.rs would have to reason about.
   var SEAT_LABEL_SEP = String.fromCharCode(35);
 
-  function providerCard(group, totalReq, seats) {
-    var m = group.metrics;
-    var scoped = group.label === selectedProvider;
-    var cardEl = document.createElement('div');
-    cardEl.className = 'provcard' + (scoped ? ' provcard--on' : '');
-
-    // The scope affordance is its own button INSIDE the card so the seat
-    // disclosure beside it is a separate control -- a button cannot contain
-    // one, and a card-wide handler would fire the scope change on every seat
-    // click.
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'provcard-scope';
-    btn.setAttribute('aria-pressed', scoped ? 'true' : 'false');
-
-    var name = document.createElement('span');
-    name.className = 'provcard-name';
-    name.textContent = group.label;
-    btn.appendChild(name);
-
-    var cost = document.createElement('span');
-    cost.className = 'provcard-cost';
-    cost.appendChild(costFigure(m));
-    btn.appendChild(cost);
-
-    var facts = document.createElement('span');
-    facts.className = 'provcard-facts';
-    facts.textContent = humanCount(m.requests) + ' req - ' + msText(m.ttft_p50_ms) +
-      ' ttft - ' + pctText(m.cache_hit_pct) + ' cached';
-    btn.appendChild(facts);
-
-    var share = totalReq > 0 ? num0(m.requests) / totalReq * 100 : 0;
-    var row = document.createElement('span');
-    row.className = 'provcard-share';
-    row.appendChild(shareBar(share));
-    var pct = document.createElement('span');
-    pct.className = 'provcard-sharepct';
-    pct.textContent = Math.round(share) + '%';
-    row.appendChild(pct);
-    btn.appendChild(row);
-
-    btn.addEventListener('click', function () { onProviderScope(group.label); });
-    cardEl.appendChild(btn);
-
-    var seatBlock = providerSeats(group.label, seats);
-    if (seatBlock) { cardEl.appendChild(seatBlock); }
-    return cardEl;
-  }
-
-  // The card's seat affordance: a default-closed disclosure over the SAME
-  // quota tiles the Health tab renders, filtered to this provider's seats.
+  // The card's seat affordance: one dot per seat plus the seat count, opening a
+  // modal that lists every seat in full. Dots, never a pooled bar -- a pooled
+  // figure over several seats is a number no provider reported.
   //
   // A provider with no quota row of its own gets NO affordance at all -- an
   // empty tile would read as a reported zero, and the quota fields are the only
@@ -2189,21 +2328,38 @@
     if (!seats) { return seatSurfaceUnavailable(); }
     var rows = seats.byProvider[provider];
     if (!rows || !rows.length) { return null; }
-    var wrap = document.createElement('div');
-    wrap.className = 'provseats';
-    var list = document.createElement('div');
-    list.className = 'qlist qlist--card';
-    rows.forEach(function (q) { list.appendChild(quotaTile(q, seats.nowMs)); });
-    wrap.appendChild(buildExpander(seatSummary(rows), list));
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'provseats';
+    btn.title = 'show every seat';
+    btn.appendChild(seatDots(rows));
+    var note = document.createElement('span');
+    note.className = 'provseats-count';
+    note.textContent = seatSummary(rows);
+    btn.appendChild(note);
+    btn.addEventListener('click', function () { openSeatModal(provider); });
+    return btn;
+  }
+
+  // One dot per seat, in the order the panel reported them. A dot carries the
+  // seat's own name and nothing derived from its siblings.
+  function seatDots(rows) {
+    var wrap = document.createElement('span');
+    wrap.className = 'seatdots';
+    rows.forEach(function (q) {
+      var dot = document.createElement('span');
+      dot.className = 'seatdot';
+      if (q.seat) { dot.title = String(q.seat); }
+      wrap.appendChild(dot);
+    });
     return wrap;
   }
 
-  // The disclosure line: how many seats this provider reports, and nothing
-  // else. No max, no average, no rollup across seats -- a seat's quota is a
-  // fact about one credential, and a headline over several would be a figure
-  // no provider reported.
+  // How many seats this provider reports, and nothing else. No max, no average,
+  // no rollup across seats -- a seat's quota is a fact about one credential, and
+  // a headline over several would be a figure no provider reported.
   function seatSummary(rows) {
-    return rows.length + phrase(rows.length, ' seat quota', ' seat quotas');
+    return rows.length + phrase(rows.length, ' seat', ' seats');
   }
 
   function seatSurfaceUnavailable() {
@@ -2213,15 +2369,107 @@
     return note;
   }
 
+  // ---- seat modal ------------------------------------------------------
+
+  // The provider whose seat modal is open, or null. View state only: it drives
+  // the modal from the SAME render pass that draws the cards, so the seat
+  // figures behind it keep landing with every poll instead of freezing at the
+  // instant the modal was opened.
+  var seatModalProvider = null;
+
+  function openSeatModal(provider) {
+    seatModalProvider = provider;
+    renderActiveTab();
+  }
+
+  function closeSeatModal() {
+    if (seatModalProvider === null) { return; }
+    seatModalProvider = null;
+    renderActiveTab();
+  }
+
+  // The provider's seats in full: ONE row per seat, each the same quota tile the
+  // Health tab renders. A modal rather than an inline expander because the seat
+  // list is a detour off the reading, not part of it -- and it deliberately
+  // carries no footer figure over the seats it lists.
+  //
+  // Drawn into the page-level modal host rather than into the section, because
+  // the panes are animated and an animated ancestor would make the fixed
+  // backdrop center on the pane instead of the viewport.
+  //
+  // Draws nothing when nothing is open, or when the open provider no longer has
+  // seats in the payload that just landed: a modal over a credential the panel
+  // has stopped reporting would show a snapshot nothing backs.
+  function renderSeatModal(seats) {
+    var host = el('modal-host');
+    if (!host) { return; }
+    var rows = (seatModalProvider !== null && seats)
+      ? seats.byProvider[seatModalProvider]
+      : null;
+    if (!rows || !rows.length) {
+      host.replaceChildren();
+      return;
+    }
+    var backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.addEventListener('click', closeSeatModal);
+    var dialog = document.createElement('div');
+    dialog.className = 'modal';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', seatModalProvider + ' seats');
+    // A click on the dialog must not reach the backdrop's close handler, or
+    // every click inside the modal would dismiss it.
+    dialog.addEventListener('click', function (e) { e.stopPropagation(); });
+    dialog.appendChild(seatModalHead(seatModalProvider, rows));
+    var body = document.createElement('div');
+    body.className = 'modal-body qlist qlist--card';
+    rows.forEach(function (q) { body.appendChild(quotaTile(q, seats.nowMs)); });
+    dialog.appendChild(body);
+    backdrop.appendChild(dialog);
+    host.replaceChildren(backdrop);
+  }
+
+  function seatModalHead(provider, rows) {
+    var head = document.createElement('div');
+    head.className = 'modal-head';
+    var title = document.createElement('span');
+    title.className = 'modal-title';
+    title.textContent = provider;
+    head.appendChild(title);
+    var sub = document.createElement('span');
+    sub.className = 'modal-sub';
+    sub.textContent = seatSummary(rows) + ' - each reported on its own';
+    head.appendChild(sub);
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'modal-close';
+    close.setAttribute('aria-label', 'Close');
+    close.textContent = 'esc x';
+    close.addEventListener('click', closeSeatModal);
+    head.appendChild(close);
+    return head;
+  }
+
   // The eight KPI tiles, hairline-gridded so they read as facets of one
   // reading. Each carries its own sparkline over the SERVER's per-bucket
   // series -- no point is synthesized, and each is drawn at its own bucket
   // start rather than on an assumed stride.
+  //
+  // The provider scope is labeled HERE, directly above the grid, because these
+  // are the figures the scope moves: a label further up the page would leave the
+  // reader to remember which block it governs.
   function kpiSection(view) {
     var t = view.totals;
     var series = view.series;
     var gap = num0(series.bucket_ms) * SERIES_GAP_FACTOR;
     var reqSpark = bucketSamples(series, function (m) { return m.requests; });
+    var wrap = document.createElement('div');
+    wrap.className = 'ovsection';
+    if (selectedProvider) {
+      wrap.appendChild(sectionHead('Scoped to ' + selectedProvider,
+        'every number below is scoped to this provider'));
+    }
     var grid = document.createElement('div');
     grid.className = 'kpigrid';
     [
@@ -2234,7 +2482,8 @@
       cacheHitTile(t, series, gap),
       costTile(t, series, gap)
     ].forEach(function (tile) { grid.appendChild(tile); });
-    return grid;
+    wrap.appendChild(grid);
+    return wrap;
   }
 
   function bucketSamples(series, read) {
@@ -2248,7 +2497,7 @@
     return kpiTile('Requests',
       magSpan(t.requests),
       subNote(errs === 0 ? 'no errors' : humanCount(errs) + ' errors', errs > 0),
-      sparkline(reqSpark, gap, false));
+      sparkline(reqSpark, gap));
   }
 
   // Time to first token. The headline is the request-weighted p50; the peak
@@ -2260,9 +2509,9 @@
     return kpiTile('Time to first token',
       figure(p50.v, p50.u, null),
       subNote(observed
-        ? 'peak ' + msText(t.ttft_p95_ms) + ' over ' + humanCount(t.requests) + ' req'
+        ? 'peak ' + msText(t.ttft_p95_ms) + ' - weighted over ' + humanCount(t.requests) + ' req'
         : 'no streamed response in this window', false),
-      sparkline(bucketSamples(series, function (m) { return m.ttft_p50_ms; }), gap, false));
+      sparkArea(bucketSamples(series, function (m) { return m.ttft_p50_ms; }), gap));
   }
 
   function fallbackTile(t, series, gap) {
@@ -2273,7 +2522,7 @@
       subNote(served === 0
         ? 'primary held for every request'
         : humanCount(served) + ' of ' + humanCount(req) + ' took a later step', false),
-      sparkline(bucketSamples(series, function (m) { return m.fallback_served; }), gap, false));
+      sparkArea(bucketSamples(series, function (m) { return m.fallback_served; }), gap));
   }
 
   // The busiest bucket of the window, read off the same request series the
@@ -2289,7 +2538,7 @@
         ? humanCount(peakReq) + ' req - ' + (req > 0 ? Math.round(peakReq / req * 100) : 0) +
           '% of the window'
         : 'no bucketed traffic in this window', false),
-      sparkline(reqSpark, gap, false));
+      sparkArea(reqSpark, gap));
   }
 
   function busiestBucket(series) {
@@ -2320,7 +2569,7 @@
       [['in', magSpan(t.input_tokens), false], ['out', magSpan(t.output_tokens), true]],
       subNote(req > 0
         ? humanCount(Math.round(num0(t.input_tokens) / req)) + ' in / ' +
-          humanCount(Math.round(num0(t.output_tokens) / req)) + ' out avg per request'
+          humanCount(Math.round(num0(t.output_tokens) / req)) + ' out avg/req'
         : 'no requests to average over', false),
       sparklinePair(inSpark, outSpark, gap));
   }
@@ -2358,16 +2607,16 @@
     return kpiTile('Cache hit',
       figure(hit > 0 ? hit.toFixed(1) : '0', '%', null),
       subNote(hit > 0
-        ? 'request-weighted over ' + humanCount(t.requests) + ' req'
+        ? 'weighted over ' + humanCount(t.requests) + ' req'
         : 'nothing served warm yet', false),
-      sparkline(bucketSamples(series, function (m) { return m.cache_hit_pct; }), gap, false));
+      sparkArea(bucketSamples(series, function (m) { return m.cache_hit_pct; }), gap));
   }
 
   function costTile(t, series, gap) {
     return kpiTile('Est. cost',
       costFigure(t),
       subNote(costNote(t), false),
-      sparkline(bucketSamples(series, function (m) { return m.cost_usd; }), gap, false));
+      sparkArea(bucketSamples(series, function (m) { return m.cost_usd; }), gap));
   }
 
   // The honest cost read: a dollar figure ONLY where the rows were priced. An
@@ -2385,7 +2634,7 @@
   function costNote(t) {
     var req = num0(t.requests);
     if (t.cost_status === 'priced') {
-      return req > 0 ? '$' + (num0(t.cost_usd) / req).toFixed(3) + ' per request' : 'priced';
+      return req > 0 ? '$' + (num0(t.cost_usd) / req).toFixed(3) + ' avg/req' : 'priced';
     }
     if (t.cost_status === 'partial') { return 'priced subtotal only - some rows have no price'; }
     if (t.cost_status === 'subscription') { return 'managed subscription - no per-token cost'; }
@@ -2453,12 +2702,15 @@
   };
 
   // The group-by picker and the provider-scope strip render OUTSIDE the section
-  // boundary, for the same reason the Overview scope strip does: a selection
-  // whose query comes back unavailable or refused must stay reversible, and the
-  // state card that replaces the content carries no affordance.
+  // boundary: a selection whose query comes back unavailable or refused must
+  // stay reversible, and the state card that replaces the content carries no
+  // affordance. Usage carries no provider cards of its own, so the strip is the
+  // only place its inherited scope can be read or lifted.
   function buildUsage(rec) {
     var stack = tabStack();
-    if (selectedProvider) { stack.appendChild(scopeStrip()); }
+    if (selectedProvider) {
+      stack.appendChild(scopeStrip('every figure below is this provider only'));
+    }
     stack.appendChild(groupByStrip());
     stack.appendChild(safeSection(rec, buildUsageLive));
     return stack;
@@ -4316,18 +4568,14 @@
     doctor: buildDoctor
   };
 
-  // ---- chrome: poll countdown ------------------------------------------
+  // ---- chrome: age ticker ----------------------------------------------
 
-  // Drive the poll indicator's 1s countdown toward the next scheduled round
-  // so it visibly decrements instead of looking frozen.
-  function startCountdown(sec) {
-    remainingSec = sec;
+  // Repaint the poll indicator every second so the as_of age it reports
+  // advances between rounds instead of looking frozen at the last one's value.
+  function startAgeTicker() {
     renderPollIndicator();
-    clearInterval(countdownTimer);
-    countdownTimer = setInterval(function () {
-      remainingSec = Math.max(0, remainingSec - 1);
-      renderPollIndicator();
-    }, 1000);
+    clearInterval(ageTimer);
+    ageTimer = setInterval(renderPollIndicator, 1000);
   }
 
   // ---- chrome: favicon state machine -----------------------------------
@@ -4516,6 +4764,9 @@
   function selectTab(name) {
     var changed = activeTab !== name;
     activeTab = name;
+    // The seat modal belongs to the Overview provider row: leaving the tab
+    // dismisses it rather than leaving it to reappear on return.
+    if (changed) { seatModalProvider = null; }
     TABS.forEach(function (n) {
       var tab = el('tab-' + n);
       var pane = el('pane-' + n);
@@ -4583,6 +4834,9 @@
     document.addEventListener('visibilitychange', updateFavicon);
     window.addEventListener('focus', updateFavicon);
     window.addEventListener('pageshow', updateFavicon);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { closeSeatModal(); }
+    });
     tick();
     usageAllRound();
   });

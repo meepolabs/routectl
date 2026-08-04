@@ -2799,10 +2799,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `url(...)`/`@import` may appear, so the artifact still renders offline
 - `src/handlers/status/dashboard.html` -- dashboard MARKUP only: the verdict
   strip (state dot + one plain-language sentence + req/span + window picker +
-  poll indicator; carries no cost figure by design), the six-tab bar
+  poll indicator, which reports the as_of AGE of the active tab's data; carries
+  no cost figure by design), the six-tab bar
   (Overview default, then Usage / Routing / Health / Config / Doctor), the
-  banner, and one identical pane shell per tab (`status-<tab>` +
-  `body-<tab>`). Never served alone; carries no `<link>`/`<script src>`
+  banner, one identical pane shell per tab (`status-<tab>` +
+  `body-<tab>`, the status line reporting only a NOT-current source), and the
+  `modal-host` overlay host outside `<main>` (a pane's entry animation would
+  otherwise become the containing block for a fixed-position modal). Never
+  served alone; carries no `<link>`/`<script src>`
 - `src/handlers/status/dashboard.css` -- dashboard STYLE body. One token set
   (dark primary, light re-valued under `prefers-color-scheme`), 8px grid,
   hairline borders, system sans for UI and mono for data, one accent plus one
@@ -2851,14 +2855,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (num0 coercion on the numeric half, no rename, no computed model); render
   code reads adapter properties. Per-tab `buildX` functions live in
   marker-delimited blocks registered in `BUILDERS`; `buildOverview` is multi-source
-  (`query` primary, plus `usage` for the seat surface): it renders the scope
-  strip outside the section boundary (so a failed provider-scoped query stays
-  reversible), then provider cards from the query `groups` (each card's scope
-  button re-issues the query with a `provider:` scope through
-  `queryInputChanged`, and carries a default-closed seat disclosure over the
-  usage `quota[]` rows whose seat key names that provider -- the same quota
-  tiles Health renders, so a provider with no quota row gets no affordance and
-  no synthesized tile) and eight KPI tiles from `totals`, each carrying a
+  (`query` primary, plus `usage` for the seat surface): the provider row leads
+  with an all-providers AGGREGATE card built from the query `totals` (the scope
+  reset), then the busiest `PROVIDER_CARD_CAP` provider cards from `groups`, then
+  -- only when more remain -- one overflow card whose expansion lists the rest.
+  Every card stays on screen while scoped (the scoped one highlighted, another
+  card moves the scope) and each re-issues the query with a `provider:` scope
+  through `queryInputChanged`; the last UNSCOPED view is retained per window to
+  draw the row, since a scoped response narrows `groups` to one provider. The
+  scope is labeled directly above the KPI grid, and a scope strip renders outside
+  the section boundary ONLY when the scoped query is unrenderable (so the scope
+  stays reversible with no cards on screen). A card's seat affordance is per-seat
+  DOTS plus the seat count, opening a page-level centered MODAL (backdrop click,
+  close control, or Escape) of one quota tile per seat over the usage `quota[]`
+  rows whose seat key names that provider -- the same tiles Health renders, so a
+  provider with no quota row gets no affordance, no synthesized tile, and no
+  cross-seat rollup. Eight KPI tiles come from `totals`, each carrying a
   sparkline over `series.buckets[].metrics` drawn at each bucket's own
   `start_ms`; the seat read is guarded on the usage record alone, so a usage
   fault costs the seat surface and leaves the KPI and provider blocks live;
