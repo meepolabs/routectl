@@ -113,6 +113,15 @@
       <div id="body-doctor"></div>
     </section>
   </main>
+
+  <!--
+    Host for the one overlay this page has (the Overview seat modal). It sits
+    OUTSIDE <main> because every pane carries an entry animation, and an
+    animated ancestor establishes a containing block for `position: fixed` --
+    a modal rendered inside a pane would be centered on the pane, not the
+    viewport.
+  -->
+  <div id="modal-host"></div>
 @@DASHBOARD_SCRIPT@@
 </body>
 </html>

@@ -61,7 +61,7 @@
   --fb-docverdict: 304px;
   --w-step: 208px;
   --w-step-narrow: 176px;
-  --h-kpi-spark: 32px;
+  --h-kpi-spark: 34px;
 
   --bg: #0d0f12;
   --surface: #15181c;
@@ -392,18 +392,18 @@ main { display: block; }
   font-size: var(--fs-xs);
   color: var(--faint);
 }
-/* Per-section freshness line (one per data source, not one per page). */
+/* Per-pane line for a source that is NOT current (loading / stale / no current
+   data / invalid payload). A live source says nothing here -- the verdict strip
+   carries the as_of age. */
 .section-status {
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--faint);
-  min-height: 1.2em;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
 }
-.section-status.pulse { animation: statuspulse 180ms var(--ease); }
-@keyframes statuspulse { from { opacity: 0.3; } to { opacity: 1; } }
+.section-status:empty { display: none; }
 .live-dot {
   width: 7px;
   height: 7px;
@@ -735,6 +735,13 @@ details > summary:focus-visible { outline: 2px solid var(--accent); outline-offs
 }
 /* The second, non-semantic data hue: a two-series chart's B series. */
 .spark polyline.series-b { stroke: var(--accent-2); }
+/* The area under a single series: the same hue at low opacity, so the fill
+   reads as the curve's own mass rather than as a second value. */
+.spark polygon {
+  fill: var(--accent);
+  fill-opacity: 0.16;
+  stroke: none;
+}
 
 /* Units (K/M/%/$/ms) sit in a faint fixed-width slot beside the numeral so
    columns align. A zero / absent value de-emphasizes whole. */
@@ -800,6 +807,9 @@ td.num .unit, th.num .unit {
   grid-template-columns: repeat(auto-fit, minmax(var(--col-provider), 1fr));
   gap: var(--sp-2);
 }
+/* The expanded overflow sits directly under the row it came from, so it reads
+   as a continuation of that row rather than a second section. */
+.provgrid--rest { margin-top: calc(-1 * var(--sp-1)); }
 .provcard {
   display: flex;
   flex-direction: column;
@@ -813,7 +823,12 @@ td.num .unit, th.num .unit {
   transition: border-color var(--dur) var(--ease);
 }
 .provcard--on { border-color: var(--accent); background: var(--accent-soft); }
-/* The scope button fills the card's reading area; the seat disclosure below it
+/* The all-providers aggregate leads the row and resets the scope; the overflow
+   card closes it and is not a reading of its own, so it carries no fill. */
+.provcard--all .provcard-name { color: var(--fg); }
+.provcard--more { background: transparent; }
+.provcard--more .provcard-name { color: var(--faint); }
+/* The scope button fills the card's reading area; the seat affordance below it
    is a separate control, so the two cannot fire each other. */
 .provcard-scope {
   font: inherit;
@@ -858,19 +873,10 @@ td.num .unit, th.num .unit {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.provcard-share {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-top: auto;
-}
-.provcard-sharepct {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--fs-xs);
-  color: var(--faint);
-  flex: none;
-}
+/* The share bar sits at the bottom of the card's reading area, so cards of
+   different fact lengths still align their bars. The card is a COLUMN flex, so
+   the bar must not take the grow factor that serves it inside a row. */
+.provcard-scope > .sharebar { margin-top: auto; flex: none; }
 .sharebar {
   display: block;
   flex: 1 1 auto;
@@ -880,12 +886,44 @@ td.num .unit, th.num .unit {
   overflow: hidden;
 }
 
-/* The card's seat disclosure: a hairline-separated block under the reading, so
-   the quota tiles read as a detail of the provider rather than as a second
-   card. */
+/* The card's seat affordance: a hairline-separated control under the reading,
+   one dot per seat plus the count, opening the per-seat modal. */
 .provseats {
-  padding-top: var(--sp-2);
+  font: inherit;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) 0 0;
+  border: 0;
   border-top: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.provseats:hover { background: var(--hover); }
+.provseats:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.seatdots { display: flex; gap: 3px; flex: none; }
+.seatdot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 2px;
+  flex: none;
+  background: var(--accent);
+}
+.provseats-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .provseats-none {
   padding-top: var(--sp-2);
@@ -900,6 +938,67 @@ td.num .unit, th.num .unit {
   width: calc(var(--pct) * 1%);
   background: var(--accent);
   transition: width var(--dur) var(--ease);
+}
+
+/* ---- seat modal (the per-seat detour off the provider row) ----
+   A centered dialog over a dimmed page: the seat list is a detour off the
+   reading, not part of it. Backdrop and close control both dismiss. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background: rgba(0, 0, 0, 0.45);
+  animation: panein 180ms var(--ease) both;
+}
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: min(640px, 100%);
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+}
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+}
+.modal-title {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--fg);
+}
+.modal-sub {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  flex: 1 1 auto;
+}
+.modal-close {
+  font: inherit;
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  flex: none;
+}
+.modal-close:hover { background: var(--hover); color: var(--fg); }
+.modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.modal-body {
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-5) var(--sp-4);
+  margin-top: 0;
 }
 
 /* ---- KPI tile grid (facets of one reading: hairline grid, no card each) ---- */
@@ -931,7 +1030,6 @@ td.num .unit, th.num .unit {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-stat);
-  font-weight: 600;
   line-height: 1.1;
   letter-spacing: -0.02em;
   color: var(--fg);
@@ -1887,9 +1985,9 @@ td.num .unit, th.num .unit {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
   .skeleton span,
-  .section-status.pulse,
   .poll-dot { animation: none; }
-  .pane { animation: none; }
+  .pane,
+  .modal-backdrop { animation: none; }
 }
 
 
