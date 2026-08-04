@@ -572,10 +572,24 @@ td.wrap {
 }
 .exp-btn:hover { background: var(--hover); color: var(--fg); }
 .exp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.exp-btn[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--fg);
+}
 tr.exp-row { cursor: pointer; }
+/* The opened panel sits on a distinct surface AND carries an accent edge: the
+   surface step alone is a few percent of luminance, which reads as no change
+   at all on a wide monitor and makes a working expander look inert. */
 .detail-row > td {
   background: var(--surface-2);
   padding: var(--sp-3) var(--sp-4);
+  border-left: 2px solid var(--accent);
+}
+.nodetail {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  font-style: italic;
 }
 .deflist {
   display: grid;

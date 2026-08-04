@@ -1625,8 +1625,11 @@
   }
 
   // A definition grid of label:value pairs. Values may be humanized
-  // strings or Nodes (pills). textContent only.
+  // strings or Nodes (pills). textContent only. A row whose detail carries no
+  // pairs at all renders an explicit line rather than an empty grid: an
+  // expander that opens onto nothing reads as a click that did not work.
   function buildDefList(pairs) {
+    if (!pairs.length) { return noDetailLine(); }
     var dl = document.createElement('dl');
     dl.className = 'deflist';
     pairs.forEach(function (p) {
@@ -1645,6 +1648,13 @@
       dl.appendChild(wrap);
     });
     return dl;
+  }
+
+  function noDetailLine() {
+    var p = document.createElement('p');
+    p.className = 'nodetail';
+    p.textContent = 'No additional detail for this row.';
+    return p;
   }
 
   // Value-domain token cell: raw wire string as textContent, styled by a
@@ -2896,16 +2906,20 @@
     return out;
   }
 
+  // Seats collapsed per nickname: the worst circuit across them, how many they
+  // are, and the seats themselves. The members are carried because the phase
+  // rule reads every seat's settled outcome, not just the worst one's.
   function targetsByNickname(targets) {
     var map = Object.create(null);
     (targets || []).forEach(function (t) {
       if (!t || !t.nickname) { return; }
       var found = map[t.nickname];
       if (!found) {
-        map[t.nickname] = { worst: t, count: 1 };
+        map[t.nickname] = { worst: t, count: 1, members: [t] };
         return;
       }
       found.count += 1;
+      found.members.push(t);
       if (circuitRank(t.circuit) > circuitRank(found.worst.circuit)) { found.worst = t; }
     });
     return map;
@@ -2915,13 +2929,46 @@
     return CIRCUIT_RANK[circuit] || 0;
   }
 
+  // The ONE target-state rule, shared by the Routing state list and the Health
+  // target cards so the two tabs can never disagree about the same target. A
+  // target with no settled outcome anywhere is `unknown`, NEVER healthy: no
+  // observation is not evidence of health. Healthy means a closed breaker AND
+  // an ok last outcome on every seat that has reported one.
+  function targetPhase(group) {
+    if (group.worst.circuit !== 'closed') { return 'attention'; }
+    var settled = group.members.filter(function (t) { return !!t.last_outcome; });
+    if (!settled.length) { return 'unknown'; }
+    var failing = settled.some(function (t) { return t.last_outcome !== 'ok'; });
+    return failing ? 'attention' : 'healthy';
+  }
+
+  // The circuit pill both tabs render: the neutral unknown token when nothing
+  // has been observed, the worst seat's circuit otherwise.
+  function circuitPill(group, phase) {
+    return phase === 'unknown'
+      ? tok('circuit', 'unknown')
+      : tokLabeled('circuit', 'circuit', group.worst.circuit);
+  }
+
+  var PHASE_DOT = { attention: 'tdot--bad', healthy: 'tdot--ok', unknown: 'tdot--unknown' };
+
+  // The dot follows the PHASE, not the raw circuit: a closed breaker nobody has
+  // probed is unknown, and a green dot beside it would contradict Health.
+  function phaseDot(group, phase) {
+    if (phase === 'unknown') { return PHASE_DOT.unknown; }
+    return CIRCUIT_DOT[group.worst.circuit] || PHASE_DOT[phase] || 'tdot--unknown';
+  }
+
   // A configured member health has never dispatched to is `unknown`, never
-  // healthy: no observation is not evidence of health.
+  // healthy: no observation is not evidence of health. The dot, the pill, and
+  // the reason all read the SHARED `targetPhase`, so this row and the Health
+  // card for the same target can never disagree.
   function targetStateRow(model, found, nowMs) {
     var row = document.createElement('div');
     row.className = 'staterow';
+    var phase = found ? targetPhase(found) : 'unknown';
     var dot = document.createElement('span');
-    dot.className = 'tdot ' + (found ? (CIRCUIT_DOT[found.worst.circuit] || 'tdot--unknown') : 'tdot--unknown');
+    dot.className = 'tdot ' + (found ? phaseDot(found, phase) : 'tdot--unknown');
     dot.setAttribute('aria-hidden', 'true');
     row.appendChild(dot);
 
@@ -2939,19 +2986,23 @@
       row.appendChild(meta);
       return row;
     }
-    row.appendChild(tokLabeled('circuit', 'circuit', found.worst.circuit));
-    meta.textContent = targetStateText(found, nowMs);
+    row.appendChild(circuitPill(found, phase));
+    meta.textContent = targetStateText(found, phase, nowMs);
     row.appendChild(meta);
     return row;
   }
 
-  function targetStateText(found, nowMs) {
+  function targetStateText(found, phase, nowMs) {
     var target = found.worst;
     var parts = [];
     if (found.count > 1) { parts.push(found.count + ' targets'); }
-    parts.push(target.last_outcome
-      ? 'last ' + labelFor('outcome', target.last_outcome).label
-      : 'no settled outcome yet');
+    if (phase === 'unknown') {
+      parts.push('nothing dispatched to it yet');
+    } else {
+      parts.push(target.last_outcome
+        ? 'last ' + labelFor('outcome', target.last_outcome).label
+        : 'no settled outcome yet');
+    }
     if (target.circuit === 'open' && target.open_since_ms !== null && target.open_since_ms !== undefined) {
       parts.push('open for ' + ageSince(target.open_since_ms, nowMs));
     }
@@ -3319,35 +3370,20 @@
   // speaks for and which learned negatives belong to it.
   function collapsedTargets(targets) {
     var byNickname = targetsByNickname(targets);
-    var byName = Object.create(null);
     var order = [];
+    var seen = Object.create(null);
     (targets || []).forEach(function (t) {
-      if (!t || !t.nickname) { return; }
-      var group = byName[t.nickname];
-      if (!group) {
-        group = {
-          nickname: t.nickname,
-          worst: byNickname[t.nickname].worst,
-          count: byNickname[t.nickname].count,
-          members: []
-        };
-        byName[t.nickname] = group;
-        order.push(group);
-      }
-      group.members.push(t);
+      if (!t || !t.nickname || seen[t.nickname]) { return; }
+      seen[t.nickname] = true;
+      var group = byNickname[t.nickname];
+      order.push({
+        nickname: t.nickname,
+        worst: group.worst,
+        count: group.count,
+        members: group.members
+      });
     });
     return order;
-  }
-
-  // A target with no settled outcome anywhere is `unknown`, NEVER healthy: no
-  // observation is not evidence of health. Healthy means a closed breaker AND
-  // an ok last outcome on every seat that has reported one.
-  function targetPhase(group) {
-    if (group.worst.circuit !== 'closed') { return 'attention'; }
-    var settled = group.members.filter(function (t) { return !!t.last_outcome; });
-    if (!settled.length) { return 'unknown'; }
-    var failing = settled.some(function (t) { return t.last_outcome !== 'ok'; });
-    return failing ? 'attention' : 'healthy';
   }
 
   // Learned rows keyed by the state key they were recorded against, so a
@@ -3396,9 +3432,7 @@
   // The state pill carries the WORST circuit across the seats, or the neutral
   // unknown token when nothing has been observed.
   function statePill(group, phase) {
-    var pill = phase === 'unknown'
-      ? tok('circuit', 'unknown')
-      : tokLabeled('circuit', 'circuit', group.worst.circuit);
+    var pill = circuitPill(group, phase);
     pill.classList.add('hstate');
     return pill;
   }
@@ -3896,7 +3930,10 @@
   }
 
   // The auto-activation inventory: one row per routectl-owned provider, with
-  // the reason a provider could not be resolved.
+  // the reason a provider could not be resolved. Named CREDENTIAL providers
+  // because the source strip counts the ROUTING providers instead, and one tab
+  // carrying two unqualified "providers" reads as one number contradicting the
+  // other.
   function activationSection(activation) {
     var tbl = mkTable('Provider activation',
       [R('provider'), C('kind'), C('status'), C('reason'), C('used by aliases')], false);
@@ -3909,7 +3946,18 @@
         yesNo(p.referenced_by_aliases)
       ]);
     });
-    return card('Providers', 'which credentials resolved, and why', tableScroll(tbl));
+    var wrap = card('Credential providers', 'which credentials resolved, and why',
+      tableScroll(tbl));
+    wrap.appendChild(activationNote());
+    return wrap;
+  }
+
+  function activationNote() {
+    var note = document.createElement('p');
+    note.className = 'footnote';
+    note.textContent = 'Credential activation only. The provider count in the strip above ' +
+      'counts the configured routing providers, which is a different set.';
+    return note;
   }
 
   // One row per `[models.X]` entry with the catalog layer that won it. The
@@ -3927,13 +3975,22 @@
     var econ = m.economics || {};
     xrow(tbl, m.nickname,
       [m.nickname, m.provider, m.upstream, tokLabeled('src', 'src', m.source)],
-      [
+      presentPairs([
         ['provider kind', m.provider_kind],
         ['max context', econ.max_context_tokens ? humanCount(econ.max_context_tokens) : null],
         ['cache write multiplier', econ.wm],
         ['cache read multiplier', econ.rm],
         ['verified at', m.verified_at]
-      ]);
+      ]));
+  }
+
+  // A model with no catalog row behind it carries none of these figures, and a
+  // grid of five dashes is indistinguishable from an expander that failed to
+  // open. Dropping the absent pairs lets `buildDefList` say so explicitly.
+  function presentPairs(pairs) {
+    return pairs.filter(function (p) {
+      return p[1] !== null && p[1] !== undefined && p[1] !== '';
+    });
   }
 
   // The capability overrides the config resolves, kept behind a default-closed
