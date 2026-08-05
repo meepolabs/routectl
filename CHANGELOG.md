@@ -113,6 +113,26 @@ list with more narrative.
   DEBUG lines (`sticky_stay`, `defer_no_healthy` and the keyless
   fall-through log nothing). `UsageRecord` loses the three matching
   fields.
+- **BEHAVIOR CHANGE: `temperature` and `top_p` are dropped on the
+  own-OAuth Anthropic lane.** Anthropic's OAuth seat 400s a
+  `/v1/messages` body carrying either param, so an `auth_kind =
+  "oauth-bearer"` provider talking to `api.anthropic.com` (excluding the
+  forwarded / pure-proxy leg) now strips both from the outbound body and
+  logs one structured `WARN` per affected request naming only the dropped
+  keys. `stop_sequences` is unaffected. The gate is the LANE, not the
+  cloak setting -- **`cloak.mode = "never"` on such a provider still drops
+  these params**, which is intended: the rejection is a property of the
+  credential, not of the disguise, so honouring the knob would mean
+  failing the request instead. Route to an API-key provider or a
+  non-Anthropic host if you need them honoured. The `count_tokens` path
+  is unaffected (its body allowlist already excluded sampling).
+- **`effort-2025-11-24` is now unioned on demand.** A request whose
+  assembled body carries `output_config.effort` gains the beta
+  automatically on the own-OAuth `api.anthropic.com` lane, bypassing
+  `allowed_betas` -- the same capability carve-out
+  `structured-outputs-2025-12-15` already had. One-way: the body's field
+  adds the flag, and a caller-supplied flag with no matching field is
+  passed through untouched. Forwarded and API-key lanes are unchanged.
 
 ### Fixed
 

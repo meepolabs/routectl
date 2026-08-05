@@ -678,6 +678,23 @@ impl AnthropicApiProvider {
             super::extras::union_structured_outputs_beta(body, &mut merged_betas);
         }
 
+        // Capability-driven effort union, mirroring the structured-outputs
+        // union above (same body-predicate, dedup, post-filter/post-floor
+        // ordering). A body carrying `output_config.effort` is rejected
+        // upstream unless `EFFORT_BETA` rides along. GATED on `is_cloak_lane`
+        // (unlike the structured-outputs union, which fires on every auth
+        // kind): the adaptive-thinking effort directive is composed only for
+        // routectl's own OAuth seat, so the union is scoped to that lane --
+        // the forwarded leg (excluded by the predicate) and the API-key lane
+        // keep byte-identical beta sets. One-way invariant: body has effort
+        // => beta present; a caller-supplied effort beta with no field is left
+        // untouched.
+        if self.is_cloak_lane(req)
+            && let Some(body) = wire_body
+        {
+            super::extras::union_effort_beta(body, &mut merged_betas);
+        }
+
         // Snapshot the FINAL composed beta set (post context_management
         // strip) so the decision context reflects what actually egresses,
         // not an intermediate union.

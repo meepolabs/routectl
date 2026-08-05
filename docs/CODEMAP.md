@@ -197,7 +197,9 @@ listed at the bottom of each crate.
   literals `OAUTH_ANTHROPIC_BETA` (`oauth-2025-04-20`), `CONTEXT_1M_BETA`
   (`context-1m-2025-08-07`, NOT in the floor -- model-gated, reaches upstream
   as client pass-through), `EFFORT_BETA` (`effort-2025-11-24`, also NOT in the
-  floor -- model-gated), and `STRUCTURED_OUTPUTS_BETA`
+  floor -- model-gated, and unioned by the egress on the own-OAuth lane
+  whenever the assembled body carries `output_config.effort`), and
+  `STRUCTURED_OUTPUTS_BETA`
   (`structured-outputs-2025-12-15`, also unioned by the egress whenever the
   assembled body carries `output_config.format`), consumed by the
   anthropic-api provider's header composition (`build_headers`) and the
@@ -525,13 +527,19 @@ listed at the bottom of each crate.
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
   reconciliation (`merge_provider_extras`, `filter_anthropic_betas`,
   `reconcile_output_config_effort`,
-  `strip_thinking_when_tool_choice_forces_use`); also the structured-outputs
-  capability-beta union (`body_has_output_config_format` +
+  `strip_thinking_when_tool_choice_forces_use`); the sampling strip
+  `normalize_claude_sampling`, which drops `temperature`/`top_p` (keeping
+  `stop_sequences`) as the LAST body mutation on the own-OAuth
+  `api.anthropic.com` lane, called from both `complete` and `stream` and
+  emitting one names-only WARN per affected request; also the two
+  capability-beta unions, each gating its flag on the ASSEMBLED body and
+  bypassing `allowed_betas` as a server requirement rather than a
+  client-opted beta: structured-outputs (`body_has_output_config_format` +
   `union_structured_outputs_beta` for the header carrier /
   `apply_structured_outputs_beta_to_body` for the body carrier, applied by
-  the Bedrock-Invoke egress after its own allowlist filters), which gates
-  the beta on the ASSEMBLED body's `output_config.format` and bypasses
-  `allowed_betas` as a server requirement rather than a client-opted beta
+  the Bedrock-Invoke egress after its own allowlist filters) keyed on
+  `output_config.format`, and effort (`body_has_output_config_effort` +
+  `union_effort_beta`, own-OAuth lane only) keyed on `output_config.effort`
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical
   `ChatResponse` (content-block walk, stop_reason map, usage cache stats)
 - `src/anthropic_api/sse.rs` -- Anthropic SSE event state machine
@@ -1995,6 +2003,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   over one temp XDG config dir (mint then adopt): the same id reaches the
   egress wire on both boots, and boot 2 leaves the persisted file's content
   and mtime untouched (adoption is read-only)
+- `tests/cross_lane_sampling_strip.rs` -- cross-lane fallback hop onto the
+  own-OAuth Anthropic seat: the first hop receives the caller's sampling
+  verbatim and fails fallbackably, the OAuth hop ships a sampling-free body
+  with `stop_sequences` intact, the canonical request is unmutated, and one
+  strip WARN correlates to the dispatching request id. Carries a span-aware
+  capture layer (the shared testkit capture is event-only)
 
 ## routectl-auth
 

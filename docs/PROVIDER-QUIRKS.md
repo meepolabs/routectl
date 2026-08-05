@@ -167,6 +167,27 @@ For `auth_kind = "api-key"` (default), routectl does not auto-inject beta gates 
 
 The base is deliberately NOT the full set genuine Claude Code emits. Model-gated flags (`context-1m-2025-08-07`, `effort-2025-11-24`, `thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`, `advisor-tool-2026-03-01`) are excluded because forcing them 400s models that do not support them (haiku rejects `context-1m-2025-08-07`). They reach upstream only when the caller sends them -- as client pass-through, now subject to `allowed_betas` where the floor previously bypassed it. If you need a model-gated flag on every request to a model that DOES support it, declare it in that `[models.X] header_extras`.
 
+Two of the gated flags are additionally unioned ON DEMAND, keyed on what the assembled body actually carries, so a request that uses the feature always ships its flag:
+
+| Body field on the wire | Beta unioned | Lane |
+| --- | --- | --- |
+| `output_config.format` | `structured-outputs-2025-12-15` | every auth kind (suppressed on the forwarded leg) |
+| `output_config.effort` | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
+
+Both unions run AFTER the `allowed_betas` filter and after the floor: they are server requirements implied by the shipped body, not client-opted betas. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
+
+### Sampling params stripped on the own-OAuth lane
+
+| Surface | Behavior |
+| --- | --- |
+| `temperature`, `top_p` | REMOVED from the final body on the own-OAuth `api.anthropic.com` lane |
+| `stop_sequences` | preserved (the OAuth seat accepts it) |
+| `top_k` | not touched -- see [WIRE-GOTCHAS.md](./WIRE-GOTCHAS.md) |
+
+Anthropic's OAuth seat 400s a `/v1/messages` body carrying either `temperature` or `top_p` (both confirmed). routectl drops them as the last mutation before the request goes out, on both the streaming and non-streaming paths, and emits one structured `WARN` per affected request naming only the dropped keys (never their values).
+
+The gate is the LANE (`oauth-bearer` + exact `api.anthropic.com` host + not the forwarded leg), NOT the cloak setting. `cloak.mode = "never"` on an OAuth provider therefore STILL drops these params -- the 400 is a property of the credential, not of the disguise. Point the request at an API-key provider (or any non-Anthropic host) if you need `temperature` honoured. The `count_tokens` path is unaffected: its body allowlist already excludes sampling.
+
 ### claude-code attribution headers (`X-Claude-Code-*`)
 
 Anthropic documents three gateway-mandatory passthrough headers at

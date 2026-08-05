@@ -45,13 +45,13 @@ pub const OAUTH_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 /// bump here can never drift out of sync with the sibling literal.
 pub const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
-/// The `anthropic-beta` flag gating `output_config.effort`. RESERVED:
-/// defined here but not yet consumed by egress. Like
+/// The `anthropic-beta` flag gating `output_config.effort`. Like
 /// `STRUCTURED_OUTPUTS_BETA` it is a server-side capability requirement
-/// rather than a client-opted beta; the intended treatment is an on-demand
-/// egress union keyed on the final body carrying the field, landing in a
-/// follow-up. It is NOT in the floor, because forcing it on a model that
-/// does not support effort 400s the request.
+/// rather than a client-opted beta: the egress unions it on-demand keyed on
+/// the final body carrying `output_config.effort`
+/// (`extras::union_effort_beta`), scoped to the OAuth own-anthropic lane. It
+/// is NOT in the floor, because forcing it on a model that does not support
+/// effort 400s the request.
 pub const EFFORT_BETA: &str = "effort-2025-11-24";
 
 /// The `anthropic-beta` flag gating `output_config.format` (structured
@@ -127,8 +127,9 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
 /// mid-conversation-system, advisor-tool) are deliberately EXCLUDED: they
 /// flow through as client-driven pass-through (subject to the ingress
 /// allowlist), so a model that rejects them never sees them forced by the
-/// floor. (effort will additionally gain an on-demand egress union keyed
-/// on `output_config.effort` in a follow-up, mirroring structured-outputs.)
+/// floor. (effort additionally gains an on-demand egress union keyed on
+/// `output_config.effort` in `extras::union_effort_beta`, mirroring
+/// structured-outputs.)
 pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
     &[
         "claude-code-20250219",

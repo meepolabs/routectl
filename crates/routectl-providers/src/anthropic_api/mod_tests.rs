@@ -3191,3 +3191,765 @@ fn record_mantle_span_fields_is_noop_without_mantle() {
         "first-party lane must record no lane fields"
     );
 }
+
+// -- sampling strip (normalize_claude_sampling) ------------------------
+
+/// Build a canonical request carrying caller sampling params plus a
+/// `stop_sequences`-bound `stop`, so the assembled body exercises both the
+/// stripped keys and the preserved neighbour.
+fn req_with_sampling(temperature: Option<f64>, top_p: Option<f64>) -> ChatRequest {
+    ChatRequest {
+        model: "claude-sonnet-4-5".into(),
+        max_tokens: Some(2048),
+        temperature,
+        top_p,
+        stop: Some(vec!["HALT".into()]),
+        ..Default::default()
+    }
+}
+
+/// Reproduce the FINAL outbound body exactly as `complete` / `stream`
+/// assemble it: `normalize_request` -> `cloak_body` -> the lane-gated
+/// sampling strip. The two dispatch paths are proven to run this sequence
+/// by `complete_and_stream_both_strip_sampling_on_the_cloak_lane`, which
+/// drives the real methods; this helper is for the matrix cases that only
+/// need the resulting body.
+fn final_body(provider: &AnthropicApiProvider, req: &ChatRequest) -> Value {
+    let mut body = provider.normalize_request(req).expect("normalize");
+    provider.cloak_body(&mut body, req);
+    if provider.is_cloak_lane(req) {
+        extras::normalize_claude_sampling(&provider.cfg.id, &mut body);
+    }
+    body
+}
+
+/// Own-OAuth lane: the caller's `temperature` and `top_p` never reach the
+/// wire, while `stop_sequences` (accepted by the seat) survives. Anthropic's
+/// OAuth seat 400s a body carrying either sampling param.
+#[test]
+fn cloak_lane_strips_caller_sampling_and_keeps_stop_sequences() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    // temperature and top_p are mutually exclusive on the assembled body
+    // (temperature wins), so drive each independently.
+    for (temperature, top_p) in [(Some(0.7), None), (None, Some(0.9))] {
+        let req = req_with_sampling(temperature, top_p);
+        let body = final_body(&provider, &req);
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must not reach the OAuth seat; got: {body}"
+        );
+        assert!(
+            body.get("top_p").is_none(),
+            "top_p must not reach the OAuth seat; got: {body}"
+        );
+        assert_eq!(
+            body["stop_sequences"],
+            serde_json::json!(["HALT"]),
+            "stop_sequences is accepted by the seat and must survive; got: {body}"
+        );
+    }
+}
+
+/// routectl's OWN thinking clamp forces `temperature: 1.0` whenever
+/// thinking is composed. The strip is the last word on the body, so that
+/// self-inflicted value is removed too -- not just caller-supplied ones.
+#[test]
+fn cloak_lane_strips_thinking_clamp_temperature() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let req = ChatRequest {
+        model: "claude-sonnet-4-5".into(),
+        max_tokens: Some(4096),
+        reasoning: Some(routectl_core::ReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Precondition: without the strip the assembly emits temperature 1.0.
+    let mut assembled = provider.normalize_request(&req).expect("normalize");
+    provider.cloak_body(&mut assembled, &req);
+    assert_eq!(
+        assembled["temperature"],
+        serde_json::json!(1.0),
+        "precondition: the thinking clamp must force temperature 1.0; got: {assembled}"
+    );
+
+    let body = final_body(&provider, &req);
+    assert!(
+        body.get("temperature").is_none(),
+        "the thinking-clamp temperature must be stripped too; got: {body}"
+    );
+}
+
+/// `provider_extras` cannot smuggle sampling onto the wire at all:
+/// `temperature` / `top_p` are canonical routectl-managed keys, so
+/// `merge_provider_extras` drops them BEFORE the strip ever runs. Pin both
+/// layers -- the extras shield upstream, and the stripped final body -- so a
+/// future relaxation of `is_routectl_managed_key` cannot quietly re-open the
+/// route without failing here. (`top_k` is NOT canonical and remains a
+/// genuine pass-through hole; see docs/WIRE-GOTCHAS.md.)
+#[test]
+fn provider_extras_cannot_smuggle_sampling_onto_the_cloak_lane() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let req = ChatRequest {
+        model: "claude-sonnet-4-5".into(),
+        max_tokens: Some(2048),
+        provider_extras: Some(serde_json::json!({"temperature": 0.3, "top_p": 0.4})),
+        ..Default::default()
+    };
+
+    let mut pre_strip = provider.normalize_request(&req).expect("normalize");
+    provider.cloak_body(&mut pre_strip, &req);
+    assert!(
+        pre_strip.get("temperature").is_none() && pre_strip.get("top_p").is_none(),
+        "the managed-key shield must drop extras sampling before the strip; got: {pre_strip}"
+    );
+
+    let body = final_body(&provider, &req);
+    assert!(
+        body.get("temperature").is_none() && body.get("top_p").is_none(),
+        "no sampling may reach the OAuth seat; got: {body}"
+    );
+}
+
+/// Lane gate, NOT cloak state: the strip is keyed on `is_cloak_lane`, so it
+/// fires for both `is_non_cc` classifications. Under `CloakMode::Never`
+/// (is_non_cc false) the sampling params are still dropped -- gating on the
+/// cloak flag instead would let `cloak.mode = never` re-introduce the
+/// lane-wide 400.
+#[test]
+fn cloak_lane_strips_sampling_under_every_cloak_mode() {
+    for mode in [CloakMode::Never, CloakMode::Always, CloakMode::Auto] {
+        let provider = oauth_provider_with_cloak(CloakConfig {
+            mode,
+            ..CloakConfig::default()
+        });
+        let req = req_with_sampling(Some(0.7), None);
+        assert!(
+            provider.is_cloak_lane(&req),
+            "precondition: every cloak mode stays on the lane ({mode:?})"
+        );
+        let body = final_body(&provider, &req);
+        assert!(
+            body.get("temperature").is_none(),
+            "cloak mode {mode:?} must not change the lane-gated strip; got: {body}"
+        );
+    }
+}
+
+/// Off-lane matrix: forwarded-OAuth, OAuth to another host, and the API-key
+/// lane all leave the body BYTE-UNCHANGED -- the caller's sampling reaches
+/// upstream verbatim. The strip exists for routectl's own OAuth seat, not
+/// for credentials or hosts routectl does not own.
+///
+/// Driven for BOTH sampling keys: a temperature-only matrix would assert
+/// nothing about `top_p` (which the assembly omits when temperature wins),
+/// so each off-lane case is re-run with a top_p-only request and the
+/// surviving key is named explicitly.
+#[test]
+fn off_lane_requests_keep_sampling_byte_unchanged() {
+    let forwarded_provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("sid".into()),
+        Vec::new(),
+        true,
+    ));
+    let other_host_provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://example.invalid",
+        Some("sid".into()),
+        Vec::new(),
+        false,
+    ));
+    let api_key_provider = AnthropicApiProvider::new(cfg_with_allowlist(Vec::new()));
+
+    // (temperature, top_p, the key the assembly emits, its value)
+    for (temperature, top_p, kept_key, kept_value) in [
+        (Some(0.7), None, "temperature", 0.7),
+        (None, Some(0.9), "top_p", 0.9),
+    ] {
+        let mut forwarded = req_with_sampling(temperature, top_p);
+        forwarded.routectl_internal.forwarded_bearer = Some(routectl_core::ForwardedBearer::new(
+            "fwd-bearer".to_string(),
+        ));
+
+        let cases: Vec<(&str, &AnthropicApiProvider, ChatRequest)> = vec![
+            ("forwarded-OAuth", &forwarded_provider, forwarded),
+            (
+                "OAuth-to-another-host",
+                &other_host_provider,
+                req_with_sampling(temperature, top_p),
+            ),
+            (
+                "API-key",
+                &api_key_provider,
+                req_with_sampling(temperature, top_p),
+            ),
+        ];
+
+        for (label, provider, req) in cases {
+            assert!(
+                !provider.is_cloak_lane(&req),
+                "precondition: {label} must be off the cloak lane"
+            );
+            // The un-stripped assembly is the byte baseline.
+            let mut expected = provider.normalize_request(&req).expect("normalize");
+            provider.cloak_body(&mut expected, &req);
+            assert!(
+                expected.get(kept_key).is_some(),
+                "{label}: precondition -- the assembly must emit {kept_key}; got: {expected}"
+            );
+
+            let body = final_body(provider, &req);
+            assert_eq!(
+                body, expected,
+                "{label} must be byte-unchanged by the strip ({kept_key} seed)"
+            );
+            assert_eq!(
+                body[kept_key],
+                serde_json::json!(kept_value),
+                "{label} must forward the caller's {kept_key} verbatim"
+            );
+        }
+    }
+}
+
+/// Both dispatch paths run the strip. Driving the REAL `complete` and
+/// `stream` (not the assembly helper) is what pins that neither path can
+/// omit the call: the lane is host-pinned to api.anthropic.com so no mock
+/// server can serve it, but token resolution happens AFTER the strip, so a
+/// failing token source halts each path with zero network I/O while the
+/// post-mutation body has already been emitted by `trace_outgoing_body`.
+///
+/// Driven once per sampling key. A temperature-only seed makes the `top_p`
+/// assertion vacuous (the assembly never emits `top_p` alongside
+/// `temperature`), so each path is re-run with a top_p-only request and the
+/// pre-strip assembly is asserted to actually carry the seeded key first.
+/// A body carrying BOTH keys is unreachable through a `ChatRequest` --
+/// `reconcile_sampling_params` emits `top_p` only when `temperature` is
+/// absent, and `merge_provider_extras` shields both as managed keys -- so
+/// the combined case is covered at the emitter level by
+/// `sampling_strip_emits_one_warn_naming_both_dropped_keys`.
+#[tokio::test]
+async fn complete_and_stream_both_strip_sampling_on_the_cloak_lane() {
+    for path in ["complete", "stream"] {
+        for (temperature, top_p, seeded_key) in
+            [(Some(0.7), None, "temperature"), (None, Some(0.9), "top_p")]
+        {
+            let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+                "https://api.anthropic.com",
+                Arc::new(FailingTokenSource),
+                false,
+            ));
+            let req = req_with_sampling(temperature, top_p);
+
+            // Precondition: without the strip this seed really does put
+            // `seeded_key` on the assembled body, so its absence below is
+            // the strip's doing and not an assembly accident.
+            let mut pre_strip = provider.normalize_request(&req).expect("normalize");
+            provider.cloak_body(&mut pre_strip, &req);
+            assert!(
+                pre_strip.get(seeded_key).is_some(),
+                "precondition: the {seeded_key} seed must reach the assembled body; got: {pre_strip}"
+            );
+
+            let (result, lines) = routectl_testkit::capture_lines(async {
+                if path == "complete" {
+                    provider.complete(req.clone()).await.map(|_| ())
+                } else {
+                    provider.stream(req.clone()).await.map(|_| ())
+                }
+            })
+            .await;
+
+            assert!(
+                result.is_err(),
+                "{path} must halt at token resolution, after the strip"
+            );
+            let outgoing: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("outgoing request body"))
+                .collect();
+            assert_eq!(
+                outgoing.len(),
+                1,
+                "{path} must emit exactly one outgoing-body trace; got: {lines:?}"
+            );
+            let body = outgoing[0];
+            assert!(
+                !body.contains("temperature"),
+                "{path} ({seeded_key} seed) must strip temperature before the outgoing trace; \
+                 got: {body}"
+            );
+            assert!(
+                !body.contains("top_p"),
+                "{path} ({seeded_key} seed) must strip top_p before the outgoing trace; got: {body}"
+            );
+            assert!(
+                body.contains("stop_sequences"),
+                "{path} must preserve stop_sequences; got: {body}"
+            );
+        }
+    }
+}
+
+// -- sampling strip: observability contract ----------------------------
+
+/// Collect the sampling-strip WARNs emitted while assembling `req`.
+fn strip_warns(
+    provider: &AnthropicApiProvider,
+    req: &ChatRequest,
+) -> Vec<routectl_testkit::CapturedEvent> {
+    warns_from(|| {
+        let _ = final_body(provider, req);
+    })
+}
+
+/// Collect the sampling-strip WARNs emitted by stripping `body` directly.
+/// Needed for the both-keys case: the canonical assembly emits at most ONE
+/// sampling key (temperature wins over top_p) and `merge_provider_extras`
+/// shields both as managed keys, so a two-key body cannot be produced
+/// through a `ChatRequest`. The emitter's combine-into-one contract is still
+/// worth pinning against a future assembly that can land both.
+fn strip_warns_for_body(body: &Value) -> Vec<routectl_testkit::CapturedEvent> {
+    warns_from(|| {
+        let mut body = body.clone();
+        extras::normalize_claude_sampling("test", &mut body);
+    })
+}
+
+fn warns_from<F: FnOnce()>(f: F) -> Vec<routectl_testkit::CapturedEvent> {
+    routectl_testkit::capture_events(f)
+        .into_iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.field("dropped_params").is_some())
+        .collect()
+}
+
+/// Two removed keys produce exactly ONE event carrying both names, with the
+/// fixed lane label and the provider id. The values themselves are never
+/// logged -- only the key names.
+#[test]
+fn sampling_strip_emits_one_warn_naming_both_dropped_keys() {
+    let warns = strip_warns_for_body(&serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "temperature": 0.3,
+        "top_p": 0.4,
+    }));
+
+    assert_eq!(warns.len(), 1, "two keys must combine into ONE event");
+    let warn = &warns[0];
+    assert_eq!(warn.field("provider"), Some("test"));
+    assert_eq!(warn.field("lane"), Some("oauth-own-anthropic"));
+    assert_eq!(
+        warn.field("dropped_params"),
+        Some("temperature,top_p"),
+        "both key names ride one bounded field"
+    );
+}
+
+/// Only the keys actually present are named: a body carrying just
+/// `temperature` must not claim `top_p` was dropped.
+#[test]
+fn sampling_strip_warn_names_only_present_keys() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let warns = strip_warns(&provider, &req_with_sampling(Some(0.7), None));
+    assert_eq!(warns.len(), 1);
+    assert_eq!(warns[0].field("dropped_params"), Some("temperature"));
+}
+
+/// No affected key -> no WARN at all. The strip must stay silent on the
+/// overwhelmingly common request shape rather than logging a no-op.
+#[test]
+fn sampling_strip_emits_no_warn_when_nothing_is_dropped() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let req = ChatRequest {
+        model: "claude-sonnet-4-5".into(),
+        max_tokens: Some(2048),
+        ..Default::default()
+    };
+    assert!(
+        strip_warns(&provider, &req).is_empty(),
+        "a no-op strip must emit no WARN"
+    );
+}
+
+/// Log hygiene: the REMOVED VALUES never appear in any field or in the
+/// message. Hostile floats are used as the canary -- if the emitter ever
+/// interpolated the stripped value (or the body) the sentinel would show up.
+#[test]
+fn sampling_strip_warn_never_carries_the_removed_values() {
+    let warns = strip_warns_for_body(&serde_json::json!({
+        "model": "claude-sonnet-4-5",
+        "temperature": 0.123_456_789,
+        "top_p": 0.987_654_321,
+    }));
+
+    assert_eq!(warns.len(), 1);
+    let warn = &warns[0];
+    for sentinel in ["0.123456789", "0.987654321"] {
+        assert!(
+            !warn.message.contains(sentinel),
+            "the removed value {sentinel} must not appear in the message: {}",
+            warn.message
+        );
+        for (name, value) in &warn.fields {
+            assert!(
+                !value.contains(sentinel),
+                "the removed value {sentinel} must not appear in field {name}: {value}"
+            );
+        }
+    }
+}
+
+/// The one-WARN contract on the REAL dispatch paths, not just the emitter.
+/// A helper-level assertion cannot see a second call site, so drive
+/// `complete` and `stream` themselves (host-pinned lane -> `FailingTokenSource`
+/// halts each path after the strip, before any network I/O) and assert
+/// exactly ONE strip WARN per path, with the exact static fields and only
+/// the seeded key name. A hostile sampling value is used as the canary so a
+/// regression that interpolated the removed value -- or the body -- into any
+/// field or the message would surface here on the production path.
+#[tokio::test]
+async fn real_complete_and_stream_each_emit_exactly_one_strip_warn() {
+    const HOSTILE_TEMPERATURE: f64 = 0.123_456_789;
+    const HOSTILE_TOP_P: f64 = 0.987_654_321;
+
+    for path in ["complete", "stream"] {
+        for (temperature, top_p, expected_names, sentinel) in [
+            (
+                Some(HOSTILE_TEMPERATURE),
+                None,
+                "temperature",
+                "0.123456789",
+            ),
+            (None, Some(HOSTILE_TOP_P), "top_p", "0.987654321"),
+        ] {
+            let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+                "https://api.anthropic.com",
+                Arc::new(FailingTokenSource),
+                false,
+            ));
+            let req = req_with_sampling(temperature, top_p);
+
+            let (result, events) = routectl_testkit::with_capture(async {
+                if path == "complete" {
+                    provider.complete(req.clone()).await.map(|_| ())
+                } else {
+                    provider.stream(req.clone()).await.map(|_| ())
+                }
+            })
+            .await;
+            assert!(
+                result.is_err(),
+                "{path} must halt at token resolution, after the strip"
+            );
+
+            let warns: Vec<_> = events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN && e.field("dropped_params").is_some())
+                .collect();
+            assert_eq!(
+                warns.len(),
+                1,
+                "{path} ({expected_names}) must emit exactly ONE strip WARN; got: {warns:?}"
+            );
+            let warn = warns[0];
+            assert_eq!(warn.field("provider"), Some("test"));
+            assert_eq!(warn.field("lane"), Some("oauth-own-anthropic"));
+            assert_eq!(
+                warn.field("dropped_params"),
+                Some(expected_names),
+                "{path} must name only the key actually dropped"
+            );
+            assert!(
+                !warn.message.contains(sentinel),
+                "{path}: the removed value must not appear in the message: {}",
+                warn.message
+            );
+            for (name, value) in &warn.fields {
+                assert!(
+                    !value.contains(sentinel),
+                    "{path}: the removed value must not appear in field {name}: {value}"
+                );
+            }
+        }
+    }
+}
+
+/// The count_tokens path deliberately does NOT call the strip:
+/// `build_count_tokens_body` already drops sampling by allowlist, so adding
+/// the call there would only multiply WARNs on a path Claude Code polls
+/// heavily. Pin both halves -- sampling absent from the count_tokens body,
+/// and no strip WARN attributable to building it.
+#[test]
+fn count_tokens_body_drops_sampling_by_allowlist_without_a_strip_warn() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let req = req_with_sampling(Some(0.7), None);
+
+    let events = routectl_testkit::capture_events(|| {
+        let mut normalized = provider.normalize_request(&req).expect("normalize");
+        provider.cloak_body(&mut normalized, &req);
+        let body = build_count_tokens_body(&normalized);
+        assert!(
+            body.get("temperature").is_none() && body.get("top_p").is_none(),
+            "the count_tokens allowlist must already exclude sampling; got: {body}"
+        );
+    });
+    assert!(
+        !events.iter().any(|e| e.field("dropped_params").is_some()),
+        "the count_tokens path must not emit a sampling-strip WARN"
+    );
+}
+
+// -- effort capability beta union --------------------------------------
+
+/// Count how many times `flag` appears in a joined `anthropic-beta` value.
+fn beta_occurrences(header: &str, flag: &str) -> usize {
+    header.split(',').filter(|b| b.trim() == flag).count()
+}
+
+/// An adaptive-thinking request composes `output_config.effort`, so the
+/// union adds `EFFORT_BETA` exactly once. Asserted against the flag's own
+/// occurrence count rather than the floor length: an effort body
+/// legitimately widens the list past `floor.len()`.
+#[test]
+fn adaptive_effort_body_gains_the_effort_beta_exactly_once() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let mut req = ChatRequest {
+        model: "claude-opus-4-7".into(),
+        max_tokens: Some(4096),
+        reasoning: Some(routectl_core::ReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    req.routectl_internal.supports_adaptive_thinking = true;
+
+    let body = provider.normalize_request(&req).expect("normalize");
+    assert!(
+        body["output_config"].get("effort").is_some(),
+        "precondition: adaptive thinking must compose output_config.effort; got: {body}"
+    );
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the OAuth lane must produce a beta header");
+    assert_eq!(
+        beta_occurrences(&value, routectl_core::identity::anthropic::EFFORT_BETA),
+        1,
+        "the effort beta must appear exactly once; got: {value}"
+    );
+    // The floor is preserved in order, with the effort flag appended.
+    let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+    for flag in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
+        assert!(
+            betas.contains(flag),
+            "the union must not drop floor flag {flag}; got: {value}"
+        );
+    }
+    assert_eq!(
+        betas.last(),
+        Some(&routectl_core::identity::anthropic::EFFORT_BETA),
+        "the capability union appends after the floor; got: {value}"
+    );
+}
+
+/// The union reads the ASSEMBLED body, so an `output_config.effort` that
+/// arrives through the `provider_extras` forward-compat sweep triggers it
+/// too -- exactly once, with no reorder of the floor.
+///
+/// Drives the WHOLE path rather than a fabricated body: the effort lives in
+/// `ChatRequest.provider_extras`, so `merge_provider_extras` must copy it
+/// onto the assembled body and the late `reconcile_output_config_effort`
+/// must let a caller-supplied value stand before header composition ever
+/// sees it. A fabricated body would prove only the union, leaving the merge
+/// and the late reconciliation untested.
+#[test]
+fn provider_extras_effort_body_gains_the_effort_beta_exactly_once() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let mut req = ChatRequest {
+        model: "claude-opus-4-7".into(),
+        max_tokens: Some(4096),
+        // Adaptive thinking is what keeps `output_config.effort` on the
+        // body through the late reconciliation; the extras value below is
+        // deliberately DIFFERENT from this one so a merge that silently
+        // dropped the extras would fail the value assertion.
+        reasoning: Some(routectl_core::ReasoningConfig {
+            effort: Some("low".into()),
+            ..Default::default()
+        }),
+        provider_extras: Some(serde_json::json!({
+            "output_config": {"effort": "high"},
+        })),
+        ..Default::default()
+    };
+    req.routectl_internal.supports_adaptive_thinking = true;
+
+    let body = provider.normalize_request(&req).expect("normalize");
+    assert_eq!(
+        body["output_config"].get("effort").and_then(Value::as_str),
+        Some("high"),
+        "the extras-supplied effort must survive the merge and the late \
+         reconciliation onto the shipped body; got: {body}"
+    );
+
+    let baseline = outbound_header_value(&provider, &req, "anthropic-beta")
+        .expect("the OAuth floor must produce a beta header");
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the OAuth floor must produce a beta header");
+
+    assert_eq!(
+        beta_occurrences(&value, routectl_core::identity::anthropic::EFFORT_BETA),
+        1,
+        "the effort beta must appear exactly once; got: {value}"
+    );
+    assert_eq!(
+        value,
+        format!(
+            "{baseline},{}",
+            routectl_core::identity::anthropic::EFFORT_BETA
+        ),
+        "the union appends without reordering the existing set"
+    );
+}
+
+/// A body carrying BOTH gated fields gains BOTH betas. `output_config.format`
+/// is already in the floor, so the observable delta is the effort flag; the
+/// assertion pins that each gated field is independently covered.
+#[test]
+fn body_with_format_and_effort_gains_both_capability_betas() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let body = serde_json::json!({
+        "output_config": {
+            "format": {"type": "json_object"},
+            "effort": "high",
+        },
+    });
+    let req = req_with_claude_code_headers(Vec::new());
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the OAuth floor must produce a beta header");
+    for flag in [
+        routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA,
+        routectl_core::identity::anthropic::EFFORT_BETA,
+    ] {
+        assert_eq!(
+            beta_occurrences(&value, flag),
+            1,
+            "{flag} must be present exactly once; got: {value}"
+        );
+    }
+}
+
+/// Effort removed by the late thinking reconciliation gains NO beta. A
+/// `tool_choice` that forces tool use strips `thinking`, and
+/// `reconcile_output_config_effort` then drops the orphan effort -- so the
+/// shipped body does not carry the gated field and must not claim the flag.
+#[test]
+fn effort_dropped_by_late_reconciliation_gains_no_effort_beta() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let mut req = ChatRequest {
+        model: "claude-opus-4-7".into(),
+        max_tokens: Some(4096),
+        reasoning: Some(routectl_core::ReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        }),
+        tool_choice: Some(serde_json::json!({"type": "any"})),
+        ..Default::default()
+    };
+    req.routectl_internal.supports_adaptive_thinking = true;
+
+    let body = provider.normalize_request(&req).expect("normalize");
+    assert!(
+        body.get("output_config")
+            .and_then(|oc| oc.get("effort"))
+            .is_none(),
+        "precondition: forced tool_choice must strip thinking and orphan effort; got: {body}"
+    );
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the OAuth floor must produce a beta header");
+    assert_eq!(
+        beta_occurrences(&value, routectl_core::identity::anthropic::EFFORT_BETA),
+        0,
+        "no effort field on the wire means no effort beta; got: {value}"
+    );
+}
+
+/// One-way invariant: a caller who explicitly requests the effort beta with
+/// NO `output_config.effort` on the body keeps the flag. The union adds the
+/// beta for the field; it never removes a beta for a missing field.
+#[test]
+fn explicit_caller_effort_beta_survives_without_the_field() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let req = ChatRequest {
+        anthropic_beta: vec![routectl_core::identity::anthropic::EFFORT_BETA.into()],
+        ..Default::default()
+    };
+    let body = serde_json::json!({"model": "claude-opus-4-7"});
+
+    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
+        .expect("the OAuth floor must produce a beta header");
+    assert_eq!(
+        beta_occurrences(&value, routectl_core::identity::anthropic::EFFORT_BETA),
+        1,
+        "a caller-supplied effort beta must survive untouched; got: {value}"
+    );
+}
+
+/// The effort union is suppressed OFF the cloak lane: a forwarded-OAuth leg
+/// and an API-key provider both emit byte-identical beta headers with and
+/// without an effort-carrying body. The forwarded leg must reach Anthropic
+/// with the client's own set verbatim, and the API-key lane never composes
+/// routectl's adaptive-effort directive.
+#[test]
+fn off_lane_beta_headers_are_byte_unchanged_by_an_effort_body() {
+    let effort_body = serde_json::json!({"output_config": {"effort": "high"}});
+
+    // Forwarded-OAuth leg: the client supplies its own beta set.
+    let forwarded_provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("sid".into()),
+        Vec::new(),
+        true,
+    ));
+    let mut forwarded_req = ChatRequest {
+        anthropic_beta: vec!["client-sent-beta".into()],
+        ..Default::default()
+    };
+    forwarded_req.routectl_internal.forwarded_bearer = Some(routectl_core::ForwardedBearer::new(
+        "fwd-bearer".to_string(),
+    ));
+
+    // API-key lane on the same host.
+    let api_key_provider = AnthropicApiProvider::new(api_key_cfg_for_betas(Vec::new()));
+    let api_key_req = ChatRequest {
+        anthropic_beta: vec!["client-sent-beta".into()],
+        ..Default::default()
+    };
+
+    for (label, provider, req) in [
+        ("forwarded-OAuth", &forwarded_provider, &forwarded_req),
+        ("API-key", &api_key_provider, &api_key_req),
+    ] {
+        assert!(
+            !provider.is_cloak_lane(req),
+            "precondition: {label} must be off the cloak lane"
+        );
+        let without_body = outbound_header_value(provider, req, "anthropic-beta");
+        let with_body =
+            outbound_header_value_for_body(provider, req, "anthropic-beta", Some(&effort_body));
+        assert_eq!(
+            with_body, without_body,
+            "{label} beta header must be byte-unchanged by an effort body"
+        );
+        assert_eq!(
+            with_body
+                .as_deref()
+                .map(|v| beta_occurrences(v, routectl_core::identity::anthropic::EFFORT_BETA)),
+            Some(0),
+            "{label} must not gain the effort beta"
+        );
+    }
+}

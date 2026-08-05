@@ -112,6 +112,16 @@ impl Provider for AnthropicApiProvider {
         // response below.
         let cloak_result = self.cloak_body(&mut body, &req);
 
+        // Sampling strip, LAST word on the JSON before the outgoing trace:
+        // on the OAuth own-anthropic lane the seat 400s a body carrying
+        // `temperature` / `top_p`, so drop them here -- after cloak, after
+        // every assembly pass. Gated on the LANE (not `is_non_cc`, not the
+        // cloak flag) so a `cloak.mode = never` provider on this credential
+        // still ships an accepted body. See `extras::normalize_claude_sampling`.
+        if self.is_cloak_lane(&req) {
+            extras::normalize_claude_sampling(&self.cfg.id, &mut body);
+        }
+
         // Emit the outgoing body at trace level so a grep by
         // request_id correlates ingress -> egress -> upstream
         // response in one pass during triage. Gated by the
@@ -302,6 +312,13 @@ impl Provider for AnthropicApiProvider {
         // is threaded into SseState so streamed tool_use names are
         // restored to the client's originals.
         let cloak_result = self.cloak_body(&mut body, &req);
+
+        // See complete(): strip caller/thinking-forced sampling the OAuth
+        // seat rejects, gated on the lane, as the last body mutation before
+        // the trace. See `extras::normalize_claude_sampling`.
+        if self.is_cloak_lane(&req) {
+            extras::normalize_claude_sampling(&self.cfg.id, &mut body);
+        }
 
         // NOTE: this trace reflects the pre-resign body; the cch token
         // in the transmitted bytes differs after resign_cch_in_place.

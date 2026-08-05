@@ -70,6 +70,11 @@ serial_test = "3"
 wiremock.workspace = true
 routectl-testkit.workspace = true
 criterion = { workspace = true }
+# Span-aware event capture for the cross-lane dispatch tests: the
+# testkit capture subscriber is event-only, and correlating a
+# provider-emitted WARN with the enclosing request's id requires reading
+# the ambient span scope.
+tracing-subscriber.workspace = true
 
 # ChatRequest::clone() cost on the dispatch hot path. `harness = false`:
 # the bench owns `main` to install the allocation-counting allocator.

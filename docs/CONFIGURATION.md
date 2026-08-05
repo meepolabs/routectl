@@ -510,26 +510,47 @@ means `allowed_betas` now APPLIES to them where the floor previously bypassed
 it: a non-empty `allowed_betas` that omits `context-1m-2025-08-07` drops a
 caller's request for it.
 
-### `allowed_betas` carve-out: the structured-outputs beta
+### `allowed_betas` carve-out: the capability betas
 
-One flag is exempt from BOTH allowlists above. Whenever a request's
-assembled body carries `output_config.format` (the structured-output
-directive), routectl force-adds
-`structured-outputs-2025-12-15` to that request's beta set on both the
-`anthropic-api` lane (the `anthropic-beta` HTTP header) and the Bedrock
-lane (the body's `anthropic_beta` array), regardless of
-`[providers.X] allowed_betas` or `[bedrock] allowed_betas`.
+Two flags are exempt from BOTH allowlists above. Each is force-added
+whenever the request's ASSEMBLED body carries the field that flag gates:
 
-The flag is not a client-opted beta: it is a routectl-derived server
-requirement implied by the structured-outputs feature the request is
-already using. Upstream rejects a body carrying `output_config.format`
-without it, so dropping the flag would guarantee a 400 rather than
-constrain anything.
+| Body field | Beta force-added | Lanes |
+| --- | --- | --- |
+| `output_config.format` (structured outputs) | `structured-outputs-2025-12-15` | `anthropic-api` (`anthropic-beta` header) and Bedrock (body `anthropic_beta` array) |
+| `output_config.effort` (adaptive thinking) | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
 
-An operator who wants to deny structured outputs should deny the
-FEATURE -- declare it in the provider's `unsupported_features` so
-requests using it are never routed to that provider -- rather than
-relying on the beta allowlist.
+Both bypass `[providers.X] allowed_betas` and `[bedrock] allowed_betas`.
+
+Neither is a client-opted beta: each is a routectl-derived server
+requirement implied by the feature the request is already using. Upstream
+rejects a body carrying the gated field without its flag, so dropping the
+flag would guarantee a 400 rather than constrain anything.
+
+Both carve-outs are ONE-WAY -- the body's field adds the flag; a
+caller-supplied flag with no matching field is passed through untouched
+(routectl never manufactures the field to match a flag).
+
+An operator who wants to deny either feature should deny the FEATURE --
+declare it in the provider's `unsupported_features` so requests using it
+are never routed to that provider -- rather than relying on the beta
+allowlist.
+
+### OAuth lane: `temperature` and `top_p` are dropped
+
+Anthropic's OAuth seat rejects a `/v1/messages` body carrying
+`temperature` or `top_p`. On an `auth_kind = "oauth-bearer"` provider
+talking to `api.anthropic.com` (excluding the forwarded / pure-proxy
+leg), routectl removes both from the outbound body and logs one
+structured `WARN` per affected request naming the dropped keys.
+`stop_sequences` is unaffected.
+
+This gate is the LANE, not the cloak setting: **`cloak.mode = "never"` on
+such a provider STILL drops these params.** That is intended -- the 400 is
+a property of the credential, not of the disguise, so honouring the knob
+would mean failing the request instead. If you need `temperature` or
+`top_p` honoured, route the request to an API-key provider or a
+non-Anthropic host.
 
 ## `[providers.X] api_shape` -- Bedrock API selector
 
