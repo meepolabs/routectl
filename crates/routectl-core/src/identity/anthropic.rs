@@ -37,11 +37,22 @@ const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 /// unconditional union in `build_headers`.
 pub const OAUTH_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 
-/// The `anthropic-beta` flag gating the 1M-token context window. Single
-/// source of truth shared by the floor list below and the provider's
-/// `has_context_1m_beta` observability check, so a version bump here can
-/// never drift out of sync with the sibling literal.
+/// The `anthropic-beta` flag gating the 1M-token context window. NOT in
+/// the floor: it is model-gated, so forcing it 400s on models that do not
+/// support it. Reaches upstream only as client-driven pass-through
+/// (subject to the ingress allowlist). Single source of truth shared by
+/// the provider's `has_context_1m_beta` observability check, so a version
+/// bump here can never drift out of sync with the sibling literal.
 pub const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
+
+/// The `anthropic-beta` flag gating `output_config.effort`. RESERVED:
+/// defined here but not yet consumed by egress. Like
+/// `STRUCTURED_OUTPUTS_BETA` it is a server-side capability requirement
+/// rather than a client-opted beta; the intended treatment is an on-demand
+/// egress union keyed on the final body carrying the field, landing in a
+/// follow-up. It is NOT in the floor, because forcing it on a model that
+/// does not support effort 400s the request.
+pub const EFFORT_BETA: &str = "effort-2025-11-24";
 
 /// The `anthropic-beta` flag gating `output_config.format` (structured
 /// outputs). A server-side capability requirement, not a client-opted
@@ -110,8 +121,14 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
 /// anthropic-beta header before the context_management strip, bypassing
 /// the ingress allowlist (these are operator-equivalent pins).
 ///
-/// 14 corpus-verified flags matching the set genuine Claude Code emits
-/// on the OAuth egress (confirmed against a captured request corpus).
+/// 9 universally-supported flags forming the model-agnostic base every
+/// non-CC OAuth request depends on. The 5 model-gated flags removed from
+/// the old floor (context-1m, effort, thinking-token-count,
+/// mid-conversation-system, advisor-tool) are deliberately EXCLUDED: they
+/// flow through as client-driven pass-through (subject to the ingress
+/// allowlist), so a model that rejects them never sees them forced by the
+/// floor. (effort will additionally gain an on-demand egress union keyed
+/// on `output_config.effort` in a follow-up, mirroring structured-outputs.)
 pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
     &[
         "claude-code-20250219",
@@ -123,11 +140,6 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
         "fast-mode-2026-02-01",
         "redact-thinking-2026-02-12",
         "token-efficient-tools-2026-03-28",
-        CONTEXT_1M_BETA,
-        "thinking-token-count-2026-05-13",
-        "mid-conversation-system-2026-04-07",
-        "advisor-tool-2026-03-01",
-        "effort-2025-11-24",
     ]
 }
 
@@ -279,9 +291,8 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_betas_floor_contains_all_fourteen_pinned_flags() {
+    fn anthropic_betas_floor_is_exactly_the_nine_base_flags() {
         let betas = default_claude_code_anthropic_betas();
-        assert_eq!(betas.len(), 14, "floor must carry exactly 14 pinned betas");
         let expected = [
             "claude-code-20250219",
             "oauth-2025-04-20",
@@ -292,16 +303,25 @@ mod tests {
             "fast-mode-2026-02-01",
             "redact-thinking-2026-02-12",
             "token-efficient-tools-2026-03-28",
+        ];
+        assert_eq!(
+            betas, expected,
+            "floor must be exactly the 9 base flags in order"
+        );
+
+        // The 5 model-gated flags removed from the floor must never
+        // return: forcing any of them 400s models that do not support it.
+        let removed = [
             "context-1m-2025-08-07",
-            "thinking-token-count-2026-05-13",
             "mid-conversation-system-2026-04-07",
             "advisor-tool-2026-03-01",
             "effort-2025-11-24",
+            "thinking-token-count-2026-05-13",
         ];
-        for flag in &expected {
+        for flag in &removed {
             assert!(
-                betas.contains(flag),
-                "floor must contain {flag}; got: {betas:?}"
+                !betas.contains(flag),
+                "floor must NOT contain removed model-gated flag {flag}; got: {betas:?}"
             );
         }
     }

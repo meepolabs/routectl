@@ -192,10 +192,12 @@ listed at the bottom of each crate.
   (`factory::validate_provider_credential_sources`), and the `/v1/models`
   forwarded-lane proxy-through decision
   (`handlers::models::forwarded_proxy_target`). Also the Claude Code
-  anthropic-beta floor: `default_claude_code_anthropic_betas()` (the 14-flag
-  corpus-verified CC beta set) plus the shared single-source-of-truth const
+  anthropic-beta floor: `default_claude_code_anthropic_betas()` (the 9-flag
+  model-agnostic CC beta base) plus the shared single-source-of-truth const
   literals `OAUTH_ANTHROPIC_BETA` (`oauth-2025-04-20`), `CONTEXT_1M_BETA`
-  (`context-1m-2025-08-07`), and `STRUCTURED_OUTPUTS_BETA`
+  (`context-1m-2025-08-07`, NOT in the floor -- model-gated, reaches upstream
+  as client pass-through), `EFFORT_BETA` (`effort-2025-11-24`, also NOT in the
+  floor -- model-gated), and `STRUCTURED_OUTPUTS_BETA`
   (`structured-outputs-2025-12-15`, also unioned by the egress whenever the
   assembled body carries `output_config.format`), consumed by the
   anthropic-api provider's header composition (`build_headers`) and the
