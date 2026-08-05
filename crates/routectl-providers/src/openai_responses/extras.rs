@@ -43,23 +43,37 @@ use crate::effort::{clamp_effort_to_supported, level_from_budget};
 /// a summary-only, context-only, or mode-only request still emits a
 /// reasoning object. An explicit canonical `enabled: false` WINS
 /// unconditionally and omits reasoning entirely -- regardless of any
-/// computed effort, budget, or overlay sub-key.
+/// computed effort, budget, or overlay sub-key. An explicit
+/// `effort: "none"` is reasoning-OFF and omits reasoning the same way.
 pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest) {
     let overlay = responses_reasoning_overlay(req);
+
+    // An explicit `effort: "none"` is a reasoning-OFF request; treat it like
+    // `enabled: false` and omit reasoning entirely rather than emit a
+    // reasoning object (which would leave thinking ON via a budget or a
+    // summary/context overlay).
+    let effort_disabled = req
+        .reasoning
+        .as_ref()
+        .and_then(|r| r.effort.as_deref())
+        .is_some_and(|e| e == "none");
+    if effort_disabled {
+        return;
+    }
 
     let (effort, enabled, budget) = match req.reasoning.as_ref() {
         Some(r) => {
             // Explicit effort wins. When no effort is set but a budget is,
             // map the budget to the nearest effort band (the Responses API
-            // takes effort, not a budget) rather than dropping it.
+            // takes effort, not a budget) rather than dropping it. A clamp
+            // that returns `None` (reasoning-OFF) leaves effort unset.
             let effort = match r.effort.as_deref() {
-                Some(e) => Some(
-                    clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).into_owned(),
-                ),
-                None => r.max_tokens.map(|budget| {
+                Some(e) => clamp_effort_to_supported(e, &req.routectl_internal.effort_levels)
+                    .map(std::borrow::Cow::into_owned),
+                None => r.max_tokens.and_then(|budget| {
                     let level = level_from_budget(budget);
                     clamp_effort_to_supported(level, &req.routectl_internal.effort_levels)
-                        .into_owned()
+                        .map(std::borrow::Cow::into_owned)
                 }),
             };
             (effort, r.enabled, r.max_tokens)

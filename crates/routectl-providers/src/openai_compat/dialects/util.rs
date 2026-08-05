@@ -22,24 +22,49 @@ const BUDGET_HIGH_THRESHOLD: u32 = 8192;
 /// gates BOTH the vLLM `chat_template_kwargs.enable_thinking` flag and the
 /// `reasoning_effort` emission, so the two can never disagree.
 ///
-/// Contract (exact):
+/// Contract (exact), in precedence order:
 ///   `enabled == Some(false)`                                        -> false
-///   `enabled == Some(true) || effort.is_some() || max_tokens.is_some()` -> true
+///   `effort == Some("none")`                                        -> false
+///   `enabled == Some(true) || effort.is_some() || max_tokens`       -> true
 ///   otherwise (no reasoning config, or a config with no signal)      -> false
 ///
 /// A present `effort`/`max_tokens` with `enabled` unset is a reasoning signal
 /// (this is what the OpenAI ingress produces when promoting a top-level
 /// `reasoning_effort`); explicit `Some(false)` always wins.
 ///
+/// Both disable intents are checked BEFORE any enable signal. An `effort` of
+/// "none" is a reasoning-OFF request, so it outranks a contradictory
+/// `enabled: true` or a stray budget: were it not to, `enable_thinking` would
+/// go on the wire as `true` while the clamp omits `reasoning_effort` -- the
+/// caller billed for thinking it explicitly declined.
+///
 /// Shared by the DeepSeek and vLLM dialects; hoisted here so they cannot drift.
 pub(super) fn reasoning_enabled_for_wire(req: &ChatRequest) -> bool {
     let Some(r) = req.reasoning.as_ref() else {
         return false;
     };
-    if r.enabled == Some(false) {
+    if r.enabled == Some(false) || r.effort.as_deref() == Some("none") {
         return false;
     }
     r.enabled == Some(true) || r.effort.is_some() || r.max_tokens.is_some()
+}
+
+/// Insert `reasoning_effort` into the outgoing body iff the clamp produced a
+/// level. A `None` clamp is reasoning-OFF (`effort: "none"`): the field is
+/// omitted rather than substituted with a positive level.
+///
+/// Shared by the OpenAI, DeepSeek and vLLM dialects so the omit contract has
+/// exactly one implementation.
+pub(super) fn insert_reasoning_effort(
+    obj: &mut serde_json::Map<String, Value>,
+    clamped: Option<std::borrow::Cow<'_, str>>,
+) {
+    if let Some(effort) = clamped {
+        obj.insert(
+            "reasoning_effort".into(),
+            Value::String(effort.into_owned()),
+        );
+    }
 }
 
 /// Derive a `reasoning_effort` string from the canonical reasoning config.
@@ -561,8 +586,28 @@ mod tests {
         );
     }
 
+    /// `effort: "none"` is reasoning-OFF: no effort is derived, so the
+    /// DeepSeek/vLLM egresses emit no `reasoning_effort` at all rather than
+    /// clamping "none" up to the lowest supported level.
+    #[test]
+    fn derive_reasoning_effort_none_when_effort_is_none_token() {
+        use routectl_core::{ChatRequest, ReasoningConfig};
+        let req = ChatRequest {
+            reasoning: Some(ReasoningConfig {
+                effort: Some("none".into()),
+                max_tokens: None,
+                enabled: None,
+                exclude: None,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            derive_reasoning_effort(&req).is_none(),
+            "effort:none must derive no effort"
+        );
+    }
+
     /// The shared wire-enabled predicate: explicit Some(false) wins;
-    /// otherwise a present enabled/effort/max_tokens signal turns it on;
     /// an empty or absent config is off.
     #[test]
     fn reasoning_enabled_for_wire_contract() {
@@ -591,6 +636,13 @@ mod tests {
         assert!(reasoning_enabled_for_wire(&with(Some(cfg(
             None,
             Some("high"),
+            None
+        )))));
+        // enabled unset + effort "none" -> off. "none" is reasoning-OFF, not
+        // a positive signal; treating it as one would turn thinking on.
+        assert!(!reasoning_enabled_for_wire(&with(Some(cfg(
+            None,
+            Some("none"),
             None
         )))));
         // enabled unset + max_tokens -> on.

@@ -8,8 +8,11 @@
 //!
 //! This module provides a single helper, `clamp_effort_to_supported`,
 //! that maps an arbitrary effort string to the nearest supported level.
-//! Anthropic-shape egresses (anthropic_api, bedrock) accept "xhigh"
-//! and "max" verbatim and MUST NOT call this helper.
+//! It returns `Option`: `None` means the caller asked for reasoning-OFF
+//! (`effort: "none"`) and the egress must OMIT the effort field rather
+//! than substitute a positive level. Anthropic-shape egresses
+//! (anthropic_api, bedrock) accept "xhigh" and "max" verbatim and MUST
+//! NOT call this helper for that purpose.
 
 #[cfg(any(
     feature = "openai-compat",
@@ -38,24 +41,35 @@ pub const VALID_EFFORT_TOKENS: [&str; 6] = ["minimal", "low", "medium", "high", 
 ))]
 const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
 
-/// Clamp `requested` to the nearest supported level on the standard
-/// rank order:
+/// Resolve `requested` against the model's declared supported levels.
+///
+/// Returns `None` when the caller's intent is reasoning-OFF (`requested ==
+/// "none"`): every egress interprets `None` as "omit the effort field" (or
+/// emit its own disable form), so a client that explicitly declined thinking
+/// is never billed for it. Returns `Some(level)` otherwise.
+///
+/// Rank order for clamping:
 ///
 ///   minimal < low < medium < high < xhigh < max
 ///
 /// Rules:
-///   - If `supported` is empty, return `requested` unchanged (passthrough).
-///   - If `supported` contains `requested`, return `requested` unchanged.
+///   - `requested == "none"` -> `None` (reasoning-OFF; omit, never substitute
+///     a positive level). This is the single place the "none" -> omit
+///     decision lives so all egresses stay consistent.
+///   - If `supported` is empty, return `Some(requested)` unchanged (passthrough).
+///   - If `supported` contains `requested`, return `Some(requested)` unchanged.
 ///   - Otherwise, pick the highest supported level that is <= requested
 ///     on the rank order above.
 ///   - If no supported level is <= requested (e.g., requested="minimal"
 ///     but supported only contains ["high"]), pick the lowest supported
 ///     level.
+///   - A genuinely unknown, intent-bearing token (not "none", not on the
+///     rank order -- e.g. "turbo") is PASSED THROUGH verbatim with a
+///     `tracing::warn!`, never clamped down to the lowest supported level.
+///     Clamping an unknown DOWN would silently invert caller intent; the
+///     upstream may reject it, but routectl does not fabricate a level.
 ///   - Emits `tracing::debug!` whenever a clamp actually changes the value,
 ///     with fields `requested`, `applied`, and `supported`.
-///   - Emits `tracing::warn!` when `supported` is non-empty AND `requested`
-///     is not in the standard rank order (unknown string). In that case the
-///     function still picks the lowest supported level as a safe default.
 #[cfg(any(
     feature = "openai-compat",
     feature = "anthropic-api",
@@ -65,30 +79,38 @@ const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
 pub(crate) fn clamp_effort_to_supported<'a>(
     requested: &'a str,
     supported: &[String],
-) -> Cow<'a, str> {
+) -> Option<Cow<'a, str>> {
+    // Reasoning-OFF: never substitute a positive level. Signal "omit" so the
+    // egress drops the effort field (or emits its own disable form). "none" is
+    // deliberately absent from RANK_ORDER -- it is not a positive level.
+    if requested == "none" {
+        return None;
+    }
+
     // Empty supported list -> passthrough semantics.
     if supported.is_empty() {
-        return Cow::Borrowed(requested);
+        return Some(Cow::Borrowed(requested));
     }
 
     // Fast path: the requested level is already in the supported set.
     if supported.iter().any(|s| s == requested) {
-        return Cow::Borrowed(requested);
+        return Some(Cow::Borrowed(requested));
     }
 
     // Locate the requested level in the canonical rank order.
     let requested_rank = RANK_ORDER.iter().position(|&r| r == requested);
 
     let Some(req_rank) = requested_rank else {
-        // Unknown effort string: warn and fall back to the lowest supported.
-        let lowest = lowest_supported(supported);
+        // Unknown, intent-bearing effort string. Pass it through verbatim
+        // rather than clamping to the lowest supported level: clamping an
+        // unknown DOWN silently inverts caller intent. The upstream may
+        // reject it, but routectl never fabricates a level.
         tracing::warn!(
             requested = requested,
-            applied = %lowest,
             supported = ?supported,
-            "effort string is not in the standard rank order; clamping to lowest supported"
+            "effort string is not in the standard rank order; passing through verbatim"
         );
-        return Cow::Owned(lowest.to_owned());
+        return Some(Cow::Borrowed(requested));
     };
 
     // Find the highest supported level whose rank is <= requested rank.
@@ -112,7 +134,7 @@ pub(crate) fn clamp_effort_to_supported<'a>(
         supported = ?supported,
         "effort clamped to model's declared supported levels"
     );
-    Cow::Owned(applied.to_owned())
+    Some(Cow::Owned(applied.to_owned()))
 }
 
 /// Exact effort-level -> `budget_tokens` lookup. Returns `None` for any
@@ -268,9 +290,38 @@ mod tests {
     ))]
     #[test]
     fn empty_supported_returns_requested() {
-        assert_eq!(clamp_effort_to_supported("max", &[]), "max");
-        assert_eq!(clamp_effort_to_supported("xhigh", &[]), "xhigh");
-        assert_eq!(clamp_effort_to_supported("anything", &[]), "anything");
+        assert_eq!(
+            clamp_effort_to_supported("max", &[]).as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            clamp_effort_to_supported("xhigh", &[]).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            clamp_effort_to_supported("anything", &[]).as_deref(),
+            Some("anything")
+        );
+    }
+
+    // "none" is reasoning-OFF: the helper returns None so every egress omits
+    // the effort field. It must NEVER resolve to a positive level, with or
+    // without a supported cap.
+    #[cfg(any(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "bedrock",
+        feature = "openai-responses"
+    ))]
+    #[test]
+    fn none_maps_to_omit_regardless_of_supported() {
+        assert_eq!(clamp_effort_to_supported("none", &[]), None);
+        let sup = levels(&["low", "medium", "high"]);
+        assert_eq!(clamp_effort_to_supported("none", &sup), None);
+        // Even when the only supported level is the lowest, "none" still omits
+        // rather than clamping up to it (the original inversion bug).
+        let only_low = levels(&["low"]);
+        assert_eq!(clamp_effort_to_supported("none", &only_low), None);
     }
 
     // Requested level is in supported -> verbatim, no allocation.
@@ -283,8 +334,14 @@ mod tests {
     #[test]
     fn requested_in_supported_returns_verbatim() {
         let sup = levels(&["low", "medium", "high"]);
-        assert_eq!(clamp_effort_to_supported("high", &sup), "high");
-        assert_eq!(clamp_effort_to_supported("low", &sup), "low");
+        assert_eq!(
+            clamp_effort_to_supported("high", &sup).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            clamp_effort_to_supported("low", &sup).as_deref(),
+            Some("low")
+        );
     }
 
     // requested="max", supported=["low","medium","high"] -> "high".
@@ -297,7 +354,10 @@ mod tests {
     #[test]
     fn max_clamps_to_high() {
         let sup = levels(&["low", "medium", "high"]);
-        assert_eq!(clamp_effort_to_supported("max", &sup), "high");
+        assert_eq!(
+            clamp_effort_to_supported("max", &sup).as_deref(),
+            Some("high")
+        );
     }
 
     // requested="xhigh", supported=["low","medium","high"] -> "high".
@@ -310,7 +370,10 @@ mod tests {
     #[test]
     fn xhigh_clamps_to_high() {
         let sup = levels(&["low", "medium", "high"]);
-        assert_eq!(clamp_effort_to_supported("xhigh", &sup), "high");
+        assert_eq!(
+            clamp_effort_to_supported("xhigh", &sup).as_deref(),
+            Some("high")
+        );
     }
 
     // requested="minimal", supported=["medium","high"] -> "medium"
@@ -324,7 +387,10 @@ mod tests {
     #[test]
     fn minimal_below_all_supported_picks_lowest() {
         let sup = levels(&["medium", "high"]);
-        assert_eq!(clamp_effort_to_supported("minimal", &sup), "medium");
+        assert_eq!(
+            clamp_effort_to_supported("minimal", &sup).as_deref(),
+            Some("medium")
+        );
     }
 
     // requested="low", supported=["medium","high"] -> "medium"
@@ -338,13 +404,16 @@ mod tests {
     #[test]
     fn low_below_all_supported_picks_lowest() {
         let sup = levels(&["medium", "high"]);
-        assert_eq!(clamp_effort_to_supported("low", &sup), "medium");
+        assert_eq!(
+            clamp_effort_to_supported("low", &sup).as_deref(),
+            Some("medium")
+        );
     }
 
-    // Unknown effort string with non-empty supported -> warn + lowest.
-    // We cannot easily test the warn emission in unit tests without
-    // tracing-test, but we can verify the returned value is the lowest
-    // supported level.
+    // Unknown, intent-bearing effort string with non-empty supported ->
+    // passthrough verbatim (NOT clamped down to lowest, which would invert
+    // intent). The upstream may reject it, but routectl never fabricates a
+    // level.
     #[cfg(any(
         feature = "openai-compat",
         feature = "anthropic-api",
@@ -352,10 +421,13 @@ mod tests {
         feature = "openai-responses"
     ))]
     #[test]
-    fn unknown_effort_returns_lowest_supported() {
+    fn unknown_effort_passes_through_verbatim() {
         let sup = levels(&["low", "medium"]);
-        let result = clamp_effort_to_supported("unknown_str", &sup);
-        assert_eq!(result, "low");
+        assert_eq!(
+            clamp_effort_to_supported("turbo", &sup).as_deref(),
+            Some("turbo"),
+            "an unknown token must pass through, not clamp down to lowest"
+        );
     }
 
     // Clamp from a mid-level works correctly.
@@ -368,10 +440,13 @@ mod tests {
     #[test]
     fn high_clamps_to_medium_when_only_low_medium_supported() {
         let sup = levels(&["low", "medium"]);
-        assert_eq!(clamp_effort_to_supported("high", &sup), "medium");
+        assert_eq!(
+            clamp_effort_to_supported("high", &sup).as_deref(),
+            Some("medium")
+        );
     }
 
-    // Single-element supported list: everything maps to it.
+    // Single-element supported list: everything (except "none") maps to it.
     #[cfg(any(
         feature = "openai-compat",
         feature = "anthropic-api",
@@ -381,9 +456,18 @@ mod tests {
     #[test]
     fn single_element_supported_always_returns_it() {
         let sup = levels(&["medium"]);
-        assert_eq!(clamp_effort_to_supported("max", &sup), "medium");
-        assert_eq!(clamp_effort_to_supported("minimal", &sup), "medium");
-        assert_eq!(clamp_effort_to_supported("medium", &sup), "medium");
+        assert_eq!(
+            clamp_effort_to_supported("max", &sup).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            clamp_effort_to_supported("minimal", &sup).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            clamp_effort_to_supported("medium", &sup).as_deref(),
+            Some("medium")
+        );
     }
 
     // minimal < low: low clamps down to minimal when minimal is sole option.
@@ -397,7 +481,10 @@ mod tests {
     fn low_clamps_down_when_only_minimal_supported() {
         let sup = levels(&["minimal"]);
         // low > minimal; highest <= low in supported is minimal.
-        assert_eq!(clamp_effort_to_supported("low", &sup), "minimal");
+        assert_eq!(
+            clamp_effort_to_supported("low", &sup).as_deref(),
+            Some("minimal")
+        );
     }
 
     // Forward table: every defined level maps to its exact budget.

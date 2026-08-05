@@ -781,6 +781,76 @@ fn reasoning_explicit_disable_omits_even_with_context_overlay() {
 }
 
 #[test]
+fn reasoning_none_effort_omits_reasoning_object() {
+    // Arrange: effort "none" is reasoning-OFF. It must NOT clamp to a
+    // positive level -- the Responses API has no disable token, so omitting
+    // the reasoning object entirely is the disable form.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("none".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(
+        v.get("reasoning").is_none(),
+        "effort:none must omit reasoning entirely, not emit a positive effort; got: {v}"
+    );
+}
+
+#[test]
+fn reasoning_none_effort_beats_budget_and_overlay() {
+    // Arrange: effort "none" paired with a budget (which would otherwise map
+    // to an effort band) and a summary overlay (which would otherwise force a
+    // reasoning object into existence). The explicit OFF wins over both.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("none".into()),
+        max_tokens: Some(8192),
+        exclude: None,
+        enabled: None,
+    });
+    req.provider_extras = Some(json!({"reasoning": {"summary": "concise"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(
+        v.get("reasoning").is_none(),
+        "effort:none must beat a budget and an overlay; got: {v}"
+    );
+}
+
+#[test]
+fn reasoning_unknown_effort_passes_through_verbatim() {
+    // Arrange: an unknown, intent-bearing token. It must travel verbatim
+    // rather than resolve to a positive level of routectl's choosing --
+    // clamping an unknown DOWN would silently invert caller intent.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("turbo".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(
+        v["reasoning"]["effort"], "turbo",
+        "an unknown effort token must pass through verbatim; got: {v}"
+    );
+}
+
+#[test]
 fn no_reasoning_controls_omits_reasoning_object() {
     // Arrange: no canonical reasoning and no remainder -> no reasoning key.
     let req = req_with(vec![user_text("ping")]);

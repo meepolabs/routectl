@@ -18,8 +18,8 @@ use routectl_core::{ChatRequest, Message, Result};
 use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 use super::util::{
-    derive_reasoning_effort, lift_delta_reasoning_content, lift_reasoning_content_field,
-    preserve_history_reasoning_content, reasoning_enabled_for_wire,
+    derive_reasoning_effort, insert_reasoning_effort, lift_delta_reasoning_content,
+    lift_reasoning_content_field, preserve_history_reasoning_content, reasoning_enabled_for_wire,
 };
 use crate::effort::clamp_effort_to_supported;
 
@@ -59,10 +59,9 @@ impl Dialect for VllmDialect {
             );
         }
         if let Some(effort) = derive_reasoning_effort(req) {
-            let clamped = clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels);
-            obj.insert(
-                "reasoning_effort".into(),
-                Value::String(clamped.into_owned()),
+            insert_reasoning_effort(
+                obj,
+                clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels),
             );
         }
         // History-reasoning shaping (strip vs preserve) is owned by
@@ -408,6 +407,117 @@ mod tests {
             "budget-only request must enable thinking: {body}"
         );
         assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    // effort:"none" is reasoning-OFF. vLLM's disable form is
+    // enable_thinking=false, and no reasoning_effort may be emitted. The two
+    // knobs must AGREE -- an enable_thinking=true paired with an omitted
+    // effort would still bill the caller for thinking it declined.
+    #[test]
+    fn none_effort_disables_thinking_and_omits_effort() {
+        // Arrange: effort "none", nothing else set.
+        let mut req = user_req("qwen3-30b");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("none".into()),
+            max_tokens: None,
+            enabled: None,
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Vllm,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert: no effort on the wire, and thinking explicitly off.
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "effort:none must not emit reasoning_effort: {body}"
+        );
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], false,
+            "effort:none must set enable_thinking=false: {body}"
+        );
+    }
+
+    // A contradictory canonical request -- effort:"none" alongside
+    // enabled:true -- must resolve to OFF. The explicit "none" is the disable
+    // intent; letting enabled:true win would ship enable_thinking=true while
+    // the clamp omits reasoning_effort, billing the caller for declined
+    // thinking.
+    #[test]
+    fn none_effort_beats_enabled_true() {
+        // Arrange
+        let mut req = user_req("qwen3-30b");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("none".into()),
+            max_tokens: None,
+            enabled: Some(true),
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Vllm,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], false,
+            "effort:none must beat enabled:true and disable thinking: {body}"
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "effort:none must not emit reasoning_effort: {body}"
+        );
+    }
+
+    // Same contradiction via a budget: effort:"none" alongside max_tokens.
+    // The budget is an enable signal only in the absence of an explicit
+    // decline.
+    #[test]
+    fn none_effort_beats_max_tokens() {
+        // Arrange
+        let mut req = user_req("qwen3-30b");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("none".into()),
+            max_tokens: Some(16000),
+            enabled: None,
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Vllm,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], false,
+            "effort:none must beat a budget and disable thinking: {body}"
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "effort:none must not emit reasoning_effort: {body}"
+        );
     }
 
     // Caller-supplied chat_template_kwargs wins: the unified reasoning config

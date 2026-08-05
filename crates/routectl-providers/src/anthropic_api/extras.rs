@@ -118,7 +118,12 @@ fn derive_effort(req: &ChatRequest) -> String {
         .as_ref()
         .and_then(|r| r.effort.clone())
         .unwrap_or_else(|| "medium".to_string());
-    clamp_effort_to_supported(&raw, &req.routectl_internal.effort_levels).into_owned()
+    // `clamp_effort_to_supported` returns `None` only for `effort: "none"`
+    // (reasoning-OFF). `derive_effort` runs solely on the adaptive path,
+    // where `build_thinking` has already mapped "none" -> `Disabled`, so
+    // `raw` is never "none" here; the fallback is a defensive belt.
+    clamp_effort_to_supported(&raw, &req.routectl_internal.effort_levels)
+        .map_or_else(|| "medium".to_string(), std::borrow::Cow::into_owned)
 }
 
 /// Decide which `ThinkingConfig` variant (if any) to emit. The
@@ -232,7 +237,11 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         });
     }
     if let Some(effort) = r.effort.as_deref() {
-        let clamped = clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels);
+        // `effort != "none"` here (the `thinking_active` gate above excludes
+        // it), so the clamp always yields `Some`; fall back to the raw effort
+        // defensively if that ever changes.
+        let clamped = clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels)
+            .unwrap_or(std::borrow::Cow::Borrowed(effort));
         // Prefer the exact effort->budget table; fall back to the
         // proportional estimate only for a level outside the table so
         // an unexpected string never regresses to a zero budget.
@@ -430,6 +439,11 @@ pub(super) fn is_routectl_managed_key(key: &str) -> bool {
 /// (`merge_provider_extras` may have overwritten the pre-merge clamped
 /// value with a raw caller-supplied `effort`). Empty `effort_levels`
 /// skips the re-clamp but still guarantees presence (pass-through).
+///
+/// An assembled `output_config.effort` of "none" is reasoning-OFF and is
+/// honored over the adaptive shape: the effort is dropped and `thinking` is
+/// rewritten to the `disabled` form, so the body never ships
+/// adaptive-thinking paired with a decline.
 pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value) {
     if !body_has_adaptive_thinking(body) {
         remove_output_config_effort(body);
@@ -453,15 +467,35 @@ pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value
         None => {
             oc.insert("effort".to_string(), Value::String(derive_effort(req)));
         }
+        Some(current) if current == "none" => {
+            disable_thinking_for_none_effort(obj);
+        }
         Some(current) => {
-            if !effort_levels.is_empty() {
-                let clamped = clamp_effort_to_supported(&current, effort_levels);
-                if clamped.as_ref() != current {
-                    oc.insert("effort".to_string(), Value::String(clamped.into_owned()));
-                }
+            if !effort_levels.is_empty()
+                && let Some(clamped) = clamp_effort_to_supported(&current, effort_levels)
+                && clamped.as_ref() != current
+            {
+                oc.insert("effort".to_string(), Value::String(clamped.into_owned()));
             }
         }
     }
+}
+
+/// Rewrite an adaptive-thinking body whose `output_config.effort` is "none"
+/// into the explicit reasoning-OFF shape: drop the effort (and a now-empty
+/// `output_config`) and replace `thinking` with `{type: "disabled"}` -- the
+/// same shape `build_thinking` emits for a canonical `effort: "none"`, so the
+/// two paths agree regardless of which one supplied the value.
+fn disable_thinking_for_none_effort(obj: &mut serde_json::Map<String, Value>) {
+    crate::effort::drop_orphaned_output_config_effort(obj);
+    obj.insert(
+        "thinking".to_string(),
+        serde_json::json!({"type": "disabled"}),
+    );
+    tracing::debug!(
+        "output_config.effort=none on an adaptive body: dropped the effort and \
+         disabled thinking (reasoning-OFF beats the adaptive shape)"
+    );
 }
 
 /// True iff the assembled body carries a `thinking` key at all (legacy
@@ -471,6 +505,20 @@ pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value
 /// cannot disagree about whether thinking survived the strip passes.
 fn body_has_thinking(body: &Value) -> bool {
     body.get("thinking").is_some()
+}
+
+/// True iff the body carries a `thinking` block that actually spends reasoning
+/// budget -- i.e. present AND not the explicit `{type: "disabled"}` form.
+/// Anthropic's forced `temperature = 1.0` applies only to active thinking, so
+/// a body whose thinking was reduced to `disabled` must get the caller's
+/// sampling back exactly as a fully-stripped one does.
+fn body_has_active_thinking(body: &Value) -> bool {
+    body_has_thinking(body)
+        && body
+            .get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(Value::as_str)
+            != Some("disabled")
 }
 
 /// True iff `body.thinking.type == "adaptive"`.
@@ -569,15 +617,16 @@ pub fn apply_structured_outputs_beta_to_body(body: &mut Value) {
 /// remove `thinking` from the body, leaving the forced sampling behind and
 /// discarding the caller's original values.
 ///
-/// This recomputes from the FINAL body: when no `thinking` survives, re-apply
-/// the caller's sampling from the SOURCE request -- `temperature =
+/// This recomputes from the FINAL body: when no ACTIVE thinking survives
+/// (stripped entirely, or rewritten to the `disabled` shape), re-apply the
+/// caller's sampling from the SOURCE request -- `temperature =
 /// req.temperature`, and `top_p` only when temperature is absent (mirrors the
 /// assembly else-branch; Claude 4.x rejects `temperature`+`top_p` together).
 /// Computing from the final body rather than restoring saved pre-strip values
 /// means a future strip pass cannot invalidate it. Must run after ALL strip
 /// passes.
 pub(super) fn reconcile_sampling_params(provider_id: &str, req: &ChatRequest, body: &mut Value) {
-    if body_has_thinking(body) {
+    if body_has_active_thinking(body) {
         return;
     }
     let temperature = req.temperature;
