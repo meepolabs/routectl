@@ -70,6 +70,29 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 ## Anthropic API surface
 
+- **The OAuth seat 400s `temperature` and `top_p`.** A `/v1/messages`
+  body carrying EITHER sampling param is rejected when the credential
+  is a Claude Code OAuth bearer against `api.anthropic.com` (both
+  confirmed independently; the failure is per-param, not per-pair).
+  `normalize_claude_sampling` in
+  `crates/routectl-providers/src/anthropic_api/extras.rs` drops both as
+  the LAST body mutation before egress, called from both `complete` and
+  `stream`, so it catches the caller's value, routectl's own
+  thinking-clamp `temperature: 1.0`, and anything a later pass could add.
+  Three notes for whoever debugs this next:
+  - The gate is the LANE predicate `is_cloak_lane` (oauth-bearer + exact
+    `api.anthropic.com` host + not the forwarded leg), deliberately NOT
+    the cloak mode. Gating on the cloak flag would let
+    `cloak.mode = "never"` re-introduce a lane-wide 400 -- the rejection
+    is a property of the credential, not of the disguise.
+  - `stop_sequences` is NOT stripped: probed and accepted (200). Only
+    the two alternative-continuation sampling knobs are rejected.
+  - `top_k` is the sibling hole. `reserved.rs` treats it as
+    non-canonical pass-through, so it is the one sampling param
+    `provider_extras` can still smuggle onto the wire. No confirmed 400
+    today, so nothing strips it -- if a `top_k` request starts failing
+    on the OAuth lane, this is the first place to look.
+
 - **Anthropic `tool_choice` rejects bare-string OpenAI shape**.
   Bedrock validators 400 on `tool_choice: "auto"` (OpenAI) where
   Anthropic expects `{"type":"auto"}`. Handled at the Anthropic-API

@@ -572,6 +572,40 @@ pub(super) fn union_structured_outputs_beta(body: &Value, betas: &mut Vec<String
     betas.push(flag.to_string());
 }
 
+/// True iff the assembled body carries `output_config.effort`, the
+/// adaptive-thinking directive Anthropic gates behind `EFFORT_BETA`.
+///
+/// Reads the ASSEMBLED body for the same reason `body_has_output_config_format`
+/// does: `reconcile_output_config_effort` injects, re-clamps, or drops
+/// `output_config.effort` after translation (an orphan effort is removed when
+/// no adaptive `thinking` survives), so `req.reasoning` is not a reliable
+/// signal for what ships.
+pub(super) fn body_has_output_config_effort(body: &Value) -> bool {
+    body.get("output_config")
+        .and_then(|oc| oc.get("effort"))
+        .is_some()
+}
+
+/// Union `EFFORT_BETA` into `betas` when `body` carries `output_config.effort`.
+/// Idempotent: an already-present flag is neither duplicated nor reordered.
+///
+/// Mirrors `union_structured_outputs_beta` (body-predicate, dedup, post-filter
+/// ordering): a capability-driven server requirement implied by the shipped
+/// body, so it runs AFTER the `allowed_betas` filter and after the floor
+/// composition. The invariant is ONE-WAY -- a body carrying the gated field
+/// gains the flag; a caller-supplied effort beta with NO field is left
+/// untouched (the inverse is never manufactured here).
+pub(super) fn union_effort_beta(body: &Value, betas: &mut Vec<String>) {
+    if !body_has_output_config_effort(body) {
+        return;
+    }
+    let flag = routectl_core::identity::anthropic::EFFORT_BETA;
+    if betas.iter().any(|b| b == flag) {
+        return;
+    }
+    betas.push(flag.to_string());
+}
+
 /// Body-field analogue of `union_structured_outputs_beta`: union the flag
 /// into `body.anthropic_beta` when the same body carries
 /// `output_config.format`. Same idempotence contract. Serves the
@@ -647,6 +681,55 @@ pub(super) fn reconcile_sampling_params(provider_id: &str, req: &ChatRequest, bo
              restored caller sampling params"
         );
     }
+}
+
+/// Fixed lane label stamped on the sampling-strip WARN. Names the credential
+/// lane (routectl's own OAuth seat egressing to api.anthropic.com), not the
+/// cloak state -- the strip is lane-deterministic, so a single static value
+/// correlates every strip event without leaking request-specific content.
+const OAUTH_OWN_ANTHROPIC_LANE: &str = "oauth-own-anthropic";
+
+/// Strip `temperature` and `top_p` from the FINAL outbound body on the
+/// OAuth own-anthropic lane. Anthropic's OAuth seat on api.anthropic.com
+/// 400s a `/v1/messages` body carrying either sampling param (both
+/// confirmed), so routectl -- which owns the outbound fingerprint on this
+/// lane -- must present a body the seat accepts regardless of what the
+/// caller, the thinking-clamp (`temperature: 1.0`), or a `provider_extras`
+/// smuggle put there.
+///
+/// The LAST word on the JSON: called after `cloak_body` and before the
+/// outgoing-body trace at both dispatch sites (`complete`, `stream`), so no
+/// later pass can re-introduce a stripped key. `stop_sequences` is left
+/// untouched (the seat accepts it). No-op on a non-object body.
+///
+/// Emits at most ONE structured WARN per affected request, listing only the
+/// key names actually present in `dropped_params`. NEVER logs the removed
+/// values or any body content -- the strip is lane-deterministic, so the
+/// key names plus the lane label are the whole diagnostic. The count_tokens
+/// path deliberately does NOT call this: `build_count_tokens_body` drops
+/// sampling by allowlist already, so calling it there would only multiply
+/// WARNs on a path Claude Code polls heavily, breaking the one-WARN-per-
+/// request contract.
+pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let mut dropped: Vec<&'static str> = Vec::new();
+    if obj.remove("temperature").is_some() {
+        dropped.push("temperature");
+    }
+    if obj.remove("top_p").is_some() {
+        dropped.push("top_p");
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        provider = provider_id,
+        lane = OAUTH_OWN_ANTHROPIC_LANE,
+        dropped_params = dropped.join(","),
+        "stripped sampling params the OAuth seat rejects on api.anthropic.com"
+    );
 }
 
 /// Set `key` to `value` on `obj`, or remove it when `value` is None
@@ -742,8 +825,13 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body
 
 #[cfg(test)]
 mod tests {
-    use super::{ThinkingConfig, build_thinking};
+    use super::{
+        ThinkingConfig, body_has_output_config_effort, build_thinking, normalize_claude_sampling,
+        union_effort_beta,
+    };
+    use routectl_core::identity::anthropic::EFFORT_BETA;
     use routectl_core::{ChatRequest, ReasoningConfig};
+    use serde_json::{Value, json};
 
     // Legacy-budget path with effort "high" must emit the exact table
     // budget (24576), not the old proportional estimate (max * 0.80).
@@ -773,6 +861,125 @@ mod tests {
                 })
             ),
             "expected exact table budget 24576, got {thinking:?}"
+        );
+    }
+
+    // -- normalize_claude_sampling helper matrix -----------------------
+
+    /// temperature only, top_p only, and both keys present (in an
+    /// arbitrary body) are all stripped; `stop_sequences` and unrelated
+    /// keys survive every case.
+    #[test]
+    fn sampling_strip_removes_temperature_and_top_p_keeps_the_rest() {
+        for mut body in [
+            json!({"model": "m", "temperature": 0.7, "stop_sequences": ["x"]}),
+            json!({"model": "m", "top_p": 0.9, "stop_sequences": ["x"]}),
+            json!({
+                "top_p": 0.1,
+                "model": "m",
+                "temperature": 1.0,
+                "stop_sequences": ["x"],
+            }),
+        ] {
+            normalize_claude_sampling("test", &mut body);
+            assert!(
+                body.get("temperature").is_none(),
+                "temperature must be stripped; got: {body}"
+            );
+            assert!(
+                body.get("top_p").is_none(),
+                "top_p must be stripped; got: {body}"
+            );
+            assert_eq!(
+                body["stop_sequences"],
+                json!(["x"]),
+                "stop_sequences must be preserved; got: {body}"
+            );
+            assert_eq!(body["model"], "m", "unrelated keys must survive");
+        }
+    }
+
+    /// The thinking-clamp forced `temperature: 1.0` is stripped like any
+    /// other sampling value -- the strip reads the final body, not intent.
+    #[test]
+    fn sampling_strip_removes_thinking_clamp_temperature() {
+        let mut body = json!({"temperature": 1.0});
+        normalize_claude_sampling("test", &mut body);
+        assert!(body.get("temperature").is_none());
+    }
+
+    /// No affected key present -> the body is byte-unchanged (and the
+    /// caller emits no WARN, asserted in the mod-level logging tests).
+    #[test]
+    fn sampling_strip_is_a_noop_without_affected_keys() {
+        let mut body = json!({"model": "m", "stop_sequences": ["x"]});
+        let before = body.clone();
+        normalize_claude_sampling("test", &mut body);
+        assert_eq!(body, before, "no sampling key -> no mutation");
+    }
+
+    /// A non-object body (array, string, null) is a no-op, never a panic.
+    #[test]
+    fn sampling_strip_is_a_noop_on_non_object_body() {
+        for mut body in [json!([1, 2, 3]), json!("scalar"), Value::Null] {
+            let before = body.clone();
+            normalize_claude_sampling("test", &mut body);
+            assert_eq!(body, before, "non-object body must be untouched");
+        }
+    }
+
+    // -- effort capability union ---------------------------------------
+
+    /// The body predicate keys strictly on `output_config.effort`; a
+    /// sibling `output_config.format` (structured outputs) is NOT effort.
+    #[test]
+    fn body_has_output_config_effort_keys_on_the_effort_subfield() {
+        assert!(body_has_output_config_effort(
+            &json!({"output_config": {"effort": "high"}})
+        ));
+        assert!(!body_has_output_config_effort(
+            &json!({"output_config": {"format": {"type": "json_object"}}})
+        ));
+        assert!(!body_has_output_config_effort(&json!({"model": "m"})));
+    }
+
+    /// A body carrying `output_config.effort` gains `EFFORT_BETA` exactly
+    /// once, appended after any pre-existing flags (no reorder).
+    #[test]
+    fn union_effort_beta_appends_flag_once() {
+        let body = json!({"output_config": {"effort": "high"}});
+        let mut betas = vec!["pre-existing".to_string()];
+        union_effort_beta(&body, &mut betas);
+        assert_eq!(
+            betas,
+            vec!["pre-existing".to_string(), EFFORT_BETA.to_string()],
+            "the flag appends after existing entries without reordering"
+        );
+    }
+
+    /// Idempotent: a second union pass neither duplicates nor reorders an
+    /// already-present flag.
+    #[test]
+    fn union_effort_beta_is_idempotent() {
+        let body = json!({"output_config": {"effort": "high"}});
+        let mut betas = vec![EFFORT_BETA.to_string(), "other".to_string()];
+        let before = betas.clone();
+        union_effort_beta(&body, &mut betas);
+        assert_eq!(betas, before, "an already-present flag stays put");
+    }
+
+    /// One-way invariant: with NO `output_config.effort` in the body, a
+    /// caller-supplied effort beta is left untouched -- the union never
+    /// manufactures the field, and never strips the flag.
+    #[test]
+    fn union_effort_beta_leaves_caller_beta_without_field_untouched() {
+        let body = json!({"model": "m"});
+        let mut betas = vec![EFFORT_BETA.to_string()];
+        let before = betas.clone();
+        union_effort_beta(&body, &mut betas);
+        assert_eq!(
+            betas, before,
+            "no effort field -> the beta list is untouched (one-way invariant)"
         );
     }
 }
