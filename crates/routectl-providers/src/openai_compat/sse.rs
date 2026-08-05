@@ -882,7 +882,9 @@ mod tests {
 
     /// The streamed synthesis scheme matches the non-streaming
     /// `normalize_tool_calls` empty-id fallback, so the two paths cannot
-    /// drift.
+    /// drift. Carries `crate::tool_calls`' own feature gate -- on a build
+    /// without it there is no second path to drift against.
+    #[cfg(any(feature = "bedrock", feature = "openai-responses"))]
     #[test]
     fn synthesized_streamed_id_matches_non_streaming_scheme() {
         let mut ids = StreamedToolCallIds::default();

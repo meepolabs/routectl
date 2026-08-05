@@ -463,7 +463,6 @@ enum ProviderCmd {
     /// `ROUTECTL_BEDROCK_ENVELOPE_CAPTURE=1` and exactly one explicit
     /// `--provider` or `--alias` target. CLI-only; never reachable from
     /// the serving listener.
-    #[cfg(feature = "bedrock")]
     #[command(hide = true)]
     CaptureEnvelope {
         /// Target a Bedrock `[providers.X]` key (model id resolved from the
@@ -838,7 +837,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let config_path = resolve_config_path(cli.config.as_deref());
                 std::process::exit(commands::probe::run(&config_path, name, json).await);
             }
-            #[cfg(feature = "bedrock")]
             ProviderCmd::CaptureEnvelope {
                 provider,
                 alias,
