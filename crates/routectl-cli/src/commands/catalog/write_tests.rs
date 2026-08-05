@@ -23,6 +23,8 @@ fn verify_at_stamps_existing_user_cell_updates_verified_at_only() {
             ttl_seconds: None,
             min_prefix_tokens: Some(512),
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -62,6 +64,8 @@ fn verify_at_flips_import_cell_source_to_user() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -145,6 +149,8 @@ fn blank_user_cell() -> OverlayCell {
         ttl_seconds: None,
         min_prefix_tokens: None,
         max_context_tokens: None,
+        input_cost_per_token: None,
+        output_cost_per_token: None,
         capabilities: None,
     }
 }
@@ -220,6 +226,8 @@ fn set_at_on_an_import_cell_flips_source_to_user_and_keeps_unset_fields() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -494,6 +502,8 @@ fn export_at_round_trips_back_into_an_equal_overlay() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -507,6 +517,8 @@ fn export_at_round_trips_back_into_an_equal_overlay() {
             ttl_seconds: None,
             min_prefix_tokens: Some(1024),
             max_context_tokens: Some(200_000),
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -645,6 +657,8 @@ fn user_cell_with_capability() -> OverlayCell {
         ttl_seconds: None,
         min_prefix_tokens: Some(1024),
         max_context_tokens: Some(200_000),
+        input_cost_per_token: None,
+        output_cost_per_token: None,
         capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
     }
 }

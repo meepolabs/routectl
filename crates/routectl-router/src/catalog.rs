@@ -126,6 +126,23 @@ pub struct CatalogRow {
     /// answer; a guessed window would be a silent data error downstream
     /// (`context_fraction`, deferred to the display work).
     pub max_context_tokens: Option<u32>,
+    /// Base input price in dollars PER TOKEN, when both vendored sources
+    /// confirm one rate for this exact `(provider_kind, model_glob)` cell.
+    /// This is the absolute rate `wm` / `rm` are multipliers OF, so a
+    /// query-time cost ESTIMATE needs it; it never replaces a
+    /// provider-reported billed figure, which stays authoritative wherever
+    /// one is available.
+    ///
+    /// `None` (fail-closed) when no single trustworthy rate exists for the
+    /// cell -- the same discipline as [`Self::max_context_tokens`]: a glob
+    /// matching models at genuinely different prices, or a structural
+    /// catch-all with no backing model, stays ABSENT rather than carrying a
+    /// guess. A guessed rate is a silent dollar error that compounds per
+    /// token.
+    pub input_cost_per_token: Option<f32>,
+    /// Base output price in dollars PER TOKEN. Same confirmation and
+    /// fail-closed rules as [`Self::input_cost_per_token`].
+    pub output_cost_per_token: Option<f32>,
     /// Capability priors keyed on the well-known namespace
     /// (`routectl_core::capability`). Absent key = NO PRIOR (distinct from
     /// `Some(false)`, an asserted absence). A baked row carries the priors its
@@ -154,6 +171,8 @@ impl CatalogRow {
             auto_cacher: false,
             tier: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: BTreeMap::new(),
         }
     }
@@ -185,6 +204,8 @@ impl CatalogRow {
             auto_cacher: ov.auto_cacher.unwrap_or(self.auto_cacher),
             tier: self.tier,
             max_context_tokens: ov.max_context_tokens.or(self.max_context_tokens),
+            input_cost_per_token: ov.input_cost_per_token.or(self.input_cost_per_token),
+            output_cost_per_token: ov.output_cost_per_token.or(self.output_cost_per_token),
             capabilities: self.capabilities.clone(),
         })
     }
@@ -216,6 +237,29 @@ pub(crate) enum CellDefect {
     /// write multiplier can make a cache break look falsely profitable.
     /// SOFT -- an operator may knowingly accept it.
     WriteMultiplierBelowSentinel(f32),
+    /// A base per-token rate is negative or non-finite. A negative price is
+    /// nonsense and a non-finite one poisons every estimate it reaches;
+    /// `None` is the way to leave a rate unconfirmed. Zero is ALLOWED -- a
+    /// genuinely free tier is a real vendor offering. HARD.
+    BaseRate(BaseRate, f32),
+}
+
+/// Which of the two base per-token rates a [`CellDefect::BaseRate`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseRate {
+    /// `input_cost_per_token`.
+    Input,
+    /// `output_cost_per_token`.
+    Output,
+}
+
+impl BaseRate {
+    const fn field(self) -> &'static str {
+        match self {
+            Self::Input => "input_cost_per_token",
+            Self::Output => "output_cost_per_token",
+        }
+    }
 }
 
 impl CellDefect {
@@ -233,6 +277,7 @@ impl CellDefect {
             Self::ReadMultiplier(_) => "rm",
             Self::WriteMultiplierNotFinite(_) | Self::WriteMultiplierBelowSentinel(_) => "wm",
             Self::ZeroMaxContextTokens => "max_context_tokens",
+            Self::BaseRate(which, _) => which.field(),
         }
     }
 
@@ -257,6 +302,11 @@ impl CellDefect {
                  break look falsely profitable",
                 CatalogRow::sentinel().wm
             ),
+            Self::BaseRate(which, rate) => format!(
+                "{} must be finite and >= 0.0 (got {rate}); use null to leave the rate \
+                 unconfirmed rather than carrying a guessed number",
+                which.field()
+            ),
         }
     }
 }
@@ -271,6 +321,8 @@ pub(crate) fn cell_value_defects(
     wm: Option<f32>,
     rm: Option<f32>,
     max_context_tokens: Option<u32>,
+    input_cost_per_token: Option<f32>,
+    output_cost_per_token: Option<f32>,
 ) -> Vec<CellDefect> {
     let mut defects = Vec::new();
     if let Some(wm) = wm {
@@ -287,6 +339,16 @@ pub(crate) fn cell_value_defects(
     }
     if max_context_tokens == Some(0) {
         defects.push(CellDefect::ZeroMaxContextTokens);
+    }
+    for (rate, which) in [
+        (input_cost_per_token, BaseRate::Input),
+        (output_cost_per_token, BaseRate::Output),
+    ] {
+        if let Some(rate) = rate
+            && (!rate.is_finite() || rate < 0.0)
+        {
+            defects.push(CellDefect::BaseRate(which, rate));
+        }
     }
     defects
 }
@@ -341,6 +403,16 @@ pub struct CachePricingOverride {
     /// wrong -- e.g. the operator has confirmed the vendor's real window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Operator-supplied base input price in dollars per token. `Some` wins
+    /// over the baked rate (or the baked `None`); `None` inherits the baked
+    /// value unchanged. Set this when the baked table has no rate for a cell,
+    /// or its rate is wrong for a negotiated / self-hosted price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_cost_per_token: Option<f32>,
+    /// Operator-supplied base output price in dollars per token. Same
+    /// precedence as [`Self::input_cost_per_token`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_cost_per_token: Option<f32>,
 }
 
 impl CachePricingOverride {
@@ -361,7 +433,13 @@ impl CachePricingOverride {
     /// Shared by the merge path ([`CatalogRow::with_overrides`]) and the
     /// startup validate-only pass ([`validate_overrides`]).
     pub fn validate(&self) -> Result<(), String> {
-        for defect in cell_value_defects(self.wm, self.rm, self.max_context_tokens) {
+        for defect in cell_value_defects(
+            self.wm,
+            self.rm,
+            self.max_context_tokens,
+            self.input_cost_per_token,
+            self.output_cost_per_token,
+        ) {
             match defect {
                 CellDefect::WriteMultiplierBelowSentinel(wm) => {
                     if !self.override_acknowledges_cost_risk {
@@ -940,6 +1018,8 @@ fn apply_overlay_cell(base: &CatalogRow, cell: &OverlayCell) -> CatalogRow {
         auto_cacher: base.auto_cacher,
         tier: base.tier,
         max_context_tokens: cell.max_context_tokens.or(base.max_context_tokens),
+        input_cost_per_token: cell.input_cost_per_token.or(base.input_cost_per_token),
+        output_cost_per_token: cell.output_cost_per_token.or(base.output_cost_per_token),
         capabilities: merge_capabilities(&base.capabilities, cell.capabilities.as_ref()),
     }
 }
@@ -1085,6 +1165,8 @@ mod tests {
             auto_cacher: _,
             tier: _,
             max_context_tokens: _,
+            input_cost_per_token: _,
+            output_cost_per_token: _,
             capabilities: _,
         } = row;
     }
@@ -1784,6 +1866,111 @@ mod tests {
         assert_eq!(r.max_context_tokens, None);
     }
 
+    // -- base per-token rates -------------------------------------------------
+
+    #[test]
+    fn model_pinned_glob_bakes_the_cross_checked_base_rates() {
+        // Arrange / Act: Sonnet 4.6's glob is pinned to one model generation,
+        // which both snapshots price identically.
+        let r = lookup("anthropic-api", "claude-sonnet-4-6", None);
+
+        // Assert: $3/M in, $15/M out, expressed per token.
+        assert_eq!(r.input_cost_per_token, Some(3.0e-6));
+        assert_eq!(r.output_cost_per_token, Some(1.5e-5));
+    }
+
+    #[test]
+    fn price_ambiguous_glob_stays_priced_absent_rather_than_guessing() {
+        // A vendor-wide prefix matches models the sources price very
+        // differently, so no single rate is defensible -- the same
+        // fail-closed answer `max_context_tokens` gives.
+        for (provider_kind, model) in [
+            ("openai-compat", "qwen-max"),
+            ("openai-compat", "gemini-3.5-flash"),
+            ("openai-responses", "gpt-5.6"),
+        ] {
+            let r = lookup(provider_kind, model, None);
+            assert_eq!(
+                r.input_cost_per_token, None,
+                "lookup({provider_kind:?}, {model:?}) must not bake a base input rate"
+            );
+            assert_eq!(r.output_cost_per_token, None);
+        }
+    }
+
+    #[test]
+    fn sentinel_carries_no_base_rates() {
+        assert_eq!(CatalogRow::sentinel().input_cost_per_token, None);
+        assert_eq!(CatalogRow::sentinel().output_cost_per_token, None);
+    }
+
+    #[test]
+    fn operator_override_wins_over_a_baked_base_rate() {
+        // Arrange: a negotiated rate on a cell the table already prices.
+        let baked = lookup("anthropic-api", "claude-sonnet-4-6", None);
+        assert_eq!(baked.input_cost_per_token, Some(3.0e-6));
+        let ov = CachePricingOverride {
+            input_cost_per_token: Some(1.0e-6),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert
+        assert_eq!(merged.input_cost_per_token, Some(1.0e-6));
+        assert_eq!(
+            merged.output_cost_per_token, baked.output_cost_per_token,
+            "an unset override field inherits the baked rate"
+        );
+    }
+
+    #[test]
+    fn operator_override_supplies_a_rate_the_table_leaves_absent() {
+        // Arrange: a price-ambiguous glob bakes no rate; the operator knows
+        // which model they actually run.
+        let baked = lookup("openai-compat", "qwen-max", None);
+        assert_eq!(baked.input_cost_per_token, None);
+        let ov = CachePricingOverride {
+            input_cost_per_token: Some(1.6e-6),
+            output_cost_per_token: Some(6.4e-6),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert
+        assert_eq!(merged.input_cost_per_token, Some(1.6e-6));
+        assert_eq!(merged.output_cost_per_token, Some(6.4e-6));
+    }
+
+    #[test]
+    fn validate_rejects_a_negative_base_rate_naming_the_field() {
+        // Arrange
+        let ov = CachePricingOverride {
+            output_cost_per_token: Some(-1.0e-6),
+            ..Default::default()
+        };
+
+        // Act
+        let err = ov
+            .validate()
+            .expect_err("a negative price must be rejected");
+
+        // Assert
+        assert!(err.contains("output_cost_per_token"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_zero_base_rate_since_a_free_tier_is_real() {
+        let ov = CachePricingOverride {
+            input_cost_per_token: Some(0.0),
+            ..Default::default()
+        };
+        assert!(ov.validate().is_ok());
+    }
+
     #[test]
     fn with_overrides_some_wins_over_baked_some() {
         // Arrange: baked Sonnet 4.6 row already carries Some(1_000_000).
@@ -1940,6 +2127,8 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }
     }
@@ -1953,6 +2142,8 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }
     }
@@ -2021,6 +2212,8 @@ mod tests {
             ttl_seconds: Some(9_999),
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         });
         let effective = merge(Some(&baked), Some(&cell));
@@ -2046,6 +2239,8 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
         });
         let effective = merge(Some(&baked), Some(&cell));
@@ -2071,6 +2266,8 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         });
         let effective = merge(None, Some(&cell));

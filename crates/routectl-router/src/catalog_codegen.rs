@@ -16,9 +16,12 @@
 //! process's working directory.
 //!
 //!   - `models_dev.json` (models.dev) is the PRIMARY source for economics
-//!     (`cost.input` / `cost.cache_read` / `cost.cache_write` /
-//!     `limit.context`) and for the `structured_output` capability tell --
-//!     its schema names these fields directly.
+//!     (`cost.input` / `cost.output` / `cost.cache_read` /
+//!     `cost.cache_write` / `limit.context`) and for the
+//!     `structured_output` capability tell -- its schema names these fields
+//!     directly. NOTE its price UNIT: `cost.*` is dollars per MILLION
+//!     tokens, where litellm's `*_cost_per_token` fields are already
+//!     per-token (see `MODELS_DEV_PRICE_UNIT_TOKENS`).
 //!   - `litellm_model_prices_and_context_window.json` (BerriAI/litellm) is
 //!     the CROSS-CHECK source for those same fields, and the SOLE source
 //!     for `web_search` / `computer_use` (models.dev has no equivalent
@@ -42,6 +45,16 @@
 //! marked `economics_unconfirmed` and its economics mirror
 //! [`crate::catalog::CatalogRow::sentinel`] rather than a fabricated
 //! number (see `OPENAI_COMPAT_SELECTORS`).
+//!
+//! BASE RATES: `input_cost_per_token` / `output_cost_per_token` are the
+//! absolute dollar rates `wm` / `rm` are multipliers OF, extracted through
+//! the same cross-check (see [`base_rates_for`]). They serve a query-time
+//! cost ESTIMATE and never displace a provider-reported billed figure. A
+//! selector whose glob spans models the sources price differently is marked
+//! `price_ambiguous` and stays priced-ABSENT (`None`) -- the same
+//! fail-closed discipline as `max_context_tokens`, since a wrong dollar
+//! rate compounds per token. Operator config still WINS over any baked rate
+//! (see [`crate::catalog::merge`]).
 
 use std::collections::BTreeMap;
 #[cfg(feature = "gen-catalog")]
@@ -61,14 +74,14 @@ use crate::catalog_codegen_selectors::{
 /// NOT on a vendor-snapshot refresh that leaves the generated shape
 /// unchanged. Rendered into `catalog_baked.rs` as `CATALOG_VERSION: u32`.
 #[cfg(feature = "gen-catalog")]
-const CATALOG_VERSION: u32 = 1;
+const CATALOG_VERSION: u32 = 2;
 
 /// Display-only date the vendored snapshots under `catalog_data/` were
 /// fetched, hand-maintained here (never the wall clock -- see the module
 /// doc's determinism note) and rendered into `catalog_baked.rs` as a
 /// separate `&str` const from `CATALOG_VERSION`.
 #[cfg(feature = "gen-catalog")]
-const CATALOG_SNAPSHOT_DATE: &str = "2026-07-11";
+const CATALOG_SNAPSHOT_DATE: &str = "2026-08-04";
 
 #[cfg(feature = "gen-catalog")]
 const LITELLM_JSON: &str = include_str!(concat!(
@@ -118,6 +131,8 @@ pub(crate) struct GeneratedCell {
     #[cfg_attr(not(feature = "gen-catalog"), allow(dead_code))]
     pub(crate) tier: Option<&'static str>,
     pub(crate) max_context_tokens: Option<u32>,
+    pub(crate) input_cost_per_token: Option<f32>,
+    pub(crate) output_cost_per_token: Option<f32>,
     pub(crate) capabilities: Vec<(&'static str, bool)>,
 }
 
@@ -347,6 +362,11 @@ pub(crate) fn derive_cells(
                 auto_cacher: catch_all.auto_cacher,
                 tier: None,
                 max_context_tokens: None,
+                // A provider-kind catch-all has no backing model to price:
+                // it matches every model the kind serves, at every price
+                // point. Fail-closed, same as its `max_context_tokens`.
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: Vec::new(),
             }]),
         ));
@@ -417,6 +437,12 @@ fn anthropic_like_cells(
         allowlist,
     )?;
     let capabilities = capabilities_for(&selector_id, entry, md_entry, allowlist)?;
+    // Every tiered selector's glob is pinned to one model generation, whose
+    // dated ids all price identically in both snapshots -- so unlike the
+    // vendor-wide openai-compat prefixes, one rate is right for the whole
+    // glob.
+    let (input_cost_per_token, output_cost_per_token) =
+        base_rates_for(&selector_id, false, entry, md_entry, allowlist)?;
 
     let mut out = vec![GeneratedCell {
         provider_kind,
@@ -428,6 +454,8 @@ fn anthropic_like_cells(
         auto_cacher: false,
         tier: Some("5m"),
         max_context_tokens: ctx,
+        input_cost_per_token,
+        output_cost_per_token,
         capabilities: capabilities.clone(),
     }];
     if let Some(wm_1h) = wm_1h {
@@ -441,6 +469,8 @@ fn anthropic_like_cells(
             auto_cacher: false,
             tier: Some("1h"),
             max_context_tokens: ctx,
+            input_cost_per_token,
+            output_cost_per_token,
             capabilities,
         });
     }
@@ -479,6 +509,13 @@ fn auto_cacher_cell(
         )?
     };
     let capabilities = capabilities_for(&selector_id, entry, md_entry, allowlist)?;
+    let (input_cost_per_token, output_cost_per_token) = base_rates_for(
+        &selector_id,
+        sel.price_ambiguous,
+        entry,
+        md_entry,
+        allowlist,
+    )?;
 
     if sel.economics_unconfirmed {
         let sentinel = CatalogRow::sentinel();
@@ -492,6 +529,8 @@ fn auto_cacher_cell(
             auto_cacher: sentinel.auto_cacher,
             tier: None,
             max_context_tokens: ctx,
+            input_cost_per_token,
+            output_cost_per_token,
             capabilities,
         });
     }
@@ -527,8 +566,78 @@ fn auto_cacher_cell(
         auto_cacher: sel.auto_cacher,
         tier: None,
         max_context_tokens: ctx,
+        input_cost_per_token,
+        output_cost_per_token,
         capabilities,
     })
+}
+
+/// Derive the base per-token input/output rates for one selector through
+/// the SAME two-source cross-check the multipliers use: agreement or
+/// single-source data passes through, a disagreement fails generation
+/// unless the allowlist resolves it.
+///
+/// `price_ambiguous` forces both rates to `None`: the selector's glob
+/// matches models the snapshots price very differently (a bare `"*"`
+/// catch-all, or a vendor-wide prefix spanning an embedding model and a
+/// flagship), so the representative model's rate would be confidently wrong
+/// for most of what the glob serves. That mirrors
+/// [`AutoCacherSelector::context_ambiguous`]'s posture for the window:
+/// ABSENT beats a guess.
+fn base_rates_for(
+    selector_id: &str,
+    price_ambiguous: bool,
+    litellm_entry: &Value,
+    models_dev_entry: Option<&Value>,
+    allowlist: &Allowlist,
+) -> Result<(Option<f32>, Option<f32>), String> {
+    if price_ambiguous {
+        return Ok((None, None));
+    }
+    let rate = |field: &str, models_dev_field: &str| -> Result<Option<f32>, String> {
+        Ok(resolve_f64(
+            selector_id,
+            field,
+            models_dev_entry.and_then(|e| models_dev_rate(e, models_dev_field)),
+            f64_field(litellm_entry, field),
+            allowlist,
+        )?
+        .and_then(narrow_rate))
+    };
+    Ok((
+        rate("input_cost_per_token", "input")?,
+        rate("output_cost_per_token", "output")?,
+    ))
+}
+
+/// Narrow a source `f64` per-token rate to the baked `f32`, or drop it
+/// (priced-ABSENT, fail-closed) when the result would not be a usable
+/// price. A dropped rate leaves the cell unpriced, which downstream
+/// already handles; a silently wrong one poisons every estimate built on
+/// it.
+///
+/// Rejects, in order: a non-finite or negative SOURCE value (corruption,
+/// not a price); a value that OVERFLOWS to infinity on the narrowing cast
+/// (`f64` carries rates `f32` cannot represent); and a positive value that
+/// UNDERFLOWS to zero on the cast (`f32`'s smallest subnormal is ~1e-45,
+/// and a rate that collapses to zero would read as a free tier). The
+/// order matters: the finiteness check has to run on the NARROWED value,
+/// since a finite `f64` is exactly what becomes `f32::INFINITY`.
+///
+/// A source zero passes through unchanged -- a genuinely free tier is a
+/// real vendor offering, not a degenerate value.
+fn narrow_rate(rate: f64) -> Option<f32> {
+    if !rate.is_finite() || rate < 0.0 {
+        return None;
+    }
+    let narrowed = rate as f32;
+    if !narrowed.is_finite() {
+        return None;
+    }
+    if rate > 0.0 && narrowed == 0.0 {
+        return None;
+    }
+    Some(narrowed)
 }
 
 fn capabilities_for(
@@ -606,6 +715,22 @@ fn models_dev_context(entry: &Value) -> Option<u32> {
         .get("context")?
         .as_f64()
         .map(|v| v as u32)
+}
+
+/// models.dev publishes `cost.input` / `cost.output` in dollars per MILLION
+/// tokens, while litellm's `input_cost_per_token` /
+/// `output_cost_per_token` are already per-token. The cache MULTIPLIERS
+/// divide two fields from the SAME source, so their units cancel and no
+/// conversion is needed there -- these absolute base rates are the first
+/// values where the mismatch is load-bearing, and cross-checking the two
+/// sources against each other requires one common unit. Per-token is that
+/// unit (it is what the row stores and what a cost estimate multiplies by a
+/// token count).
+const MODELS_DEV_PRICE_UNIT_TOKENS: f64 = 1.0e6;
+
+fn models_dev_rate(entry: &Value, field: &str) -> Option<f64> {
+    let rate = entry.get("cost")?.get(field)?.as_f64()?;
+    Some(rate / MODELS_DEV_PRICE_UNIT_TOKENS)
 }
 
 /// The stable marker every cross-check-disagreement error message from
@@ -784,6 +909,8 @@ fn render_cell(out: &mut String, cell: &GeneratedCell) {
          \x20               auto_cacher: {},\n\
          \x20               tier: {},\n\
          \x20               max_context_tokens: {},\n\
+         \x20               input_cost_per_token: {},\n\
+         \x20               output_cost_per_token: {},\n\
          \x20               capabilities: {},\n\
          \x20           }},\n\
          \x20       }},",
@@ -796,8 +923,23 @@ fn render_cell(out: &mut String, cell: &GeneratedCell) {
         cell.auto_cacher,
         tier,
         ctx,
+        render_rate(cell.input_cost_per_token),
+        render_rate(cell.output_cost_per_token),
         caps,
     );
+}
+
+/// Render one base per-token rate as Rust source. `{:e}` (not `Display`)
+/// because these rates are small enough that decimal notation runs to a
+/// dozen leading zeros -- an unreadable literal in a checked-in file that a
+/// reviewer is expected to diff. The exponent form round-trips exactly: it
+/// is emitted from, and parsed back into, the same `f32`.
+#[cfg(feature = "gen-catalog")]
+fn render_rate(rate: Option<f32>) -> String {
+    match rate {
+        None => "None".to_string(),
+        Some(v) => format!("Some({v:e}_f32)"),
+    }
 }
 
 #[cfg(test)]
@@ -875,6 +1017,7 @@ mod tests {
         let litellm = serde_json::json!({
             tiered.litellm_key: {
                 "input_cost_per_token": 1.0e-5,
+                "output_cost_per_token": 5.0e-5,
                 "cache_read_input_token_cost": 1.0e-6,
                 "cache_creation_input_token_cost": 1.25e-5,
                 "cache_creation_input_token_cost_above_1hr": 2.0e-5,
@@ -882,6 +1025,7 @@ mod tests {
             },
             auto_cacher.litellm_key: {
                 "input_cost_per_token": 2.0e-6,
+                "output_cost_per_token": 8.0e-6,
                 "cache_read_input_token_cost": 2.0e-7,
                 "max_input_tokens": 400_000.0,
             },
@@ -890,7 +1034,15 @@ mod tests {
             "anthropic": {
                 "models": {
                     tiered.models_dev_model: {
-                        "cost": {"input": 1.0e-5, "cache_read": 1.0e-6, "cache_write": 1.25e-5},
+                        // models.dev prices are per MILLION tokens, so these
+                        // are the same rates the litellm fixture states
+                        // per-token (see `MODELS_DEV_PRICE_UNIT_TOKENS`).
+                        "cost": {
+                            "input": 10.0,
+                            "output": 50.0,
+                            "cache_read": 1.0,
+                            "cache_write": 12.5,
+                        },
                         "limit": {"context": 200_000},
                     },
                 },
@@ -898,7 +1050,7 @@ mod tests {
             auto_cacher.models_dev_provider: {
                 "models": {
                     auto_cacher.models_dev_model: {
-                        "cost": {"input": 2.0e-6, "cache_read": 2.0e-7},
+                        "cost": {"input": 2.0, "output": 8.0, "cache_read": 0.2},
                         "limit": {"context": 400_000},
                     },
                 },
@@ -919,6 +1071,14 @@ mod tests {
         assert_eq!(tiered_cells[1].tier, Some("1h"));
         assert_eq!(tiered_cells[1].wm, 2.0);
         assert_eq!(tiered_cells[0].rm, tiered_cells[1].rm);
+        // Base rates cross-check clean across the two unit conventions and
+        // are shared by both tiers.
+        assert_eq!(tiered_cells[0].input_cost_per_token, Some(1.0e-5));
+        assert_eq!(tiered_cells[0].output_cost_per_token, Some(5.0e-5));
+        assert_eq!(
+            tiered_cells[1].input_cost_per_token,
+            tiered_cells[0].input_cost_per_token
+        );
 
         let auto_cacher_cells = results
             .iter()
@@ -928,5 +1088,122 @@ mod tests {
         assert_eq!(auto_cacher_cells.len(), 1, "single tier-agnostic row");
         assert!(auto_cacher_cells[0].tier.is_none());
         assert_eq!(auto_cacher_cells[0].max_context_tokens, Some(400_000));
+        // The openai-responses `*` glob is `price_ambiguous`: it serves every
+        // OpenAI model, so it stays priced-ABSENT even though both fixtures
+        // publish a rate for the representative model.
+        assert_eq!(auto_cacher_cells[0].input_cost_per_token, None);
+        assert_eq!(auto_cacher_cells[0].output_cost_per_token, None);
+    }
+
+    #[test]
+    fn base_rates_normalize_the_two_sources_price_units_before_cross_checking() {
+        // Arrange: the SAME rate stated in each source's own unit --
+        // models.dev per million tokens, litellm per token. Agreement here
+        // is only reachable through the conversion.
+        let litellm = serde_json::json!({
+            "input_cost_per_token": 3.0e-6,
+            "output_cost_per_token": 1.5e-5,
+        });
+        let models_dev = serde_json::json!({"cost": {"input": 3.0, "output": 15.0}});
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let rates = base_rates_for("k:m", false, &litellm, Some(&models_dev), &allowlist)
+            .expect("agreeing rates must not trip the cross-check");
+
+        // Assert
+        assert_eq!(rates, (Some(3.0e-6), Some(1.5e-5)));
+    }
+
+    #[test]
+    fn base_rates_fail_closed_on_an_unallowlisted_price_disagreement() {
+        // Arrange: models.dev says $3/M, litellm says $4/M -- a real gap,
+        // not a unit artifact.
+        let litellm = serde_json::json!({"input_cost_per_token": 4.0e-6});
+        let models_dev = serde_json::json!({"cost": {"input": 3.0}});
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let err = base_rates_for("k:m", false, &litellm, Some(&models_dev), &allowlist)
+            .expect_err("a genuine price disagreement must fail generation");
+
+        // Assert
+        assert!(reason_is_cross_check_mismatch(&err), "reason: {err}");
+        assert!(err.contains("input_cost_per_token"), "reason: {err}");
+    }
+
+    #[test]
+    fn base_rates_drop_a_negative_published_rate_rather_than_baking_it() {
+        // Arrange: a single source publishing a nonsense negative price (no
+        // cross-check to run, so the filter is the only guard).
+        let litellm = serde_json::json!({"input_cost_per_token": -1.0e-6});
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+
+        // Assert: priced-ABSENT, not a negative rate.
+        assert_eq!(rates, (None, None));
+    }
+
+    #[test]
+    fn base_rates_keep_a_zero_rate_since_a_free_tier_is_real() {
+        // Arrange
+        let litellm = serde_json::json!({"input_cost_per_token": 0.0});
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+
+        // Assert
+        assert_eq!(rates, (Some(0.0), None));
+    }
+
+    // -----------------------------------------------------------------------
+    // f64 -> f32 narrowing: a value that only becomes degenerate ON the
+    // cast is dropped, not baked.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn base_rates_drop_a_rate_that_overflows_f32_on_the_narrowing_cast() {
+        // Arrange: finite as f64, but past f32::MAX (~3.4e38), so the cast
+        // yields f32::INFINITY -- a source-value finiteness check alone
+        // would wave this through.
+        let litellm = serde_json::json!({"input_cost_per_token": 1.0e300});
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+
+        // Assert: priced-ABSENT, never an infinite baked rate.
+        assert_eq!(rates, (None, None));
+    }
+
+    #[test]
+    fn base_rates_drop_a_positive_rate_that_underflows_to_zero_on_the_narrowing_cast() {
+        // Arrange: a positive f64 far below f32's smallest subnormal
+        // (~1e-45), so the cast collapses it to 0.0 -- which would
+        // otherwise read as a free tier rather than a lost value.
+        let litellm = serde_json::json!({"input_cost_per_token": 1.0e-300});
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        // Act
+        let rates = base_rates_for("k:m", false, &litellm, None, &allowlist).expect("derives");
+
+        // Assert: priced-ABSENT, never a spurious zero.
+        assert_eq!(rates, (None, None));
+    }
+
+    #[test]
+    fn narrow_rate_keeps_a_representable_positive_rate_and_an_exact_zero() {
+        assert_eq!(narrow_rate(3.0e-6), Some(3.0e-6_f32));
+        assert_eq!(narrow_rate(0.0), Some(0.0_f32));
+    }
+
+    #[test]
+    fn narrow_rate_rejects_non_finite_and_negative_sources() {
+        assert_eq!(narrow_rate(f64::NAN), None);
+        assert_eq!(narrow_rate(f64::INFINITY), None);
+        assert_eq!(narrow_rate(-1.0e-6), None);
     }
 }

@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 use crate::catalog::CatalogRow;
 
 /// See `crate::catalog_codegen` for how this is derived.
-pub const CATALOG_VERSION: u32 = 1;
+pub const CATALOG_VERSION: u32 = 2;
 
 /// Display-only; never used in economics. See `crate::catalog_codegen`.
-pub const CATALOG_SNAPSHOT_DATE: &str = "2026-07-11";
+pub const CATALOG_SNAPSHOT_DATE: &str = "2026-08-04";
 
 /// One generated baked cell. Mirrors `crate::catalog`'s module-private
 /// `BakedCell` shape as a public type, since `catalog_baked` has no
@@ -42,6 +42,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: BTreeMap::new(),
             },
         },
@@ -58,6 +60,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(1e-6_f32),
+                output_cost_per_token: Some(5e-6_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -77,6 +81,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(1e-6_f32),
+                output_cost_per_token: Some(5e-6_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -96,6 +102,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -115,6 +123,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -134,6 +144,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -153,6 +165,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -172,6 +186,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -191,6 +207,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -210,6 +228,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -229,6 +249,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -248,6 +270,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -267,6 +291,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -286,6 +312,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -305,6 +333,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -324,6 +354,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: BTreeMap::new(),
             },
         },
@@ -340,6 +372,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(1e-6_f32),
+                output_cost_per_token: Some(5e-6_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -359,6 +393,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(1e-6_f32),
+                output_cost_per_token: Some(5e-6_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -378,6 +414,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -397,6 +435,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(5e-6_f32),
+                output_cost_per_token: Some(2.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -416,6 +456,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -435,6 +477,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(200000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -454,6 +498,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("5m"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -473,6 +519,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: Some("1h"),
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(3e-6_f32),
+                output_cost_per_token: Some(1.5e-5_f32),
                 capabilities: capabilities_map(&[
                     ("computer_use", true),
                     ("structured_output", true),
@@ -492,6 +540,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: BTreeMap::new(),
             },
         },
@@ -508,6 +558,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[("structured_output", true)]),
             },
         },
@@ -524,6 +576,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(4.35e-7_f32),
+                output_cost_per_token: Some(8.7e-7_f32),
                 capabilities: capabilities_map(&[("structured_output", true)]),
             },
         },
@@ -540,6 +594,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: Some(1048576),
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[
                     ("web_search", true),
                     ("structured_output", true),
@@ -551,7 +607,7 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
             model_glob: "grok-*",
             row: CatalogRow {
                 wm: 1_f32,
-                rm: 0.25_f32,
+                rm: 0.15_f32,
                 ttl_seconds: 300,
                 min_prefix_tokens: 4096,
                 has_storage_rent: false,
@@ -559,6 +615,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[
                     ("web_search", true),
                     ("structured_output", true),
@@ -578,6 +636,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: Some(262144),
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[("web_search", true)]),
             },
         },
@@ -594,6 +654,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: BTreeMap::new(),
             },
         },
@@ -610,6 +672,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: Some(1000000),
+                input_cost_per_token: Some(3e-7_f32),
+                output_cost_per_token: Some(1.2e-6_f32),
                 capabilities: BTreeMap::new(),
             },
         },
@@ -626,6 +690,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[("structured_output", true)]),
             },
         },
@@ -642,6 +708,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: Some(262144),
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[("web_search", true)]),
             },
         },
@@ -658,6 +726,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: false,
                 tier: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: BTreeMap::new(),
             },
         },
@@ -674,6 +744,8 @@ pub fn baked_cells() -> Vec<BakedCatalogCell> {
                 auto_cacher: true,
                 tier: None,
                 max_context_tokens: Some(1050000),
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: capabilities_map(&[
                     ("web_search", true),
                     ("structured_output", true),

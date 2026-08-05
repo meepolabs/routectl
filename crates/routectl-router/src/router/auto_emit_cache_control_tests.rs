@@ -1202,6 +1202,8 @@ async fn overlay_override_through_real_load_path_changes_would_trim_pricing() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );

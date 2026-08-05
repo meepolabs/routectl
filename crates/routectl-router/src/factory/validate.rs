@@ -1132,10 +1132,15 @@ fn validate_float_fields(config: &Config) -> Result<()> {
     }
 
     for (key, override_entry) in &config.cache_pricing {
-        let leaves: [(&str, Option<f32>); 3] = [
+        let leaves: [(&str, Option<f32>); 5] = [
             ("wm", override_entry.wm),
             ("rm", override_entry.rm),
             ("storage_rent", override_entry.storage_rent),
+            ("input_cost_per_token", override_entry.input_cost_per_token),
+            (
+                "output_cost_per_token",
+                override_entry.output_cost_per_token,
+            ),
         ];
         for (field, value) in leaves {
             let Some(v) = value else { continue };
