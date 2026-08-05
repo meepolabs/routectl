@@ -492,6 +492,24 @@ api_key_ref  = "env://ANTHROPIC_API_KEY"
 allowed_betas = ["claude-code-20250219", "oauth-2025-04-20"]
 ```
 
+On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
+routectl also injects a 9-flag model-agnostic floor
+(`default_claude_code_anthropic_betas()`: `claude-code-20250219`,
+`oauth-2025-04-20`, `interleaved-thinking-2025-05-14`,
+`context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`,
+`structured-outputs-2025-12-15`, `fast-mode-2026-02-01`,
+`redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28`). The floor
+bypasses this allowlist -- those nine are operator-equivalent pins.
+
+The floor carries ONLY model-agnostic flags. Model-gated ones
+(`context-1m-2025-08-07`, `effort-2025-11-24`,
+`thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`,
+`advisor-tool-2026-03-01`) are NOT injected, because forcing them 400s models
+that do not support them. They travel as ordinary client-driven flags, which
+means `allowed_betas` now APPLIES to them where the floor previously bypassed
+it: a non-empty `allowed_betas` that omits `context-1m-2025-08-07` drops a
+caller's request for it.
+
 ### `allowed_betas` carve-out: the structured-outputs beta
 
 One flag is exempt from BOTH allowlists above. Whenever a request's

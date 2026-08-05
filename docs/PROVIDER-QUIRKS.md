@@ -163,7 +163,9 @@ api_key_ref = "file:///path/to/oauth-token"
 auth_kind = "oauth-bearer"
 ```
 
-For `auth_kind = "api-key"` (default), routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth_kind = "oauth-bearer"` on `api.anthropic.com`, the full Claude Code beta set (incl. `oauth-2025-04-20` and `context-1m-2025-08-07`) is auto-injected from `default_claude_code_anthropic_betas()`, so no manual `header_extras` beta list is needed.
+For `auth_kind = "api-key"` (default), routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth_kind = "oauth-bearer"` on `api.anthropic.com`, `default_claude_code_anthropic_betas()` auto-injects a 9-flag model-agnostic base -- `claude-code-20250219`, `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`, `redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28` -- so no manual `header_extras` beta list is needed for those.
+
+The base is deliberately NOT the full set genuine Claude Code emits. Model-gated flags (`context-1m-2025-08-07`, `effort-2025-11-24`, `thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`, `advisor-tool-2026-03-01`) are excluded because forcing them 400s models that do not support them (haiku rejects `context-1m-2025-08-07`). They reach upstream only when the caller sends them -- as client pass-through, now subject to `allowed_betas` where the floor previously bypassed it. If you need a model-gated flag on every request to a model that DOES support it, declare it in that `[models.X] header_extras`.
 
 ### claude-code attribution headers (`X-Claude-Code-*`)
 

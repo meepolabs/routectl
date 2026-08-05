@@ -989,6 +989,7 @@ pub fn routectl_core::failure_class::classify_with_attempt(&routectl_core::error
 pub mod routectl_core::identity
 pub mod routectl_core::identity::anthropic
 pub const routectl_core::identity::anthropic::CONTEXT_1M_BETA: &str
+pub const routectl_core::identity::anthropic::EFFORT_BETA: &str
 pub const routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA: &str
 pub const routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA: &str
 pub const fn routectl_core::identity::anthropic::default_claude_code_anthropic_betas() -> &'static [&'static str]

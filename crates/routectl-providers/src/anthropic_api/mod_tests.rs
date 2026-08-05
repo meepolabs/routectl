@@ -2713,9 +2713,9 @@ fn resolve_forwarded_bearer_does_not_log_token() {
 
 /// A genuine Claude Code request (a captured `x-claude-code-session-id`
 /// header) classifies as NOT non-CC, but the mandatory OAuth gate still
-/// fires independent of that classification. The non-CC-only floor
-/// (and therefore `context-1m-2025-08-07`) must NOT widen the beta set
-/// for a genuine CC client.
+/// fires independent of that classification. `context-1m-2025-08-07` is
+/// not in the floor, so it never widens the beta set for a genuine CC
+/// client either.
 #[test]
 fn beta_decision_reflects_genuine_cc_request() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -2739,8 +2739,10 @@ fn beta_decision_reflects_genuine_cc_request() {
 }
 
 /// The mirror case: no captured session-id header classifies as
-/// non-CC, and the pinned Claude Code beta floor (including
-/// `context-1m-2025-08-07`) widens the outgoing beta set.
+/// non-CC. The beta floor no longer carries `context-1m-2025-08-07`, so
+/// the classification alone never widens the outgoing beta set with it
+/// -- a true `has_context_1m_beta` now means the CALLER (or an operator
+/// `header_extras`) asked for it, never floor contamination.
 #[test]
 fn beta_decision_reflects_non_cc_request() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
@@ -2758,8 +2760,8 @@ fn beta_decision_reflects_non_cc_request() {
         "the mandatory oauth gate must fire for non-CC too"
     );
     assert!(
-        decision.has_context_1m_beta,
-        "a non-CC request must be floor-widened with context-1m"
+        !decision.has_context_1m_beta,
+        "a non-CC request must NOT be floor-widened with context-1m"
     );
 }
 
