@@ -146,6 +146,12 @@ impl IngressAdapter for OpenAiIngress {
                 "openai ingress: invalid /v1/chat/completions body: {e}"
             ))
         })?;
+        // An assistant turn echoed back by a client may carry its
+        // reasoning_details in Anthropic block vocabulary -- notably a
+        // response routectl itself served through the Anthropic ingress.
+        // The kind aliases handle the discriminator; this lands the
+        // Anthropic `thinking` payload key on canonical `text`.
+        routectl_core::normalize_reasoning_detail_payloads(&mut req);
         // Merge swept extras into req.provider_extras (the body may
         // have already carried an explicit `provider_extras` object;
         // sweep keeps both -- the swept ones win on conflict because

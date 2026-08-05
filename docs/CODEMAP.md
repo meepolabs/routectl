@@ -93,6 +93,16 @@ listed at the bottom of each crate.
   consumer shares: `is_responses_family` (family test, never `==`),
   `scheme_of` -> `ReplayScheme` (Codex/Mantle/Gray validator family), and
   `is_replayable(detail, lane)` -> `Replayability` (Carry/Strip/Gray)
+- `src/reasoning_ingest.rs` -- `normalize_reasoning_detail_payloads`, the
+  inbound reasoning-vocabulary normalization BOTH ingresses run after
+  deserialization. `ReasoningDetailKind` serde-aliases the Anthropic block
+  names (`thinking` -> `Text`, `redacted_thinking` -> `Encrypted`) so a
+  client echoing an assistant turn in Anthropic vocabulary is not rejected;
+  this moves the Anthropic `thinking` payload key onto canonical `text`,
+  which the aliases alone cannot do. Shared, not duplicated per ingress:
+  the defect it closes was the two dialects drifting apart on which
+  vocabulary they accept. Read-only scan first, `Arc::make_mut` only when a
+  rewrite is due, so the common request pays no message-buffer copy
 - `src/reserved.rs` -- `is_canonical_request_key` allowlist guarding
   extras-merge from clobbering `ChatRequest` fields
 - `src/capability.rs` -- shared capability-key vocabulary (`WEB_SEARCH`,
@@ -3791,6 +3801,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   canonical normalize and Anthropic ingress render does not leak vendor
   envelope keys or a `signature:null` thinking block into the Anthropic-shape
   response
+- `tests/cross_ingress_reasoning_roundtrip.rs` -- pins that routectl accepts
+  its OWN output across dialects: captures an assistant turn from
+  `AnthropicIngress::render_response` and replays it into
+  `OpenAiIngress::parse_request` unmodified, both as content blocks and as a
+  `reasoning_details` array still spelled in Anthropic vocabulary. Also pins
+  the closing lap (re-render to Anthropic blocks with text and signature
+  intact) and that the inbound aliases never leak back onto the OpenAI wire
 - `tests/e2e_reasoning.rs` -- end-to-end reasoning round-trip across DeepSeek
   / vLLM / Anthropic dialects
 - `tests/live_matrix.rs` -- shared harness for the live provider matrix

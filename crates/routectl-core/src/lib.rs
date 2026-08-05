@@ -19,6 +19,7 @@ pub(crate) mod provider;
 pub(crate) mod reasoning_dialect;
 pub mod reasoning_envelope;
 pub mod reasoning_format;
+pub mod reasoning_ingest;
 pub(crate) mod reserved;
 pub mod schema;
 pub(crate) mod schema_opaque;
@@ -69,6 +70,7 @@ pub use reasoning_format::{
     BEDROCK_MANTLE, CODEX_OAUTH, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReplayScheme, Replayability,
     is_replayable, is_responses_family, scheme_of,
 };
+pub use reasoning_ingest::normalize_reasoning_detail_payloads;
 pub use reserved::is_canonical_request_key;
 pub use schema::{
     CacheCreation, ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta,
