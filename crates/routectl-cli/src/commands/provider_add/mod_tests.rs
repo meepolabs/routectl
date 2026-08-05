@@ -404,7 +404,6 @@ async fn missing_secret_source_errors_actionably() {
     assert_eq!(std::fs::read(&path).unwrap(), before, "must not write");
 }
 
-#[cfg(feature = "gemini")]
 #[tokio::test]
 async fn adds_gemini_with_default_base_url() {
     let dir = tempfile::tempdir().unwrap();
@@ -422,7 +421,6 @@ async fn adds_gemini_with_default_base_url() {
     assert_eq!(entry.api_key_ref(), Some("env://GEMINI_API_KEY"));
 }
 
-#[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_rejects_base_url_flag() {
     let dir = tempfile::tempdir().unwrap();

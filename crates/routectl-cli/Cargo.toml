@@ -103,19 +103,13 @@ dhat = { version = "0.3", optional = true }
 libc = "0.2"
 
 [features]
-# Default-on forward of routectl-router's `gemini` feature, so the shipped
-# binary can add and route Gemini providers. `provider add` cfg-gates its
-# Gemini support behind this feature, mirroring the router's own cfg gate on
-# the `Gemini` variant -- a build with the feature off compiles cleanly and
-# simply does not offer the kind.
-default = ["gemini", "bedrock"]
-gemini = ["routectl-router/gemini"]
-# Default-on forward of the Bedrock lane. Gates the env-gated envelope-
-# capture harness (commands::probe::capture); on by default so the shipped
-# binary carries it (armed at runtime by ROUTECTL_BEDROCK_ENVELOPE_CAPTURE,
-# not a build flag). routectl-providers already enables its bedrock feature
-# unconditionally; this adds the router forward plus the CLI cfg gate.
-bedrock = ["routectl-router/bedrock", "routectl-providers/bedrock"]
+# The CLI ships every provider by design. Its `routectl-providers` dependency
+# hardcodes the full provider set and it pulls `routectl-router` with default
+# features (which forward bedrock / openai-responses / gemini), so the whole
+# provider set is compiled unconditionally. A lean provider subset is not a
+# supported CLI build target, so no provider-gating features are declared
+# here -- any such flag would be decorative (feature unification re-enables
+# every provider through the two deps above regardless of it).
 # Enable live integration tests that hit real providers using API keys
 # from the environment (OPENROUTER_API_KEY, NIM_API_KEY, ANTHROPIC_API_KEY,
 # AWS_BEARER_TOKEN_BEDROCK, etc.). Tests skip cleanly when their key is

@@ -37,8 +37,10 @@ cargo test -p routectl-cli --features live-integration --release \
 # Lean build for downstream library consumers who don't want the
 # AWS dependency tree. Scoped to the providers library: a full
 # --workspace build can never be AWS-free because routectl-cli
-# always links the bedrock feature, and Cargo feature unification
-# then re-enables bedrock (and the AWS SDK) for the whole graph.
+# hardcodes the bedrock provider on its routectl-providers dependency,
+# and Cargo feature unification then re-enables bedrock (and the AWS
+# SDK) for the whole graph. The routectl CLI itself declares no
+# provider-gating features -- it ships every provider by design.
 # This providers-scoped check is what the pre-commit hook runs.
 cargo check -p routectl-providers --no-default-features \
   --features openai-compat,anthropic-api

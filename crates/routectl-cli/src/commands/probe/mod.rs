@@ -33,7 +33,6 @@ use crate::server::CompositeStore;
 
 pub mod canary;
 pub mod capabilities;
-#[cfg(feature = "bedrock")]
 pub mod capture;
 pub mod resolve;
 

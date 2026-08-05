@@ -10,17 +10,11 @@ use super::capture::{PendingSecret, capture_from_stdin, ref_class, resolve_inter
 use super::{AddIo, ProviderAddArgs};
 
 /// Provider kinds this flag-driven command can construct from a single
-/// `api_key_ref`. `openai-compat` / `anthropic-api` are always compiled;
-/// `gemini` (api-key mode) is added when its cargo feature is on -- default
-/// for the shipped binary, and cfg-gated here to mirror the router's own
-/// gate on the `Gemini` variant. Kinds needing richer inputs are out of this
-/// command's non-interactive scope: Bedrock takes a multi-field credential
-/// block, and OpenAI Responses defaults to OAuth; both are configured by
-/// hand or through the interactive flow.
-#[cfg(feature = "gemini")]
+/// `api_key_ref`. Kinds needing richer inputs are out of this command's
+/// non-interactive scope: Bedrock takes a multi-field credential block, and
+/// OpenAI Responses defaults to OAuth; both are configured by hand or through
+/// the interactive flow.
 const SUPPORTED_KINDS: &[&str] = &["openai-compat", "anthropic-api", "gemini"];
-#[cfg(not(feature = "gemini"))]
-const SUPPORTED_KINDS: &[&str] = &["openai-compat", "anthropic-api"];
 
 /// The login provider id an oauth-backed `--kind` delegates to, or `None`
 /// for an ordinary api-key kind. Hardcode-then-abstract: the login flow
@@ -86,7 +80,6 @@ pub(super) fn build_entry(
             };
             Ok((entry, cred_class, pending))
         }
-        #[cfg(feature = "gemini")]
         "gemini" => {
             // Gemini has no public base-URL setter; its constructor pins the
             // public v1beta endpoint. A custom endpoint is a hand-edit, so a
