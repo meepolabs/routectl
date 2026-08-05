@@ -128,14 +128,17 @@ impl ReplayLearnKey {
         }
     }
 
-    /// The lane discriminant this entry is keyed on.
-    #[must_use]
+    /// The lane discriminant this entry is keyed on. Only the tests that pin
+    /// key normalization read it back out; the lifecycle itself passes the
+    /// whole key around.
+    #[cfg(test)]
     pub fn lane_key(&self) -> &str {
         &self.lane_key
     }
 
-    /// The normalized capability key this entry is keyed on.
-    #[must_use]
+    /// The normalized capability key this entry is keyed on. Test-only for the
+    /// same reason as [`Self::lane_key`].
+    #[cfg(test)]
     pub fn capability_key(&self) -> &str {
         &self.capability_key
     }
@@ -198,8 +201,9 @@ impl ReplayLearnRegistry {
 
     /// Whether an acting learned negative currently forces a strip for this
     /// pair, independent of any in-flight probe. Read-only: it never claims
-    /// the carry slot.
-    #[must_use]
+    /// the carry slot. Test-only: the dispatch path settles through
+    /// `admit_provisional`, which reads the same state while claiming.
+    #[cfg(test)]
     pub fn is_negative_acting(&self, key: &ReplayLearnKey, now: Instant) -> bool {
         matches!(self.negative_state(key, now), NegativeState::Acting)
     }
@@ -241,12 +245,6 @@ pub struct ReplayProbeGuard<'a> {
 }
 
 impl ReplayProbeGuard<'_> {
-    /// The pair this guard carries.
-    #[must_use]
-    pub const fn key(&self) -> &ReplayLearnKey {
-        &self.key
-    }
-
     /// Phase two: the stripped repair succeeded, so the rejection is
     /// confirmed as a real replay incompatibility. Persists the negative
     /// (refreshing a resident or lapsed one) and returns the emission row
@@ -350,7 +348,10 @@ impl ReplayProbeGuard<'_> {
     /// Settle WITHOUT learning: the stripped repair failed, or the request
     /// hit an error unrelated to replay. Any resident entry is left exactly
     /// as it was, so the next request re-verifies rather than inheriting a
-    /// conclusion nothing proved.
+    /// conclusion nothing proved. The dispatch path reaches this same
+    /// no-learn settlement by dropping an unsettled guard (see [`Drop`]); an
+    /// explicit call is exercised only by the tests.
+    #[cfg(test)]
     pub fn release(mut self) {
         self.settled = true;
         self.registry.release_slot(&self.key);

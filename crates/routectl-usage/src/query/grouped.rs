@@ -252,7 +252,7 @@ pub struct QueryResult {
 /// The whole read happens inside a single deferred transaction, so every figure
 /// comes from one snapshot. A progress handler checks `deadline` every few
 /// thousand VM instructions and interrupts the statement once it has passed,
-/// surfacing as [`QueryError::Interrupted`]; a [`ProgressGuard`] removes the
+/// surfacing as [`QueryError::Interrupted`]; a `ProgressGuard` removes the
 /// handler on every exit path -- return, error, and unwind alike -- so the
 /// connection is left as it was found.
 ///

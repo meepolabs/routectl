@@ -147,7 +147,6 @@ pub use k_estimator::{
     ShadowOutcome, ShadowStore, rebuild_into,
 };
 pub use learned_capability::{LearnedCapabilityRegistry, LearnedRegistryEntry};
-pub use learned_replay::{ReplayLearnKey, ReplayLearnRegistry, ReplayProbeGuard};
 pub use override_registry::{
     OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,
     validate_capability_overrides,

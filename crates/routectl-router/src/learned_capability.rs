@@ -480,7 +480,7 @@ impl LearnedCapabilityRegistry {
     /// re-probe slot. For callers that own their own admission discipline;
     /// the ordinary dispatch path uses [`Self::acting_negative_for`], which
     /// both reads and claims.
-    pub fn negative_state(
+    pub(crate) fn negative_state(
         &self,
         state_key: &str,
         feature_key_raw: &str,

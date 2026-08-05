@@ -293,10 +293,10 @@ pub fn open_readonly_fastfail(path: impl AsRef<Path>) -> Result<UsageDb, OpenErr
 /// older-schema DB is a clear error here, never a silent migrate -- the
 /// out-of-band-migration incident class.
 ///
-/// The open sequence is a thin sibling of [`open_readonly_with_timeout`],
-/// reusing [`verify_readable_version`] and [`ensure_requests_table`]: reject
+/// The open sequence is a thin sibling of `open_readonly_with_timeout`,
+/// reusing `verify_readable_version` and `ensure_requests_table`: reject
 /// a missing file as `NoData`, open `SQLITE_OPEN_READ_WRITE` (never `CREATE`),
-/// apply the standard [`BUSY_TIMEOUT_MS`] busy timeout, verify the schema
+/// apply the standard `BUSY_TIMEOUT_MS` busy timeout, verify the schema
 /// version matches this binary exactly ([`OpenError::VersionTooOld`] /
 /// [`OpenError::VersionTooNew`] on any mismatch), treat a missing `requests`
 /// table as `NoData`, and confirm WAL by READING the journal-mode pragma

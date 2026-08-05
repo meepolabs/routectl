@@ -610,34 +610,32 @@ async fn observe_meta_empty_capability_events_enqueues_nothing() {
     writer.shutdown();
 }
 
+/// A reasoning-replay learn event shaped exactly as the router's replay
+/// lifecycle emits it on commit: lane-discriminated state key, scheme-tagged
+/// capability key, self-identifying tier on a single corroborated
+/// observation. The lifecycle that PRODUCES this shape is covered by the
+/// router's own unit tests; here it is a fixture so the CLI drain is tested
+/// without reaching into router internals.
+fn replay_learn_event() -> routectl_router::router::CapabilityLearnEvent {
+    routectl_router::router::CapabilityLearnEvent {
+        state_key: "lane-target#mantle".to_string(),
+        capability_key: "reasoning_replay:codex".to_string(),
+        provider_kind: "openai-responses".to_string(),
+        signal_tier: routectl_core::SignalTier::SelfIdentifying,
+        observations: 1,
+        upstream_status: 400,
+        remapped: false,
+        request_features: vec!["reasoning_replay".to_string()],
+        phase: FailurePhase::F1,
+        source: EvidenceSource::Live,
+    }
+}
+
 #[tokio::test]
-async fn observe_meta_drains_a_committed_replay_negative_without_a_schema_change() {
-    // Arrange: a real reasoning-replay learn event, produced by the
-    // lifecycle's own two-phase commit rather than hand-built, rides the
-    // dispatch meta.
-    use routectl_core::ReplayScheme;
-    use routectl_router::{LearnedCapabilityRegistry, ReplayLearnKey, ReplayLearnRegistry};
-
-    let learned = std::sync::Arc::new(LearnedCapabilityRegistry::new(
-        std::time::Duration::from_hours(48),
-        std::time::Duration::from_hours(1),
-        64,
-    ));
-    let replay = ReplayLearnRegistry::new(learned);
-    let now = std::time::Instant::now();
-    let key = ReplayLearnKey::new(
-        "lane-target",
-        "openai-responses",
-        ReplayScheme::Mantle,
-        ReplayScheme::Codex,
-    );
-    let event = replay
-        .admit_provisional(&key, now)
-        .expect("an unknown pair admits its single carry")
-        .commit(400, vec!["reasoning_replay".to_string()], now);
-
+async fn observe_meta_drains_a_replay_negative_without_a_schema_change() {
+    // Arrange: a reasoning-replay learn event rides the dispatch meta.
     let mut meta = any_dispatch_meta().await;
-    meta.learned_capabilities = vec![event];
+    meta.learned_capabilities = vec![replay_learn_event()];
 
     // Act: the drain runs over the shipped `learned_capabilities` seam.
     let (conn, _dir) = drain_and_open(&meta, 7, 3, 1);
