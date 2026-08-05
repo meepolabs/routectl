@@ -882,6 +882,15 @@ pub struct ReasoningDetail {
 /// Discriminator on a `ReasoningDetail`. Determines what fields the
 /// detail's `payload` object carries and how downstream egresses
 /// interpret it.
+///
+/// Three variants, and only three: this is the canonical vocabulary every
+/// egress matches exhaustively. The Anthropic block spellings
+/// (`thinking`, `redacted_thinking`) are accepted INBOUND as serde
+/// aliases onto the canonical variant they already mean, so a client
+/// echoing a `reasoning_details` array in Anthropic vocabulary is not
+/// rejected at the ingress boundary. Aliases widen deserialization only
+/// -- serialization always emits the canonical `reasoning.*` spelling,
+/// so the outbound wire contract is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningDetailKind {
@@ -894,14 +903,26 @@ pub enum ReasoningDetailKind {
     /// is an opaque blob the model emits and expects back verbatim on
     /// follow-up turns for chain-of-thought continuity. Round-trip
     /// only; never displayed to the user.
-    #[serde(rename = "reasoning.encrypted")]
+    ///
+    /// The Anthropic `redacted_thinking` block is the same thing under
+    /// another name -- an opaque replay-only blob, carried in
+    /// `payload.data` -- so it aliases here. Both payload spellings are
+    /// already read by the Anthropic egress and by the ingress's
+    /// `encrypted_detail_data`.
+    #[serde(rename = "reasoning.encrypted", alias = "redacted_thinking")]
     Encrypted,
     /// Anthropic-shape thinking block. `payload.text` is the visible
     /// thinking content; `payload.signature` is mandatory for
     /// multi-turn replay (Anthropic 400s on follow-ups missing it).
     /// Format string `anthropic-claude-v1` distinguishes from other
     /// `Text`-kind details.
-    #[serde(rename = "reasoning.text")]
+    ///
+    /// The Anthropic `thinking` block aliases here. That block spells
+    /// its text `thinking` rather than `text`, so an inbound detail in
+    /// that vocabulary needs
+    /// [`normalize_reasoning_detail_payloads`](crate::normalize_reasoning_detail_payloads)
+    /// to land its text where every reader looks.
+    #[serde(rename = "reasoning.text", alias = "thinking")]
     Text,
 }
 

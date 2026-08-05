@@ -52,6 +52,11 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     let mut req: ChatRequest = serde_json::from_value(body)
         .map_err(|e| Error::Validation(format!("anthropic ingress: invalid body: {e}")))?;
 
+    // Same inbound reasoning-payload normalization the openai ingress
+    // runs. Shared so the two dialects cannot drift back apart on which
+    // reasoning vocabulary they accept.
+    routectl_core::normalize_reasoning_detail_payloads(&mut req);
+
     // v0.6.0: alias resolution lives entirely in the router. The
     // ingress only honors the `x-routectl-alias` header override
     // (otherwise the wire `model` value passes through verbatim).
