@@ -120,10 +120,24 @@ pub(super) fn build_additional_fields(
     strip_thinking_when_tool_choice_forces_use(cfg, &mut bag, tool_choice);
 
     if bag.is_empty() {
-        None
-    } else {
-        Some(Value::Object(bag))
+        return None;
     }
+
+    // Feature-triggered structured-outputs beta union. When the bag carries
+    // `output_config.format`, AWS forwards it to Anthropic which gates it
+    // behind `STRUCTURED_OUTPUTS_BETA`; a Converse request whose `[bedrock]
+    // allowed_betas` omits that flag would otherwise ship the gated field
+    // ungated and 400. The flag is a routectl-derived server requirement
+    // implied by the shipped bag, not a client-opted beta, so it bypasses the
+    // allowlist -- run AFTER `filter_bedrock_betas` and
+    // `filter_bedrock_body_fields` (which could drop `output_config`
+    // entirely). Reuses the same helper as the Bedrock-Invoke lane: the bag's
+    // `output_config.format` + `anthropic_beta` shape matches the Anthropic
+    // body it reads. Feature-triggered and idempotent -- no format means no
+    // flag, an already-present flag is neither duplicated nor reordered.
+    let mut bag = Value::Object(bag);
+    crate::anthropic_api::request::apply_structured_outputs_beta_to_body(&mut bag);
+    Some(bag)
 }
 
 /// Layer canonical `req.provider_extras` (the Anthropic ingress's
@@ -755,5 +769,87 @@ mod tests {
         );
         assert_eq!(oc["format"]["type"], "json_schema");
         assert_eq!(oc["format"]["schema"]["required"][0], "x");
+    }
+
+    /// A request carrying `response_format` maps to `output_config.format`
+    /// in the Converse bag; the structured-outputs beta it gates must ride
+    /// along in `anthropic_beta` even when a NON-EMPTY `[bedrock]
+    /// allowed_betas` omits the flag. The union is a routectl-derived server
+    /// requirement implied by the shipped field, not a client-opted beta, so
+    /// it bypasses the allowlist -- parallel to the Bedrock-Invoke test
+    /// `structured_outputs_beta_survives_a_restrictive_bedrock_allowlist`.
+    #[test]
+    fn structured_outputs_beta_survives_restrictive_converse_allowlist() {
+        use serde_json::json;
+
+        // Arrange: restrictive allowlist that omits the flag, plus a
+        // structured-output directive on the request.
+        let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
+        let mut cfg = fake_cfg();
+        cfg.allowed_betas = vec!["context-1m-2025-08-07".into()];
+        assert!(
+            !cfg.allowed_betas.iter().any(|b| b == flag),
+            "precondition: the allowlist must omit the structured-outputs flag"
+        );
+        assert!(
+            !cfg.anthropic_beta.iter().any(|b| b == flag),
+            "precondition: the operator floor must not supply the flag either"
+        );
+
+        let mut req = req_with_thinking();
+        req.response_format = Some(json!({
+            "type": "json_schema",
+            "json_schema": {"name": "widget", "schema": {"type": "object"}},
+        }));
+
+        // Act
+        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = bag.as_object().expect("bag is an object");
+
+        // Assert: the directive reached the bag, and its gating beta rode
+        // along despite the restrictive allowlist.
+        assert!(
+            bag.get("output_config")
+                .and_then(|oc| oc.get("format"))
+                .is_some(),
+            "precondition: the structured-output directive must reach the bag; got: {bag:?}"
+        );
+        let betas: Vec<&str> = bag["anthropic_beta"]
+            .as_array()
+            .expect("the gating beta must be on the final bag")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert!(
+            betas.contains(&flag),
+            "output_config.format must never ship without its gating beta; got: {betas:?}"
+        );
+    }
+
+    /// Regression guard: a bag with no `output_config.format` gains no
+    /// structured-outputs beta -- the union is strictly feature-triggered.
+    #[test]
+    fn no_structured_output_format_gains_no_beta() {
+        let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
+        let cfg = fake_cfg();
+        let req = req_with_thinking();
+
+        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = bag.as_object().expect("bag is an object");
+
+        assert!(
+            bag.get("output_config")
+                .and_then(|oc| oc.get("format"))
+                .is_none(),
+            "precondition: no structured-output directive in this request; got: {bag:?}"
+        );
+        let carries_flag = bag
+            .get("anthropic_beta")
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| arr.iter().any(|b| b.as_str() == Some(flag)));
+        assert!(
+            !carries_flag,
+            "no structured-output format must yield no structured-outputs beta; got: {bag:?}"
+        );
     }
 }
