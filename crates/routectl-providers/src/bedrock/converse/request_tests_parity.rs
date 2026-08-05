@@ -241,6 +241,46 @@ fn response_format_coexists_with_adaptive_effort_in_bag() {
     assert_eq!(oc["effort"], "medium", "got: {body}");
 }
 
+/// `effort: "none"` is reasoning-OFF. On the Converse adaptive path the
+/// disable form is `thinking: {type: "disabled"}`; no positive
+/// `output_config.effort` may accompany it. Without this pin, the shared
+/// clamp helper could resolve "none" to the lowest supported level and bill
+/// the caller for thinking it explicitly declined.
+#[test]
+fn none_effort_emits_disabled_thinking_and_no_output_config_effort() {
+    // Arrange: adaptive thinking enabled on the provider, effort "none".
+    let mut cfg = fake_cfg();
+    cfg.adaptive_thinking = Some(true);
+    let req = ChatRequest {
+        model: "anthropic.claude-sonnet-4-5".into(),
+        messages: vec![user_msg("hi")].into(),
+        max_tokens: Some(2048),
+        reasoning: Some(ReasoningConfig {
+            effort: Some("none".into()),
+            max_tokens: None,
+            exclude: None,
+            enabled: None,
+        }),
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert: thinking is the explicit disable form, and no effort rides along.
+    let bag = &body["additionalModelRequestFields"];
+    assert_eq!(
+        bag["thinking"]["type"], "disabled",
+        "effort:none must emit the disabled thinking form: {body}"
+    );
+    assert!(
+        bag.get("output_config")
+            .and_then(|oc| oc.get("effort"))
+            .is_none(),
+        "effort:none must not emit a positive output_config.effort: {body}"
+    );
+}
+
 fn custom_tool(name: &str) -> ToolDef {
     ToolDef::Custom(CustomTool {
         name: name.into(),

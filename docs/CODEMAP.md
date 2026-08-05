@@ -323,8 +323,12 @@ listed at the bottom of each crate.
   drift-proof field set)
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller
   `reasoning.effort` against per-model `effort_levels` (rounds toward
-  most-capable above max, least-capable below min); single source of truth
-  across openai-compat, anthropic-api, bedrock, openai-responses
+  most-capable above max, least-capable below min). Returns `Option`: `None`
+  means reasoning-OFF (`effort: "none"`) and the egress MUST omit the effort
+  field (or emit its own disable form) rather than substitute a positive
+  level; an unknown token passes through verbatim rather than clamping down.
+  Single source of truth across openai-compat, anthropic-api, bedrock,
+  openai-responses
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every
   egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the
   redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream ->
@@ -617,7 +621,9 @@ listed at the bottom of each crate.
   OpenAI-compat hosts
 - `src/openai_compat/dialects/util.rs` -- helpers shared between dialect impls
   (lift, strip, preserve, drop_sampling_params, think-tag regex,
-  `reasoning_enabled_for_wire` reasoning-signal predicate)
+  `reasoning_enabled_for_wire` reasoning-signal predicate,
+  `insert_reasoning_effort` clamp-result emitter shared by the openai,
+  deepseek and vllm dialects)
 
 ### openai_compat/wire_lift
 

@@ -231,18 +231,24 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
         // Clamp effort against the operator-declared effort_levels cap
         // before inserting into the bag. Empty effort_levels = pass-through
         // (current Bedrock Converse default). Mirrors the Anthropic-API
-        // egress behavior in derive_effort.
+        // egress behavior in derive_effort. A `None` clamp is reasoning-OFF
+        // (`effort: "none"`); `build_thinking` already returns `Disabled`
+        // for that (never Adaptive), so this branch is not reached with
+        // "none" -- but the guard keeps the wire free of an orphaned
+        // output_config.effort even if that invariant ever shifts.
         let raw_effort = req
             .reasoning
             .as_ref()
             .and_then(|r| r.effort.clone())
             .unwrap_or_else(|| "medium".to_string());
-        let effort = clamp_effort_to_supported(&raw_effort, &req.routectl_internal.effort_levels)
-            .into_owned();
-        bag.insert(
-            "output_config".to_string(),
-            serde_json::json!({"effort": effort}),
-        );
+        if let Some(effort) =
+            clamp_effort_to_supported(&raw_effort, &req.routectl_internal.effort_levels)
+        {
+            bag.insert(
+                "output_config".to_string(),
+                serde_json::json!({"effort": effort.into_owned()}),
+            );
+        }
     }
 }
 

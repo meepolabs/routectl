@@ -278,6 +278,48 @@ fn adaptive_reclamp_preserves_sibling_output_config_keys() {
     assert_eq!(oc["format"]["schema"]["required"][0], "x");
 }
 
+/// An adaptive-thinking request whose provider_extras override the generated
+/// `output_config.effort` with "none" is a reasoning-OFF request. The body
+/// must not ship `thinking: {type: "adaptive"}` alongside an effort of "none":
+/// the effort is omitted and thinking is reconciled to the disabled form, so
+/// the caller is not billed for thinking it declined.
+#[test]
+fn adaptive_provider_extras_none_effort_omits_effort_and_disables_thinking() {
+    use serde_json::json;
+
+    // Arrange: canonical effort "max" (adaptive), provider_extras override "none".
+    let req = ChatRequest {
+        model: "claude-opus-4-7".into(),
+        messages: vec![user_msg("hi")].into(),
+        max_tokens: Some(1024),
+        reasoning: Some(ReasoningConfig {
+            effort: Some("max".into()),
+            max_tokens: None,
+            exclude: None,
+            enabled: Some(true),
+        }),
+        provider_extras: Some(json!({
+            "output_config": {"effort": "none"}
+        })),
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+
+    // Assert: no effort survives, and thinking is the explicit disable form.
+    assert!(
+        body.get("output_config")
+            .and_then(|oc| oc.get("effort"))
+            .is_none(),
+        "output_config.effort=none must be omitted, not shipped; got: {body}"
+    );
+    assert_eq!(
+        body["thinking"]["type"], "disabled",
+        "an effort of none must reconcile thinking to disabled, not leave it adaptive; got: {body}"
+    );
+}
+
 #[test]
 fn output_config_is_not_routectl_managed() {
     // Pinning this invariant: output_config must remain a non-managed

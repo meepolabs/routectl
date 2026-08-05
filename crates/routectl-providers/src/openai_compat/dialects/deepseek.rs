@@ -18,8 +18,8 @@ use routectl_core::{ChatRequest, Message, Result};
 use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 use super::util::{
-    derive_reasoning_effort, drop_sampling_params, lift_delta_reasoning_content,
-    lift_reasoning_content_field, preserve_history_reasoning_content,
+    derive_reasoning_effort, drop_sampling_params, insert_reasoning_effort,
+    lift_delta_reasoning_content, lift_reasoning_content_field, preserve_history_reasoning_content,
 };
 use crate::effort::clamp_effort_to_supported;
 use crate::model_profile::profile_for;
@@ -52,10 +52,9 @@ impl Dialect for DeepSeekDialect {
             drop_sampling_params(obj);
         }
         if let Some(effort) = derive_reasoning_effort(req) {
-            let clamped = clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels);
-            obj.insert(
-                "reasoning_effort".into(),
-                Value::String(clamped.into_owned()),
+            insert_reasoning_effort(
+                obj,
+                clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels),
             );
         }
         // History-reasoning shaping (strip vs preserve) is owned by
@@ -304,6 +303,37 @@ mod tests {
         assert!(
             body.get("reasoning_effort").is_none(),
             "disabled reasoning must not emit reasoning_effort: {body}"
+        );
+    }
+
+    // effort:"none" is reasoning-OFF: no reasoning_effort may reach the wire,
+    // and it must NOT be clamped up to the lowest supported level.
+    #[test]
+    fn none_effort_omits_reasoning_effort() {
+        // Arrange: effort "none", nothing else set.
+        let mut req = user_req("deepseek-reasoner");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("none".into()),
+            max_tokens: None,
+            enabled: None,
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::DeepSeek,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "effort:none must omit reasoning_effort, not emit a positive level: {body}"
         );
     }
 }
