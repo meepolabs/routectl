@@ -278,6 +278,8 @@ fn build_candidate_cells(
                 ttl_seconds: ov.ttl_seconds,
                 min_prefix_tokens: ov.min_prefix_tokens,
                 max_context_tokens: ov.max_context_tokens,
+                input_cost_per_token: ov.input_cost_per_token,
+                output_cost_per_token: ov.output_cost_per_token,
                 capabilities: None,
             },
         );
@@ -296,6 +298,8 @@ fn cell_values_equal(a: &OverlayCell, b: &OverlayCell) -> bool {
         && a.ttl_seconds == b.ttl_seconds
         && a.min_prefix_tokens == b.min_prefix_tokens
         && a.max_context_tokens == b.max_context_tokens
+        && a.input_cost_per_token == b.input_cost_per_token
+        && a.output_cost_per_token == b.output_cost_per_token
         && a.capabilities == b.capabilities
 }
 
@@ -1425,6 +1429,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1588,6 +1594,8 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         };
         let mut b = a.clone();

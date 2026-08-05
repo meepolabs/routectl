@@ -32,8 +32,9 @@ use routectl_router::{
     CandidateOrigin, CatalogOverlay, CatalogRow, ImpactClass, ImportCandidate, ImportDiff,
     OverlayError, ShrinkVerdict, SkipKind, baked_row_map, baked_shrink_counts,
     build_import_candidate, candidate_shrink_counts, catalog_import_state_default_path,
-    diff_has_no_effective_change, diff_overlay, load_catalog_import_baseline, load_catalog_overlay,
-    overlay_default_path, persist_catalog_import_baseline, shrink_guard, with_overlay_write_lock,
+    diff_has_no_effective_change, diff_overlay, is_import_cell, load_catalog_import_baseline,
+    load_catalog_overlay, overlay_default_path, persist_catalog_import_baseline, shrink_guard,
+    with_overlay_write_lock,
 };
 
 const LITELLM_URL: &str =
@@ -445,11 +446,18 @@ impl From<OverlayError> for ApplyError {
     }
 }
 
-/// Merge ONLY `diff.applied`'s rows into the overlay loaded under the
-/// write lock, aborting (without writing) if the overlay's revision no
-/// longer matches `expected_revision` -- see [`ApplyError::RevisionChanged`].
+/// Merge `diff.applied`'s rows into the overlay loaded under the write
+/// lock and REMOVE `diff.cleared`'s stale `source: import` cells,
+/// aborting (without writing) if the overlay's revision no longer matches
+/// `expected_revision` -- see [`ApplyError::RevisionChanged`].
 /// `diff.skipped` / `diff.conflicted` are never written, by construction:
-/// this loop never reads them.
+/// this function never reads them.
+///
+/// The revision guard already proves the overlay still holds what the
+/// diff was computed against, but each clear re-checks `is_import_cell`
+/// anyway: removal is destructive and must never take out a
+/// `source: user` cell, so the guarantee is asserted at the write itself
+/// rather than trusted across the two phases.
 fn apply_diff(
     path: &Path,
     expected_revision: u64,
@@ -463,6 +471,11 @@ fn apply_diff(
         for row in &diff.applied {
             next.cells
                 .insert(row.selector.clone(), Some(row.candidate.clone()));
+        }
+        for selector in &diff.cleared {
+            if is_import_cell(&next, selector) {
+                next.cells.remove(selector);
+            }
         }
         Ok(next)
     })
@@ -514,6 +527,7 @@ fn confirm_and_apply(
             applied = diff.applied.len(),
             skipped = diff.skipped.len(),
             conflicted = diff.conflicted.len(),
+            cleared = diff.cleared.len(),
             "catalog import: diff summary",
         );
         print_diff(&diff);
@@ -636,6 +650,18 @@ fn print_diff(diff: &ImportDiff) {
 
     println!("\nconflicted ({}):", diff.conflicted.len());
     print_rows_or_none(&diff.conflicted, conflict_note);
+
+    println!(
+        "\ncleared: stale import cell removed, baked value restored ({}):",
+        diff.cleared.len()
+    );
+    if diff.cleared.is_empty() {
+        println!("  (none)");
+    } else {
+        for selector in &diff.cleared {
+            println!("  {selector}");
+        }
+    }
 }
 
 fn print_rows_or_none(
@@ -718,9 +744,10 @@ fn print_summary(diff: &ImportDiff, saved: &CatalogOverlay, wrote: bool) {
 fn summary_line(diff: &ImportDiff, saved: &CatalogOverlay, wrote: bool) -> String {
     if wrote {
         format!(
-            "import applied: {} selector(s) written, {} skipped, {} conflicted; overlay \
-             revision is now {}.",
+            "import applied: {} selector(s) written, {} cleared, {} skipped, {} conflicted; \
+             overlay revision is now {}.",
             diff.applied.len(),
+            diff.cleared.len(),
             diff.skipped.len(),
             diff.conflicted.len(),
             saved.revision,
@@ -979,6 +1006,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1158,6 +1187,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1177,6 +1208,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             },
         );
@@ -1242,6 +1275,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1298,6 +1333,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1344,6 +1381,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1395,6 +1434,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             },
         );
@@ -1516,6 +1557,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1589,6 +1632,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1623,6 +1668,8 @@ mod tests {
                                 ttl_seconds: None,
                                 min_prefix_tokens: None,
                                 max_context_tokens: None,
+                                input_cost_per_token: None,
+                                output_cost_per_token: None,
                                 capabilities: None,
                             }),
                         );
@@ -1682,6 +1729,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1739,6 +1788,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1856,6 +1907,128 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Stale-import clearing through the real write path.
+    // -----------------------------------------------------------------------
+
+    const GROK: &str = "openai-compat:grok-*";
+
+    /// A candidate that admits nothing and skips Grok for a cross-check
+    /// disagreement.
+    fn grok_cross_check_skip_candidate() -> ImportCandidate {
+        ImportCandidate {
+            origin: CandidateOrigin::DocRefresh,
+            verified_at: "2026-08-04".to_string(),
+            cells: BTreeMap::new(),
+            skipped: vec![routectl_router::SkippedSelector {
+                selector: GROK.to_string(),
+                reason: "cross-check mismatch".to_string(),
+                kind: SkipKind::CrossCheckDisagreement,
+            }],
+        }
+    }
+
+    /// The Grok cell an OLDER snapshot pair would have imported:
+    /// `rm = 0.25`, which the baked catalog now corrects to `0.15`.
+    fn stale_grok_cell(source: OverlaySource) -> OverlayCell {
+        OverlayCell {
+            source,
+            verified_at: "2026-01-01".to_string(),
+            wm: Some(1.0),
+            rm: Some(0.25),
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
+            capabilities: None,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn a_cross_check_skip_removes_the_stale_import_cell_so_the_baked_row_wins_again() {
+        // Arrange: the overlay carries an OLD import's Grok rm = 0.25; the
+        // refresh skips Grok on a cross-check disagreement, so no candidate
+        // cell overwrites it. The baked row says 0.15.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let mut seed = BTreeMap::new();
+        seed.insert(
+            GROK.to_string(),
+            Some(stale_grok_cell(OverlaySource::Import)),
+        );
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload");
+        let baked = baked_row_map();
+        assert_eq!(
+            baked.get(GROK).expect("grok is baked-known").rm,
+            0.15_f32,
+            "fixture guard: this test asserts the baked Grok rm is 0.15",
+        );
+
+        // Act
+        let (diff, saved, wrote) = confirm_and_apply(
+            &overlay_path,
+            &grok_cross_check_skip_candidate(),
+            &baked,
+            initial_overlay,
+            true,
+            || {},
+        )
+        .expect("a clear-only diff must apply");
+
+        // Assert: the write happened (a clear is never a no-op) and the
+        // stale cell is GONE from the persisted overlay, so nothing
+        // overrides the baked 0.15 any more.
+        assert_eq!(diff.cleared, vec![GROK.to_string()]);
+        assert!(diff.applied.is_empty());
+        assert!(wrote, "removing a stale import cell is a real change");
+        let reloaded = load_catalog_overlay(&overlay_path).expect("reload");
+        assert!(
+            !reloaded.cells.contains_key(GROK),
+            "the stale import cell must be removed entirely, not merely blanked"
+        );
+        assert_eq!(saved.revision, 2, "seed(1) + clear(2)");
+    }
+
+    #[test]
+    #[serial]
+    fn a_cross_check_skip_leaves_an_operator_user_cell_in_place() {
+        // Arrange: identical to the clear case except the Grok cell is a
+        // `source: user` override -- an operator override outranks both the
+        // import and the baked row, so it must survive untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let mut seed = BTreeMap::new();
+        seed.insert(GROK.to_string(), Some(stale_grok_cell(OverlaySource::User)));
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload");
+
+        // Act
+        let (diff, _saved, wrote) = confirm_and_apply(
+            &overlay_path,
+            &grok_cross_check_skip_candidate(),
+            &baked_row_map(),
+            initial_overlay,
+            true,
+            || {},
+        )
+        .expect("a skip-only diff against a user cell must succeed");
+
+        // Assert: nothing cleared, nothing written, the override intact.
+        assert!(diff.cleared.is_empty());
+        assert!(!wrote, "a preserved user cell is a no-op write");
+        let reloaded = load_catalog_overlay(&overlay_path).expect("reload");
+        let cell = reloaded
+            .cells
+            .get(GROK)
+            .and_then(Option::as_ref)
+            .expect("the user cell must survive");
+        assert_eq!(cell.source, OverlaySource::User);
+        assert_eq!(cell.rm, Some(0.25));
+    }
+
+    // -----------------------------------------------------------------------
     // Small pure-function unit coverage.
     // -----------------------------------------------------------------------
 
@@ -1918,6 +2091,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
             impact: ImpactClass::DisplayOnly,

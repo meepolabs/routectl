@@ -16,7 +16,7 @@ either project is reused.
               the MIT grant covers this file -- the repository's
               "enterprise/" carve-out does not apply to it)
    Copyright: Copyright (c) 2023 Berri AI
-   Snapshot date: 2026-07-11
+   Snapshot date: 2026-08-04
 
 2. models_dev.json
    -------------------------------------------------------------------
@@ -25,12 +25,23 @@ either project is reused.
    URL:       https://models.dev/api.json
    License:   MIT (https://raw.githubusercontent.com/sst/models.dev/dev/LICENSE)
    Copyright: Copyright (c) 2025 models.dev
-   Snapshot date: 2026-07-11
+   Snapshot date: 2026-08-04
 
 Both sources are MIT-licensed; MIT permits use, copy, modification, and
 redistribution (including baking derived facts into another project's
 compiled output), subject to including the license and copyright notice,
 reproduced above, alongside the vendored copies.
+
+Price units differ between the two sources
+-------------------------------------------------------------------
+litellm states prices PER TOKEN (`input_cost_per_token`,
+`output_cost_per_token`); models.dev states them PER MILLION TOKENS
+(`cost.input`, `cost.output`). The derived cache MULTIPLIERS divide two
+fields from the same source, so their units cancel; the baked base rates
+do not, and the generator normalizes models.dev to per-token before
+cross-checking the two sources. Keep this in mind when reading a
+disagreement reported by the generator: both values in its message are
+already per-token.
 
 cross_check_allowlist.json
 -------------------------------------------------------------------

@@ -82,6 +82,8 @@ fn present_import_cell_overrides_baked_and_shows_import_source() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -111,6 +113,8 @@ fn present_user_cell_with_no_baked_match_renders_from_sentinel_base() {
             ttl_seconds: None,
             min_prefix_tokens: Some(999),
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -159,6 +163,8 @@ fn stale_verified_at_renders_warn_marker() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -188,6 +194,8 @@ fn round_trip_display_renders_import_user_and_disabled_states() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -201,6 +209,8 @@ fn round_trip_display_renders_import_user_and_disabled_states() {
             ttl_seconds: None,
             min_prefix_tokens: Some(1024),
             max_context_tokens: Some(200_000),
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -276,6 +286,8 @@ fn punch_list_cleared_when_overlay_supplies_a_window() {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: Some(200_000),
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }),
     );
@@ -310,6 +322,8 @@ fn blank_user_cell() -> OverlayCell {
         ttl_seconds: None,
         min_prefix_tokens: None,
         max_context_tokens: None,
+        input_cost_per_token: None,
+        output_cost_per_token: None,
         capabilities: None,
     }
 }

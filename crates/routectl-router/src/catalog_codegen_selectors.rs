@@ -134,6 +134,19 @@ pub struct AutoCacherSelector {
     /// [`crate::catalog::CatalogRow::max_context_tokens`]'s own
     /// fail-closed documented behavior for a broad, ambiguous glob.
     pub context_ambiguous: bool,
+    /// When `true`, `model_glob` matches models the snapshots price very
+    /// differently, so no single base per-token rate is right for the glob
+    /// (e.g. a bare `"*"` spanning a $0.02/M embedding model and a $150/M
+    /// reasoning model, or a vendor prefix spanning a flash and a flagship
+    /// tier). `input_cost_per_token` / `output_cost_per_token` on the
+    /// generated row are forced `None`; every other field is still derived.
+    /// Same posture as [`Self::context_ambiguous`], applied to price: a
+    /// wrong dollar rate compounds per token, so ABSENT beats a guess.
+    ///
+    /// Independent of `context_ambiguous` -- a glob can be coherent in one
+    /// dimension and not the other (`grok-*` prices within 2x but spans a
+    /// 131K-to-2M window range).
+    pub price_ambiguous: bool,
 }
 
 pub const OPENAI_RESPONSES_SELECTORS: &[AutoCacherSelector] = &[AutoCacherSelector {
@@ -146,6 +159,10 @@ pub const OPENAI_RESPONSES_SELECTORS: &[AutoCacherSelector] = &[AutoCacherSelect
     auto_cacher: true,
     economics_unconfirmed: false,
     context_ambiguous: false,
+    // The openai-responses `*` glob serves every OpenAI model, which the
+    // snapshots price from $0.02/M (embeddings) to $150/M (o1-pro) -- no
+    // single rate is defensible for the glob.
+    price_ambiguous: true,
 }];
 
 pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
@@ -159,6 +176,9 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         auto_cacher: true,
         economics_unconfirmed: false,
         context_ambiguous: false,
+        // Pinned to one model (unlike the `deepseek-*` catch-all below):
+        // every id this glob matches prices identically in both snapshots.
+        price_ambiguous: false,
     },
     AutoCacherSelector {
         model_glob: "deepseek-*",
@@ -170,6 +190,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         auto_cacher: true,
         economics_unconfirmed: false,
         context_ambiguous: false,
+        price_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "gemini-*",
@@ -181,6 +202,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         auto_cacher: true,
         economics_unconfirmed: false,
         context_ambiguous: false,
+        price_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "grok-*",
@@ -196,6 +218,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // number under the shared glob would be confidently wrong for
         // most of the family.
         context_ambiguous: true,
+        price_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "kimi-*",
@@ -207,6 +230,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         auto_cacher: true,
         economics_unconfirmed: false,
         context_ambiguous: false,
+        price_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "moonshot-*",
@@ -218,6 +242,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         auto_cacher: true,
         economics_unconfirmed: false,
         context_ambiguous: false,
+        price_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "mistral-*",
@@ -231,6 +256,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // mistral-* spans embedding models, code models, and chat models
         // of very different sizes in the vendored snapshot.
         context_ambiguous: true,
+        price_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "qwen-*",
@@ -244,6 +270,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // qwen-* spans dashscope SKUs from 30K (qwen-max) to 1M
         // (qwen-turbo / qwen-coder) tokens in the vendored snapshot.
         context_ambiguous: true,
+        price_ambiguous: true,
     },
     AutoCacherSelector {
         model_glob: "minimax-m3*",
@@ -255,6 +282,9 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         auto_cacher: true,
         economics_unconfirmed: false,
         context_ambiguous: false,
+        // Pinned to the M3 generation, which prices identically in both
+        // snapshots; the `minimax-*` catch-all below spans a 2x range.
+        price_ambiguous: false,
     },
     AutoCacherSelector {
         model_glob: "minimax-*",
@@ -269,6 +299,7 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         // windows genuinely differ (196608 vs 1_000_000), so no single
         // window can be baked for the glob.
         context_ambiguous: true,
+        price_ambiguous: true,
     },
 ];
 

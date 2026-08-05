@@ -139,6 +139,8 @@ struct StoredRow {
     auto_cacher: bool,
     tier: Option<String>,
     max_context_tokens: Option<u32>,
+    input_cost_per_token: Option<f32>,
+    output_cost_per_token: Option<f32>,
     capabilities: BTreeMap<String, bool>,
 }
 
@@ -168,6 +170,8 @@ impl StoredRow {
             auto_cacher: self.auto_cacher,
             tier,
             max_context_tokens: self.max_context_tokens,
+            input_cost_per_token: self.input_cost_per_token,
+            output_cost_per_token: self.output_cost_per_token,
             capabilities: self.capabilities,
         })
     }
@@ -472,6 +476,10 @@ pub enum ImpactField {
     MinPrefixTokens,
     /// The context window.
     MaxContextTokens,
+    /// The base input price, in dollars per token.
+    InputCostPerToken,
+    /// The base output price, in dollars per token.
+    OutputCostPerToken,
     /// The capability priors.
     Capabilities,
     /// The auto-cacher flag.
@@ -492,10 +500,10 @@ pub enum ImpactField {
 
 /// The shared impact taxonomy (see the module-level classes on
 /// [`ImpactClass`]): display-only (`verified_at`, `source`),
-/// cost-affecting (`wm`, `rm`, `auto_cacher`, plus the baked-only
-/// reserved economics fields), routing-affecting (`ttl_seconds`,
-/// `min_prefix_tokens`, `max_context_tokens`, a capability flip, or a
-/// row's enable/disable state). Reused verbatim by
+/// cost-affecting (`wm`, `rm`, `auto_cacher`, the base per-token rates,
+/// plus the baked-only reserved economics fields), routing-affecting
+/// (`ttl_seconds`, `min_prefix_tokens`, `max_context_tokens`, a capability
+/// flip, or a row's enable/disable state). Reused verbatim by
 /// `crate::catalog_import::diff_overlay` for its own row labels.
 #[must_use]
 pub const fn classify_field(field: ImpactField) -> ImpactClass {
@@ -506,6 +514,8 @@ pub const fn classify_field(field: ImpactField) -> ImpactClass {
         | ImpactField::AutoCacher
         | ImpactField::HasStorageRent
         | ImpactField::StorageRent
+        | ImpactField::InputCostPerToken
+        | ImpactField::OutputCostPerToken
         | ImpactField::Tier => ImpactClass::CostAffecting,
         ImpactField::TtlSeconds
         | ImpactField::MinPrefixTokens
@@ -599,6 +609,22 @@ fn diff_row(old: &CatalogRow, new: &CatalogRow) -> Option<(ImpactClass, String, 
             jv(new.max_context_tokens),
         );
     }
+    if old.input_cost_per_token != new.input_cost_per_token {
+        note(
+            ImpactField::InputCostPerToken,
+            "input_cost_per_token",
+            jv(old.input_cost_per_token),
+            jv(new.input_cost_per_token),
+        );
+    }
+    if old.output_cost_per_token != new.output_cost_per_token {
+        note(
+            ImpactField::OutputCostPerToken,
+            "output_cost_per_token",
+            jv(old.output_cost_per_token),
+            jv(new.output_cost_per_token),
+        );
+    }
     if old.capabilities != new.capabilities {
         note(
             ImpactField::Capabilities,
@@ -645,6 +671,8 @@ mod tests {
             auto_cacher: _,
             tier: _,
             max_context_tokens: _,
+            input_cost_per_token: _,
+            output_cost_per_token: _,
             capabilities: _,
         } = CatalogRow::sentinel();
     }
@@ -1081,6 +1109,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );

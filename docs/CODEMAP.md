@@ -1264,7 +1264,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   lookup index (`AliasPattern`, `PrefixIndex`)
 - `src/catalog.rs` -- two-layer catalog: layer 1 is the baked reference table
   (`CatalogRow`:
-  `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`capabilities`,
+  `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`input_cost_per_token`/`output_cost_per_token`/`capabilities`,
   keyed `(provider_kind, model[, tier])`, `TABLE` populated from
   `catalog_baked::baked_cells` at startup), layer 2 is `catalog_overlay.json`.
   `lookup(provider_kind, model, tier)` does three-tier fallback (exact-or-glob
@@ -1278,7 +1278,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `wm`/`rm`/`max_context_tokens` structural checks to `cell_value_defects`
   then layers its ack-gated posture on the result) and `CachePricingSelector`
   (`"provider_kind:model_glob"` parse/format) round out the override surface.
-  `cell_value_defects(wm, rm, max_context_tokens) -> Vec<CellDefect>` (both
+  `cell_value_defects(wm, rm, max_context_tokens, input_cost_per_token,
+  output_cost_per_token) -> Vec<CellDefect>` (both
   `pub(crate)`) is the ONE home of the cell-value invariants, shared with the
   overlay `load` path: `CellDefect` classifies each degeneracy (HARD
   `ReadMultiplier`/`WriteMultiplierNotFinite`/`ZeroMaxContextTokens` vs the
@@ -1318,11 +1319,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `SkipKind` discriminator (`CrossCheckDisagreement` / `UnknownSelector` /
   `DegenerateValue` / the fail-safe `Other` default) beside its human
   `reason`. `diff_overlay(current_overlay, candidate, baked) ->
-  ImportDiff{applied, skipped, conflicted}`: a `source: import` cell (or an
+  ImportDiff{applied, skipped, conflicted, cleared}`: a `source: import` cell (or an
   absent key) sorts into `applied`; a `source: user` cell OR an explicit
   disable ALWAYS sorts into `conflicted`
   (`ExistingCell::{Absent,Disabled,Present}` -- import never overwrites a user
-  cell, no equal-value carve-out); each `DiffRow` carries the escalated
+  cell, no equal-value carve-out); `cleared` names the selectors whose stale
+  `source: import` cell must be REMOVED because this run skipped them for a
+  `CrossCheckDisagreement` (`stale_import_cells`, gated on the public
+  `is_import_cell` -- without it an older snapshot's import cell would keep
+  overriding the vetted baked row forever; `source: user` cells and explicit
+  disables are never cleared, and no other skip kind clears at all); each
+  `DiffRow` carries the escalated
   `ImpactClass` (via `catalog_state::classify_field`/`escalate`) of every
   field that differs from the baked-or-existing effective value, plus a
   `cheaper_direction` flag (`wm` down or `rm` up -- lowers the break-even
@@ -1369,13 +1376,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   missing-key / absent-data `Err` when tagging a skipped selector's
   `SkipKind`.
   `ttl_seconds`/`min_prefix_tokens`/`auto_cacher`/provider-catch-all rows are
-  curated constants (neither vendor feed publishes them). Renders through
+  curated constants (neither vendor feed publishes them). Base per-token rates
+  (`input_cost_per_token`/`output_cost_per_token`) go through the same
+  cross-check, normalizing models.dev's per-million-token unit to per-token;
+  a `price_ambiguous` selector stays priced-`None` rather than baking one
+  representative model's rate, and `narrow_rate` drops any rate that is
+  negative/non-finite at source OR that overflows to infinity / underflows a
+  positive value to zero on the `f64 -> f32` cast (a source zero passes
+  through as a real free tier). Renders through
   `rustfmt` before writing; the drift-guard test diffs byte-for-byte against
   the committed file
 - `src/catalog_codegen_selectors.rs` -- static data tables for
   `catalog_codegen.rs`: which vendored snapshot entries become baked cells,
   plus the curated per-family facts (`ttl_seconds`, `min_prefix_tokens`,
-  `auto_cacher`, `economics_unconfirmed`/`context_ambiguous` escape hatches)
+  `auto_cacher`, `economics_unconfirmed`/`context_ambiguous`/`price_ambiguous`
+  escape hatches)
 - `src/bin/gen_catalog.rs` -- `cargo run --bin gen_catalog` regenerates
   `src/catalog_baked.rs` from `catalog_data/` via
   `catalog_codegen::render_catalog_baked_rs`; fails loudly on a parse error or
@@ -3476,7 +3491,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
     existing overlay cell of either provenance) -- an unknown selector is a
     hard `CatalogWriteError::UnknownSelector`, the synthetic-row poisoning
     guard; fields are
-    `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens` plus
+    `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`input_cost_per_token`/`output_cost_per_token`
+    plus
     `cap:<name>=true|false` flags;
     `auto_cacher`/`has_storage_rent`/`storage_rent`/`verified_at` hard-reject;
     value validation reuses `CachePricingOverride::validate` against ONLY the
@@ -3499,14 +3515,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   EXPECTED cross-check disagreement, which count as present toward the totals)
   -> `diff_overlay` against the overlay loaded before any lock is taken ->
   render the impact-labeled diff (reuses `catalog::render_table`; sections
-  applied/skipped/conflicted, a `cheaper?` flag, and an "identical (user cell
+  applied/skipped/conflicted/cleared, a `cheaper?` flag, and an "identical (user cell
   preserved)" note for a display-only conflict against an already-matching
   user cell) -> y/N confirm (`--yes` skips it) ->
   `confirm_and_apply`/`apply_diff` acquire `with_overlay_write_lock` ONLY at
-  this point, merge ONLY `diff.applied` rows (never conflicted/skipped), and
+  this point, merge `diff.applied` rows and REMOVE `diff.cleared`'s stale
+  import cells (never conflicted/skipped; each clear re-checks
+  `is_import_cell` under the lock so a removal can never take out a
+  `source: user` cell), and
   on a revision conflict release, recompute ONE fresh diff + confirm against
-  the latest overlay (a second conflict aborts, no retry loop); an empty
-  `applied` set skips the lock entirely rather than pay for a no-op revision
+  the latest overlay (a second conflict aborts, no retry loop); a diff with
+  nothing to write (empty `cleared` and no `applied` row that differs from
+  disk) skips the lock entirely rather than pay for a no-op revision
   bump. Any source-level fetch failure (non-200 / invalid JSON / non-object
   top-level shape) aborts before the overlay is ever opened, so it stays
   byte-identical. `catalog_import_state.json`'s baseline is persisted only

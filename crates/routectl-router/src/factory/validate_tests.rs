@@ -1771,7 +1771,7 @@ mod collect_config_validation_tests {
     /// (float leaves; integers are out of scope) must be registered in
     /// `validate_float_fields`' covered set. A future f64/f32 leaf added
     /// to the config without registering it here fails this test.
-    const COVERED_FLOAT_LEAVES: [&str; 9] = [
+    const COVERED_FLOAT_LEAVES: [&str; 11] = [
         "RetryPolicy.backoff_multiplier",
         "PricingConfig.input_per_mtok",
         "PricingConfig.output_per_mtok",
@@ -1781,6 +1781,8 @@ mod collect_config_validation_tests {
         "CachePricingOverride.wm",
         "CachePricingOverride.rm",
         "CachePricingOverride.storage_rent",
+        "CachePricingOverride.input_cost_per_token",
+        "CachePricingOverride.output_cost_per_token",
     ];
 
     #[test]

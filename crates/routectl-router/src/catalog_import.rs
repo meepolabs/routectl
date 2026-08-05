@@ -12,10 +12,11 @@
 //! [`build_import_candidate`] groups the derived cells by selector and
 //! includes a field on the candidate [`OverlayCell`] ONLY when every cell
 //! in the group agrees on it; a disagreeing field is OMITTED and stays
-//! baked-authoritative. `rm` / `max_context_tokens` / `capabilities` are
-//! computed once per selector and shared across tiers, so they always
-//! agree and always import; a single-cell (auto-cacher) family agrees
-//! with itself trivially and imports every field.
+//! baked-authoritative. `rm` / `max_context_tokens` / the base per-token
+//! rates / `capabilities` are computed once per selector and shared across
+//! tiers, so they always agree and always import; a single-cell
+//! (auto-cacher) family agrees with itself trivially and imports every
+//! field.
 //!
 //! EMPTY ALLOWLIST: this module always calls `derive_cells` with
 //! [`Allowlist::empty`] -- the checked-in
@@ -23,7 +24,9 @@
 //! the vendored codegen snapshots, which does not apply to freshly
 //! fetched sources. A selector whose two sources disagree therefore
 //! always fails the cross-check here, even for a mismatch codegen would
-//! resolve via that allowlist.
+//! resolve via that allowlist. Because that skip is EXPECTED rather than
+//! exceptional, it also has to undo any earlier run's cell for the same
+//! selector: see [`stale_import_cells`].
 //!
 //! PER-SELECTOR PARTITION: `derive_cells` returns one `Result` per static
 //! selector and never short-circuits, so one selector's cross-check
@@ -216,7 +219,8 @@ fn admit_group(
 }
 
 /// Reject a candidate cell carrying a non-finite or non-positive `wm` /
-/// `rm`, or a zero `max_context_tokens` / `ttl_seconds` -- a vendor
+/// `rm`, a zero `max_context_tokens` / `ttl_seconds`, or a negative /
+/// non-finite base per-token rate -- a vendor
 /// snapshot publishing a degenerate derived number (e.g. a negative or
 /// zero cache-read price, or an overflowing division) should skip that
 /// one selector rather than poison the break-even math downstream. Only
@@ -252,6 +256,18 @@ fn validate_candidate_cell(key: &str, cell: &OverlayCell) -> Result<(), SkippedS
     {
         return Err(invalid("ttl_seconds", ttl_seconds.to_string()));
     }
+    // A negative or non-finite base rate is source corruption, not a price.
+    // Zero is allowed: a genuinely free tier is a real vendor offering.
+    for (field, rate) in [
+        ("input_cost_per_token", cell.input_cost_per_token),
+        ("output_cost_per_token", cell.output_cost_per_token),
+    ] {
+        if let Some(rate) = rate
+            && (!rate.is_finite() || rate < 0.0)
+        {
+            return Err(invalid(field, rate.to_string()));
+        }
+    }
     Ok(())
 }
 
@@ -269,6 +285,8 @@ fn group_and_agree(group: &[GeneratedCell], verified_at: &str) -> OverlayCell {
         ttl_seconds: agree(group, |cell| cell.ttl_seconds),
         min_prefix_tokens: agree(group, |cell| cell.min_prefix_tokens),
         max_context_tokens: agree(group, |cell| cell.max_context_tokens).flatten(),
+        input_cost_per_token: agree(group, |cell| cell.input_cost_per_token).flatten(),
+        output_cost_per_token: agree(group, |cell| cell.output_cost_per_token).flatten(),
         capabilities: agree(group, |cell| cell.capabilities.clone())
             .map(|caps| caps.into_iter().map(|(k, v)| (k.to_string(), v)).collect()),
     }
@@ -368,6 +386,9 @@ pub struct ImportDiff {
     /// selector is explicitly disabled) -- the existing value is
     /// preserved untouched; this row is never applied.
     pub conflicted: Vec<DiffRow>,
+    /// Selectors whose STALE `source: import` cell must be REMOVED from
+    /// the overlay (see [`stale_import_cells`]).
+    pub cleared: Vec<String>,
 }
 
 /// Diff `candidate` against `current_overlay`, classifying every
@@ -379,13 +400,17 @@ pub struct ImportDiff {
 /// lookup miss degrades gracefully (the CURRENT-effective-value
 /// comparison simply has no baked fallback for that field).
 ///
-/// IMPORT NEVER OVERWRITES `source: user` CELLS: an existing user cell
-/// (or an explicit disable) always sorts the row into `conflicted`,
-/// regardless of whether the candidate's values happen to coincide with
-/// what is already there -- the overlay stores one `OverlayCell` per
-/// selector with ONE `source` for the whole row, so there is no partial
-/// per-field ownership to merge around. An absent key, or an existing
+/// `source: user` CELLS ARE NEVER TOUCHED: an existing user cell (or an
+/// explicit disable) always sorts the row into `conflicted`, regardless
+/// of whether the candidate's values happen to coincide with what is
+/// already there -- the overlay stores one `OverlayCell` per selector
+/// with ONE `source` for the whole row, so there is no partial per-field
+/// ownership to merge around. An absent key, or an existing
 /// `source: import` cell, always sorts into `applied`.
+///
+/// A selector the candidate SKIPPED for a cross-check disagreement gets
+/// no row at all, but its stale `source: import` cell (if any) is listed
+/// in [`ImportDiff::cleared`] -- see [`stale_import_cells`].
 #[must_use]
 pub fn diff_overlay(
     current_overlay: &CatalogOverlay,
@@ -394,6 +419,7 @@ pub fn diff_overlay(
 ) -> ImportDiff {
     let mut diff = ImportDiff {
         skipped: candidate.skipped.clone(),
+        cleared: stale_import_cells(current_overlay, &candidate.skipped),
         ..ImportDiff::default()
     };
 
@@ -416,11 +442,60 @@ pub fn diff_overlay(
     diff
 }
 
-/// `true` when applying `diff.applied` would write nothing new to the
-/// overlay: every applied row's candidate cell is byte-identical
-/// (including `verified_at`) to the overlay cell already sitting there
-/// under that selector. Vacuously `true` when `diff.applied` is empty --
-/// the pre-existing no-op case this extends.
+/// The selectors whose existing `source: import` cell must be REMOVED
+/// from the overlay because this run skipped them for a cross-check
+/// disagreement.
+///
+/// A skipped selector produces no candidate cell, so without this the
+/// PREVIOUS run's `source: import` cell would survive and keep
+/// overriding the vetted baked row indefinitely -- an operator who
+/// imported an older snapshot pair would stay pinned to that snapshot's
+/// value even after upgrading to a baked catalog that corrects it. The
+/// baked row is the cross-checked, allowlist-resolved, reviewed value;
+/// an unverifiable import cell is not, so removing the cell (and letting
+/// the merge fall back to baked) is the fail-safe direction.
+///
+/// `source: user` cells are NEVER cleared -- an operator override
+/// outranks both the import and the baked row. An explicitly disabled
+/// selector (overlay key present, JSON `null`) is likewise left alone:
+/// the disable is an operator decision, not a stale import.
+///
+/// Only [`SkipKind::CrossCheckDisagreement`] clears. The other kinds
+/// carry no such guarantee: [`SkipKind::UnknownSelector`] has no baked
+/// row to fall back to by definition, and
+/// [`SkipKind::DegenerateValue`] / [`SkipKind::Other`] would clear on
+/// transient source corruption. Leaving those cells in place keeps this
+/// narrow.
+fn stale_import_cells(overlay: &CatalogOverlay, skipped: &[SkippedSelector]) -> Vec<String> {
+    skipped
+        .iter()
+        .filter(|skip| skip.kind == SkipKind::CrossCheckDisagreement)
+        .filter(|skip| is_import_cell(overlay, &skip.selector))
+        .map(|skip| skip.selector.clone())
+        .collect()
+}
+
+/// `true` when `overlay` currently carries a `source: import` cell for
+/// `selector` -- the only state [`stale_import_cells`] is allowed to
+/// clear.
+#[must_use]
+pub fn is_import_cell(overlay: &CatalogOverlay, selector: &str) -> bool {
+    matches!(
+        ExistingCell::from_overlay(overlay, selector),
+        ExistingCell::Present(cell) if cell.source == OverlaySource::Import
+    )
+}
+
+/// `true` when applying `diff` would write nothing new to the overlay:
+/// it clears no stale import cell, AND every applied row's candidate cell
+/// is byte-identical (including `verified_at`) to the overlay cell
+/// already sitting there under that selector. Vacuously `true` when both
+/// `diff.cleared` and `diff.applied` are empty -- the pre-existing no-op
+/// case this extends.
+///
+/// A non-empty [`ImportDiff::cleared`] is ALWAYS an effective change:
+/// every entry names a cell that exists on disk right now and must be
+/// removed (see [`stale_import_cells`]), so the write cannot be skipped.
 ///
 /// A row only reaches `applied` with `ExistingCell::Absent` or
 /// `ExistingCell::Present` (never `Disabled`, which always sorts into
@@ -435,9 +510,10 @@ pub fn diff_overlay(
 /// change, same as any other field's drift.
 #[must_use]
 pub fn diff_has_no_effective_change(diff: &ImportDiff) -> bool {
-    diff.applied.iter().all(|row| {
-        matches!(&row.existing, ExistingCell::Present(existing) if *existing == row.candidate)
-    })
+    diff.cleared.is_empty()
+        && diff.applied.iter().all(|row| {
+            matches!(&row.existing, ExistingCell::Present(existing) if *existing == row.candidate)
+        })
 }
 
 /// Build one [`DiffRow`], escalating the impact class of every
@@ -510,6 +586,24 @@ fn row(
         && candidate.max_context_tokens != effective_max_context
     {
         impact = escalate(impact, classify_field(ImpactField::MaxContextTokens));
+    }
+
+    let effective_input_cost = existing_cell
+        .and_then(|c| c.input_cost_per_token)
+        .or_else(|| baked.and_then(|b| b.input_cost_per_token));
+    if candidate.input_cost_per_token.is_some()
+        && candidate.input_cost_per_token != effective_input_cost
+    {
+        impact = escalate(impact, classify_field(ImpactField::InputCostPerToken));
+    }
+
+    let effective_output_cost = existing_cell
+        .and_then(|c| c.output_cost_per_token)
+        .or_else(|| baked.and_then(|b| b.output_cost_per_token));
+    if candidate.output_cost_per_token.is_some()
+        && candidate.output_cost_per_token != effective_output_cost
+    {
+        impact = escalate(impact, classify_field(ImpactField::OutputCostPerToken));
     }
 
     let effective_capabilities = existing_cell
@@ -817,6 +911,8 @@ mod tests {
             auto_cacher: false,
             tier: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: Vec::new(),
         }
     }
@@ -833,6 +929,7 @@ mod tests {
         let litellm = serde_json::json!({
             tiered.litellm_key: {
                 "input_cost_per_token": 1.0e-5,
+                "output_cost_per_token": 5.0e-5,
                 "cache_read_input_token_cost": 1.0e-6,
                 "cache_creation_input_token_cost": 1.25e-5,
                 "cache_creation_input_token_cost_above_1hr": 2.0e-5,
@@ -840,6 +937,7 @@ mod tests {
             },
             auto_cacher.litellm_key: {
                 "input_cost_per_token": 2.0e-6,
+                "output_cost_per_token": 8.0e-6,
                 "cache_read_input_token_cost": 2.0e-7,
                 "max_input_tokens": 400_000.0,
             },
@@ -848,7 +946,15 @@ mod tests {
             "anthropic": {
                 "models": {
                     tiered.models_dev_model: {
-                        "cost": {"input": 1.0e-5, "cache_read": 1.0e-6, "cache_write": 1.25e-5},
+                        // models.dev prices are per MILLION tokens: the same
+                        // rates the litellm half of this fixture states
+                        // per-token.
+                        "cost": {
+                            "input": 10.0,
+                            "output": 50.0,
+                            "cache_read": 1.0,
+                            "cache_write": 12.5,
+                        },
                         "limit": {"context": 200_000},
                     },
                 },
@@ -856,7 +962,7 @@ mod tests {
             auto_cacher.models_dev_provider: {
                 "models": {
                     auto_cacher.models_dev_model: {
-                        "cost": {"input": 2.0e-6, "cache_read": 2.0e-7},
+                        "cost": {"input": 2.0, "output": 8.0, "cache_read": 0.2},
                         "limit": {"context": 400_000},
                     },
                 },
@@ -906,6 +1012,12 @@ mod tests {
             cell.min_prefix_tokens.is_some(),
             "min_prefix_tokens agrees across tiers, must import"
         );
+        assert_eq!(
+            cell.input_cost_per_token,
+            Some(1.0e-5),
+            "base rates are derived once per selector, so they agree across tiers and import"
+        );
+        assert_eq!(cell.output_cost_per_token, Some(5.0e-5));
     }
 
     #[test]
@@ -1228,8 +1340,10 @@ mod tests {
         let auto_cacher = &OPENAI_RESPONSES_SELECTORS[0];
         litellm[auto_cacher.litellm_key]["cache_read_input_token_cost"] =
             serde_json::json!(-2.0e-7);
+        // Same rate in models.dev's per-million unit, so the two sources
+        // genuinely agree and the cross-check has nothing to flag.
         models_dev[auto_cacher.models_dev_provider]["models"][auto_cacher.models_dev_model]["cost"]
-            ["cache_read"] = serde_json::json!(-2.0e-7);
+            ["cache_read"] = serde_json::json!(-0.2);
 
         // Act
         let candidate = build_import_candidate(
@@ -1272,6 +1386,8 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }
     }
@@ -1313,6 +1429,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1348,6 +1466,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );
@@ -1460,6 +1580,144 @@ mod tests {
 
         // Assert
         assert_eq!(diff.skipped, candidate.skipped);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale-import clearing: a cross-check-skipped selector's prior
+    // `source: import` cell is removed so the vetted baked row wins again,
+    // while a `source: user` cell at the same position survives.
+    // -----------------------------------------------------------------------
+
+    fn grok_selector() -> String {
+        selector_key("openai-compat", "grok-*")
+    }
+
+    /// A candidate that admits nothing and skips `selector` for a
+    /// cross-check disagreement -- exactly what a refresh produces when
+    /// the two freshly-fetched sources disagree under the empty allowlist.
+    fn cross_check_skip_candidate(selector: &str) -> ImportCandidate {
+        ImportCandidate {
+            origin: CandidateOrigin::DocRefresh,
+            verified_at: "2026-08-04".to_string(),
+            cells: BTreeMap::new(),
+            skipped: vec![SkippedSelector {
+                selector: selector.to_string(),
+                reason: "cross-check mismatch".to_string(),
+                kind: SkipKind::CrossCheckDisagreement,
+            }],
+        }
+    }
+
+    /// An overlay cell an OLD snapshot pair would have imported for Grok:
+    /// `rm = 0.25`, which the baked catalog now corrects to `0.15`.
+    fn stale_grok_import_cell() -> OverlayCell {
+        OverlayCell {
+            source: OverlaySource::Import,
+            verified_at: "2026-01-01".to_string(),
+            wm: Some(1.0),
+            rm: Some(0.25),
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
+            capabilities: None,
+        }
+    }
+
+    #[test]
+    fn diff_overlay_clears_a_stale_import_cell_when_the_selector_is_cross_check_skipped() {
+        // Arrange: an operator carried an OLD snapshot's Grok import cell
+        // (rm = 0.25) forward; the refresh skips Grok on a cross-check
+        // disagreement, so no candidate cell overwrites it. The baked row
+        // now says rm = 0.15.
+        let selector = grok_selector();
+        let baked = baked_row_map();
+        assert_eq!(
+            baked.get(&selector).expect("grok is baked-known").rm,
+            0.15_f32,
+            "fixture guard: this test asserts the baked Grok rm is 0.15",
+        );
+        let overlay = overlay_with_cell(&selector, Some(stale_grok_import_cell()));
+        let candidate = cross_check_skip_candidate(&selector);
+
+        // Act
+        let diff = diff_overlay(&overlay, &candidate, &baked);
+
+        // Assert: the stale import cell is scheduled for removal, so the
+        // baked 0.15 becomes authoritative again; the skip is a real
+        // effective change, not a no-op.
+        assert_eq!(diff.cleared, vec![selector.clone()]);
+        assert!(diff.applied.is_empty());
+        assert!(diff.conflicted.is_empty());
+        assert!(!diff_has_no_effective_change(&diff));
+    }
+
+    #[test]
+    fn diff_overlay_never_clears_a_user_cell_at_a_cross_check_skipped_selector() {
+        // Arrange: same skip, but the Grok cell is a `source: user`
+        // override -- an operator override always wins over both import
+        // and baked, so it must survive the clear.
+        let selector = grok_selector();
+        let baked = baked_row_map();
+        let user_cell = OverlayCell {
+            source: OverlaySource::User,
+            ..stale_grok_import_cell()
+        };
+        let overlay = overlay_with_cell(&selector, Some(user_cell.clone()));
+        let candidate = cross_check_skip_candidate(&selector);
+
+        // Act
+        let diff = diff_overlay(&overlay, &candidate, &baked);
+
+        // Assert: nothing is cleared; the user override is untouched.
+        assert!(diff.cleared.is_empty());
+        assert!(diff.applied.is_empty());
+        assert!(diff.conflicted.is_empty());
+        assert!(!is_import_cell(&overlay, &selector));
+        assert_eq!(overlay.cells.get(&selector), Some(&Some(user_cell)));
+    }
+
+    #[test]
+    fn diff_overlay_only_clears_cross_check_skips_never_the_other_skip_kinds() {
+        // Arrange: the same stale Grok import cell, but each skip kind
+        // OTHER than a cross-check disagreement -- none of them proves a
+        // vetted baked row is available to fall back to.
+        let selector = grok_selector();
+        let baked = baked_row_map();
+        let overlay = overlay_with_cell(&selector, Some(stale_grok_import_cell()));
+
+        for kind in [
+            SkipKind::UnknownSelector,
+            SkipKind::DegenerateValue,
+            SkipKind::Other,
+        ] {
+            // Act
+            let mut candidate = cross_check_skip_candidate(&selector);
+            candidate.skipped[0].kind = kind;
+            let diff = diff_overlay(&overlay, &candidate, &baked);
+
+            // Assert
+            assert!(diff.cleared.is_empty(), "must not clear on {kind:?}");
+        }
+    }
+
+    #[test]
+    fn diff_overlay_does_not_clear_an_absent_or_disabled_cross_check_skipped_selector() {
+        // Arrange: no cell (absent) and an explicit disable both have no
+        // stale import cell to clear.
+        let selector = grok_selector();
+        let baked = baked_row_map();
+        let candidate = cross_check_skip_candidate(&selector);
+
+        // Act + Assert: absent overlay.
+        let absent = diff_overlay(&CatalogOverlay::default(), &candidate, &baked);
+        assert!(absent.cleared.is_empty());
+
+        // Act + Assert: explicitly disabled (JSON null) overlay.
+        let disabled = overlay_with_cell(&selector, None);
+        let disabled_diff = diff_overlay(&disabled, &candidate, &baked);
+        assert!(disabled_diff.cleared.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -1689,6 +1947,8 @@ mod tests {
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             }),
         );

@@ -105,6 +105,8 @@ pub(crate) fn verify_at(selector_raw: &str, path: &Path) -> Result<(), Box<dyn s
             ttl_seconds: existing.ttl_seconds,
             min_prefix_tokens: existing.min_prefix_tokens,
             max_context_tokens: existing.max_context_tokens,
+            input_cost_per_token: existing.input_cost_per_token,
+            output_cost_per_token: existing.output_cost_per_token,
             capabilities: existing.capabilities,
         };
         let mut next = overlay;
@@ -164,6 +166,8 @@ enum FieldUpdate {
     TtlSeconds(u32),
     MinPrefixTokens(u32),
     MaxContextTokens(u32),
+    InputCostPerToken(f32),
+    OutputCostPerToken(f32),
     /// A `cap:<name>=true|false` capability flag.
     Capability(String, bool),
 }
@@ -224,11 +228,14 @@ fn parse_field(raw: &str) -> Result<FieldUpdate, CatalogWriteError> {
         "ttl_seconds" => parse_num(raw, value).map(FieldUpdate::TtlSeconds),
         "min_prefix_tokens" => parse_num(raw, value).map(FieldUpdate::MinPrefixTokens),
         "max_context_tokens" => parse_num(raw, value).map(FieldUpdate::MaxContextTokens),
+        "input_cost_per_token" => parse_num(raw, value).map(FieldUpdate::InputCostPerToken),
+        "output_cost_per_token" => parse_num(raw, value).map(FieldUpdate::OutputCostPerToken),
         other => Err(CatalogWriteError::InvalidField {
             raw: raw.to_string(),
             reason: format!(
                 "unknown field `{other}`; supported fields are wm, rm, ttl_seconds, \
-                 min_prefix_tokens, max_context_tokens, cap:<name>"
+                 min_prefix_tokens, max_context_tokens, input_cost_per_token, \
+                 output_cost_per_token, cap:<name>"
             ),
         }),
     }
@@ -256,6 +263,8 @@ fn apply_field_update(cell: &mut OverlayCell, update: FieldUpdate) {
         FieldUpdate::TtlSeconds(v) => cell.ttl_seconds = Some(v),
         FieldUpdate::MinPrefixTokens(v) => cell.min_prefix_tokens = Some(v),
         FieldUpdate::MaxContextTokens(v) => cell.max_context_tokens = Some(v),
+        FieldUpdate::InputCostPerToken(v) => cell.input_cost_per_token = Some(v),
+        FieldUpdate::OutputCostPerToken(v) => cell.output_cost_per_token = Some(v),
         FieldUpdate::Capability(name, flag) => {
             cell.capabilities
                 .get_or_insert_with(BTreeMap::new)
@@ -300,6 +309,8 @@ fn validate_updates(
             FieldUpdate::Wm(v) => ov.wm = Some(*v),
             FieldUpdate::Rm(v) => ov.rm = Some(*v),
             FieldUpdate::MaxContextTokens(v) => ov.max_context_tokens = Some(*v),
+            FieldUpdate::InputCostPerToken(v) => ov.input_cost_per_token = Some(*v),
+            FieldUpdate::OutputCostPerToken(v) => ov.output_cost_per_token = Some(*v),
             FieldUpdate::TtlSeconds(_)
             | FieldUpdate::MinPrefixTokens(_)
             | FieldUpdate::Capability(..) => {}
@@ -387,6 +398,8 @@ pub(crate) fn set_at(
                 ttl_seconds: None,
                 min_prefix_tokens: None,
                 max_context_tokens: None,
+                input_cost_per_token: None,
+                output_cost_per_token: None,
                 capabilities: None,
             },
         };

@@ -135,6 +135,14 @@ pub struct OverlayCell {
     /// Context-window override, in tokens. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Base input price override, in dollars per token. Unset inherits the
+    /// baked rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_cost_per_token: Option<f32>,
+    /// Base output price override, in dollars per token. Unset inherits the
+    /// baked rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_cost_per_token: Option<f32>,
     /// Capability-prior override. Unset inherits the baked value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<BTreeMap<String, bool>>,
@@ -256,8 +264,13 @@ pub fn load(path: &Path) -> Result<CatalogOverlay, OverlayError> {
     // knowingly run a cheap write multiplier (settled constraint).
     for (selector, cell) in &overlay.cells {
         let Some(cell) = cell else { continue };
-        for defect in crate::catalog::cell_value_defects(cell.wm, cell.rm, cell.max_context_tokens)
-        {
+        for defect in crate::catalog::cell_value_defects(
+            cell.wm,
+            cell.rm,
+            cell.max_context_tokens,
+            cell.input_cost_per_token,
+            cell.output_cost_per_token,
+        ) {
             if defect.is_hard() {
                 return Err(OverlayError::Corrupt {
                     path: display,
@@ -479,6 +492,8 @@ mod tests {
             ttl_seconds: Some(300),
             min_prefix_tokens: None,
             max_context_tokens: None,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: None,
         }
     }
@@ -492,6 +507,8 @@ mod tests {
             ttl_seconds: None,
             min_prefix_tokens: Some(1024),
             max_context_tokens: Some(200_000),
+            input_cost_per_token: None,
+            output_cost_per_token: None,
             capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
         }
     }

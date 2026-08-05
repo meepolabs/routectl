@@ -246,6 +246,14 @@
             "null"
           ]
         },
+        "input_cost_per_token": {
+          "description": "Operator-supplied base input price in dollars per token. `Some` wins\nover the baked rate (or the baked `None`); `None` inherits the baked\nvalue unchanged. Set this when the baked table has no rate for a cell,\nor its rate is wrong for a negotiated / self-hosted price.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "max_context_tokens": {
           "description": "Operator-supplied context window in tokens. `Some` wins over the\nbaked window (or the baked `None`); `None` inherits the baked value\nunchanged. Set this when the baked table's `None` for a cell is\nwrong -- e.g. the operator has confirmed the vendor's real window.",
           "format": "uint32",
@@ -261,6 +269,14 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "output_cost_per_token": {
+          "description": "Operator-supplied base output price in dollars per token. Same\nprecedence as [`Self::input_cost_per_token`].",
+          "format": "float",
+          "type": [
+            "number",
             "null"
           ]
         },
