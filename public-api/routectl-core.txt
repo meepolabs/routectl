@@ -648,8 +648,9 @@ pub routectl_core::error::Error::Upstream::body: alloc::string::String
 pub routectl_core::error::Error::Upstream::provider: alloc::string::String
 pub routectl_core::error::Error::Upstream::retry_after: core::option::Option<core::time::Duration>
 pub routectl_core::error::Error::Upstream::status: u16
-pub routectl_core::error::Error::Upstream::upstream_code: core::option::Option<alloc::string::String>
-pub routectl_core::error::Error::Upstream::upstream_type: core::option::Option<alloc::string::String>
+pub routectl_core::error::Error::Upstream::upstream_code: core::option::Option<alloc::boxed::Box<str>>
+pub routectl_core::error::Error::Upstream::upstream_request_id: core::option::Option<alloc::boxed::Box<str>>
+pub routectl_core::error::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::error::Error::Validation(alloc::string::String)
 impl routectl_core::error::Error
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
@@ -657,6 +658,7 @@ pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_with_retry_after(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>) -> Self
+pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(core::io::error::Error) -> Self
 impl core::convert::From<serde_json::error::Error> for routectl_core::error::Error
@@ -1139,6 +1141,8 @@ pub enum routectl_core::reasoning_format::ReplayScheme
 pub routectl_core::reasoning_format::ReplayScheme::Codex
 pub routectl_core::reasoning_format::ReplayScheme::Gray
 pub routectl_core::reasoning_format::ReplayScheme::Mantle
+impl routectl_core::reasoning_format::ReplayScheme
+pub const fn routectl_core::reasoning_format::ReplayScheme::as_str(self) -> &'static str
 impl core::clone::Clone for routectl_core::reasoning_format::ReplayScheme
 pub fn routectl_core::reasoning_format::ReplayScheme::clone(&self) -> routectl_core::reasoning_format::ReplayScheme
 impl core::cmp::Eq for routectl_core::reasoning_format::ReplayScheme
@@ -1996,6 +2000,44 @@ pub fn routectl_core::schema::ReasoningDetail::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for routectl_core::schema::ReasoningDetail where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_core::schema::ReasoningDetail
 impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ReasoningDetail
+pub struct routectl_core::schema::ResponsesPassthroughItem
+pub routectl_core::schema::ResponsesPassthroughItem::item: serde_json::value::Value
+pub routectl_core::schema::ResponsesPassthroughItem::modeled_prefix: usize
+impl core::clone::Clone for routectl_core::schema::ResponsesPassthroughItem
+pub fn routectl_core::schema::ResponsesPassthroughItem::clone(&self) -> routectl_core::schema::ResponsesPassthroughItem
+impl core::fmt::Debug for routectl_core::schema::ResponsesPassthroughItem
+pub fn routectl_core::schema::ResponsesPassthroughItem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::Send for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::Sync for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::Unpin for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::UnsafeUnpin for routectl_core::schema::ResponsesPassthroughItem
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema::ResponsesPassthroughItem
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema::ResponsesPassthroughItem
+impl<T, U> core::convert::Into<U> for routectl_core::schema::ResponsesPassthroughItem where U: core::convert::From<T>
+pub fn routectl_core::schema::ResponsesPassthroughItem::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::schema::ResponsesPassthroughItem where U: core::convert::Into<T>
+pub type routectl_core::schema::ResponsesPassthroughItem::Error = core::convert::Infallible
+pub fn routectl_core::schema::ResponsesPassthroughItem::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::schema::ResponsesPassthroughItem where U: core::convert::TryFrom<T>
+pub type routectl_core::schema::ResponsesPassthroughItem::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::schema::ResponsesPassthroughItem::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::schema::ResponsesPassthroughItem where T: core::clone::Clone
+pub type routectl_core::schema::ResponsesPassthroughItem::Owned = T
+pub fn routectl_core::schema::ResponsesPassthroughItem::clone_into(&self, &mut T)
+pub fn routectl_core::schema::ResponsesPassthroughItem::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::schema::ResponsesPassthroughItem where T: 'static + ?core::marker::Sized
+pub fn routectl_core::schema::ResponsesPassthroughItem::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::schema::ResponsesPassthroughItem where T: ?core::marker::Sized
+pub fn routectl_core::schema::ResponsesPassthroughItem::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::schema::ResponsesPassthroughItem where T: ?core::marker::Sized
+pub fn routectl_core::schema::ResponsesPassthroughItem::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::schema::ResponsesPassthroughItem where T: core::clone::Clone
+pub unsafe fn routectl_core::schema::ResponsesPassthroughItem::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::schema::ResponsesPassthroughItem
+pub fn routectl_core::schema::ResponsesPassthroughItem::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::schema::ResponsesPassthroughItem
+impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ResponsesPassthroughItem
 #[non_exhaustive] pub struct routectl_core::schema::RoutectlInternal
 pub routectl_core::schema::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
@@ -2008,6 +2050,7 @@ pub routectl_core::schema::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::schema::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_core::schema::RoutectlInternal::provenance: routectl_core::schema::RequestProvenance
 pub routectl_core::schema::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::CoreReasoningDialect>
+pub routectl_core::schema::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::schema::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::schema::RoutectlInternal::supports_adaptive_thinking: bool
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
@@ -2204,6 +2247,7 @@ pub routectl_core::system_content::SystemContent::Text(alloc::string::String)
 impl routectl_core::system_content::SystemContent
 pub fn routectl_core::system_content::SystemContent::cache_controls(&self) -> impl core::iter::traits::iterator::Iterator<Item = &routectl_core::cache_control::CacheControl>
 pub fn routectl_core::system_content::SystemContent::flatten(&self) -> alloc::string::String
+pub fn routectl_core::system_content::SystemContent::is_blank(&self) -> bool
 impl core::clone::Clone for routectl_core::system_content::SystemContent
 pub fn routectl_core::system_content::SystemContent::clone(&self) -> routectl_core::system_content::SystemContent
 impl core::fmt::Debug for routectl_core::system_content::SystemContent
@@ -2738,8 +2782,9 @@ pub routectl_core::Error::Upstream::body: alloc::string::String
 pub routectl_core::Error::Upstream::provider: alloc::string::String
 pub routectl_core::Error::Upstream::retry_after: core::option::Option<core::time::Duration>
 pub routectl_core::Error::Upstream::status: u16
-pub routectl_core::Error::Upstream::upstream_code: core::option::Option<alloc::string::String>
-pub routectl_core::Error::Upstream::upstream_type: core::option::Option<alloc::string::String>
+pub routectl_core::Error::Upstream::upstream_code: core::option::Option<alloc::boxed::Box<str>>
+pub routectl_core::Error::Upstream::upstream_request_id: core::option::Option<alloc::boxed::Box<str>>
+pub routectl_core::Error::Upstream::upstream_type: core::option::Option<alloc::boxed::Box<str>>
 pub routectl_core::Error::Validation(alloc::string::String)
 impl routectl_core::error::Error
 pub fn routectl_core::error::Error::normalize_request(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
@@ -2747,6 +2792,7 @@ pub fn routectl_core::error::Error::normalize_response(impl core::convert::Into<
 pub fn routectl_core::error::Error::upstream(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_full(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn routectl_core::error::Error::upstream_with_retry_after(impl core::convert::Into<alloc::string::String>, u16, impl core::convert::Into<alloc::string::String>, core::option::Option<core::time::Duration>) -> Self
+pub fn routectl_core::error::Error::with_upstream_request_id(self, core::option::Option<alloc::string::String>) -> Self
 impl core::convert::From<core::io::error::Error> for routectl_core::error::Error
 pub fn routectl_core::error::Error::from(core::io::error::Error) -> Self
 impl core::convert::From<serde_json::error::Error> for routectl_core::error::Error
@@ -3232,6 +3278,8 @@ pub enum routectl_core::ReplayScheme
 pub routectl_core::ReplayScheme::Codex
 pub routectl_core::ReplayScheme::Gray
 pub routectl_core::ReplayScheme::Mantle
+impl routectl_core::reasoning_format::ReplayScheme
+pub const fn routectl_core::reasoning_format::ReplayScheme::as_str(self) -> &'static str
 impl core::clone::Clone for routectl_core::reasoning_format::ReplayScheme
 pub fn routectl_core::reasoning_format::ReplayScheme::clone(&self) -> routectl_core::reasoning_format::ReplayScheme
 impl core::cmp::Eq for routectl_core::reasoning_format::ReplayScheme
@@ -3459,6 +3507,7 @@ pub routectl_core::SystemContent::Text(alloc::string::String)
 impl routectl_core::system_content::SystemContent
 pub fn routectl_core::system_content::SystemContent::cache_controls(&self) -> impl core::iter::traits::iterator::Iterator<Item = &routectl_core::cache_control::CacheControl>
 pub fn routectl_core::system_content::SystemContent::flatten(&self) -> alloc::string::String
+pub fn routectl_core::system_content::SystemContent::is_blank(&self) -> bool
 impl core::clone::Clone for routectl_core::system_content::SystemContent
 pub fn routectl_core::system_content::SystemContent::clone(&self) -> routectl_core::system_content::SystemContent
 impl core::fmt::Debug for routectl_core::system_content::SystemContent
@@ -4771,6 +4820,44 @@ impl<T> core::convert::From<T> for routectl_core::ReplayAttempt
 pub fn routectl_core::ReplayAttempt::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::ReplayAttempt
 impl<T> tracing::instrument::WithSubscriber for routectl_core::ReplayAttempt
+pub struct routectl_core::ResponsesPassthroughItem
+pub routectl_core::ResponsesPassthroughItem::item: serde_json::value::Value
+pub routectl_core::ResponsesPassthroughItem::modeled_prefix: usize
+impl core::clone::Clone for routectl_core::schema::ResponsesPassthroughItem
+pub fn routectl_core::schema::ResponsesPassthroughItem::clone(&self) -> routectl_core::schema::ResponsesPassthroughItem
+impl core::fmt::Debug for routectl_core::schema::ResponsesPassthroughItem
+pub fn routectl_core::schema::ResponsesPassthroughItem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::Send for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::Sync for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::Unpin for routectl_core::schema::ResponsesPassthroughItem
+impl core::marker::UnsafeUnpin for routectl_core::schema::ResponsesPassthroughItem
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::schema::ResponsesPassthroughItem
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::schema::ResponsesPassthroughItem
+impl<T, U> core::convert::Into<U> for routectl_core::schema::ResponsesPassthroughItem where U: core::convert::From<T>
+pub fn routectl_core::schema::ResponsesPassthroughItem::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::schema::ResponsesPassthroughItem where U: core::convert::Into<T>
+pub type routectl_core::schema::ResponsesPassthroughItem::Error = core::convert::Infallible
+pub fn routectl_core::schema::ResponsesPassthroughItem::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::schema::ResponsesPassthroughItem where U: core::convert::TryFrom<T>
+pub type routectl_core::schema::ResponsesPassthroughItem::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::schema::ResponsesPassthroughItem::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::schema::ResponsesPassthroughItem where T: core::clone::Clone
+pub type routectl_core::schema::ResponsesPassthroughItem::Owned = T
+pub fn routectl_core::schema::ResponsesPassthroughItem::clone_into(&self, &mut T)
+pub fn routectl_core::schema::ResponsesPassthroughItem::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::schema::ResponsesPassthroughItem where T: 'static + ?core::marker::Sized
+pub fn routectl_core::schema::ResponsesPassthroughItem::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::schema::ResponsesPassthroughItem where T: ?core::marker::Sized
+pub fn routectl_core::schema::ResponsesPassthroughItem::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::schema::ResponsesPassthroughItem where T: ?core::marker::Sized
+pub fn routectl_core::schema::ResponsesPassthroughItem::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::schema::ResponsesPassthroughItem where T: core::clone::Clone
+pub unsafe fn routectl_core::schema::ResponsesPassthroughItem::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::schema::ResponsesPassthroughItem
+pub fn routectl_core::schema::ResponsesPassthroughItem::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::schema::ResponsesPassthroughItem
+impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::ResponsesPassthroughItem
 #[non_exhaustive] pub struct routectl_core::RoutectlInternal
 pub routectl_core::RoutectlInternal::claude_code_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::effort_levels: alloc::sync::Arc<[alloc::string::String]>
@@ -4783,6 +4870,7 @@ pub routectl_core::RoutectlInternal::max_thinking_budget: u32
 pub routectl_core::RoutectlInternal::operator_betas: alloc::vec::Vec<alloc::string::String>
 pub routectl_core::RoutectlInternal::provenance: routectl_core::schema::RequestProvenance
 pub routectl_core::RoutectlInternal::reasoning_dialect: core::option::Option<routectl_core::CoreReasoningDialect>
+pub routectl_core::RoutectlInternal::responses_input_passthrough: alloc::vec::Vec<routectl_core::schema::ResponsesPassthroughItem>
 pub routectl_core::RoutectlInternal::stainless_headers: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_core::RoutectlInternal::supports_adaptive_thinking: bool
 impl core::clone::Clone for routectl_core::schema::RoutectlInternal
@@ -5233,6 +5321,7 @@ pub fn routectl_core::Provider::normalize_request(&self, &routectl_core::schema:
 pub fn routectl_core::Provider::normalize_response(&self, serde_json::value::Value) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>
 pub fn routectl_core::Provider::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_core::Provider::probe<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::ProbeOutcome> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+pub fn routectl_core::Provider::replay_lane(&self) -> routectl_core::reasoning_format::ReplayScheme
 pub fn routectl_core::Provider::stream<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub trait routectl_core::TokenSource: core::marker::Send + core::marker::Sync + core::fmt::Debug
 pub fn routectl_core::TokenSource::on_auth_failure<'life0, 'async_trait>(&'life0 self) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait

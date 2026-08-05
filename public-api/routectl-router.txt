@@ -2920,6 +2920,7 @@ pub routectl_router::router::DispatchMeta::cleared_capabilities: alloc::vec::Vec
 pub routectl_router::router::DispatchMeta::fallback_count: u32
 pub routectl_router::router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
 pub routectl_router::router::DispatchMeta::reduction_strategy: core::option::Option<&'static str>
+pub routectl_router::router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
 pub routectl_router::router::DispatchMeta::resolved_alias: alloc::string::String
 pub routectl_router::router::DispatchMeta::selection_decision: core::option::Option<&'static str>
 pub routectl_router::router::DispatchMeta::served_forwarded_credential: bool
@@ -3060,6 +3061,63 @@ impl<T> typenum::type_operators::Same for routectl_router::router::DispatchedStr
 pub type routectl_router::router::DispatchedStream::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::DispatchedStream where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::DispatchedStream::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::router::ReplayDegradation
+pub routectl_router::router::ReplayDegradation::action: &'static str
+pub routectl_router::router::ReplayDegradation::artifact_count: usize
+pub routectl_router::router::ReplayDegradation::learned: bool
+pub routectl_router::router::ReplayDegradation::reason: &'static str
+pub routectl_router::router::ReplayDegradation::repair_attempted: bool
+pub routectl_router::router::ReplayDegradation::repair_succeeded: bool
+pub routectl_router::router::ReplayDegradation::source_schemes: alloc::vec::Vec<routectl_core::reasoning_format::ReplayScheme>
+pub routectl_router::router::ReplayDegradation::state_key: alloc::string::String
+pub routectl_router::router::ReplayDegradation::target_lane: routectl_core::reasoning_format::ReplayScheme
+impl core::clone::Clone for routectl_router::router::ReplayDegradation
+pub fn routectl_router::router::ReplayDegradation::clone(&self) -> routectl_router::router::ReplayDegradation
+impl core::fmt::Debug for routectl_router::router::ReplayDegradation
+pub fn routectl_router::router::ReplayDegradation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for routectl_router::router::ReplayDegradation
+impl core::marker::Send for routectl_router::router::ReplayDegradation
+impl core::marker::Sync for routectl_router::router::ReplayDegradation
+impl core::marker::Unpin for routectl_router::router::ReplayDegradation
+impl core::marker::UnsafeUnpin for routectl_router::router::ReplayDegradation
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::router::ReplayDegradation
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::router::ReplayDegradation
+impl<T, U> core::convert::Into<U> for routectl_router::router::ReplayDegradation where U: core::convert::From<T>
+pub fn routectl_router::router::ReplayDegradation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::router::ReplayDegradation where U: core::convert::Into<T>
+pub type routectl_router::router::ReplayDegradation::Error = core::convert::Infallible
+pub fn routectl_router::router::ReplayDegradation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::router::ReplayDegradation where U: core::convert::TryFrom<T>
+pub type routectl_router::router::ReplayDegradation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::router::ReplayDegradation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::router::ReplayDegradation where T: core::clone::Clone
+pub type routectl_router::router::ReplayDegradation::Owned = T
+pub fn routectl_router::router::ReplayDegradation::clone_into(&self, &mut T)
+pub fn routectl_router::router::ReplayDegradation::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::router::ReplayDegradation where T: core::clone::Clone
+pub fn routectl_router::router::ReplayDegradation::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::router::ReplayDegradation where T: 'static + ?core::marker::Sized
+pub fn routectl_router::router::ReplayDegradation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::router::ReplayDegradation where T: ?core::marker::Sized
+pub fn routectl_router::router::ReplayDegradation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::router::ReplayDegradation where T: ?core::marker::Sized
+pub fn routectl_router::router::ReplayDegradation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::router::ReplayDegradation where T: core::clone::Clone
+pub unsafe fn routectl_router::router::ReplayDegradation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::router::ReplayDegradation
+pub fn routectl_router::router::ReplayDegradation::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::router::ReplayDegradation where T: core::clone::Clone
+pub fn routectl_router::router::ReplayDegradation::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::router::ReplayDegradation
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::router::ReplayDegradation where T: ?core::marker::Sized
+pub fn routectl_router::router::ReplayDegradation::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::router::ReplayDegradation::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::router::ReplayDegradation
+impl<T> tracing::instrument::WithSubscriber for routectl_router::router::ReplayDegradation
+impl<T> typenum::type_operators::Same for routectl_router::router::ReplayDegradation
+pub type routectl_router::router::ReplayDegradation::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::ReplayDegradation where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::router::ReplayDegradation::into_shared(self) -> Shared
 pub struct routectl_router::router::RouteTargetStatus
 pub routectl_router::router::RouteTargetStatus::gate: routectl_router::runtime_state::ProviderGateStatus
 pub routectl_router::router::RouteTargetStatus::nickname: alloc::string::String
@@ -3234,6 +3292,7 @@ pub type routectl_router::router::RouterOptions::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::router::RouterOptions where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::router::RouterOptions::into_shared(self) -> Shared
 pub const routectl_router::router::ALIAS_MAX_RECURSION_DEPTH: usize
+pub const fn routectl_router::router::class_debits(&routectl_core::failure_class::FailureClass) -> bool
 pub fn routectl_router::router::merge_header_extras(&str, core::option::Option<&alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, &mut routectl_core::schema::ChatRequest)
 pub fn routectl_router::router::merge_payload_extras(&str, core::option::Option<&serde_json::value::Value>, core::option::Option<&serde_json::value::Value>, &mut routectl_core::schema::ChatRequest)
 pub mod routectl_router::runtime_state
@@ -6317,6 +6376,62 @@ impl<T> typenum::type_operators::Same for routectl_router::ActivationState
 pub type routectl_router::ActivationState::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ActivationState where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ActivationState::into_shared(self) -> Shared
+pub struct routectl_router::AliasChain
+pub routectl_router::AliasChain::alias: alloc::string::String
+pub routectl_router::AliasChain::chain: alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for routectl_router::AliasChain
+pub fn routectl_router::AliasChain::clone(&self) -> routectl_router::AliasChain
+impl core::cmp::Eq for routectl_router::AliasChain
+impl core::cmp::PartialEq for routectl_router::AliasChain
+pub fn routectl_router::AliasChain::eq(&self, &routectl_router::AliasChain) -> bool
+impl core::fmt::Debug for routectl_router::AliasChain
+pub fn routectl_router::AliasChain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::AliasChain
+impl core::marker::Freeze for routectl_router::AliasChain
+impl core::marker::Send for routectl_router::AliasChain
+impl core::marker::Sync for routectl_router::AliasChain
+impl core::marker::Unpin for routectl_router::AliasChain
+impl core::marker::UnsafeUnpin for routectl_router::AliasChain
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::AliasChain
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::AliasChain
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::AliasChain where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::AliasChain::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::AliasChain where U: core::convert::From<T>
+pub fn routectl_router::AliasChain::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::AliasChain where U: core::convert::Into<T>
+pub type routectl_router::AliasChain::Error = core::convert::Infallible
+pub fn routectl_router::AliasChain::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::AliasChain where U: core::convert::TryFrom<T>
+pub type routectl_router::AliasChain::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::AliasChain::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::AliasChain where T: core::clone::Clone
+pub type routectl_router::AliasChain::Owned = T
+pub fn routectl_router::AliasChain::clone_into(&self, &mut T)
+pub fn routectl_router::AliasChain::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::AliasChain where T: core::clone::Clone
+pub fn routectl_router::AliasChain::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::AliasChain where T: 'static + ?core::marker::Sized
+pub fn routectl_router::AliasChain::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::AliasChain where T: ?core::marker::Sized
+pub fn routectl_router::AliasChain::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::AliasChain where T: ?core::marker::Sized
+pub fn routectl_router::AliasChain::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::AliasChain where T: core::clone::Clone
+pub unsafe fn routectl_router::AliasChain::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::AliasChain
+pub fn routectl_router::AliasChain::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::AliasChain where T: core::clone::Clone
+pub fn routectl_router::AliasChain::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::AliasChain
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::AliasChain where T: ?core::marker::Sized
+pub fn routectl_router::AliasChain::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::AliasChain::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::AliasChain
+impl<T> tracing::instrument::WithSubscriber for routectl_router::AliasChain
+impl<T> typenum::type_operators::Same for routectl_router::AliasChain
+pub type routectl_router::AliasChain::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::AliasChain where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::AliasChain::into_shared(self) -> Shared
 pub struct routectl_router::BakedPricingRow
 pub routectl_router::BakedPricingRow::model_glob: &'static str
 pub routectl_router::BakedPricingRow::provider_kind: &'static str
@@ -7694,6 +7809,7 @@ pub routectl_router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routect
 pub routectl_router::DispatchMeta::fallback_count: u32
 pub routectl_router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
 pub routectl_router::DispatchMeta::reduction_strategy: core::option::Option<&'static str>
+pub routectl_router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
 pub routectl_router::DispatchMeta::resolved_alias: alloc::string::String
 pub routectl_router::DispatchMeta::selection_decision: core::option::Option<&'static str>
 pub routectl_router::DispatchMeta::served_forwarded_credential: bool
@@ -8064,9 +8180,11 @@ pub type routectl_router::EditResult::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::EditResult where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::EditResult::into_shared(self) -> Shared
 pub struct routectl_router::EffectiveView
+pub routectl_router::EffectiveView::aliases: alloc::vec::Vec<routectl_router::AliasChain>
 pub routectl_router::EffectiveView::capabilities: alloc::vec::Vec<routectl_router::OverrideRow>
 pub routectl_router::EffectiveView::classes: alloc::vec::Vec<routectl_router::ClassPolicyCell>
 pub routectl_router::EffectiveView::models: alloc::vec::Vec<routectl_router::ModelCell>
+pub routectl_router::EffectiveView::provider_ids: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::EffectiveView
 pub fn routectl_router::EffectiveView::clone(&self) -> routectl_router::EffectiveView
 impl core::cmp::PartialEq for routectl_router::EffectiveView
@@ -11423,6 +11541,7 @@ pub fn routectl_router::catalog_import_state_default_path() -> std::path::PathBu
 pub fn routectl_router::catalog_state_default_path() -> std::path::PathBuf
 pub fn routectl_router::catalog_state_selector_key(&str, &str) -> alloc::string::String
 pub fn routectl_router::check_drift_and_persist_state(&[(alloc::string::String, alloc::string::String)], &routectl_router::CatalogOverlay, &std::path::Path)
+pub const fn routectl_router::class_debits(&routectl_core::failure_class::FailureClass) -> bool
 pub fn routectl_router::class_policy_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
 pub const fn routectl_router::classify_field(routectl_router::ImpactField) -> routectl_router::ImpactClass
 pub fn routectl_router::codex_identity_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
