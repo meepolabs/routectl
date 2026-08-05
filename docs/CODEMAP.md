@@ -449,7 +449,7 @@ listed at the bottom of each crate.
   `max_thinking_entry_bytes`, `session_id`, `cloak`, `use_forwarded_bearer`,
   `mantle` (`Option<MantleAuth>`, cfg `bedrock`)) + `AuthKind` (ApiKey /
   OauthBearer) +
-  `AnthropicApiProvider::new`/`resolve_user_agent`/`build_headers`/`cloak_body`/`is_non_cc`
+  `AnthropicApiProvider::new`/`resolve_user_agent`/`build_headers`/`cloak_body`/`is_non_cc`/`is_cloak_lane`
   and the beta-decision 4xx observability (`BetaDecision`,
   `should_log_beta_4xx`, `log_beta_decision_on_4xx`).
   `should_use_forwarded_bearer` is the shared three-way WIRE gate consulted by
@@ -465,7 +465,11 @@ listed at the bottom of each crate.
   `self.cfg.auth.token()` when the gate is armed; `build_headers` gates the
   same pin (`forwarded_leg`) to stamp the client's captured
   `stainless_headers` + `claude_code_headers` LAST, overriding routectl's
-  minted identity fingerprint on that leg only. Bedrock mantle lane (cfg
+  minted identity fingerprint on that leg only. `is_cloak_lane` composes
+  `forwarded_leg` + `is_anthropic_api_host` + `AuthKind::OauthBearer` into the
+  single own-OAuth-to-Anthropic LANE predicate the lane-gated header/body sites
+  share (it is the lane, independent of `is_non_cc`/`CloakMode`, which remain
+  separate inner gates). Bedrock mantle lane (cfg
   `bedrock`): `MantleAuth` (defined in `crate::mantle`) selects the lane when
   `cfg.mantle` is `Some`; `is_mantle` gates a no-redirect client
   (`http_client::build_no_redirect`, Policy::none()), a `build_headers` skip
