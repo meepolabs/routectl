@@ -160,8 +160,10 @@ pub fn routectl_router::catalog::BakedPricingRow::into_shared(self) -> Shared
 pub struct routectl_router::catalog::CachePricingOverride
 pub routectl_router::catalog::CachePricingOverride::auto_cacher: core::option::Option<bool>
 pub routectl_router::catalog::CachePricingOverride::has_storage_rent: core::option::Option<bool>
+pub routectl_router::catalog::CachePricingOverride::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CachePricingOverride::max_context_tokens: core::option::Option<u32>
 pub routectl_router::catalog::CachePricingOverride::min_prefix_tokens: core::option::Option<u32>
+pub routectl_router::catalog::CachePricingOverride::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CachePricingOverride::override_acknowledges_cost_risk: bool
 pub routectl_router::catalog::CachePricingOverride::rm: core::option::Option<f32>
 pub routectl_router::catalog::CachePricingOverride::storage_rent: core::option::Option<f32>
@@ -294,8 +296,10 @@ pub fn routectl_router::catalog::CachePricingSelector::into_shared(self) -> Shar
 pub routectl_router::catalog::CatalogRow::auto_cacher: bool
 pub routectl_router::catalog::CatalogRow::capabilities: alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>
 pub routectl_router::catalog::CatalogRow::has_storage_rent: bool
+pub routectl_router::catalog::CatalogRow::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CatalogRow::max_context_tokens: core::option::Option<u32>
 pub routectl_router::catalog::CatalogRow::min_prefix_tokens: u32
+pub routectl_router::catalog::CatalogRow::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::catalog::CatalogRow::rm: f32
 pub routectl_router::catalog::CatalogRow::storage_rent: f32
 pub routectl_router::catalog::CatalogRow::tier: core::option::Option<&'static str>
@@ -4696,8 +4700,10 @@ pub routectl_router::ImpactField::AutoCacher
 pub routectl_router::ImpactField::Capabilities
 pub routectl_router::ImpactField::Enablement
 pub routectl_router::ImpactField::HasStorageRent
+pub routectl_router::ImpactField::InputCostPerToken
 pub routectl_router::ImpactField::MaxContextTokens
 pub routectl_router::ImpactField::MinPrefixTokens
+pub routectl_router::ImpactField::OutputCostPerToken
 pub routectl_router::ImpactField::Rm
 pub routectl_router::ImpactField::Source
 pub routectl_router::ImpactField::StorageRent
@@ -6794,8 +6800,10 @@ pub fn routectl_router::CacheConfig::into_shared(self) -> Shared
 pub struct routectl_router::CachePricingOverride
 pub routectl_router::CachePricingOverride::auto_cacher: core::option::Option<bool>
 pub routectl_router::CachePricingOverride::has_storage_rent: core::option::Option<bool>
+pub routectl_router::CachePricingOverride::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::CachePricingOverride::max_context_tokens: core::option::Option<u32>
 pub routectl_router::CachePricingOverride::min_prefix_tokens: core::option::Option<u32>
+pub routectl_router::CachePricingOverride::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::CachePricingOverride::override_acknowledges_cost_risk: bool
 pub routectl_router::CachePricingOverride::rm: core::option::Option<f32>
 pub routectl_router::CachePricingOverride::storage_rent: core::option::Option<f32>
@@ -7377,8 +7385,10 @@ pub fn routectl_router::CatalogOverlay::into_shared(self) -> Shared
 pub routectl_router::CatalogRow::auto_cacher: bool
 pub routectl_router::CatalogRow::capabilities: alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>
 pub routectl_router::CatalogRow::has_storage_rent: bool
+pub routectl_router::CatalogRow::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::CatalogRow::max_context_tokens: core::option::Option<u32>
 pub routectl_router::CatalogRow::min_prefix_tokens: u32
+pub routectl_router::CatalogRow::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::CatalogRow::rm: f32
 pub routectl_router::CatalogRow::storage_rent: f32
 pub routectl_router::CatalogRow::tier: core::option::Option<&'static str>
@@ -8413,6 +8423,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::ImportCandidate::into_shared(self) -> Shared
 pub struct routectl_router::ImportDiff
 pub routectl_router::ImportDiff::applied: alloc::vec::Vec<routectl_router::DiffRow>
+pub routectl_router::ImportDiff::cleared: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::ImportDiff::conflicted: alloc::vec::Vec<routectl_router::DiffRow>
 pub routectl_router::ImportDiff::skipped: alloc::vec::Vec<routectl_router::SkippedSelector>
 impl core::clone::Clone for routectl_router::ImportDiff
@@ -9538,8 +9549,10 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::NearLosslessMarks::into_shared(self) -> Shared
 pub struct routectl_router::OverlayCell
 pub routectl_router::OverlayCell::capabilities: core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, bool>>
+pub routectl_router::OverlayCell::input_cost_per_token: core::option::Option<f32>
 pub routectl_router::OverlayCell::max_context_tokens: core::option::Option<u32>
 pub routectl_router::OverlayCell::min_prefix_tokens: core::option::Option<u32>
+pub routectl_router::OverlayCell::output_cost_per_token: core::option::Option<f32>
 pub routectl_router::OverlayCell::rm: core::option::Option<f32>
 pub routectl_router::OverlayCell::source: routectl_router::OverlaySource
 pub routectl_router::OverlayCell::ttl_seconds: core::option::Option<u32>
@@ -11558,6 +11571,7 @@ pub fn routectl_router::epoch_day_age(&str, i64) -> core::option::Option<i64>
 pub const fn routectl_router::escalate(routectl_router::ImpactClass, routectl_router::ImpactClass) -> routectl_router::ImpactClass
 pub fn routectl_router::evaluate(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
 pub fn routectl_router::is_cataloged_provider_kind(&str) -> bool
+pub fn routectl_router::is_import_cell(&routectl_router::CatalogOverlay, &str) -> bool
 pub fn routectl_router::is_stale_days(&str, i64, i64) -> bool
 pub fn routectl_router::is_stale_days_today(&str, i64) -> bool
 pub fn routectl_router::is_stale_today(&str) -> bool
