@@ -463,6 +463,29 @@ impl AnthropicApiProvider {
         )
     }
 
+    /// The cloak LANE predicate: this request egresses on routectl's own
+    /// OAuth credential to `api.anthropic.com`, so routectl -- not the
+    /// client -- owns the outbound fingerprint and must present one
+    /// Anthropic accepts for an OAuth seat.
+    ///
+    /// Three stable conditions, composed from the existing helpers so a new
+    /// lane-gated site cannot copy them and drift: `OauthBearer` auth kind,
+    /// exact `api.anthropic.com` host, and NOT the forwarded (pure-proxy)
+    /// leg (there the client's own identity must reach Anthropic verbatim
+    /// per the FORWARDING TRANSPARENCY CONTRACT).
+    ///
+    /// Deliberately INDEPENDENT of `is_non_cc` and of `CloakMode`: this is
+    /// the lane, not the cloak state. Sites that additionally depend on the
+    /// cloak state keep their own inner gate (e.g. the pinned beta floor is
+    /// `is_cloak_lane && is_non_cc`) -- folding either into the lane would
+    /// let a `cloak.mode = never` provider escape lane-wide requirements
+    /// that exist for the credential, not for the disguise.
+    pub(super) fn is_cloak_lane(&self, req: &ChatRequest) -> bool {
+        self.cfg.auth_kind == AuthKind::OauthBearer
+            && is_anthropic_api_host(&self.cfg.base_url)
+            && !self.forwarded_leg(req)
+    }
+
     /// Compose the outbound headers, including the three-source
     /// `anthropic-beta` union.
     ///
@@ -592,10 +615,7 @@ impl AnthropicApiProvider {
         // Anthropic verbatim rather than being widened by routectl's minted
         // floor -- that would be a fingerprint the client never sent.
         let mut oauth_added = false;
-        if !forwarded_leg
-            && self.cfg.auth_kind == AuthKind::OauthBearer
-            && is_anthropic_api_host(&self.cfg.base_url)
-        {
+        if self.is_cloak_lane(req) {
             let oauth_beta = routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA;
             if beta_seen.insert(oauth_beta.to_string()) {
                 merged_betas.push(oauth_beta.to_string());

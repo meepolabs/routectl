@@ -1571,6 +1571,83 @@ fn forwarded_leg_predicate_true_iff_all_three_positive() {
     }
 }
 
+/// The cloak LANE predicate `is_cloak_lane` is true ONLY for the
+/// OauthBearer + exact api.anthropic.com host + non-forwarded
+/// combination. It is false on the forwarded leg, for OAuth pointed at
+/// another host, and for any non-OAuth auth kind. This is the lane, not
+/// the cloak state -- its value is exercised across all combinations
+/// here; independence from `is_non_cc`/`CloakMode` is asserted separately.
+#[test]
+fn is_cloak_lane_true_iff_own_oauth_anthropic() {
+    // Own OAuth to the exact api.anthropic.com host, no forwarded bearer.
+    let own = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("sid".into()),
+        Vec::new(),
+        false,
+    ));
+    assert!(
+        own.is_cloak_lane(&ChatRequest::default()),
+        "own OAuth to api.anthropic.com (non-forwarded) is the cloak lane",
+    );
+
+    // Forwarded leg: use_forwarded_bearer + captured bearer + anthropic
+    // host -> forwarded_leg true -> lane false.
+    let fwd_provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://api.anthropic.com",
+        Some("sid".into()),
+        Vec::new(),
+        true,
+    ));
+    assert!(
+        !fwd_provider.is_cloak_lane(&forwarded_req(&[], &[], &[])),
+        "the forwarded leg is not the cloak lane",
+    );
+
+    // OAuth pointed at a non-anthropic host -> lane false.
+    let other_host = AnthropicApiProvider::new(oauth_cfg_with_session(
+        "https://example.invalid",
+        Some("sid".into()),
+        Vec::new(),
+        false,
+    ));
+    assert!(
+        !other_host.is_cloak_lane(&ChatRequest::default()),
+        "OAuth to another host is not the cloak lane",
+    );
+
+    // Non-OAuth auth kind (ApiKey) on the anthropic host -> lane false.
+    let api_key = AnthropicApiProvider::new(cfg_with_allowlist(Vec::new()));
+    assert!(
+        !api_key.is_cloak_lane(&ChatRequest::default()),
+        "a non-OAuth auth kind is never the cloak lane",
+    );
+}
+
+/// `is_cloak_lane` is the LANE, not the cloak STATE: its value must not
+/// depend on `is_non_cc` or `CloakMode`. Under every cloak mode -- Never
+/// (is_non_cc false), Always (is_non_cc true), and Auto -- an own OAuth
+/// provider on the anthropic host stays in the lane. This is the guard
+/// that keeps `cloak.mode = never` from escaping lane-wide requirements.
+#[test]
+fn is_cloak_lane_independent_of_cloak_mode_and_is_non_cc() {
+    for mode in [CloakMode::Never, CloakMode::Always, CloakMode::Auto] {
+        let provider = oauth_provider_with_cloak(CloakConfig {
+            mode,
+            ..CloakConfig::default()
+        });
+        // A session header drives is_non_cc under Auto; assert the lane is
+        // stable regardless of whether it is present.
+        for headers in [Vec::new(), vec![("x-claude-code-session-id", "sid-42")]] {
+            let req = req_with_claude_code_headers(headers);
+            assert!(
+                provider.is_cloak_lane(&req),
+                "is_cloak_lane must hold under mode {mode:?} regardless of is_non_cc",
+            );
+        }
+    }
+}
+
 /// On the forwarded leg cloak_body is a no-op: it returns None and leaves
 /// the body byte-for-byte unchanged, so the client's real body (billing
 /// block included) reaches Anthropic untouched.
