@@ -132,6 +132,12 @@ fn require_scoped(args: &CaptureArgs) -> Result<(), String> {
 /// 400 with a top-level string `__type` naming a ValidationException and a
 /// non-empty string `message`, and NOT the nested Anthropic-shape error
 /// envelope. Returns the failure reason on any mismatch.
+///
+/// The `__type` check runs through the canonical
+/// [`routectl_providers::aws_exception_type_is`] reduction, so the namespaced
+/// wire form (`com.amazon.coral.validate#ValidationException`) and the bare
+/// token are accepted identically while an unrelated exception whose name
+/// merely embeds the target is not.
 fn classify_validation(status: u16, body: &[u8]) -> Result<(), String> {
     if status != 400 {
         return Err(format!("expected HTTP 400, got HTTP {status}"));
@@ -148,9 +154,13 @@ fn classify_validation(status: u16, body: &[u8]) -> Result<(), String> {
         .get("__type")
         .and_then(Value::as_str)
         .ok_or_else(|| "response has no string `__type` field".to_string())?;
-    if !type_field.contains("ValidationException") {
+    if !routectl_providers::aws_exception_type_is(
+        type_field,
+        routectl_providers::VALIDATION_EXCEPTION_TYPE,
+    ) {
         return Err(format!(
-            "`__type` is `{type_field}`, not a ValidationException"
+            "`__type` is `{type_field}`, not a {}",
+            routectl_providers::VALIDATION_EXCEPTION_TYPE
         ));
     }
     let message = obj
@@ -551,6 +561,34 @@ mod tests {
     fn classify_accepts_flat_validation_400() {
         let body = br#"{"__type":"com.amazon.coral.validate#ValidationException","message":"model does not support the anthropic_beta value"}"#;
         assert!(classify_validation(400, body).is_ok());
+    }
+
+    #[test]
+    fn classify_accepts_namespaced_and_bare_type_identically() {
+        // The namespaced wire form and the bare token are the same
+        // discriminator: the harness must accept both, and reject an unrelated
+        // exception in either form.
+        for accepted in [
+            br#"{"__type":"ValidationException","message":"x"}"#.as_slice(),
+            br#"{"__type":"com.amazon.coral.validate#ValidationException","message":"x"}"#
+                .as_slice(),
+            br#"{"__type":"com.amazon.coral.service#ValidationException","message":"x"}"#
+                .as_slice(),
+        ] {
+            assert!(
+                classify_validation(400, accepted).is_ok(),
+                "body {} must be accepted",
+                String::from_utf8_lossy(accepted)
+            );
+        }
+        for rejected in [
+            br#"{"__type":"ThrottlingException","message":"x"}"#.as_slice(),
+            br#"{"__type":"com.amazon.coral.service#ThrottlingException","message":"x"}"#
+                .as_slice(),
+            br#"{"__type":"PreValidationExceptionWrapper","message":"x"}"#.as_slice(),
+        ] {
+            classify_validation(400, rejected).expect_err("non-validation type must be rejected");
+        }
     }
 
     #[test]

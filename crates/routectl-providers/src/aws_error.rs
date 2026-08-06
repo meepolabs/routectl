@@ -53,7 +53,7 @@ pub fn lift_aws_error_tokens(parsed: Option<&Value>) -> (Option<String>, Option<
         .get("__type")
         .and_then(Value::as_str)
         .filter(|raw| is_bounded_aws_token(raw))
-        .map(strip_aws_namespace);
+        .map(|raw| strip_aws_namespace(raw).to_string());
     let upstream_code = v
         .get("code")
         .and_then(Value::as_str)
@@ -88,11 +88,34 @@ fn is_bounded_aws_token(token: &str) -> bool {
 /// Strip an AWS namespace prefix from an exception token:
 /// `"com.amazonaws.bedrock#ThrottlingException"` -> `"ThrottlingException"`.
 /// A token with no `#` is returned unchanged.
-fn strip_aws_namespace(raw: &str) -> String {
-    raw.rsplit_once('#')
-        .map_or(raw, |(_, bare)| bare)
-        .to_string()
+///
+/// The canonical reduction every `__type` / `x-amzn-errortype` consumer runs
+/// before comparing against a bare exception name. Crate-private: downstream
+/// crates gate through [`aws_exception_type_is`] rather than reducing by hand.
+fn strip_aws_namespace(raw: &str) -> &str {
+    raw.rsplit_once('#').map_or(raw, |(_, bare)| bare)
 }
+
+/// True when `raw` and `expected` name the same AWS exception, whichever of
+/// them arrives bare and whichever namespaced
+/// (`com.amazon.coral.validate#ValidationException`).
+///
+/// The canonical comparison for any consumer gating on an AWS exception
+/// discriminator: an exact `==` against a bare name silently misses the
+/// namespaced wire form, and a `contains` match accepts an unrelated
+/// exception whose name merely embeds the target. BOTH operands are
+/// namespace-reduced, so a caller holding a namespaced constant gets the same
+/// verdict as one holding the bare name.
+pub fn aws_exception_type_is(raw: &str, expected: &str) -> bool {
+    strip_aws_namespace(raw) == strip_aws_namespace(expected)
+}
+
+/// The bare AWS exception name a Bedrock request-validation 400 carries in
+/// its discriminator (body `__type` or the `x-amzn-errortype` header). Single
+/// source of truth for every consumer gating on a validation rejection, so
+/// the token cannot drift between the provider lift, the capability matcher,
+/// and the envelope-capture harness.
+pub const VALIDATION_EXCEPTION_TYPE: &str = "ValidationException";
 
 /// The response header AWS/Bedrock uses to carry the exception
 /// discriminator when the error body is the flat minimal `{"message":...}`
@@ -218,7 +241,7 @@ pub fn classify_aws_error_type_header(headers: &HeaderMap) -> ErrorTypeHeaderLif
         .split_once(':')
         .map_or(first_str, |(head, _)| head);
     if is_bounded_aws_token(head) {
-        ErrorTypeHeaderLift::Lifted(strip_aws_namespace(head))
+        ErrorTypeHeaderLift::Lifted(strip_aws_namespace(head).to_string())
     } else {
         ErrorTypeHeaderLift::Invalid
     }
@@ -442,6 +465,107 @@ mod tests {
         // Only the final `#` splits, and an empty bare token stays empty.
         assert_eq!(strip_aws_namespace("a#b#Trailing"), "Trailing");
         assert_eq!(strip_aws_namespace("prefix#"), "");
+    }
+
+    /// `aws_exception_type_is` matches the NAMESPACED and the bare form of a
+    /// discriminator identically, and refuses an unrelated exception whose
+    /// name merely embeds the target (what a `contains` match would accept).
+    #[test]
+    fn aws_exception_type_is_matches_namespaced_and_bare_identically() {
+        for raw in [
+            VALIDATION_EXCEPTION_TYPE,
+            "com.amazon.coral.service#ValidationException",
+            "com.amazon.coral.validate#ValidationException",
+        ] {
+            assert!(
+                aws_exception_type_is(raw, VALIDATION_EXCEPTION_TYPE),
+                "`{raw}` must match the bare token"
+            );
+        }
+        for raw in [
+            "ThrottlingException",
+            "com.amazon.coral.service#ThrottlingException",
+            "PreValidationExceptionWrapper",
+            "com.amazon.coral.service#SubValidationException",
+        ] {
+            assert!(
+                !aws_exception_type_is(raw, VALIDATION_EXCEPTION_TYPE),
+                "`{raw}` must not match the bare token"
+            );
+        }
+    }
+
+    /// The comparison is symmetric: all four bare/namespaced combinations of
+    /// the two operands agree, so a caller holding a NAMESPACED constant gets
+    /// the same verdict as one holding the bare name. A name that merely
+    /// embeds the token is still rejected in every combination.
+    #[test]
+    fn aws_exception_type_is_normalizes_both_operands() {
+        const BARE: &str = VALIDATION_EXCEPTION_TYPE;
+        const NAMESPACED: &str = "com.amazon.coral.validate#ValidationException";
+        for (raw, expected) in [
+            (BARE, BARE),
+            (BARE, NAMESPACED),
+            (NAMESPACED, BARE),
+            (NAMESPACED, NAMESPACED),
+        ] {
+            assert!(
+                aws_exception_type_is(raw, expected),
+                "`{raw}` vs `{expected}` must match in every bare/namespaced combination"
+            );
+        }
+
+        const EMBEDDING_BARE: &str = "PreValidationExceptionWrapper";
+        const EMBEDDING_NAMESPACED: &str = "com.amazon.coral.service#SubValidationException";
+        for (raw, expected) in [
+            (EMBEDDING_BARE, BARE),
+            (EMBEDDING_BARE, NAMESPACED),
+            (EMBEDDING_NAMESPACED, BARE),
+            (EMBEDDING_NAMESPACED, NAMESPACED),
+            (BARE, EMBEDDING_BARE),
+            (NAMESPACED, EMBEDDING_NAMESPACED),
+        ] {
+            assert!(
+                !aws_exception_type_is(raw, expected),
+                "`{raw}` vs `{expected}` merely embeds the token and must not match"
+            );
+        }
+    }
+
+    /// A namespaced `__type` lifts to exactly the token a bare `__type`
+    /// lifts to, so the provider lift and any downstream discriminator gate
+    /// agree on one form.
+    #[test]
+    fn lift_of_namespaced_type_equals_lift_of_bare_type() {
+        let namespaced = serde_json::from_str::<Value>(
+            r#"{"__type":"com.amazon.coral.service#ThrottlingException"}"#,
+        )
+        .ok();
+        let bare = serde_json::from_str::<Value>(r#"{"__type":"ThrottlingException"}"#).ok();
+        assert_eq!(
+            lift_aws_error_tokens(namespaced.as_ref()),
+            lift_aws_error_tokens(bare.as_ref())
+        );
+    }
+
+    /// The header lift reduces a namespaced discriminator to the same token a
+    /// bare one yields, across both the plain and the coral-URL-tailed form.
+    #[test]
+    fn header_lift_of_namespaced_type_equals_lift_of_bare_type() {
+        let bare = lift_aws_error_type_from_headers(&headers_with_error_type(&[
+            VALIDATION_EXCEPTION_TYPE,
+        ]));
+        assert_eq!(bare.as_deref(), Some(VALIDATION_EXCEPTION_TYPE));
+        for raw in [
+            "com.amazon.coral.service#ValidationException",
+            "com.amazon.coral.service#ValidationException:http://internal.example/coral/",
+        ] {
+            assert_eq!(
+                lift_aws_error_type_from_headers(&headers_with_error_type(&[raw])),
+                bare,
+                "header `{raw}` must lift to the bare token"
+            );
+        }
     }
 
     /// The AWS envelope lift reads `__type` (namespace-stripped) and a

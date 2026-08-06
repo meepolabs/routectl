@@ -454,12 +454,13 @@ pub fn upstream_param(err: &Error) -> Option<String> {
     upstream_error_field(err, "param").filter(|param| is_safe_param_token(param))
 }
 
-/// The `__type` discriminant an AWS Bedrock request-validation 400 carries,
-/// namespace-stripped as the lift lands it on
-/// [`Error::Upstream::upstream_type`]. Used only for drift observability at
-/// the learn site (a rejection whose lifted type is this yet matched no
-/// template is visible wording drift), never to attribute a capability.
-const BEDROCK_VALIDATION_EXCEPTION_TYPE: &str = "ValidationException";
+/// The `__type` discriminant an AWS Bedrock request-validation 400 carries.
+/// Aliases the providers crate's single source of truth for the token, so the
+/// matcher's gate and the lane that lifts it cannot drift. Used only for drift
+/// observability at the learn site (a rejection whose lifted type is this yet
+/// matched no template is visible wording drift), never to attribute a
+/// capability.
+const BEDROCK_VALIDATION_EXCEPTION_TYPE: &str = routectl_providers::VALIDATION_EXCEPTION_TYPE;
 
 /// Anchored-template extractions for a Bedrock `ValidationException`
 /// message. Each entry is a `(prefix, suffix)` literal template with
@@ -582,22 +583,29 @@ fn bedrock_validation_message(err: &Error) -> Option<String> {
 }
 
 /// True when `err` carries a Bedrock `ValidationException`, read from the
-/// lifted, namespace-stripped [`Error::Upstream::upstream_type`] rather than
-/// re-parsed from the raw body. The native lane emits the namespaced wire
-/// form (`com.amazon.coral.validate#ValidationException`) in the body but
-/// lifts the bare `ValidationException` onto `upstream_type`; matching the
-/// lifted token is what makes this predicate fire on real production input
-/// (a raw-body match on the bare name is dead against the namespaced shape).
-/// The learn site uses it to bump a drift counter when the matcher
-/// attributed no capability yet the rejection WAS a validation fault -- so
-/// wording drift is visible instead of silently reintroducing repeat 400s.
+/// lifted [`Error::Upstream::upstream_type`] rather than re-parsed from the
+/// raw body. The native lane emits the namespaced wire form
+/// (`com.amazon.coral.validate#ValidationException`) in the body but lifts the
+/// bare `ValidationException` onto `upstream_type`; matching the lifted token
+/// is what makes this predicate fire on real production input (a raw-body
+/// match on the bare name is dead against the namespaced shape).
+///
+/// The comparison runs through
+/// [`routectl_providers::aws_exception_type_is`], so a discriminator that
+/// arrives still namespaced -- an upstream or intermediary that bypassed the
+/// provider lift -- matches identically to the bare token instead of being
+/// silently missed.
+///
+/// The learn site uses it to bump a drift counter when the matcher attributed
+/// no capability yet the rejection WAS a validation fault -- so wording drift
+/// is visible instead of silently reintroducing repeat 400s.
 pub fn is_bedrock_validation_exception(err: &Error) -> bool {
     matches!(
         err,
         Error::Upstream {
             upstream_type: Some(t),
             ..
-        } if &**t == BEDROCK_VALIDATION_EXCEPTION_TYPE
+        } if routectl_providers::aws_exception_type_is(t, BEDROCK_VALIDATION_EXCEPTION_TYPE)
     )
 }
 
@@ -1440,6 +1448,49 @@ mod tests {
             Some("some rejection")
         );
         assert!(is_bedrock_validation_exception(&err));
+    }
+
+    #[test]
+    fn bedrock_validation_predicate_matches_namespaced_upstream_type_identically() {
+        // A discriminator that reaches `upstream_type` STILL NAMESPACED (an
+        // intermediary or a future lane that bypassed the provider lift) must
+        // gate exactly as the bare token does -- the namespaced form is never
+        // silently missed.
+        let fx = capture_fixture();
+        let body = fx["canaries"]["advisor-tool"]["body"]
+            .as_str()
+            .expect("advisor body")
+            .to_string();
+        let bare = upstream(400, &body, Some(BEDROCK_VALIDATION_EXCEPTION_TYPE), None);
+        // The bare form is the learnable case, so the parity assertions below
+        // compare a real attribution, not two `None`s.
+        assert!(
+            resolve_requested_capability("bedrock", &bare, &cf(FailureClass::BadRequest)).is_some()
+        );
+        for namespaced_type in [
+            "com.amazon.coral.validate#ValidationException",
+            "com.amazon.coral.service#ValidationException",
+        ] {
+            let namespaced = upstream(400, &body, Some(namespaced_type), None);
+            assert_eq!(
+                is_bedrock_validation_exception(&namespaced),
+                is_bedrock_validation_exception(&bare),
+                "namespaced `{namespaced_type}` must gate as the bare token does"
+            );
+            assert_eq!(
+                resolve_requested_capability("bedrock", &namespaced, &cf(FailureClass::BadRequest)),
+                resolve_requested_capability("bedrock", &bare, &cf(FailureClass::BadRequest)),
+                "namespaced `{namespaced_type}` must resolve as the bare token does"
+            );
+        }
+        // A DIFFERENT namespaced exception still fails the gate: the
+        // reduction is not a substring match.
+        assert!(!is_bedrock_validation_exception(&upstream(
+            400,
+            &body,
+            Some("com.amazon.coral.service#ThrottlingException"),
+            None
+        )));
     }
 
     #[test]
