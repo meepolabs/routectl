@@ -315,7 +315,7 @@ listed at the bottom of each crate.
   `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
-  `retry_after`, `responses_reasoning_guard`
+  `retry_after`, `responses_reasoning_guard`, `sampling_drop_guard`
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin
   and User-Agent override; also owns the response-body cap cluster shared by
@@ -363,6 +363,14 @@ listed at the bottom of each crate.
   when a non-Responses egress (openai-compat/openrouter, anthropic-api,
   gemini) drops the OpenAI-Responses-dialect `reasoning.context` /
   `reasoning.mode` carried through `provider_extras["reasoning"]`
+- `src/sampling_drop_guard.rs` -- shared leak-guard
+  (`warn_dropped_sampling_fields`): one WARN per
+  request naming which of the canonical sampling knobs (`n`, `seed`,
+  `logprobs`, `top_logprobs`, `logit_bias`, `presence_penalty`,
+  `frequency_penalty`) an egress that cannot honor them received -- names
+  only, never values. Called by anthropic-api (which covers bedrock-invoke
+  via delegation), bedrock-converse, gemini and openai-responses;
+  openai-compat forwards the fields verbatim and never calls in
 - `src/claude_signing.rs` -- byte-level re-signer for the billing-header
   checksum; re-signs an existing billing block in place after egress body
   mutations

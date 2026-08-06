@@ -63,6 +63,10 @@ const RESPONSE_FIELD_PATHS: &[&str] = &["/stop_sequence"];
 // ---------------------------------------------------------------------------
 
 pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseRequest> {
+    // The canonical sampling knobs have no `inferenceConfig` home and are
+    // gated out of the additionalModelRequestFields merge as canonical keys;
+    // WARN once so the loss isn't silent.
+    crate::sampling_drop_guard::warn_dropped_sampling_fields(&cfg.id, req);
     let system = build_system(req);
     let messages = build_messages(&cfg.id, &req.messages)?;
     let tool_config = build_tool_config(&cfg.id, req, &messages)?;

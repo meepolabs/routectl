@@ -29,6 +29,19 @@ pub(crate) mod model_profile;
 ))]
 pub(crate) mod responses_reasoning_guard;
 
+// Shared leak-guard: WARN once per request when an egress that cannot
+// honor the canonical sampling knobs (`n`, `seed`, `logprobs`,
+// `top_logprobs`, `logit_bias`, `presence_penalty`, `frequency_penalty`)
+// receives one. Gated on those egresses; openai-compat forwards them
+// verbatim and never calls in.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "gemini",
+    feature = "openai-responses"
+))]
+pub(crate) mod sampling_drop_guard;
+
 pub(crate) mod http_client;
 
 // Shared single-shot reachability probe for the HTTP-based egresses

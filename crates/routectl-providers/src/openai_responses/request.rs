@@ -27,6 +27,10 @@ use super::{AuthKind, OpenAiResponsesConfig, extras};
 /// `stream = false` and the caller flips as needed.
 pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<ResponsesRequest> {
     warn_dropped_cache_control(req);
+    // The canonical sampling knobs have no Responses-API home and are gated
+    // out of the provider_extras merge as canonical keys; WARN once so the
+    // loss isn't silent.
+    crate::sampling_drop_guard::warn_dropped_sampling_fields(&cfg.id, req);
 
     let instructions = translate_system(req).unwrap_or_default();
     let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req)?;

@@ -1241,3 +1241,50 @@ fn keeps_temperature_when_top_p_unset() {
         "topP must be absent when only temperature is set, got {body}"
     );
 }
+
+/// A request carrying canonical sampling knobs the Converse envelope
+/// cannot model emits one WARN naming them, and the body ships none of
+/// them.
+#[traced_test]
+#[test]
+fn sampling_fields_warn_once_naming_dropped_fields() {
+    // Arrange
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")].into(),
+        max_tokens: Some(256),
+        n: Some(3),
+        presence_penalty: Some(0.5),
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert
+    assert!(body.get("n").is_none(), "got {body}");
+    logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
+    assert!(logs_contain("presence_penalty"));
+}
+
+/// The sampling WARN stays silent when the request carries none of the
+/// seven knobs.
+#[traced_test]
+#[test]
+fn no_sampling_warn_when_no_sampling_field_set() {
+    // Arrange
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")].into(),
+        max_tokens: Some(256),
+        ..Default::default()
+    };
+
+    // Act
+    let _ = normalize_request(&cfg, &req).unwrap();
+
+    // Assert
+    assert!(!logs_contain("sampling fields dropped"));
+}
