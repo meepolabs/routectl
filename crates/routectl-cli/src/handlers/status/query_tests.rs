@@ -6,7 +6,7 @@ use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::Request as HttpRequest;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use routectl_router::{Config, Router};
 #[cfg(not(debug_assertions))]
 use routectl_usage::{BucketSpec, RowCost};
@@ -791,25 +791,49 @@ fn far_deadline() -> Instant {
 
 // --- the series mode ----------------------------------------------------
 
-#[tokio::test]
-async fn a_bucket_token_returns_a_series_at_the_resolved_width() {
-    // Arrange: two rows an hour apart, requested at hour granularity.
+/// A pinned local instant, mid-afternoon on an ordinary day: 2026-06-11
+/// (Thursday) 14:30.
+///
+/// The `today` window runs from local midnight to `now`, so seeding rows at
+/// offsets from the REAL clock and asserting they share that window only holds
+/// for some hours of the day: `now - 1h` falls into yesterday whenever the suite
+/// runs before 01:00 local. Anchoring the arrangement to a fixed instant instead
+/// makes seed, window, and expected bucket count agree at every wall-clock hour.
+fn fixed_now() -> DateTime<Local> {
+    Local
+        .from_local_datetime(
+            &NaiveDate::from_ymd_opt(2026, 6, 11)
+                .unwrap()
+                .and_hms_opt(14, 30, 0)
+                .unwrap(),
+        )
+        .earliest()
+        .unwrap()
+}
+
+#[test]
+fn a_bucket_token_returns_a_series_at_the_resolved_width() {
+    // Arrange: two rows an hour apart on the pinned day, requested at hour
+    // granularity. Both sit after that day's local midnight and at or before the
+    // pinned instant, so both are inside `today` whatever the real clock reads.
+    // The handler stamps `now` itself, so the window is resolved and the panel
+    // built directly -- the same parse -> grid -> fold -> render path, with the
+    // clock supplied rather than read.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    let now_ms = Local::now().timestamp_millis();
+    let now = fixed_now();
+    let now_ms = now.timestamp_millis();
     seed_ledger(&path, &[now_ms - 3_600_000, now_ms]);
+    let body = r#"{"window":"today","group_by":"model","bucket":"hour"}"#;
+    let (spec, bucket) = spec_from_body(body.as_bytes(), now).expect("body is in vocabulary");
+    let pricer = state_with_ledger(path.clone()).router.pricer();
 
     // Act
-    let (status, json) = send(
-        state_with_ledger(path),
-        QUERY_METHOD,
-        r#"{"window":"today","group_by":"model","bucket":"hour"}"#,
-    )
-    .await;
+    let panel = build_panel(&path, spec, bucket, &pricer, now.to_utc().to_rfc3339(), now);
+    let json = serde_json::to_value(&panel).expect("the panel renders");
 
     // Assert: a populated series whose width is the requested hour, and whose
     // buckets are dense and ascending.
-    assert_eq!(status, StatusCode::OK);
     assert!(json["unavailable"].is_null(), "seeded ledger: {json}");
     assert_eq!(json["data"]["series"]["bucket_ms"], 3_600_000);
     let buckets = json["data"]["series"]["buckets"].as_array().unwrap();
