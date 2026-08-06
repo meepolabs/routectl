@@ -43,7 +43,25 @@ use super::types::{
 /// into one message (see `push_or_coalesce`): parallel tool results each
 /// synthesize a user turn, and Converse 400s on consecutive same-role
 /// turns.
+///
+/// A `CitationsDropTally` threads through every document-bearing path so
+/// malformed `citations` values across the whole request collapse into one
+/// aggregated WARN instead of one per document (see
+/// `translate_document_citations`).
 pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<ConverseMessage>> {
+    let mut tally = CitationsDropTally::new(id);
+    let translated = translate_messages(id, messages, &mut tally);
+    // Flush on both arms: a request that records a drop and only then
+    // hits a translation error still owes the operator its aggregate WARN.
+    tally.flush();
+    translated
+}
+
+fn translate_messages(
+    id: &str,
+    messages: &[Message],
+    tally: &mut CitationsDropTally<'_>,
+) -> Result<Vec<ConverseMessage>> {
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
     for msg in messages {
         match msg.role {
@@ -54,7 +72,7 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
                 // by `build_system` via `lift_legacy_system`.
             }
             Role::User => {
-                let mut blocks = build_user_content_blocks(id, &msg.content)?;
+                let mut blocks = build_user_content_blocks(id, &msg.content, tally)?;
                 ensure_document_has_text_sibling(&mut blocks);
                 if blocks.is_empty() {
                     tracing::debug!(
@@ -67,7 +85,7 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
                 push_or_coalesce(&mut out, "user", blocks);
             }
             Role::Assistant => {
-                let blocks = build_assistant_content_blocks(id, msg)?;
+                let blocks = build_assistant_content_blocks(id, msg, tally)?;
                 if blocks.is_empty() {
                     tracing::debug!(
                         provider = id,
@@ -79,7 +97,7 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
                 push_or_coalesce(&mut out, "assistant", blocks);
             }
             Role::Tool => {
-                let tool_msg = build_tool_message(id, msg)?;
+                let tool_msg = build_tool_message(msg, tally)?;
                 push_or_coalesce(&mut out, "user", tool_msg.content);
             }
         }
@@ -143,8 +161,9 @@ fn ensure_document_has_text_sibling(blocks: &mut Vec<ConverseContentBlock>) {
 fn build_user_content_blocks(
     id: &str,
     content: &MessageContent,
+    tally: &mut CitationsDropTally<'_>,
 ) -> Result<Vec<ConverseContentBlock>> {
-    content_blocks_with_cache_control(id, content)
+    content_blocks_with_cache_control(id, content, tally)
 }
 
 /// Assistant-role content with text-after-tool_use cleanup. Bedrock and
@@ -168,16 +187,20 @@ fn build_user_content_blocks(
 /// `toolUse` blocks via `append_tool_use_blocks_from_calls`, so the turn
 /// is no longer empty/skipped and the toolUse precedes the next turn's
 /// toolResult.
-fn build_assistant_content_blocks(id: &str, msg: &Message) -> Result<Vec<ConverseContentBlock>> {
+fn build_assistant_content_blocks(
+    id: &str,
+    msg: &Message,
+    tally: &mut CitationsDropTally<'_>,
+) -> Result<Vec<ConverseContentBlock>> {
     let mut blocks = if !msg.reasoning_details.is_empty() {
         let mut blocks = emit_reasoning_blocks_converse(id, &msg.reasoning_details)?;
-        append_converse_content_blocks(id, &msg.content, &mut blocks)?;
+        append_converse_content_blocks(id, &msg.content, &mut blocks, tally)?;
         blocks
     } else if let MessageContent::Parts(parts) = &msg.content {
         let cleaned = strip_text_after_tool_use(parts);
-        content_blocks_from_parts(id, &cleaned)?
+        content_blocks_from_parts(id, &cleaned, tally)?
     } else {
-        content_blocks_with_cache_control(id, &msg.content)?
+        content_blocks_with_cache_control(id, &msg.content, tally)?
     };
     append_tool_use_blocks_from_calls(id, msg, &mut blocks);
     Ok(blocks)
@@ -325,6 +348,7 @@ fn append_converse_content_blocks(
     id: &str,
     content: &MessageContent,
     blocks: &mut Vec<ConverseContentBlock>,
+    tally: &mut CitationsDropTally<'_>,
 ) -> Result<()> {
     match content {
         MessageContent::Text(t) if !t.is_empty() => {
@@ -333,7 +357,7 @@ fn append_converse_content_blocks(
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
-            let more = content_blocks_from_parts(id, &cleaned)?;
+            let more = content_blocks_from_parts(id, &cleaned, tally)?;
             blocks.extend(more);
         }
     }
@@ -343,11 +367,12 @@ fn append_converse_content_blocks(
 fn content_blocks_with_cache_control(
     id: &str,
     content: &MessageContent,
+    tally: &mut CitationsDropTally<'_>,
 ) -> Result<Vec<ConverseContentBlock>> {
     match content {
         MessageContent::Text(t) => Ok(vec![ConverseContentBlock::Text { text: t.clone() }]),
         MessageContent::Null => Ok(Vec::new()),
-        MessageContent::Parts(parts) => content_blocks_from_parts(id, parts),
+        MessageContent::Parts(parts) => content_blocks_from_parts(id, parts, tally),
     }
 }
 
@@ -356,10 +381,14 @@ fn content_blocks_with_cache_control(
 /// sibling `{cachePoint}` block is emitted IMMEDIATELY AFTER the
 /// translated block (avoids the orphan-cachePoint shape that AWS
 /// rejects when a translation drops the underlying block).
-fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Result<Vec<ConverseContentBlock>> {
+fn content_blocks_from_parts(
+    id: &str,
+    parts: &[ContentPart],
+    tally: &mut CitationsDropTally<'_>,
+) -> Result<Vec<ConverseContentBlock>> {
     let mut out: Vec<ConverseContentBlock> = Vec::with_capacity(parts.len());
     for p in parts {
-        if let Some(block) = translate_content_part(id, p)? {
+        if let Some(block) = translate_content_part(id, p, tally)? {
             let cc = p.cache_control().cloned();
             out.push(block);
             if let Some(cc) = cc {
@@ -381,9 +410,13 @@ fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Result<Vec<Conv
 /// dropped (with a tracing diagnostic). Returns Err only on hard
 /// translation failures (e.g. thinking block without a signature, which
 /// would 400 AWS on multi-turn replay).
-fn translate_content_part(id: &str, p: &ContentPart) -> Result<Option<ConverseContentBlock>> {
+fn translate_content_part(
+    id: &str,
+    p: &ContentPart,
+    tally: &mut CitationsDropTally<'_>,
+) -> Result<Option<ConverseContentBlock>> {
     match p {
-        ContentPart::Known(k) => translate_known_part(id, k),
+        ContentPart::Known(k) => translate_known_part(id, k, tally),
         // Re-wrap the catchall as the AWS single-key union -- the exact
         // inverse of the response decoder's tag/extras split -- so an
         // unmodeled Converse block preserved on a prior response turn
@@ -406,7 +439,11 @@ fn translate_content_part(id: &str, p: &ContentPart) -> Result<Option<ConverseCo
     }
 }
 
-fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<ConverseContentBlock>> {
+fn translate_known_part(
+    id: &str,
+    k: &KnownContentPart,
+    tally: &mut CitationsDropTally<'_>,
+) -> Result<Option<ConverseContentBlock>> {
     match k {
         KnownContentPart::Text { text, .. } => {
             Ok(Some(ConverseContentBlock::Text { text: text.clone() }))
@@ -423,6 +460,7 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
             source,
             title.as_deref(),
             citations.as_ref(),
+            tally,
         )),
         // OpenAI-shape file part. Reuse the document translator by first
         // rewriting the base64 `file_data` data URI into the canonical
@@ -434,7 +472,13 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
         KnownContentPart::File { file, .. } => {
             if let Some((source, title)) = file_data_to_document_source(file) {
                 // An OpenAI-shape file part has no citations carrier.
-                Ok(translate_document(id, &source, title.as_deref(), None))
+                Ok(translate_document(
+                    id,
+                    &source,
+                    title.as_deref(),
+                    None,
+                    tally,
+                ))
             } else {
                 tracing::warn!(
                     provider = id,
@@ -461,7 +505,7 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
             is_error,
             ..
         } => {
-            let mut result_content = translate_tool_result_content(id, content);
+            let mut result_content = translate_tool_result_content(content, tally);
             ensure_min_tool_result_content(&mut result_content);
             Ok(Some(ConverseContentBlock::ToolResult {
                 tool_result: ConverseToolResult {
@@ -649,6 +693,7 @@ fn translate_document(
     source: &Value,
     title: Option<&str>,
     citations: Option<&Value>,
+    tally: &mut CitationsDropTally<'_>,
 ) -> Option<ConverseContentBlock> {
     let Some(obj) = source.as_object() else {
         tracing::warn!(
@@ -693,7 +738,7 @@ fn translate_document(
             format,
             name,
             source: ConverseDocumentSource { bytes },
-            citations: translate_document_citations(id, citations)
+            citations: translate_document_citations(citations, tally)
                 .map(|enabled| ConverseCitationsConfig { enabled }),
         },
     })
@@ -709,21 +754,71 @@ fn translate_document(
 /// absent value, or an explicit `false`, returns None so the optional
 /// member is omitted -- `{enabled: false}` is indistinguishable from
 /// absence in behavior and only adds wire noise. Any other shape returns
-/// None with a WARN: the canonical field is opaque because ingresses
-/// forward it verbatim, so guessing an interpretation would silently
-/// invent a citation setting the caller never asked for.
-fn translate_document_citations(id: &str, citations: Option<&Value>) -> Option<bool> {
+/// None and is counted on `tally`: the canonical field is opaque because
+/// ingresses forward it verbatim, so guessing an interpretation would
+/// silently invent a citation setting the caller never asked for.
+///
+/// The per-document event `tally.record` emits is DEBUG and the
+/// operator-facing loss is the single aggregated WARN `tally` emits at end
+/// of request. A request may
+/// carry an unbounded number of document elements (a raw tool_result
+/// content array is an opaque `Value`), so a per-document WARN is a
+/// log-volume amplifier driven by request content.
+fn translate_document_citations(
+    citations: Option<&Value>,
+    tally: &mut CitationsDropTally<'_>,
+) -> Option<bool> {
     let citations = citations?;
     match citations.as_object().and_then(|o| o.get("enabled")) {
         Some(Value::Bool(true)) => Some(true),
         Some(Value::Bool(false)) => None,
         _ => {
+            tally.record();
+            None
+        }
+    }
+}
+
+/// Per-request counter of documents whose `citations` value was
+/// unrecognized and therefore dropped. Threaded through every
+/// document-bearing translation path (message content, canonical
+/// tool_result Parts, and the raw Anthropic-shape tool_result content
+/// array) so one request emits at most one WARN regardless of how many
+/// documents it carries. Carries the provider id so both the per-document
+/// DEBUG event and the aggregate WARN are attributable on a request that
+/// fans out over more than one provider.
+struct CitationsDropTally<'a> {
+    provider: &'a str,
+    dropped: usize,
+}
+
+impl<'a> CitationsDropTally<'a> {
+    const fn new(provider: &'a str) -> Self {
+        Self {
+            provider,
+            dropped: 0,
+        }
+    }
+
+    fn record(&mut self) {
+        self.dropped += 1;
+        tracing::debug!(
+            provider = self.provider,
+            "dropping unrecognized document citations value on Converse egress; \
+             expected an object with a boolean `enabled` member"
+        );
+    }
+
+    /// Emit the aggregated WARN, if anything was dropped. Called once per
+    /// request from `build_messages`.
+    fn flush(&self) {
+        if self.dropped > 0 {
             tracing::warn!(
-                provider = id,
+                provider = self.provider,
+                dropped_count = self.dropped,
                 "dropping unrecognized document citations value on Converse egress; \
                  expected an object with a boolean `enabled` member"
             );
-            None
         }
     }
 }
@@ -819,12 +914,15 @@ fn normalize_document_source_bytes(kind: &str, data: &str) -> Option<String> {
     }
 }
 
-fn translate_tool_result_content(id: &str, content: &Value) -> Vec<ConverseToolResultContent> {
+fn translate_tool_result_content(
+    content: &Value,
+    tally: &mut CitationsDropTally<'_>,
+) -> Vec<ConverseToolResultContent> {
     match content {
         Value::String(s) => vec![ConverseToolResultContent::Text { text: s.clone() }],
         Value::Array(arr) => arr
             .iter()
-            .map(|v| translate_tool_result_array_element(id, v))
+            .map(|v| translate_tool_result_array_element(v, tally))
             .collect(),
         Value::Null => Vec::new(),
         other => vec![ConverseToolResultContent::Json {
@@ -853,7 +951,10 @@ fn ensure_min_tool_result_content(content: &mut Vec<ConverseToolResultContent>) 
 /// Claude 3+. Dispatch on the `type` tag so each shape lands in the
 /// correct AWS variant; bare strings stay as Text; unknown shapes fall
 /// to Json.
-fn translate_tool_result_array_element(id: &str, v: &Value) -> ConverseToolResultContent {
+fn translate_tool_result_array_element(
+    v: &Value,
+    tally: &mut CitationsDropTally<'_>,
+) -> ConverseToolResultContent {
     if let Value::String(s) = v {
         return ConverseToolResultContent::Text { text: s.clone() };
     }
@@ -924,11 +1025,11 @@ fn translate_tool_result_array_element(id: &str, v: &Value) -> ConverseToolResul
             let title = obj.get("title").and_then(|t| t.as_str());
             ConverseToolResultContent::Document {
                 document: tool_result_document_value(
-                    id,
                     format,
                     title,
                     bytes,
                     obj.get("citations"),
+                    tally,
                 ),
             }
         }
@@ -940,7 +1041,10 @@ fn translate_tool_result_array_element(id: &str, v: &Value) -> ConverseToolResul
 /// turn. Returns an error when `tool_call_id` is missing -- AWS rejects
 /// `toolResult.toolUseId == ""` and the silent fallback that produced
 /// an empty string upstream-failed with a vague 400.
-fn build_tool_message(id: &str, msg: &Message) -> Result<ConverseMessage> {
+fn build_tool_message(
+    msg: &Message,
+    tally: &mut CitationsDropTally<'_>,
+) -> Result<ConverseMessage> {
     let Some(tool_use_id) = msg.tool_call_id.as_ref().filter(|s| !s.is_empty()).cloned() else {
         return Err(routectl_core::Error::NormalizeRequest(
             "bedrock-converse".to_string(),
@@ -957,7 +1061,7 @@ fn build_tool_message(id: &str, msg: &Message) -> Result<ConverseMessage> {
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
         MessageContent::Parts(parts) => parts
             .iter()
-            .map(|p| translate_part_for_tool_result(id, p))
+            .map(|p| translate_part_for_tool_result(p, tally))
             .collect(),
         MessageContent::Null => Vec::new(),
     };
@@ -984,7 +1088,10 @@ fn build_tool_message(id: &str, msg: &Message) -> Result<ConverseMessage> {
 /// parts (image / document) wrap as `{"json": {"type":"tool_use",...}}`
 /// and Claude 3+ on Converse rejects the malformed shape -- the model
 /// gets the canonical schema instead of the AWS image/document block.
-fn translate_part_for_tool_result(id: &str, p: &ContentPart) -> ConverseToolResultContent {
+fn translate_part_for_tool_result(
+    p: &ContentPart,
+    tally: &mut CitationsDropTally<'_>,
+) -> ConverseToolResultContent {
     match p {
         ContentPart::Known(KnownContentPart::Text { text, .. }) => {
             ConverseToolResultContent::Text { text: text.clone() }
@@ -997,7 +1104,7 @@ fn translate_part_for_tool_result(id: &str, p: &ContentPart) -> ConverseToolResu
             title,
             citations,
             ..
-        }) => document_to_tool_result(id, source, title.as_deref(), citations.as_ref())
+        }) => document_to_tool_result(source, title.as_deref(), citations.as_ref(), tally)
             .unwrap_or_else(|| content_part_to_json_fallback(p)),
         _ => {
             tracing::debug!(
@@ -1045,10 +1152,10 @@ fn image_source_to_tool_result(source: &Value) -> Option<ConverseToolResultConte
 /// `normalize_document_source_bytes`), and the emitted wire value comes
 /// from `tool_result_document_value` so both tool_result paths agree.
 fn document_to_tool_result(
-    id: &str,
     source: &Value,
     title: Option<&str>,
     citations: Option<&Value>,
+    tally: &mut CitationsDropTally<'_>,
 ) -> Option<ConverseToolResultContent> {
     let obj = source.as_object()?;
     let kind = obj.get("type").and_then(|v| v.as_str())?;
@@ -1057,7 +1164,7 @@ fn document_to_tool_result(
     let format = media_type_to_document_format(media_type)?;
     let bytes = normalize_document_source_bytes(kind, data)?;
     Some(ConverseToolResultContent::Document {
-        document: tool_result_document_value(id, format, title, bytes, citations),
+        document: tool_result_document_value(format, title, bytes, citations, tally),
     })
 }
 
@@ -1068,18 +1175,18 @@ fn document_to_tool_result(
 /// `translate_document_citations` mapping the message-content path uses, so
 /// a document behaves identically wherever it appears.
 fn tool_result_document_value(
-    id: &str,
     format: String,
     title: Option<&str>,
     bytes: String,
     citations: Option<&Value>,
+    tally: &mut CitationsDropTally<'_>,
 ) -> Value {
     let mut document = serde_json::json!({
         "format": format,
         "name": sanitize_document_name(title),
         "source": {"bytes": bytes},
     });
-    if let Some(enabled) = translate_document_citations(id, citations)
+    if let Some(enabled) = translate_document_citations(citations, tally)
         && let Some(map) = document.as_object_mut()
     {
         map.insert(
@@ -2145,8 +2252,8 @@ mod tests {
         };
 
         // Act
-        let result =
-            build_tool_message(TEST_ID, &msg).expect("Null-content tool message must translate");
+        let result = build_tool_message(&msg, &mut CitationsDropTally::new("test"))
+            .expect("Null-content tool message must translate");
 
         // Assert
         let tool_result = result
@@ -2185,7 +2292,7 @@ mod tests {
             is_error: None,
             cache_control: None,
         };
-        let block = translate_known_part("test", &part)
+        let block = translate_known_part("test", &part, &mut CitationsDropTally::new("test"))
             .expect("ToolResult part must translate")
             .expect("ToolResult part must produce a block");
         match block {
@@ -2273,7 +2380,8 @@ mod tests {
             "source": {"type": "text", "media_type": "text/plain", "data": "hello"},
             "title": "notes",
         });
-        let out = translate_tool_result_array_element(TEST_ID, &element);
+        let out =
+            translate_tool_result_array_element(&element, &mut CitationsDropTally::new("test"));
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
         };
@@ -2290,8 +2398,13 @@ mod tests {
     #[test]
     fn text_source_document_to_tool_result_is_base64_encoded() {
         let source = json!({"type": "text", "media_type": "text/plain", "data": "hello"});
-        let out = document_to_tool_result(TEST_ID, &source, Some("notes"), None)
-            .expect("text source must now translate to a Document variant, not None");
+        let out = document_to_tool_result(
+            &source,
+            Some("notes"),
+            None,
+            &mut CitationsDropTally::new("test"),
+        )
+        .expect("text source must now translate to a Document variant, not None");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
         };
@@ -2313,7 +2426,8 @@ mod tests {
             "source": {"type": "base64", "media_type": "text/plain", "data": already},
             "title": "notes",
         });
-        let out = translate_tool_result_array_element(TEST_ID, &element);
+        let out =
+            translate_tool_result_array_element(&element, &mut CitationsDropTally::new("test"));
         let ConverseToolResultContent::Document { document } = out else {
             panic!("array path: expected Document variant, got: {out:?}");
         };
@@ -2323,8 +2437,13 @@ mod tests {
         );
 
         let source = json!({"type": "base64", "media_type": "text/plain", "data": already});
-        let out = document_to_tool_result(TEST_ID, &source, Some("notes"), None)
-            .expect("base64 source must translate to a Document variant");
+        let out = document_to_tool_result(
+            &source,
+            Some("notes"),
+            None,
+            &mut CitationsDropTally::new("test"),
+        )
+        .expect("base64 source must translate to a Document variant");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("Parts path: expected Document variant, got: {out:?}");
         };
@@ -2744,10 +2863,11 @@ mod tests {
 
     /// The canonical citations field is opaque, so a value that is not an
     /// object with a boolean `enabled` gets no guessed interpretation: the
-    /// member is omitted and the loss is logged.
+    /// member is omitted and the loss is logged (per-document at DEBUG, plus
+    /// the aggregated per-request WARN).
     #[traced_test]
     #[test]
-    fn malformed_document_citations_omits_the_member_and_warns() {
+    fn malformed_document_citations_omits_the_member_and_logs() {
         // Arrange
         let messages = vec![document_message(Some(json!("yes")))];
 
@@ -2762,6 +2882,159 @@ mod tests {
         assert!(
             logs_contain("dropping unrecognized document citations value"),
             "the dropped citations config must be observable in the logs"
+        );
+    }
+
+    /// A message-content document is one of three paths that can carry a
+    /// malformed citations value; a request can hold an unbounded number of
+    /// them, so the operator-facing WARN is aggregated per request rather
+    /// than emitted per document. N malformed documents -> exactly one WARN.
+    #[test]
+    fn many_malformed_document_citations_emit_one_aggregated_warn() {
+        // Arrange
+        const N: usize = 50;
+        let messages: Vec<Message> = (0..N)
+            .map(|_| document_message(Some(json!("yes"))))
+            .collect();
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            build_messages(TEST_ID, &messages).expect("messages must translate");
+        });
+
+        // Assert
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message
+                        .contains("dropping unrecognized document citations value")
+            })
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "{N} malformed-citations documents must emit exactly one aggregated WARN"
+        );
+        assert_eq!(
+            warns[0].field("dropped_count"),
+            Some(N.to_string().as_str()),
+            "the aggregated WARN must carry the dropped count"
+        );
+    }
+
+    /// Same bound on the tool_result paths: a `Role::Tool` turn whose Parts
+    /// carry N malformed-citations documents, plus a raw Anthropic-shape
+    /// tool_result content array carrying N more, still emit one WARN for
+    /// the whole request.
+    #[test]
+    fn many_malformed_citations_across_tool_result_paths_emit_one_aggregated_warn() {
+        // Arrange
+        const N: usize = 40;
+        let malformed = json!("yes");
+        let malformed_document_part = || {
+            ContentPart::Known(routectl_core::KnownContentPart::Document {
+                source: json!({
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "JVBERi0xLjQ=",
+                }),
+                title: Some("notes".into()),
+                citations: Some(malformed.clone()),
+                cache_control: None,
+            })
+        };
+        let canonical_parts_turn = Message {
+            role: Role::Tool,
+            tool_call_id: Some("tu_1".into()),
+            content: MessageContent::Parts((0..N).map(|_| malformed_document_part()).collect()),
+            ..user_msg()
+        };
+        let raw_array_turn = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(
+                routectl_core::KnownContentPart::ToolResult {
+                    tool_use_id: "tu_2".into(),
+                    content: Value::Array(
+                        (0..N)
+                            .map(|_| raw_document_element(Some(malformed.clone())))
+                            .collect(),
+                    ),
+                    is_error: None,
+                    cache_control: None,
+                },
+            )]),
+            ..user_msg()
+        };
+        let messages = vec![canonical_parts_turn, raw_array_turn];
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            build_messages(TEST_ID, &messages).expect("messages must translate");
+        });
+
+        // Assert
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message
+                        .contains("dropping unrecognized document citations value")
+            })
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "both tool_result document paths must share the one per-request WARN"
+        );
+        assert_eq!(
+            warns[0].field("dropped_count"),
+            Some((2 * N).to_string().as_str()),
+            "the aggregated count must span every document path in the request"
+        );
+    }
+
+    /// The aggregate WARN is the only operator-facing record of the loss, so
+    /// it must survive a later translation failure: a recorded drop followed
+    /// by a `Role::Tool` turn missing its `tool_call_id` still emits exactly
+    /// one WARN carrying the count observed before the error.
+    #[test]
+    fn recorded_drop_still_warns_when_a_later_message_fails_to_translate() {
+        // Arrange
+        let messages = vec![
+            document_message(Some(json!("yes"))),
+            Message {
+                role: Role::Tool,
+                tool_call_id: None,
+                content: MessageContent::Text("result".into()),
+                ..user_msg()
+            },
+        ];
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            build_messages(TEST_ID, &messages)
+                .expect_err("a tool message without tool_call_id must fail translation");
+        });
+
+        // Assert
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.level == tracing::Level::WARN
+                    && e.message
+                        .contains("dropping unrecognized document citations value")
+            })
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "a translation error must not swallow the aggregated citations WARN"
+        );
+        assert_eq!(
+            warns[0].field("dropped_count"),
+            Some("1"),
+            "the aggregated WARN must carry the count recorded before the error"
         );
     }
 
@@ -2786,7 +3059,10 @@ mod tests {
     /// Serialize the document emitted by the raw tool_result array path so
     /// assertions see the exact wire shape.
     fn raw_element_document_json(citations: Option<Value>) -> Value {
-        let out = translate_tool_result_array_element(TEST_ID, &raw_document_element(citations));
+        let out = translate_tool_result_array_element(
+            &raw_document_element(citations),
+            &mut CitationsDropTally::new("test"),
+        );
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
         };
@@ -2865,7 +3141,7 @@ mod tests {
     /// same shared helper the canonical paths use.
     #[traced_test]
     #[test]
-    fn raw_tool_result_document_malformed_citations_omits_the_member_and_warns() {
+    fn raw_tool_result_document_malformed_citations_omits_the_member_and_logs() {
         // Arrange / Act
         let document = raw_element_document_json(Some(json!("yes")));
 

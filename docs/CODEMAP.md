@@ -886,7 +886,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   wire value to the shared assembler `tool_result_document_value`.
   `sanitize_document_name` is the single `document.name` charset/length
   enforcement point and `translate_document_citations` the single citations
-  bool lift, and all three paths route through them so they cannot drift
+  bool lift, and all three paths route through them so they cannot drift.
+  A `CitationsDropTally` threads through all three so a request carrying N
+  malformed citations values emits one aggregated WARN, not N
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
   when the translated transcript references tool blocks but no tools survive
