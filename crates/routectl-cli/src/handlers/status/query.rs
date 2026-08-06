@@ -36,15 +36,14 @@ use serde::Deserialize;
 use serde_json::json;
 
 use routectl_usage::{
-    GroupDim, QueryError, QueryResult, QuerySeries, QuerySpec, earliest_ts_start,
-    open_readonly_fastfail, query,
+    GroupDim, QueryResult, QuerySeries, QuerySpec, earliest_ts_start, open_readonly_fastfail, query,
 };
 
 use crate::commands::usage::{BucketUnit, WindowFlag, resolve_bucket, window_bounds};
 use crate::server::status_gate::QUERY_BUDGET_MS;
 
 use super::router_view::QueryPricer;
-use super::usage::{busy_or_unavailable, open_error_code};
+use super::usage::{open_error_code, query_error_code};
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
@@ -364,21 +363,6 @@ fn build_panel(
             Panel::available(SCHEMA_VERSION, as_of, result)
         }
         Err(err) => Panel::unavailable(SCHEMA_VERSION, query_error_code(&err)),
-    }
-}
-
-/// Map a grouped-query failure to its shed code. A fired deadline is its OWN
-/// code: the ledger is healthy and the window is simply too large to answer
-/// inside the budget, which is a different operator action than a busy or
-/// unreadable database.
-fn query_error_code(err: &QueryError) -> &'static str {
-    match err {
-        QueryError::Sqlite(source) => busy_or_unavailable(source.sqlite_error_code()),
-        QueryError::Interrupted => codes::QUERY_TIMEOUT,
-        // The bucket grid is resolved server-side, so an unusable one is a bug
-        // here rather than operator input. Mapped rather than panicked so the
-        // never-500 posture holds.
-        QueryError::InvalidBucket => codes::DB_UNAVAILABLE,
     }
 }
 
