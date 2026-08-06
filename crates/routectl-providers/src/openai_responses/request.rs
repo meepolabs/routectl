@@ -54,7 +54,14 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
-        max_output_tokens: req.max_tokens,
+        // Codex's `ResponsesApiRequest` has no `max_output_tokens` member,
+        // and chatgpt.com's codex backend rejects fields the client never
+        // sends. Other auth_kinds (ApiKey, BedrockMantle) accept it as a
+        // documented top-level field, so forward the caller's ceiling there.
+        max_output_tokens: match cfg.auth_kind {
+            AuthKind::ChatgptOauth => None,
+            _ => req.max_tokens,
+        },
     };
 
     extras::apply_reasoning(&mut request, req);

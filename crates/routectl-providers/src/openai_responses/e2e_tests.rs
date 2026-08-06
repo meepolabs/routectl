@@ -1087,6 +1087,12 @@ mod mantle_wire {
             body["stream"].as_bool().unwrap_or(false),
             "complete() forces stream:true on the wire; got: {body}"
         );
+        assert_eq!(
+            body["max_output_tokens"],
+            json!(64),
+            "the mantle lane must forward the caller's ceiling as \
+             max_output_tokens; only the codex-oauth lane suppresses it; got: {body}"
+        );
     }
 
     /// complete() on the SigV4 lane signs with an `AWS4-HMAC-SHA256`
@@ -1280,6 +1286,12 @@ mod mantle_wire {
             body["store"],
             json!(false),
             "the mantle lane must force store=false on the streamed wire body; got: {body}"
+        );
+        assert_eq!(
+            body["max_output_tokens"],
+            json!(64),
+            "the mantle lane must forward the caller's ceiling as \
+             max_output_tokens on the streamed wire body; got: {body}"
         );
     }
 }

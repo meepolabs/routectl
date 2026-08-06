@@ -1254,7 +1254,10 @@ Only consumed by Anthropic-shape egresses (`anthropic-api` and
 `max_tokens` under their own wire name (`openai-responses` emits it as
 `max_output_tokens`) and forward caller omission cleanly without
 injection (good-translator principle: do not inject where the upstream
-already handles it).
+already handles it). Exception: the `openai-responses` codex OAuth lane
+(`chatgpt.com/backend-api/codex`) omits `max_output_tokens` entirely --
+codex's request contract has no such field and the backend rejects the
+drift.
 
 Set this when an Anthropic-shape egress points at a model whose
 upstream `max_tokens` cap is below `64000` -- otherwise a caller that

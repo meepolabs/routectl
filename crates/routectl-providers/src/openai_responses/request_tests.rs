@@ -1517,14 +1517,16 @@ fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
 // ---------------------------------------------------------------------------
 
 /// A caller-supplied ceiling must reach the wire under the Responses
-/// API's own field name. Forwarding is not injection: the good-translator
-/// principle forbids synthesizing a value, not honoring one.
+/// API's own field name on the ApiKey lane, where `max_output_tokens`
+/// is a documented top-level field. Forwarding is not injection: the
+/// good-translator principle forbids synthesizing a value, not honoring
+/// one.
 #[test]
 fn openai_responses_forwards_caller_max_tokens_as_max_output_tokens() {
     let mut req = req_with(vec![user_text("hi")]);
     req.max_tokens = Some(500);
 
-    let v = translate_to_json(&cfg(), &req);
+    let v = translate_to_json(&cfg_api_key(), &req);
 
     assert_eq!(
         v.get("max_output_tokens").and_then(Value::as_u64),
@@ -1537,6 +1539,28 @@ fn openai_responses_forwards_caller_max_tokens_as_max_output_tokens() {
     );
 }
 
+/// The codex OAuth lane MUST NOT emit `max_output_tokens` even when the
+/// caller supplies a ceiling: codex's `ResponsesApiRequest` has no such
+/// member and the chatgpt.com backend rejects the contract drift. This
+/// pins the lane split against `openai_responses_forwards_caller_max_tokens_as_max_output_tokens`
+/// so the two lanes can never silently converge again.
+#[test]
+fn openai_responses_omits_max_output_tokens_on_codex_lane() {
+    let mut req = req_with(vec![user_text("hi")]);
+    req.max_tokens = Some(500);
+
+    let v = translate_to_json(&cfg(), &req);
+
+    assert!(
+        v.get("max_output_tokens").is_none(),
+        "codex OAuth lane must not emit max_output_tokens; got: {v}"
+    );
+    assert!(
+        v.get("max_tokens").is_none(),
+        "codex OAuth lane must not emit max_tokens either; got: {v}"
+    );
+}
+
 /// The caller's value wins over the Anthropic-shape carrier, and the
 /// carrier never contributes its own number to this lane.
 #[test]
@@ -1545,7 +1569,7 @@ fn openai_responses_caller_max_tokens_wins_over_internal_carrier() {
     req.max_tokens = Some(500);
     req.routectl_internal.max_output_tokens = 8000;
 
-    let v = translate_to_json(&cfg(), &req);
+    let v = translate_to_json(&cfg_api_key(), &req);
 
     assert_eq!(
         v.get("max_output_tokens").and_then(Value::as_u64),
@@ -1571,7 +1595,11 @@ fn openai_responses_does_not_inject_max_tokens_when_caller_omitted() {
     // model that happens to route through openai-responses), the
     // egress must NOT lift it onto the wire body.
     req.routectl_internal.max_output_tokens = 8000;
-    let v = translate_to_json(&cfg(), &req);
+    // Run on the ApiKey lane, where `max_output_tokens` IS an emittable
+    // wire field -- so a synthesized baseline would actually surface here.
+    // On the codex lane the field is gated off unconditionally, which
+    // would make this non-injection assertion vacuous.
+    let v = translate_to_json(&cfg_api_key(), &req);
     assert!(
         v.get("max_tokens").is_none(),
         "openai-responses egress must not inject max_tokens; got: {v}"
