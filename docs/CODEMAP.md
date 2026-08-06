@@ -315,7 +315,7 @@ listed at the bottom of each crate.
   `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
-  `retry_after`, `responses_reasoning_guard`, `sampling_drop_guard`
+  `retry_after`, `sampling_drop_guard`
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin
   and User-Agent override; also owns the response-body cap cluster shared by
@@ -358,11 +358,6 @@ listed at the bottom of each crate.
 - `src/system_filter.rs` -- shared predicate + strip helper for the Claude
   Code billing/attribution system block; used by the egresses before
   forwarding upstream
-- `src/responses_reasoning_guard.rs` -- shared leak-guard
-  (`warn_dropped_reasoning_dialect`): one WARN per request (no field values)
-  when a non-Responses egress (openai-compat/openrouter, anthropic-api,
-  gemini) drops the OpenAI-Responses-dialect `reasoning.context` /
-  `reasoning.mode` carried through `provider_extras["reasoning"]`
 - `src/sampling_drop_guard.rs` -- shared leak-guard
   (`warn_dropped_sampling_fields`): one WARN per
   request naming which of the canonical sampling knobs (`n`, `seed`,
@@ -1574,7 +1569,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   replay rejection admits via `replay_repair`, swaps to the stripped variant,
   and retries once; `replay_rejection_body_free` rebuilds the rejection with
   no upstream body before generic logging, and `emit_replay_degradation`
-  fires the single per-request degradation WARN
+  fires the single per-request degradation WARN. Reasoning-dialect fidelity
+  guard (moved here from the providers crate so per-egress normalize's
+  clone/retry/fallback can no longer repeat it):
+  `warn_dropped_reasoning_dialect` +
+  `carries_responses_reasoning_dialect` / `target_drops_responses_reasoning`
+  (`RESPONSES_PROVIDER_KIND`) emit ONE WARN (no field values) at the dispatch
+  point inside each chain loop when the per-target post-overlay request
+  carries `provider_extras["reasoning"]` `context` / `mode` that a
+  non-Responses egress drops -- target-accurate, deduped by a stack-local
+  `reasoning_drop_warned` flag above the loop
 - `src/router/replay_repair.rs` -- the router-side reasoning-replay carry
   admission + strip-repair settlement the dispatch arm drives:
   `ReplayCarryPlan` / `plan_replay_carry` decide carry-once vs proactive
