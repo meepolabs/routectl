@@ -351,15 +351,23 @@ pub(super) fn open_error_code(err: &OpenError) -> &'static str {
     }
 }
 
-/// Map a query failure to its `Panel::unavailable` shed code.
-fn query_error_code(err: &QueryError) -> &'static str {
+/// Map a query failure to its `Panel::unavailable` shed code. Shared with the
+/// `/status/query` handler so the two ledger-backed surfaces classify a read
+/// failure identically.
+///
+/// A fired deadline is its OWN code: the ledger is healthy and the window is
+/// simply too large to answer inside the budget, which is a different operator
+/// action than a busy or unreadable database. This panel installs no progress
+/// handler and asks for no time series, so neither `Interrupted` nor
+/// `InvalidBucket` is reachable from it; both are mapped rather than panicked so
+/// the never-500 posture holds if that ever changes.
+pub(super) fn query_error_code(err: &QueryError) -> &'static str {
     match err {
         QueryError::Sqlite(source) => busy_or_unavailable(source.sqlite_error_code()),
-        // Both unreachable from this panel: it runs no deadline-bounded query,
-        // so no progress handler is installed on its connection, and it asks for
-        // no time series. Mapped rather than panicked so the never-500 posture
-        // holds if that ever changes.
-        QueryError::Interrupted | QueryError::InvalidBucket => codes::DB_UNAVAILABLE,
+        QueryError::Interrupted => codes::QUERY_TIMEOUT,
+        // The bucket grid is resolved caller-side, so an unusable one is a bug
+        // rather than operator input.
+        QueryError::InvalidBucket => codes::DB_UNAVAILABLE,
     }
 }
 
@@ -821,16 +829,40 @@ mod tests {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
             None,
         );
+        assert_eq!(open_error_code(&OpenError::Pragma(locked)), codes::DB_BUSY);
+    }
+
+    #[test]
+    fn query_error_code_maps_every_variant() {
+        // The interrupt is NOT a broken database: a fired deadline gets
+        // query_timeout, a lock gets db_busy, and anything else db_unavailable.
+        assert_eq!(
+            query_error_code(&QueryError::Interrupted),
+            codes::QUERY_TIMEOUT
+        );
+        assert_eq!(
+            query_error_code(&QueryError::InvalidBucket),
+            codes::DB_UNAVAILABLE
+        );
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+            None,
+        );
         assert_eq!(
             query_error_code(&QueryError::Sqlite(locked)),
             codes::DB_BUSY
         );
-        let other = rusqlite::Error::SqliteFailure(
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        assert_eq!(query_error_code(&QueryError::Sqlite(busy)), codes::DB_BUSY);
+        let corrupt = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
             None,
         );
         assert_eq!(
-            query_error_code(&QueryError::Sqlite(other)),
+            query_error_code(&QueryError::Sqlite(corrupt)),
             codes::DB_UNAVAILABLE
         );
     }

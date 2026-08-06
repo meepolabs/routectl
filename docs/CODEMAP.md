@@ -2778,7 +2778,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   reporting-only `cache_read_present` denominator; NEVER request
   rows/ids/bodies/prompts). Ledger-open/query failures classify to the shed
   codes `no_data`/`schema_mismatch`/`db_busy`/`db_unavailable` (busy/lock read
-  from the `rusqlite` error code)
+  from the `rusqlite` error code) through `open_error_code` /
+  `query_error_code`, both `pub(super)` and shared with `/status/query` so the
+  two ledger-backed surfaces classify one failure identically;
+  `query_error_code` also owns the `query_timeout` arm (`QueryError::Interrupted`,
+  reachable only on the deadline-bounded query path -- this panel installs no
+  progress handler)
 - `src/handlers/status/health.rs` -- `/status/health` (schema_version 5).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
   reads `route_targets` + `learned_capabilities` from that single view,

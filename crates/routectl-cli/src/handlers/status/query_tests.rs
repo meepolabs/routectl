@@ -361,32 +361,6 @@ fn absent_filters_match_everything_and_present_ones_bind() {
     assert_eq!(filtered.provider_filter.as_deref(), Some("anthropic"));
 }
 
-#[test]
-fn a_fired_deadline_sheds_under_its_own_code() {
-    // The interrupt is NOT a broken database: it gets query_timeout, while a
-    // lock gets db_busy and anything else db_unavailable.
-    assert_eq!(
-        query_error_code(&QueryError::Interrupted),
-        codes::QUERY_TIMEOUT
-    );
-    let locked = rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
-        None,
-    );
-    assert_eq!(
-        query_error_code(&QueryError::Sqlite(locked)),
-        codes::DB_BUSY
-    );
-    let corrupt = rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
-        None,
-    );
-    assert_eq!(
-        query_error_code(&QueryError::Sqlite(corrupt)),
-        codes::DB_UNAVAILABLE
-    );
-}
-
 #[tokio::test]
 async fn an_expired_deadline_sheds_query_timeout_end_to_end() {
     // The progress handler checks the deadline every few thousand VM
