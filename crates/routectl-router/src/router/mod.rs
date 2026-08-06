@@ -741,7 +741,7 @@ pub struct DispatchMeta {
     /// the re-probe did not succeed); carries one event per cleared entry so
     /// the usage-capture layer persists the clear and the warm-rebuild replayer
     /// removes the same resident negative on boot rather than resurrecting it.
-    /// Collected ONLY at [`LearnedProbeGuard::settle_success`]. Additive,
+    /// Collected ONLY at `LearnedProbeGuard::settle_success`. Additive,
     /// defaults empty.
     pub cleared_capabilities: Vec<CapabilityClearedEvent>,
     /// Reasoning-replay degradation record for the whole chain walk.

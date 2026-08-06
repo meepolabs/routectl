@@ -14,7 +14,7 @@
 //! daemon is the sole writer and may be live). A tombstone row marks the
 //! correctness boundary: the replayer trusts only rows after it, and only
 //! when its stamped revision matches the caller's catalog / overlay revision.
-//! [`classify_boundary`] resolves this read-only and PURELY (no logging, no
+//! `classify_boundary` resolves this read-only and PURELY (no logging, no
 //! writes): the serve warm collapses every non-`Replay` outcome to a fresh
 //! tombstone write, while the doctor maps each to a first-class availability
 //! state. Neither action lives here -- this module owns the read, not the

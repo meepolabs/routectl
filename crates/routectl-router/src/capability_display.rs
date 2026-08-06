@@ -40,7 +40,7 @@ pub const SOURCE_PRIOR: &str = "prior";
 /// `verdict` is a stable token: the core [`Verdict::as_str`] vocabulary
 /// (`verified` / `broken` / `assumed` / `unknown`) for the learned,
 /// verified, prior, and no-signal cases, plus the two PANEL-ONLY override
-/// tokens ([`FORCED_SUPPORTED`] / [`FORCED_UNSUPPORTED`]). `supported`
+/// tokens (`FORCED_SUPPORTED` / `FORCED_UNSUPPORTED`). `supported`
 /// carries the polarity the token alone does not for a prior `assumed`
 /// cell (the catalog can assert either direction); it is `None` only for
 /// the no-signal `unknown` cell. `source` is the winning layer's tag, or

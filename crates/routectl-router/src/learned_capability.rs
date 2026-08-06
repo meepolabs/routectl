@@ -315,7 +315,7 @@ impl LearnedCapabilityRegistry {
 
     /// Build the registry sized from the `[capability]` knobs: the decay and
     /// inferred-observation windows from the configured hours, the resident
-    /// cap from [`DEFAULT_MAX_ENTRIES`]. Shared by the router constructor and
+    /// cap from `DEFAULT_MAX_ENTRIES`. Shared by the router constructor and
     /// the doctor's one-shot read-only ledger rebuild so both size an
     /// otherwise-bare registry identically.
     pub fn from_capability_config(capability: &crate::config::CapabilityConfig) -> Self {

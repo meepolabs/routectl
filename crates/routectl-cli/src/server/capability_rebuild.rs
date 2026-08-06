@@ -5,7 +5,8 @@
 //! (or confirmed working, or probe-settled) would have to be re-learned from
 //! live traffic. This module runs a one-shot rebuild at the serve bootstrap,
 //! mirroring the K-estimator warm in [`super::k_rebuild`]. The read-only
-//! ledger bridge itself (the [`CapabilityLedgerReader`] adapter, the clock
+//! ledger bridge itself (the [`routectl_router::CapabilityLedgerReader`]
+//! adapter, the clock
 //! map, and the boundary classification) lives in [`super::ledger_reader`],
 //! shared with the offline doctor gather; this module owns the serve-side
 //! reaction to that classification -- replay-or-enqueue -- and nothing else.

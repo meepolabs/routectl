@@ -12,7 +12,7 @@
 //! a persisted clear, every restart resurrects a probe-settled negative.
 
 /// A single probe-settled clear captured at
-/// [`super::LearnedProbeGuard::settle_success`] -- the ONLY settlement arm that
+/// `super::LearnedProbeGuard::settle_success` -- the ONLY settlement arm that
 /// clears a resident negative (a same-capability rejection refreshes the entry
 /// with backoff; a drop records a transient `OtherError`; neither clears).
 ///

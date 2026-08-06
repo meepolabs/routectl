@@ -151,7 +151,7 @@ pub trait CapabilityLedgerReader: Send + Sync {
     fn tombstone(&self) -> Option<ReplayTombstone>;
 
     /// Every candidate event row in any order; the rebuild filters through
-    /// [`should_replay`] and sorts oldest-first itself.
+    /// `should_replay` and sorts oldest-first itself.
     fn read_events(&self) -> Vec<CapabilityEventRow>;
 }
 
