@@ -988,10 +988,13 @@ pub fn routectl_core::failure_class::classify(&routectl_core::error::Error, core
 pub fn routectl_core::failure_class::classify_with_attempt(&routectl_core::error::Error, core::option::Option<&str>, routectl_core::ReplayAttempt) -> routectl_core::failure_class::ClassifiedFailure
 pub mod routectl_core::identity
 pub mod routectl_core::identity::anthropic
+pub const routectl_core::identity::anthropic::ADVISOR_TOOL_BETA: &str
 pub const routectl_core::identity::anthropic::CONTEXT_1M_BETA: &str
 pub const routectl_core::identity::anthropic::EFFORT_BETA: &str
+pub const routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA: &str
 pub const routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA: &str
 pub const routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA: &str
+pub const routectl_core::identity::anthropic::THINKING_TOKEN_COUNT_BETA: &str
 pub const fn routectl_core::identity::anthropic::default_claude_code_anthropic_betas() -> &'static [&'static str]
 pub fn routectl_core::identity::anthropic::default_claude_code_identity_headers() -> alloc::vec::Vec<(&'static str, &'static str)>
 pub fn routectl_core::identity::anthropic::default_claude_code_user_agent() -> &'static str

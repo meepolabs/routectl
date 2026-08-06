@@ -201,7 +201,11 @@ listed at the bottom of each crate.
   whenever the assembled body carries `output_config.effort`), and
   `STRUCTURED_OUTPUTS_BETA`
   (`structured-outputs-2025-12-15`, also unioned by the egress whenever the
-  assembled body carries `output_config.format`), consumed by the
+  assembled body carries `output_config.format`), and the three remaining
+  removed-from-floor pass-through literals `MID_CONVERSATION_SYSTEM_BETA`,
+  `ADVISOR_TOOL_BETA`, `THINKING_TOKEN_COUNT_BETA` (model-gated, client
+  pass-through only; named so the egress 4xx diagnostics match on them without
+  re-typing the wire strings), consumed by the
   anthropic-api provider's header composition (`build_headers`) and the
   beta-decision 4xx observability
 - `src/error.rs` -- `Error` enum
@@ -459,7 +463,14 @@ listed at the bottom of each crate.
   OauthBearer) +
   `AnthropicApiProvider::new`/`resolve_user_agent`/`build_headers`/`cloak_body`/`is_non_cc`/`is_cloak_lane`
   and the beta-decision 4xx observability (`BetaDecision`,
-  `should_log_beta_4xx`, `log_beta_decision_on_4xx`).
+  `should_log_beta_4xx`, `log_beta_decision_on_4xx`). `BetaDecision` carries
+  BOUNDED booleans only, all read off the FINAL composed beta set and final
+  wire body: `has_context_1m_beta`, `has_context_management_beta`,
+  `has_mid_conversation_system_beta`, `has_advisor_tool_beta`,
+  `has_thinking_token_count_beta`, `has_effort_beta`, `body_has_effort` -- since
+  the 9-flag floor excludes the four pass-through flags, a `true` pinpoints a
+  caller/operator beta rather than floor contamination, with no raw beta string
+  or body content ever logged.
   `should_use_forwarded_bearer` is the shared three-way WIRE gate consulted by
   both `resolve_effective_token` and `build_headers`:
   `self.cfg.use_forwarded_bearer` (set at construction from the provider's

@@ -2736,6 +2736,10 @@ fn beta_decision_reflects_genuine_cc_request() {
         !decision.has_context_1m_beta,
         "a genuine-CC request must not be floor-widened with context-1m"
     );
+    assert!(
+        !decision.has_effort_beta && !decision.body_has_effort,
+        "no body means no effort field and no effort beta"
+    );
 }
 
 /// The mirror case: no captured session-id header classifies as
@@ -2763,6 +2767,159 @@ fn beta_decision_reflects_non_cc_request() {
         !decision.has_context_1m_beta,
         "a non-CC request must NOT be floor-widened with context-1m"
     );
+    // The other three removed flags share context-1m's standing: the
+    // 9-entry floor excludes them, so the full non-CC floor injection
+    // must leave every pass-through boolean false.
+    assert!(
+        !decision.has_mid_conversation_system_beta
+            && !decision.has_advisor_tool_beta
+            && !decision.has_thinking_token_count_beta
+            && !decision.has_effort_beta,
+        "the floor must not set any pass-through beta boolean"
+    );
+}
+
+/// The pass-through booleans exist to separate a caller/operator beta from
+/// floor contamination. Send `context-1m` on the request itself (pass-through
+/// mode: empty `allowed_betas`) and the boolean must flip true, while the
+/// sibling pass-through flags -- which the floor also excludes -- stay false.
+#[test]
+fn beta_decision_pass_through_beta_sets_its_boolean_but_floor_does_not() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let mut req = req_with_claude_code_headers(Vec::new());
+    req.anthropic_beta = vec![routectl_core::identity::anthropic::CONTEXT_1M_BETA.to_string()];
+    let client = reqwest::Client::new();
+    let rb = client.post("http://127.0.0.1/test");
+
+    let (_rb, decision) = provider.build_headers(rb, &req, "test-token", None);
+
+    assert!(
+        decision.has_context_1m_beta,
+        "a caller-supplied context-1m must set its boolean"
+    );
+    assert!(
+        !decision.has_mid_conversation_system_beta
+            && !decision.has_advisor_tool_beta
+            && !decision.has_thinking_token_count_beta,
+        "the floor must not set the pass-through betas the caller did not send"
+    );
+}
+
+/// Every pass-through boolean must be individually load-bearing, not just
+/// collectively false under the floor: supply each flag in turn as a
+/// client-sent beta on the cloak lane and assert EXACTLY its own field
+/// flips true while the three siblings stay false. Reverting any one
+/// field's `has_beta(..)` expression to `false` (or aliasing it onto a
+/// neighbour's flag) fails this table.
+#[test]
+fn beta_decision_each_pass_through_flag_sets_only_its_own_boolean() {
+    // Canonical order shared by the flag table and the projection below.
+    let flags = [
+        routectl_core::identity::anthropic::CONTEXT_1M_BETA,
+        routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA,
+        routectl_core::identity::anthropic::ADVISOR_TOOL_BETA,
+        routectl_core::identity::anthropic::THINKING_TOKEN_COUNT_BETA,
+    ];
+    let names = [
+        "has_context_1m_beta",
+        "has_mid_conversation_system_beta",
+        "has_advisor_tool_beta",
+        "has_thinking_token_count_beta",
+    ];
+    let project = |d: &BetaDecision| {
+        [
+            d.has_context_1m_beta,
+            d.has_mid_conversation_system_beta,
+            d.has_advisor_tool_beta,
+            d.has_thinking_token_count_beta,
+        ]
+    };
+
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    for (supplied, flag) in flags.iter().enumerate() {
+        let mut req = req_with_claude_code_headers(Vec::new());
+        req.anthropic_beta = vec![(*flag).to_string()];
+        let rb = reqwest::Client::new().post("http://127.0.0.1/test");
+
+        let (_rb, decision) = provider.build_headers(rb, &req, "test-token", None);
+
+        let observed = project(&decision);
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(
+                observed[i],
+                i == supplied,
+                "with only {flag} supplied, {name} must be {}",
+                i == supplied
+            );
+        }
+    }
+}
+
+/// The same table on the operator lane: an operator-pinned beta bypasses
+/// the `allowed_betas` allowlist, so a RESTRICTIVE allowlist must not stop
+/// the boolean from flipping -- the snapshot reads the FINAL composed set.
+#[test]
+fn beta_decision_operator_pinned_flag_sets_its_boolean_despite_allowlist() {
+    let flags = [
+        routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA,
+        routectl_core::identity::anthropic::ADVISOR_TOOL_BETA,
+        routectl_core::identity::anthropic::THINKING_TOKEN_COUNT_BETA,
+    ];
+    let project = |d: &BetaDecision| {
+        [
+            d.has_mid_conversation_system_beta,
+            d.has_advisor_tool_beta,
+            d.has_thinking_token_count_beta,
+        ]
+    };
+
+    for (supplied, flag) in flags.iter().enumerate() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(
+            vec![("anthropic-beta".to_string(), (*flag).to_string())],
+            None,
+        ));
+        let req = req_with_claude_code_headers(Vec::new());
+        let rb = reqwest::Client::new().post("http://127.0.0.1/test");
+
+        let (_rb, decision) = provider.build_headers(rb, &req, "test-token", None);
+
+        let observed = project(&decision);
+        for (i, observed_flag) in observed.iter().enumerate() {
+            assert_eq!(
+                *observed_flag,
+                i == supplied,
+                "operator-pinned {flag}: field {i} must be {}",
+                i == supplied
+            );
+        }
+        assert!(
+            !decision.has_context_1m_beta,
+            "operator-pinned {flag} must not set the context-1m boolean"
+        );
+    }
+}
+
+/// A final body carrying `output_config.effort` drives BOTH effort
+/// booleans: the egress union puts `EFFORT_BETA` on the wire, and
+/// `body_has_effort` records the field that demanded it.
+#[test]
+fn beta_decision_effort_body_sets_both_effort_booleans() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    let req = req_with_claude_code_headers(Vec::new());
+    let body = serde_json::json!({"output_config": {"effort": "high"}});
+    let client = reqwest::Client::new();
+    let rb = client.post("http://127.0.0.1/test");
+
+    let (_rb, decision) = provider.build_headers(rb, &req, "test-token", Some(&body));
+
+    assert!(
+        decision.body_has_effort,
+        "output_config.effort in the final body must set body_has_effort"
+    );
+    assert!(
+        decision.has_effort_beta,
+        "the effort union must land EFFORT_BETA in the final composed set"
+    );
 }
 
 /// Drive `log_beta_decision_on_4xx` directly (bypassing a full HTTP
@@ -2780,6 +2937,11 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
         oauth_added: true,
         has_context_1m_beta: true,
         has_context_management_beta: false,
+        has_mid_conversation_system_beta: true,
+        has_advisor_tool_beta: false,
+        has_thinking_token_count_beta: false,
+        has_effort_beta: true,
+        body_has_effort: true,
     };
 
     provider.log_beta_decision_on_4xx(400, &decision, "invalid_request_error: bad beta");
@@ -2792,6 +2954,126 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
     assert!(logs_contain("oauth_added=true"));
     assert!(logs_contain("has_context_1m_beta=true"));
     assert!(logs_contain("has_context_management_beta=false"));
+    assert!(logs_contain("has_mid_conversation_system_beta=true"));
+    assert!(logs_contain("has_advisor_tool_beta=false"));
+    assert!(logs_contain("has_thinking_token_count_beta=false"));
+    assert!(logs_contain("has_effort_beta=true"));
+    assert!(logs_contain("body_has_effort=true"));
+
+    // Bounded booleans only: no beta wire string may reach the log.
+    for flag in [
+        routectl_core::identity::anthropic::CONTEXT_1M_BETA,
+        routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA,
+        routectl_core::identity::anthropic::ADVISOR_TOOL_BETA,
+        routectl_core::identity::anthropic::THINKING_TOKEN_COUNT_BETA,
+        routectl_core::identity::anthropic::EFFORT_BETA,
+    ] {
+        assert!(
+            !logs_contain(flag),
+            "raw beta string {flag} must never be logged"
+        );
+    }
+}
+
+/// The bounded-boolean design, proven against an excerpt that DOES carry a
+/// beta literal.
+///
+/// Division of responsibility, since the previous absence check could not
+/// distinguish the two:
+///
+/// * `body_excerpt` is the UPSTREAM error message, already run through
+///   `sanitize_for_log` by every call site (control chars replaced,
+///   length-capped). Its job is to relay what Anthropic said -- and an
+///   Anthropic 400 rejecting a beta names that beta in its own message. So
+///   a beta literal appearing inside the excerpt is upstream text, is not
+///   this diagnostic's doing, and is NOT what this test forbids.
+/// * The eleven decision fields are what THIS diagnostic contributes, and
+///   every one of them is a bounded boolean or enum derived from the final
+///   composed set. None may render a beta wire string. That is the
+///   invariant asserted below: with a beta literal deliberately planted in
+///   the excerpt, every literal found on the log line must be accounted for
+///   by the excerpt, never by a decision field.
+#[traced_test]
+#[test]
+fn log_beta_decision_on_4xx_decision_fields_never_render_a_beta_literal() {
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+    // Every pass-through boolean TRUE: if any field rendered its flag name
+    // instead of a bool, this is the shape that would expose it.
+    let decision = BetaDecision {
+        is_non_cc: true,
+        forwarded_leg: false,
+        cloak_mode: CloakMode::Auto,
+        oauth_added: true,
+        has_context_1m_beta: true,
+        has_context_management_beta: true,
+        has_mid_conversation_system_beta: true,
+        has_advisor_tool_beta: true,
+        has_thinking_token_count_beta: true,
+        has_effort_beta: true,
+        body_has_effort: true,
+    };
+    let planted = routectl_core::identity::anthropic::ADVISOR_TOOL_BETA;
+    let excerpt = format!("invalid_request_error: unsupported beta {planted}");
+
+    provider.log_beta_decision_on_4xx(400, &decision, &excerpt);
+
+    logs_assert(|lines: &[&str]| {
+        let line = lines
+            .iter()
+            .find(|l| l.contains("anthropic-api oauth 4xx beta decision context"))
+            .ok_or_else(|| "beta decision event never emitted".to_string())?;
+        let (fields, echoed_excerpt) = line
+            .split_once("body_excerpt=")
+            .ok_or_else(|| format!("no body_excerpt field on the line: {line}"))?;
+        // Guard the split itself: every decision field must sit in the
+        // prefix, or the assertion below would vacuously pass by skipping
+        // fields that drifted after `body_excerpt`.
+        for name in [
+            "is_non_cc=",
+            "forwarded_leg=",
+            "cloak_mode=",
+            "oauth_added=",
+            "has_context_1m_beta=",
+            "has_context_management_beta=",
+            "has_mid_conversation_system_beta=",
+            "has_advisor_tool_beta=",
+            "has_thinking_token_count_beta=",
+            "has_effort_beta=",
+            "body_has_effort=",
+        ] {
+            if !fields.contains(name) {
+                return Err(format!(
+                    "{name} is not ahead of body_excerpt; the field/excerpt \
+                     split no longer covers every decision field"
+                ));
+            }
+        }
+        // The planted literal must be present -- via the excerpt only. Its
+        // absence would mean the test proves nothing.
+        if !echoed_excerpt.contains(planted) {
+            return Err(format!(
+                "the planted literal {planted} never reached the excerpt; \
+                 the test would be vacuous"
+            ));
+        }
+        for flag in [
+            routectl_core::identity::anthropic::CONTEXT_1M_BETA,
+            routectl_core::identity::anthropic::MID_CONVERSATION_SYSTEM_BETA,
+            routectl_core::identity::anthropic::ADVISOR_TOOL_BETA,
+            routectl_core::identity::anthropic::THINKING_TOKEN_COUNT_BETA,
+            routectl_core::identity::anthropic::EFFORT_BETA,
+            context_management::CONTEXT_MANAGEMENT_BETA,
+            routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA,
+        ] {
+            if fields.contains(flag) {
+                return Err(format!(
+                    "a decision field rendered the raw beta string {flag}; \
+                     these fields must stay bounded booleans"
+                ));
+            }
+        }
+        Ok(())
+    });
 }
 
 /// `should_log_beta_4xx` is the single gate shared by `complete()`,

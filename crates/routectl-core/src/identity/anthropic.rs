@@ -45,6 +45,23 @@ pub const OAUTH_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 /// bump here can never drift out of sync with the sibling literal.
 pub const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
+/// The `anthropic-beta` flag gating mid-conversation system blocks. NOT in
+/// the floor (model-gated, same rationale as `CONTEXT_1M_BETA`): reaches
+/// upstream only as client-driven pass-through. Named so the provider's 4xx
+/// pass-through diagnostics can match on it without re-typing the wire
+/// string.
+pub const MID_CONVERSATION_SYSTEM_BETA: &str = "mid-conversation-system-2026-04-07";
+
+/// The `anthropic-beta` flag gating the advisor tool. NOT in the floor
+/// (model-gated); client-driven pass-through only. Shared with the
+/// provider's 4xx pass-through diagnostics.
+pub const ADVISOR_TOOL_BETA: &str = "advisor-tool-2026-03-01";
+
+/// The `anthropic-beta` flag gating thinking-token counting. NOT in the
+/// floor (model-gated); client-driven pass-through only. Shared with the
+/// provider's 4xx pass-through diagnostics.
+pub const THINKING_TOKEN_COUNT_BETA: &str = "thinking-token-count-2026-05-13";
+
 /// The `anthropic-beta` flag gating `output_config.effort`. Like
 /// `STRUCTURED_OUTPUTS_BETA` it is a server-side capability requirement
 /// rather than a client-opted beta: the egress unions it on-demand keyed on

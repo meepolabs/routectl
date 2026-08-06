@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use routectl_core::identity::anthropic as beta_flags;
 use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_core::{ChatRequest, Result, StaticToken, TokenSource};
 
@@ -225,10 +226,17 @@ impl AnthropicApiConfig {
 
 /// Beta-decision context computed by `build_headers` on the OauthBearer +
 /// api.anthropic.com own-token lane. Carries just enough of the beta-gating
-/// decision to diagnose a beta-caused 4xx (e.g. a floor-widened beta the
-/// upstream rejects) without enabling full header tracing. Cheap to build
-/// (six bools/copies) -- returned unconditionally from `build_headers` so
-/// the 2xx hot path pays no extra allocation, only this small struct.
+/// decision to diagnose a beta-caused 4xx (e.g. a model-gated beta the
+/// upstream rejects) without enabling full header tracing. Every field is a
+/// BOUNDED boolean or enum derived from the FINAL composed beta set and the
+/// FINAL wire body -- never a raw beta string and never body content, so an
+/// untrusted caller value can not reach the log through here.
+///
+/// The four pass-through booleans (`has_context_1m_beta`,
+/// `has_mid_conversation_system_beta`, `has_advisor_tool_beta`,
+/// `has_thinking_token_count_beta`) name flags the 9-entry floor
+/// deliberately excludes, so a `true` pinpoints a caller- or
+/// operator-supplied beta rather than floor contamination.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct BetaDecision {
     pub(super) is_non_cc: bool,
@@ -237,6 +245,11 @@ pub(super) struct BetaDecision {
     pub(super) oauth_added: bool,
     pub(super) has_context_1m_beta: bool,
     pub(super) has_context_management_beta: bool,
+    pub(super) has_mid_conversation_system_beta: bool,
+    pub(super) has_advisor_tool_beta: bool,
+    pub(super) has_thinking_token_count_beta: bool,
+    pub(super) has_effort_beta: bool,
+    pub(super) body_has_effort: bool,
 }
 
 /// The single three-way WIRE gate shared by both consumers of the forwarded
@@ -696,14 +709,18 @@ impl AnthropicApiProvider {
         }
 
         // Snapshot the FINAL composed beta set (post context_management
-        // strip) so the decision context reflects what actually egresses,
-        // not an intermediate union.
-        let has_context_1m_beta = merged_betas
-            .iter()
-            .any(|b| b == routectl_core::identity::anthropic::CONTEXT_1M_BETA);
-        let has_context_management_beta = merged_betas
-            .iter()
-            .any(|b| b == context_management::CONTEXT_MANAGEMENT_BETA);
+        // strip, post capability unions) so the decision context reflects
+        // what actually egresses, not an intermediate union. Bounded
+        // booleans only -- the raw beta strings are caller-influenced and
+        // never enter the diagnostics.
+        let has_beta = |flag: &str| merged_betas.iter().any(|b| b == flag);
+        let has_context_1m_beta = has_beta(beta_flags::CONTEXT_1M_BETA);
+        let has_context_management_beta = has_beta(context_management::CONTEXT_MANAGEMENT_BETA);
+        let has_mid_conversation_system_beta = has_beta(beta_flags::MID_CONVERSATION_SYSTEM_BETA);
+        let has_advisor_tool_beta = has_beta(beta_flags::ADVISOR_TOOL_BETA);
+        let has_thinking_token_count_beta = has_beta(beta_flags::THINKING_TOKEN_COUNT_BETA);
+        let has_effort_beta = has_beta(beta_flags::EFFORT_BETA);
+        let body_has_effort = wire_body.is_some_and(super::extras::body_has_output_config_effort);
 
         if !merged_betas.is_empty() {
             rb = rb.header("anthropic-beta", merged_betas.join(","));
@@ -849,6 +866,11 @@ impl AnthropicApiProvider {
             oauth_added,
             has_context_1m_beta,
             has_context_management_beta,
+            has_mid_conversation_system_beta,
+            has_advisor_tool_beta,
+            has_thinking_token_count_beta,
+            has_effort_beta,
+            body_has_effort,
         };
         (rb, decision)
     }
@@ -872,7 +894,9 @@ impl AnthropicApiProvider {
     /// the beta-decision context plus the already-sanitized body excerpt --
     /// no tokens, credentials, or request/response content -- so a
     /// beta-caused 400 recurrence is diagnosable without enabling header
-    /// tracing. Callers gate this to the own-token OAuth-anthropic lane
+    /// tracing. Every beta field is a BOUNDED boolean: the composed beta
+    /// strings themselves are caller-influenced and are never logged.
+    /// Callers gate this to the own-token OAuth-anthropic lane
     /// before calling; the message literal is stable so subscribers can
     /// filter on it independent of `context`.
     pub(super) fn log_beta_decision_on_4xx(&self, status: u16, dec: &BetaDecision, excerpt: &str) {
@@ -885,6 +909,11 @@ impl AnthropicApiProvider {
             oauth_added = dec.oauth_added,
             has_context_1m_beta = dec.has_context_1m_beta,
             has_context_management_beta = dec.has_context_management_beta,
+            has_mid_conversation_system_beta = dec.has_mid_conversation_system_beta,
+            has_advisor_tool_beta = dec.has_advisor_tool_beta,
+            has_thinking_token_count_beta = dec.has_thinking_token_count_beta,
+            has_effort_beta = dec.has_effort_beta,
+            body_has_effort = dec.body_has_effort,
             body_excerpt = %excerpt,
             "anthropic-api oauth 4xx beta decision context",
         );
