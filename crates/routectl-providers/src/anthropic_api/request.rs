@@ -337,6 +337,12 @@ pub(crate) fn normalize(
     // loss isn't silent.
     crate::responses_reasoning_guard::warn_dropped_reasoning_dialect(id, req);
 
+    // The canonical sampling knobs have no Anthropic Messages home and are
+    // gated out of the provider_extras merge as canonical keys; WARN once so
+    // the loss isn't silent. Bedrock-Invoke delegates body construction here,
+    // so this single call also covers that lane (with its own provider id).
+    crate::sampling_drop_guard::warn_dropped_sampling_fields(id, req);
+
     // Anthropic's wire requires every tool_result carry the
     // `tool_use_id` of the tool_use it answers; missing ids are
     // rejected upfront (always, independent of history_reasoning).
@@ -626,6 +632,57 @@ mod reasoning_leak_guard_tests {
         assert!(body.get("context").is_none());
         assert!(body.get("mode").is_none());
         assert!(logs_contain("reasoning context/mode dropped"));
+    }
+}
+
+#[cfg(test)]
+mod sampling_leak_guard_tests {
+    use super::normalize;
+    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+    use tracing_test::traced_test;
+
+    fn user_req() -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    #[traced_test]
+    fn sampling_fields_warn_once_naming_dropped_fields() {
+        let mut req = user_req();
+        req.n = Some(3);
+        req.logprobs = Some(true);
+
+        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+
+        assert!(body.get("n").is_none());
+        assert!(body.get("logprobs").is_none());
+        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
+        assert!(logs_contain("logprobs"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn no_sampling_warn_when_no_sampling_field_set() {
+        let req = user_req();
+
+        let _ = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+
+        assert!(!logs_contain("sampling fields dropped"));
     }
 }
 

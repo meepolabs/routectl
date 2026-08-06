@@ -1515,4 +1515,33 @@ mod tests {
             "got: {body}"
         );
     }
+
+    /// The Invoke lane delegates body construction to the anthropic-api
+    /// normalizer, so the shared sampling leak-guard fires here too --
+    /// attributed to the Bedrock provider id.
+    #[test]
+    #[tracing_test::traced_test]
+    fn sampling_fields_warn_once_naming_dropped_fields() {
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.seed = Some(42);
+        req.top_logprobs = Some(5);
+
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        assert!(body.get("seed").is_none(), "got: {body}");
+        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
+        assert!(logs_contain("top_logprobs"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn no_sampling_warn_when_no_sampling_field_set() {
+        let cfg = fake_cfg();
+        let req = user_req();
+
+        let _ = normalize_request(&cfg, &req).unwrap();
+
+        assert!(!logs_contain("sampling fields dropped"));
+    }
 }

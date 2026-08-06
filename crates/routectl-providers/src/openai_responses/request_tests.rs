@@ -1734,3 +1734,43 @@ fn no_warn_for_clean_request() {
         "no drop diagnostic should fire when no caller marker is present"
     );
 }
+
+// ---------------------------------------------------------------------------
+// dropped canonical sampling knobs observability
+//
+// The Responses API models none of `n / seed / logprobs / top_logprobs /
+// logit_bias / presence_penalty / frequency_penalty`, and they cannot ride
+// through provider_extras (canonical keys). These tests pin that the drop
+// is OBSERVABLE (one WARN naming the fields) and silent when unset.
+// ---------------------------------------------------------------------------
+
+#[traced_test]
+#[test]
+fn sampling_fields_warn_once_naming_dropped_fields() {
+    // Arrange
+    let mut req = req_with(vec![user_text("hi")]);
+    req.n = Some(3);
+    req.frequency_penalty = Some(0.7);
+
+    // Act
+    let wire = translate_to_json(&cfg(), &req);
+
+    // Assert
+    logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
+    assert!(logs_contain("frequency_penalty"));
+    assert!(wire.get("n").is_none(), "got: {wire}");
+    assert!(wire.get("frequency_penalty").is_none(), "got: {wire}");
+}
+
+#[traced_test]
+#[test]
+fn no_sampling_warn_when_no_sampling_field_set() {
+    // Arrange
+    let req = req_with(vec![user_text("hi")]);
+
+    // Act
+    let _ = translate(&cfg(), &req).expect("translate");
+
+    // Assert
+    assert!(!logs_contain("sampling fields dropped"));
+}

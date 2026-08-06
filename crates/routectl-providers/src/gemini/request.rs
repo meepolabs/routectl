@@ -35,6 +35,10 @@ pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContent
     // dropped as a managed key in merge_payload_extras); WARN once so the
     // loss isn't silent.
     crate::responses_reasoning_guard::warn_dropped_reasoning_dialect(provider_id, req);
+    // The canonical sampling knobs are not translated onto
+    // `generationConfig` and are gated out of the provider_extras merge as
+    // canonical keys; WARN once so the loss isn't silent.
+    crate::sampling_drop_guard::warn_dropped_sampling_fields(provider_id, req);
     let system_instruction = build_system_instruction(req);
     let contents = build_contents(provider_id, req)?;
     let (tools, tool_config) = build_tools_and_config(provider_id, req);
@@ -2610,6 +2614,29 @@ mod tests {
         assert!(body.get("context").is_none());
         assert!(body.get("mode").is_none());
         assert!(logs_contain("reasoning context/mode dropped"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn sampling_fields_warn_once_naming_dropped_fields() {
+        let mut req = base_req();
+        req.n = Some(3);
+        req.seed = Some(42);
+
+        let _ = translate("gemini:test", &req).expect("translate");
+
+        assert!(logs_contain("seed"));
+        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
+    }
+
+    #[test]
+    #[traced_test]
+    fn no_sampling_warn_when_no_sampling_field_set() {
+        let req = base_req();
+
+        let _ = translate("gemini:test", &req).expect("translate");
+
+        assert!(!logs_contain("sampling fields dropped"));
     }
 
     #[test]
