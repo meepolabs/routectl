@@ -387,7 +387,7 @@ pub struct ImportDiff {
     /// preserved untouched; this row is never applied.
     pub conflicted: Vec<DiffRow>,
     /// Selectors whose STALE `source: import` cell must be REMOVED from
-    /// the overlay (see [`stale_import_cells`]).
+    /// the overlay (see `stale_import_cells`).
     pub cleared: Vec<String>,
 }
 
@@ -410,7 +410,7 @@ pub struct ImportDiff {
 ///
 /// A selector the candidate SKIPPED for a cross-check disagreement gets
 /// no row at all, but its stale `source: import` cell (if any) is listed
-/// in [`ImportDiff::cleared`] -- see [`stale_import_cells`].
+/// in [`ImportDiff::cleared`] -- see `stale_import_cells`.
 #[must_use]
 pub fn diff_overlay(
     current_overlay: &CatalogOverlay,
@@ -476,7 +476,7 @@ fn stale_import_cells(overlay: &CatalogOverlay, skipped: &[SkippedSelector]) -> 
 }
 
 /// `true` when `overlay` currently carries a `source: import` cell for
-/// `selector` -- the only state [`stale_import_cells`] is allowed to
+/// `selector` -- the only state `stale_import_cells` is allowed to
 /// clear.
 #[must_use]
 pub fn is_import_cell(overlay: &CatalogOverlay, selector: &str) -> bool {
@@ -495,7 +495,7 @@ pub fn is_import_cell(overlay: &CatalogOverlay, selector: &str) -> bool {
 ///
 /// A non-empty [`ImportDiff::cleared`] is ALWAYS an effective change:
 /// every entry names a cell that exists on disk right now and must be
-/// removed (see [`stale_import_cells`]), so the write cannot be skipped.
+/// removed (see `stale_import_cells`), so the write cannot be skipped.
 ///
 /// A row only reaches `applied` with `ExistingCell::Absent` or
 /// `ExistingCell::Present` (never `Disabled`, which always sorts into

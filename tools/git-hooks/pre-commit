@@ -53,6 +53,13 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 echo "pre-commit: cargo check (lean providers build)"
 cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api
 
+echo "pre-commit: cargo doc (rustdoc lints denied)"
+# Scoped to the PUBLIC doc surface (no --document-private-items): the
+# private-items pass resolves links that break in the published docs, so
+# denying against it would green-light exactly the breakage this gate
+# exists to catch.
+RUSTDOCFLAGS="-D rustdoc::all" cargo doc --workspace --all-features --no-deps
+
 echo "pre-commit: cargo test --workspace --release"
 # replay_egress and replay_ingress integration tests are temporarily
 # skipped because the local captured/ corpus has bodies cut by

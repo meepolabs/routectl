@@ -7,7 +7,7 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Verification gate
 
-Every change must keep two things green:
+Every change must keep all of the following green:
 
 ```bash
 # Unit + integration tests across the whole workspace.
@@ -44,6 +44,13 @@ cargo test -p routectl-cli --features live-integration --release \
 # This providers-scoped check is what the pre-commit hook runs.
 cargo check -p routectl-providers --no-default-features \
   --features openai-compat,anthropic-api
+
+# Rustdoc lints, denied. Catches broken intra-doc links and public docs
+# that link PRIVATE items -- such a link resolves locally but renders as
+# dead text in the published docs. Deliberately NOT run with
+# --document-private-items: that flag makes private targets resolvable,
+# which would green-light exactly the links this gate rejects.
+RUSTDOCFLAGS="-D rustdoc::all" cargo doc --workspace --all-features --no-deps
 ```
 
 The workspace has seven crates: `routectl-core`, `routectl-auth`,
@@ -68,8 +75,8 @@ bash tools/git-hooks/install.sh
 This symlinks `pre-commit` and `commit-msg` into `.git/hooks/`. The
 `pre-commit` hook runs the gitleaks staged secret scan, a scan for
 accidental non-public identifiers (`scripts/check-internal-ids.sh
---staged`), and the fmt / clippy / lean-check / workspace-test gate --
-the same workspace tests CI runs EXCEPT the two replay suites
+--staged`), and the fmt / clippy / lean-check / rustdoc / workspace-test
+gate -- the same workspace tests CI runs EXCEPT the two replay suites
 (`egress_replay_all` / `ingress_replay_all`), which only run against a
 contributor's local fixture corpus (CI runs them unfiltered). The
 `commit-msg` hook applies the same identifier scan to the commit

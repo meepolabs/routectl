@@ -40,6 +40,15 @@ jobs:
       - name: cargo check (lean providers build, no aws-* deps)
         run: cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api
 
+      # Scoped to the PUBLIC doc surface (no --document-private-items): a
+      # private-items pass resolves links that break in the published docs,
+      # so denying against it would green-light the very breakage this
+      # step catches.
+      - name: cargo doc (rustdoc lints denied)
+        env:
+          RUSTDOCFLAGS: -D rustdoc::all
+        run: cargo doc --workspace --all-features --no-deps
+
   msrv:
     name: msrv check (1.95.0)
     runs-on: ubuntu-22.04

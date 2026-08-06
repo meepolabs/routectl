@@ -48,7 +48,7 @@
 //!
 //! BASE RATES: `input_cost_per_token` / `output_cost_per_token` are the
 //! absolute dollar rates `wm` / `rm` are multipliers OF, extracted through
-//! the same cross-check (see [`base_rates_for`]). They serve a query-time
+//! the same cross-check (see `base_rates_for`). They serve a query-time
 //! cost ESTIMATE and never displace a provider-reported billed figure. A
 //! selector whose glob spans models the sources price differently is marked
 //! `price_ambiguous` and stays priced-ABSENT (`None`) -- the same
