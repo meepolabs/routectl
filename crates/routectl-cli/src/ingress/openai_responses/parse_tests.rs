@@ -1185,6 +1185,19 @@ fn responses_egress_body(req: &ChatRequest) -> serde_json::Value {
     .expect("responses egress normalize")
 }
 
+fn responses_egress_body_api_key(req: &ChatRequest) -> serde_json::Value {
+    use routectl_core::Provider;
+    use routectl_providers::openai_responses::{
+        AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+    };
+
+    let mut cfg = OpenAiResponsesConfig::new("openai-responses:test", "literal:test");
+    cfg.auth_kind = AuthKind::ApiKey;
+    OpenAiResponsesProvider::new(cfg)
+        .normalize_request(req)
+        .expect("responses egress normalize")
+}
+
 #[test]
 fn unmodeled_input_item_kinds_round_trip_through_responses_egress() {
     // Arrange: a codex-shaped Responses request interleaving a modeled
@@ -1276,16 +1289,17 @@ fn preserved_items_keep_relative_order_on_egress() {
 
 #[test]
 fn max_output_tokens_survives_the_responses_round_trip() {
-    // Arrange: a client capping the completion on the Responses ingress.
+    // Arrange: a client capping the completion on the Responses ingress,
+    // routed to a standard api-key model where the wire field is honored.
     let body = json!({
-        "model": "gpt-5-codex",
+        "model": "gpt-5",
         "input": "hi",
         "max_output_tokens": 500
     });
 
     // Act: ingress -> canonical -> egress wire body.
     let req = parse(body);
-    let out = responses_egress_body(&req);
+    let out = responses_egress_body_api_key(&req);
 
     // Assert: the ceiling is intact at both hops.
     assert_eq!(req.max_tokens, Some(500));
@@ -1298,13 +1312,43 @@ fn max_output_tokens_survives_the_responses_round_trip() {
 }
 
 #[test]
-fn omitted_max_output_tokens_stays_omitted_on_the_round_trip() {
-    // Arrange: no ceiling from the client.
-    let body = json!({"model": "gpt-5-codex", "input": "hi"});
+fn max_output_tokens_dropped_on_the_codex_round_trip() {
+    // Arrange: same capped request, but routed to the codex OAuth lane,
+    // whose contract has no `max_output_tokens` field.
+    let body = json!({
+        "model": "gpt-5-codex",
+        "input": "hi",
+        "max_output_tokens": 500
+    });
 
     // Act
     let req = parse(body);
     let out = responses_egress_body(&req);
+
+    // Assert: the ceiling is parsed into canonical but excluded from the
+    // codex wire body, since the backend rejects the contract drift.
+    assert_eq!(req.max_tokens, Some(500));
+    assert!(
+        out.get("max_output_tokens").is_none(),
+        "codex lane must not emit max_output_tokens; got {out}"
+    );
+}
+
+#[test]
+fn omitted_max_output_tokens_stays_omitted_on_the_round_trip() {
+    // Arrange: no ceiling from the client, routed to a standard api-key
+    // model where `max_output_tokens` IS an emittable wire field -- so a
+    // synthesized baseline would actually show up here (the codex lane
+    // gates the field off unconditionally, which would make this
+    // non-injection assertion vacuous).
+    let body = json!({"model": "gpt-5", "input": "hi"});
+
+    // Act
+    let mut req = parse(body);
+    // Pin: even with a non-zero router carrier present, the egress must
+    // not lift it onto the wire when the caller omitted the ceiling.
+    req.routectl_internal.max_output_tokens = 8000;
+    let out = responses_egress_body_api_key(&req);
 
     // Assert: routectl synthesizes nothing on this lane.
     assert_eq!(req.max_tokens, None);

@@ -31,7 +31,9 @@
 mod common;
 
 use routectl_core::Provider;
-use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
+use routectl_providers::openai_responses::{
+    AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+};
 
 use common::scenarios;
 
@@ -51,6 +53,16 @@ fn openai_responses_provider() -> OpenAiResponsesProvider {
         "openai-responses-test",
         "test-key",
     ))
+}
+
+/// The api-key lane, which differs from the codex-oauth default above in
+/// the fields the upstream accepts. Its own snapshot exists so a future
+/// convergence of the two lanes fails a recorded wire body, not only a
+/// unit test.
+fn openai_responses_provider_api_key() -> OpenAiResponsesProvider {
+    let mut cfg = OpenAiResponsesConfig::new("openai-responses-test", "test-key");
+    cfg.auth_kind = AuthKind::ApiKey;
+    OpenAiResponsesProvider::new(cfg)
 }
 
 // =====================================================================
@@ -210,6 +222,42 @@ mod scenario_5_cache_control_positions {
         assert!(
             !body_str.contains("cache_control"),
             "openai-responses egress must NOT emit `cache_control` anywhere; body: {body_str}"
+        );
+
+        insta::with_settings!({snapshot_path => "snapshots/openai_responses"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+    }
+}
+
+// =====================================================================
+// Scenario 6: max_output_tokens_api_key_lane
+// =====================================================================
+//
+// The api-key lane accepts `max_output_tokens` as a documented top-level
+// field, so the caller's ceiling MUST reach the wire body there. The
+// codex-oauth snapshots elsewhere in this file correctly omit it (codex's
+// request shape has no such member). Snapshotting the api-key body pins
+// the retained field so a future cross-lane convergence -- one that
+// suppressed it here too -- fails a recorded wire body, not only a unit
+// test. The reused fixture carries `max_tokens: Some(1024)`.
+
+mod scenario_6_max_output_tokens_api_key_lane {
+    use super::*;
+
+    #[test]
+    fn openai_responses_egress() {
+        let req = scenarios::scenario_1_system_handling();
+        let body = openai_responses_provider_api_key()
+            .normalize_request(&req)
+            .expect("openai_responses normalize");
+
+        // Pin: the caller's ceiling survives to the api-key wire body.
+        assert_eq!(
+            body.get("max_output_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(1024),
+            "api-key lane must retain max_output_tokens; body: {body}"
         );
 
         insta::with_settings!({snapshot_path => "snapshots/openai_responses"}, {

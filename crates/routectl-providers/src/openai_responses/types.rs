@@ -81,6 +81,9 @@ pub struct ResponsesRequest {
     /// `max_tokens`. Never synthesized: `None` stays absent on the wire so
     /// the upstream applies its own default (the Anthropic-shape
     /// `routectl_internal.max_output_tokens` baseline does not apply here).
+    /// Excluded on the `ChatgptOauth` (codex) lane: codex's request contract
+    /// has no such field and the chatgpt.com backend rejects the drift; the
+    /// gate lives in `request.rs::translate`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_tokens: Option<u32>,
 }
