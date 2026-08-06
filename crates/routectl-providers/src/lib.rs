@@ -184,6 +184,21 @@ pub(crate) mod anthropic_error;
 ))]
 pub(crate) mod aws_error;
 
+// The AWS exception-discriminator vocabulary, re-exported for the downstream
+// crates that gate on a `__type` / `x-amzn-errortype` token. Every consumer
+// compares through `aws_exception_type_is` (or the already-stripped
+// `upstream_type` the lift lands) so the namespaced wire form
+// (`com.amazon.coral.validate#ValidationException`) can never be silently
+// missed by an exact match against the bare name. The rest of `aws_error`
+// stays crate-private: the redaction and lift entry points are lane-internal.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-compat",
+    feature = "openai-responses"
+))]
+pub use aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is};
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 

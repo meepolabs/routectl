@@ -418,7 +418,15 @@ listed at the bottom of each crate.
   400 body carries no `__type`; a duplicate / conflicting / malformed /
   missing header fails closed with a bounded reason label
   (`missing|invalid|ambiguous|conflict`) and the URL tail never reaches an
-  `Error` field or a log line
+  `Error` field or a log line. The crate root re-exports the discriminator
+  vocabulary -- `VALIDATION_EXCEPTION_TYPE` (the bare `ValidationException`
+  token) and `aws_exception_type_is(raw, expected)` (namespace-stripping
+  comparison, normalizing BOTH operands) -- so every downstream
+  `__type` / `x-amzn-errortype` consumer
+  (the router's `is_bedrock_validation_exception`, the CLI envelope-capture
+  harness's `classify_validation`) gates through one reduction and a
+  still-namespaced discriminator is never silently missed by an exact match
+  against the bare name; `strip_aws_namespace` itself stays crate-private
 - `src/mantle.rs` -- shared helpers for the Bedrock mantle lanes: pure
   region-to-URL builders (`mantle_host` ->
   `https://bedrock-mantle.<region>.api.aws`, `mantle_anthropic_base` ->
@@ -1868,7 +1876,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `upstream_type == "ValidationException"`) BEFORE the message read: the
   captured must-not-learn rejections (bad model id, unknown beta flag) share
   the learnable rejection's exact flat shape, so only the lifted discriminator
-  may unlock a match. `BEDROCK_VALIDATION_TEMPLATES` are grounded in captured
+  may unlock a match. The gate compares through
+  `routectl_providers::aws_exception_type_is` against the crate's
+  `VALIDATION_EXCEPTION_TYPE`, so a discriminator arriving still namespaced
+  (an intermediary that bypassed the provider lift) matches identically to the
+  bare token instead of being silently missed. `BEDROCK_VALIDATION_TEMPLATES` are grounded in captured
   InvokeModel 400s (`tool type '<type>' is not supported for this model`;
   `<field>: Extra inputs are not permitted`); `BEDROCK_TOKEN_TRANSLATIONS`
   maps the rejected tool type onto the identically-named `derive_feature_keys`
@@ -3620,7 +3632,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `probe::resolve::resolve_provider_and_model`) to a Bedrock Invoke provider,
   signs+sends each via the providers-crate `signing`/`endpoint` seams, and
   `classify_validation` hard-fails unless each is HTTP 400 with a flat AWS
-  `ValidationException` (`{"__type","message"}`). Before persisting,
+  `ValidationException` (`{"__type","message"}`) -- the `__type` check runs
+  through `routectl_providers::aws_exception_type_is`, so the namespaced wire
+  form and the bare token are accepted identically while an unrelated
+  exception whose name merely embeds the target is not. Before persisting,
   `assert_no_credential_echo` scans each body for the request's own credential
   material (`configured_secret_material` raw key id/secret/token/bearer key +
   `signed_header_secrets` Authorization / `x-amz-security-token`) and
