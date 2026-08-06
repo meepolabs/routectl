@@ -56,6 +56,33 @@ const REPLAY_ACTION_STRIP_REPAIR: &str = "strip_repair";
 /// rejection.
 const REPLAY_REASON_UPSTREAM_REJECTION: &str = "upstream_replay_rejection";
 
+/// The one provider kind whose egress can represent the
+/// OpenAI-Responses-dialect `reasoning.context` / `reasoning.mode`
+/// sub-keys. Matches `ProviderEntry::kind_str`, so it round-trips with the
+/// `kind = "..."` discriminant in the operator's provider table.
+const RESPONSES_PROVIDER_KIND: &str = "openai-responses";
+
+/// Whether `req` carries a Responses-dialect `reasoning.context` or
+/// `reasoning.mode` under `provider_extras`. `summary` is deliberately
+/// excluded -- its loss is a soft downgrade of summary verbosity, not a
+/// semantic gap.
+fn carries_responses_reasoning_dialect(req: &ChatRequest) -> bool {
+    req.provider_extras
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("reasoning"))
+        .and_then(|v| v.as_object())
+        .is_some_and(|m| m.contains_key("context") || m.contains_key("mode"))
+}
+
+/// Whether the target egress DROPS the Responses-dialect reasoning
+/// sub-keys. An unknown / unresolved provider kind (the legacy direct
+/// dispatch path) is treated as dropping, so the fidelity loss warns
+/// rather than passing silently.
+fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
+    provider_kind != Some(RESPONSES_PROVIDER_KIND)
+}
+
 /// Emit the single aggregated reasoning-replay degradation WARN for a
 /// resolved request. Fires exactly ONCE when the strip-repair branch
 /// degraded a carried reasoning artifact anywhere in the chain walk, and
@@ -147,6 +174,33 @@ impl Router {
         }
     }
 
+    /// Fidelity WARN when the target this dispatch is about to hit cannot
+    /// represent the Responses-dialect `reasoning.context` / `reasoning.mode`
+    /// the request carries. Reads the per-target (post-overlay) clone at the
+    /// dispatch point, so it is accurate for the target actually used: a
+    /// Responses primary that fails over to a non-Responses fallback warns,
+    /// a Responses-only success does not. `warned` is a stack-local owned by
+    /// the chain loop, making this at most one WARN per client request across
+    /// same-provider retries and fallback hops. Logs no field values.
+    fn warn_dropped_reasoning_dialect(
+        provider_name: &str,
+        provider_kind: Option<&str>,
+        attempt_req: &ChatRequest,
+        warned: &mut bool,
+    ) {
+        if *warned
+            || !target_drops_responses_reasoning(provider_kind)
+            || !carries_responses_reasoning_dialect(attempt_req)
+        {
+            return;
+        }
+        *warned = true;
+        tracing::warn!(
+            provider = %provider_name,
+            "reasoning context/mode dropped: representable only on the OpenAI Responses egress"
+        );
+    }
+
     /// Complete a non-streaming request with default options, returning
     /// only the dispatch result.
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
@@ -225,6 +279,11 @@ impl Router {
         // set stops a same-request retry from manufacturing a second
         // observation. See `observe_for_learning`.
         let mut learn_dedupe: HashSet<LearnDedupeKey> = HashSet::new();
+        // One reasoning-drop fidelity WARN per client request: the emit sits
+        // at the dispatch point (per-target, post-overlay) so it is
+        // target-accurate, and this flag stops a same-provider retry or a
+        // later fallback hop from repeating it.
+        let mut reasoning_drop_warned = false;
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -439,6 +498,14 @@ impl Router {
                     &policy,
                     provider_name,
                     target.stream_first_byte_timeout_ms,
+                );
+                // Fidelity WARN at the dispatch point: reads the per-target
+                // clone about to go upstream, at most once per request.
+                Self::warn_dropped_reasoning_dialect(
+                    provider_name,
+                    target.provider_kind,
+                    &attempt_req,
+                    &mut reasoning_drop_warned,
                 );
                 let result = run_with_timeout(
                     provider_name,
@@ -982,6 +1049,10 @@ impl Router {
         // set stops a same-request retry from manufacturing a second
         // observation. See `observe_for_learning`.
         let mut learn_dedupe: HashSet<LearnDedupeKey> = HashSet::new();
+        // One reasoning-drop fidelity WARN per client request -- see
+        // `complete_inner`. Same stack-local once-flag over the dispatch-point
+        // emit, so the streaming path is not a second site that repeats it.
+        let mut reasoning_drop_warned = false;
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -1173,6 +1244,13 @@ impl Router {
                 // consistent under the single-probe invariant.
                 let mut probe_guard = self.probe_slot_guard(state_key);
 
+                // Fidelity WARN at the dispatch point -- see `complete_inner`.
+                Self::warn_dropped_reasoning_dialect(
+                    provider_name,
+                    target.provider_kind,
+                    &attempt_req,
+                    &mut reasoning_drop_warned,
+                );
                 let r = try_stream_with_first_content(
                     provider_name,
                     model,
@@ -2723,3 +2801,7 @@ mod capability_acceptance_tests;
 #[cfg(test)]
 #[path = "replay_degradation_observability_tests.rs"]
 mod replay_degradation_observability_tests;
+
+#[cfg(test)]
+#[path = "reasoning_drop_warn_tests.rs"]
+mod reasoning_drop_warn_tests;

@@ -332,11 +332,6 @@ pub(crate) fn normalize(
         &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
     >,
 ) -> Result<Value> {
-    // Responses-dialect reasoning context/mode has no Anthropic home (it is
-    // dropped as a managed key in merge_provider_extras); WARN once so the
-    // loss isn't silent.
-    crate::responses_reasoning_guard::warn_dropped_reasoning_dialect(id, req);
-
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; WARN once so
     // the loss isn't silent. Bedrock-Invoke delegates body construction here,
@@ -597,7 +592,6 @@ mod reasoning_leak_guard_tests {
     use super::normalize;
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
     use serde_json::json;
-    use tracing_test::traced_test;
 
     fn user_req() -> ChatRequest {
         ChatRequest {
@@ -619,10 +613,10 @@ mod reasoning_leak_guard_tests {
     }
 
     #[test]
-    #[traced_test]
-    fn responses_reasoning_context_mode_dropped_and_warns() {
+    fn responses_reasoning_context_mode_dropped() {
         // A Responses-ingress request carrying reasoning context/mode routed
-        // to the Anthropic egress does NOT emit them and warns once.
+        // to the Anthropic egress does NOT emit them. The fidelity WARN for
+        // the drop is emitted router-side, per dispatched target.
         let mut req = user_req();
         req.provider_extras = Some(json!({"reasoning": {"context": "all_turns", "mode": "pro"}}));
 
@@ -631,7 +625,6 @@ mod reasoning_leak_guard_tests {
         assert!(body.get("reasoning").is_none());
         assert!(body.get("context").is_none());
         assert!(body.get("mode").is_none());
-        assert!(logs_contain("reasoning context/mode dropped"));
     }
 }
 

@@ -31,10 +31,6 @@ use super::types::{
 /// The config's `id` is used only for error attribution.
 pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
     warn_dropped_cache_control(provider_id, req);
-    // Responses-dialect reasoning context/mode has no Gemini home (it is
-    // dropped as a managed key in merge_payload_extras); WARN once so the
-    // loss isn't silent.
-    crate::responses_reasoning_guard::warn_dropped_reasoning_dialect(provider_id, req);
     // The canonical sampling knobs are not translated onto
     // `generationConfig` and are gated out of the provider_extras merge as
     // canonical keys; WARN once so the loss isn't silent.
@@ -2589,10 +2585,10 @@ mod tests {
     }
 
     #[test]
-    #[traced_test]
-    fn responses_reasoning_context_mode_dropped_and_warns() {
+    fn responses_reasoning_context_mode_dropped() {
         // A Responses-ingress request carrying reasoning context/mode routed
-        // to the Gemini egress does NOT emit them and warns once.
+        // to the Gemini egress does NOT emit them. The fidelity WARN for the
+        // drop is emitted router-side, per dispatched target.
         let mut req = ChatRequest {
             model: "gemini-2.5-pro".into(),
             messages: vec![make_user("hi")].into(),
@@ -2613,7 +2609,6 @@ mod tests {
         assert!(body.get("reasoning").is_none());
         assert!(body.get("context").is_none());
         assert!(body.get("mode").is_none());
-        assert!(logs_contain("reasoning context/mode dropped"));
     }
 
     #[test]
