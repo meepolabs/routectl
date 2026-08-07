@@ -20,12 +20,8 @@ use serde::Serialize;
 use crate::db::UsageDb;
 
 use super::aggregate::{QUERY_AGG_SQL, SERIES_AGG_SQL, map_fine_row, map_fine_row_bucketed};
+use super::deadline::DeadlineGuard;
 use super::{AggRow, GroupKey, QueryError};
-
-/// How often (in SQLite VM instructions) the deadline is re-checked. Small
-/// enough that a runaway scan is cut short promptly, large enough that the
-/// callback is not a measurable share of the query's own work.
-const PROGRESS_OPS: i32 = 10_000;
 
 /// The most buckets a series may carry. The caller resolves the bucket width so
 /// its count fits under this cap; this crate re-checks it as its own trust
@@ -252,7 +248,7 @@ pub struct QueryResult {
 /// The whole read happens inside a single deferred transaction, so every figure
 /// comes from one snapshot. A progress handler checks `deadline` every few
 /// thousand VM instructions and interrupts the statement once it has passed,
-/// surfacing as [`QueryError::Interrupted`]; a `ProgressGuard` removes the
+/// surfacing as [`QueryError::Interrupted`]; a [`DeadlineGuard`] removes the
 /// handler on every exit path -- return, error, and unwind alike -- so the
 /// connection is left as it was found.
 ///
@@ -264,31 +260,12 @@ pub fn query(
     price: impl Fn(&AggRow) -> RowCost,
     deadline: Instant,
 ) -> Result<QueryResult, QueryError> {
-    let conn = db.conn();
-    conn.progress_handler(PROGRESS_OPS, Some(move || Instant::now() > deadline))?;
     // Held across the read + fold so the handler is detached even when the
     // `price` closure panics: the connection outlives this call, and a stale
     // expired deadline left on it would spuriously interrupt the next statement
     // run on it.
-    let _guard = ProgressGuard { conn };
+    let _guard = DeadlineGuard::install(db, deadline)?;
     read_and_fold(db, spec, price)
-}
-
-/// Detaches [`query`]'s progress handler on every exit path, unwinding
-/// included.
-struct ProgressGuard<'a> {
-    conn: &'a rusqlite::Connection,
-}
-
-impl Drop for ProgressGuard<'_> {
-    fn drop(&mut self) {
-        // A detach failure never masks the read's outcome -- the read is what
-        // the caller asked for, and a handler that could not be removed is not
-        // the caller's problem to interpret.
-        let _ = self
-            .conn
-            .progress_handler(PROGRESS_OPS, None::<fn() -> bool>);
-    }
 }
 
 /// The read + fold, split out so [`query`] can scope its progress guard around
@@ -310,7 +287,7 @@ fn read_and_fold(
     let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
     let mut buckets: BTreeMap<i64, GroupAcc> = BTreeMap::new();
 
-    let tx = db.conn().unchecked_transaction().map_err(classify)?;
+    let tx = db.conn().unchecked_transaction()?;
     match spec.bucket {
         None => fold_groups(&tx, spec, &price, &mut groups)?,
         Some(bucket) => {
@@ -319,7 +296,7 @@ fn read_and_fold(
     }
     // A read-only transaction has nothing to commit; rolling back releases the
     // snapshot without touching the DB.
-    tx.finish().map_err(classify)?;
+    tx.finish()?;
 
     let mut totals = GroupAcc::default();
     for acc in groups.values() {
@@ -370,20 +347,18 @@ fn fold_groups(
     price: &impl Fn(&AggRow) -> RowCost,
     groups: &mut BTreeMap<String, GroupAcc>,
 ) -> Result<(), QueryError> {
-    let mut stmt = tx.prepare(QUERY_AGG_SQL).map_err(classify)?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![
-                spec.from_ms,
-                spec.to_ms,
-                spec.alias_filter.as_deref(),
-                spec.provider_filter.as_deref(),
-            ],
-            map_fine_row,
-        )
-        .map_err(classify)?;
+    let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            spec.from_ms,
+            spec.to_ms,
+            spec.alias_filter.as_deref(),
+            spec.provider_filter.as_deref(),
+        ],
+        map_fine_row,
+    )?;
     for row in rows {
-        let fine = row.map_err(classify)?;
+        let fine = row?;
         let cost = price(&fine.agg);
         let label = group_label(&fine.agg.key, spec.group_by);
         groups.entry(label).or_default().add(&fine, cost);
@@ -408,21 +383,19 @@ fn fold_groups_and_buckets(
     groups: &mut BTreeMap<String, GroupAcc>,
     buckets: &mut BTreeMap<i64, GroupAcc>,
 ) -> Result<(), QueryError> {
-    let mut stmt = tx.prepare(SERIES_AGG_SQL).map_err(classify)?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![
-                spec.from_ms,
-                spec.to_ms,
-                spec.alias_filter.as_deref(),
-                spec.provider_filter.as_deref(),
-                bucket.width_ms,
-            ],
-            map_fine_row_bucketed,
-        )
-        .map_err(classify)?;
+    let mut stmt = tx.prepare(SERIES_AGG_SQL)?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            spec.from_ms,
+            spec.to_ms,
+            spec.alias_filter.as_deref(),
+            spec.provider_filter.as_deref(),
+            bucket.width_ms,
+        ],
+        map_fine_row_bucketed,
+    )?;
     for row in rows {
-        let (fine, bucket_ix) = row.map_err(classify)?;
+        let (fine, bucket_ix) = row?;
         if bucket_ix < 0 || bucket_ix >= bucket.count as i64 {
             return Err(QueryError::InvalidBucket);
         }
@@ -465,15 +438,6 @@ fn densify(
         bucket_ms: bucket.width_ms,
         buckets: filled,
     }
-}
-
-/// Map a SQLite failure to [`QueryError`], separating a deadline interrupt from
-/// every other cause so the shell can shed it under its own code.
-fn classify(err: rusqlite::Error) -> QueryError {
-    if err.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
-        return QueryError::Interrupted;
-    }
-    QueryError::Sqlite(err)
 }
 
 /// The label a fine row rolls up under for the requested dimension.

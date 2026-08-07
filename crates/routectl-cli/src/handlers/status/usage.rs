@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -20,11 +21,13 @@ use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 use routectl_usage::{
-    AggRow, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb, WouldTrimSummary, aggregate,
-    errors_by_class, latest_quota_by_seat, open_readonly_fastfail, would_trim_summary,
+    AggRow, DeadlineGuard, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb,
+    WouldTrimSummary, aggregate, errors_by_class, latest_quota_by_seat, open_readonly_fastfail,
+    would_trim_summary,
 };
 
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
+use crate::server::status_gate::USAGE_BUDGET_MS;
 
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
@@ -205,29 +208,43 @@ pub(super) async fn handler(
 /// opened and dropped within this call, so nothing is cached across
 /// requests. Every recoverable failure degrades to an unavailable panel
 /// carrying the mapped shed code -- never a stale payload.
+///
+/// The read budget is anchored here rather than at request arrival so it
+/// measures the READ, not the time the request spent waiting for a
+/// concurrency permit or a blocking worker.
 fn build_panel(
     db_path: &Path,
     token: &'static str,
     bounds: WindowBounds,
     as_of: String,
 ) -> Panel<UsagePanel> {
+    let deadline = Instant::now() + Duration::from_millis(USAGE_BUDGET_MS);
     let db = match open_readonly_fastfail(db_path) {
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
-    match collect(&db, token, bounds) {
+    match collect(&db, token, bounds, deadline) {
         Ok(dto) => Panel::available(SCHEMA_VERSION, as_of, dto),
         Err(code) => Panel::unavailable(SCHEMA_VERSION, code),
     }
 }
 
-/// Run the three read-only aggregate queries and assemble the DTO. On a
+/// Run the four read-only aggregate queries and assemble the DTO. On a
 /// query failure, returns the mapped shed code.
+///
+/// ONE deadline covers the whole collection rather than any single statement:
+/// three of the four reads full-scan the ledger on the all-time window the
+/// dashboard polls, so bounding one of them would not bound the panel. The
+/// guard is per-CONNECTION and this connection is opened per request, so a
+/// single install reaches every statement below with no stale-handler risk
+/// across requests, and it detaches on every exit path here.
 fn collect(
     db: &UsageDb,
     token: &'static str,
     bounds: WindowBounds,
+    deadline: Instant,
 ) -> Result<UsagePanel, &'static str> {
+    let _guard = DeadlineGuard::install(db, deadline).map_err(|e| query_error_code(&e))?;
     let rows = aggregate(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     let breakdown =
         errors_by_class(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
@@ -357,10 +374,10 @@ pub(super) fn open_error_code(err: &OpenError) -> &'static str {
 ///
 /// A fired deadline is its OWN code: the ledger is healthy and the window is
 /// simply too large to answer inside the budget, which is a different operator
-/// action than a busy or unreadable database. This panel installs no progress
-/// handler and asks for no time series, so neither `Interrupted` nor
-/// `InvalidBucket` is reachable from it; both are mapped rather than panicked so
-/// the never-500 posture holds if that ever changes.
+/// action than a busy or unreadable database. Both surfaces bound their reads,
+/// so `Interrupted` is live on each. `InvalidBucket` is reachable only from the
+/// `/status/query` series path -- this panel asks for no time series -- and is
+/// mapped rather than panicked so the never-500 posture holds regardless.
 pub(super) fn query_error_code(err: &QueryError) -> &'static str {
     match err {
         QueryError::Sqlite(source) => busy_or_unavailable(source.sqlite_error_code()),
@@ -1228,5 +1245,125 @@ mod tests {
             edges[1].field("code").is_none(),
             "the back-to-available edge carries no reason code"
         );
+    }
+
+    /// Seed `count` in-window rows sharing one group key, in a single
+    /// transaction. Sized by the caller: enough rows that a full scan runs past
+    /// at least one progress-callback interval.
+    fn seed_bulk(path: &Path, count: usize) {
+        let db = open(path).expect("open ledger");
+        db.conn().execute_batch("BEGIN").expect("begin");
+        for i in 0..count {
+            db.conn()
+                .execute(
+                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                     requested_model, alias, model, provider, upstream, stream, outcome, \
+                     latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                     input_tokens, output_tokens) \
+                     VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 'm', 'p', 'u', 0, 'ok', \
+                     5, 0, 0, 1, 0, 10, 20)",
+                    rusqlite::params![1000 + i as i64, format!("bulk-{i}")],
+                )
+                .expect("seed bulk row");
+        }
+        db.conn().execute_batch("COMMIT").expect("commit");
+    }
+
+    const ALL_TIME: WindowBounds = WindowBounds {
+        from_ms: 0,
+        to_ms: i64::MAX,
+    };
+
+    #[test]
+    fn an_expired_budget_sheds_query_timeout_and_leaves_the_connection_usable() {
+        // Arrange: enough rows that the first statement runs past one progress
+        // callback interval, plus a deadline that has ALREADY passed.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_bulk(&path, 4000);
+        let db = open(&path).expect("open ledger");
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("instant predates the process start");
+
+        // Act
+        let shed = collect(&db, "all", ALL_TIME, expired);
+        let after = collect(
+            &db,
+            "all",
+            ALL_TIME,
+            Instant::now() + Duration::from_mins(10),
+        );
+
+        // Assert: an overrun is an honest timeout, NOT a database fault -- the
+        // ledger is healthy and the dashboard retries `query_timeout`. And the
+        // guard detached, so the next collection on the SAME connection runs.
+        assert_eq!(shed.err(), Some(codes::QUERY_TIMEOUT));
+        assert_eq!(
+            after.expect("collect after the shed").totals.requests,
+            4000,
+            "a retained expired handler would interrupt the following read"
+        );
+    }
+
+    /// The healthy-path counterpart to the shed test above: wiring a deadline
+    /// must not make a ledger that answers WELL inside the budget start
+    /// shedding. Named for what it asserts -- it supplies no expired deadline,
+    /// so it says nothing about the expiry path, which
+    /// `an_expired_budget_sheds_query_timeout_and_leaves_the_connection_usable`
+    /// covers at the `collect` boundary.
+    #[tokio::test]
+    async fn a_ledger_inside_the_budget_stays_available_after_wiring_the_deadline() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_bulk(&path, 4000);
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+
+        // The budget is a whole second, so a 4000-row ledger answers inside it:
+        // this pins that wiring the deadline did not make the healthy path shed.
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["unavailable"].is_null(),
+            "a ledger answerable inside the budget must stay available: {json}"
+        );
+        assert_eq!(json["data"]["totals"]["requests"], 4000);
+    }
+
+    /// Cold-cache panel benchmark over a >=1M-row ledger. `#[ignore]`d: seeding
+    /// a million rows costs minutes, and the default suite already runs a full
+    /// release build on every commit.
+    ///
+    /// Run it with:
+    ///
+    /// ```text
+    /// cargo test -p routectl-cli --release \
+    ///   handlers::status::usage::tests::a_million_row_ledger_answers_inside_the_budget \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "seeds a 1M-row ledger; run explicitly with --ignored"]
+    fn a_million_row_ledger_answers_inside_the_budget() {
+        const ROWS: usize = 1_000_000;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_bulk(&path, ROWS);
+
+        // A fresh connection, so no page of this ledger is in THIS connection's
+        // cache when the collection starts.
+        let db = open_readonly_fastfail(&path).expect("open ledger read-only");
+        let started = Instant::now();
+        let panel = collect(
+            &db,
+            "all",
+            ALL_TIME,
+            started + Duration::from_millis(USAGE_BUDGET_MS),
+        )
+        .expect("the panel must answer inside its budget");
+        let elapsed = started.elapsed();
+
+        println!("{ROWS} rows: usage panel collected in {elapsed:?} (budget {USAGE_BUDGET_MS}ms)");
+        assert_eq!(panel.totals.requests, ROWS as i64);
     }
 }
