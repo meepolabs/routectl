@@ -2240,9 +2240,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/query/mod.rs` -- read-query facade: owns the shared row/error types
   `QueryError` (`Sqlite` + `Interrupted`, the latter distinguishing a fired
   query deadline from a real DB fault, + `InvalidBucket` for a time-bucket grid
-  that violates its width/count invariants), `GroupKey`, `AggRow` and re-exports
-  the whole read-side surface from the four submodules so every symbol stays at
+  that violates its width/count invariants) and its hand-written
+  `From<rusqlite::Error>`, which is what makes `Interrupted` reachable from
+  EVERY query function without any of them taking a deadline parameter;
+  `GroupKey`, `AggRow` and re-exports
+  the whole read-side surface from the five submodules so every symbol stays at
   `routectl_usage::` unchanged
+- `src/query/deadline.rs` -- `DeadlineGuard::install(db, deadline)`: the
+  reusable connection-level read deadline (SQLite progress handler re-checked
+  every 10_000 VM ops, detached on every exit path including unwind). Per
+  CONNECTION rather than per statement, so one install bounds a multi-statement
+  read; used by `query/grouped.rs` and by the `/status/usage` panel
 - `src/query/aggregate.rs` -- aggregate + breakdown queries over the requests
   table; exports `aggregate`, `errors_by_class` (flat per-group failure-class
   breakdown, same window predicate + group key as `aggregate`, sums to
@@ -2280,9 +2288,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   buckets densify
   through the same `finish` an empty group takes, while a window matching no row
   at all yields an EMPTY series rather than a thousand synthetic zeros. Cost
-  enters only via the closure, so the crate stays a leaf; a `progress_handler`
-  deadline surfaces as `QueryError::Interrupted` and is detached by an RAII guard
-  on every exit path, unwinding included; a cost sum that an extreme configured
+  enters only via the closure, so the crate stays a leaf; the deadline is
+  installed through the shared `DeadlineGuard` (`query/deadline.rs`), surfaces
+  as `QueryError::Interrupted` and is detached on every exit path, unwinding
+  included; a cost sum that an extreme configured
   rate overflowed to non-finite is a VALUE outcome (`cost_usd: None` +
   `unpriced`), never an assert, because the fold is network-reachable and the
   release profile aborts on panic.
@@ -2566,9 +2575,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `concurrent_aggregates_hold_at_most_max_inflight_blocking_builders`, which
   parks builders via `handlers/status/builder_probe.rs`. Also owns
   `QUERY_BUDGET_MS = 1000`, the per-request wall-clock budget for one
-  `/status/query` grouped aggregate (an overrun sheds as the `query_timeout`
-  unavailable panel). Neither const is a config knob (no `config_classify`
-  section)
+  `/status/query` grouped aggregate, and `USAGE_BUDGET_MS = 1000`, the budget
+  for one whole `/status/usage` collection (an overrun of either sheds as the
+  `query_timeout` unavailable panel); both doc comments carry the occupancy
+  relationship to `STATUS_MAX_INFLIGHT` and the client aborts. No const here is
+  a config knob (no `config_classify` section)
 - `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching
   `oauth://<provider>` to `OAuthStore` and `env://` / `file://` / `literal:`
   to `MemoryStore`; degrades gracefully when no `HOME` / `XDG_CONFIG_HOME`
@@ -2816,9 +2827,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   from the `rusqlite` error code) through `open_error_code` /
   `query_error_code`, both `pub(super)` and shared with `/status/query` so the
   two ledger-backed surfaces classify one failure identically;
-  `query_error_code` also owns the `query_timeout` arm (`QueryError::Interrupted`,
-  reachable only on the deadline-bounded query path -- this panel installs no
-  progress handler)
+  `query_error_code` also owns the `query_timeout` arm
+  (`QueryError::Interrupted`). `build_panel` anchors ONE `USAGE_BUDGET_MS`
+  deadline inside the blocking closure and `collect` installs a single
+  `DeadlineGuard` on the per-request connection, so all four reads share one
+  budget and an overrun sheds `query_timeout` instead of starving a worker
 - `src/handlers/status/health.rs` -- `/status/health` (schema_version 5).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
   reads `route_targets` + `learned_capabilities` from that single view,

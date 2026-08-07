@@ -28,9 +28,9 @@ pub use handle::{UsageCounters, UsageHandle};
 pub use learn_event::CapabilityLearnEvent;
 pub use migrate::MigrateError;
 pub use query::{
-    AggRow, BucketSpec, CapabilityEventRow, CostStatus, GroupDim, GroupKey, KCalibration,
-    M1AttributionSummary, QueryError, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
-    QuerySpec, QueryTotals, QuotaSnapshot, ReuseSampleRow, RowCost, SeriesBucket,
+    AggRow, BucketSpec, CapabilityEventRow, CostStatus, DeadlineGuard, GroupDim, GroupKey,
+    KCalibration, M1AttributionSummary, QueryError, QueryGroup, QueryMetrics, QueryResult,
+    QuerySeries, QuerySpec, QueryTotals, QuotaSnapshot, ReuseSampleRow, RowCost, SeriesBucket,
     ShadowMisfireSummary, TombstoneRow, WouldTrimSummary, aggregate, earliest_ts_start,
     errors_by_class, k_calibration_summary, latest_quota_by_seat, latest_tombstone,
     m1_attribution_summary, query, read_capability_events_after, read_reuse_samples_since,

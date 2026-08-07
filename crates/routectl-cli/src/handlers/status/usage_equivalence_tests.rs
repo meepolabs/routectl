@@ -386,7 +386,13 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
         from_ms: FROM_MS,
         to_ms: TO_MS,
     };
-    let panel = collect(&db, "today", bounds).expect("panel fold");
+    let panel = collect(
+        &db,
+        "today",
+        bounds,
+        Instant::now() + Duration::from_mins(10),
+    )
+    .expect("panel fold");
     let spec = QuerySpec {
         from_ms: bounds.from_ms,
         to_ms: bounds.to_ms,

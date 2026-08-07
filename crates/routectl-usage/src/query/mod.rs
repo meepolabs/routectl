@@ -2,6 +2,7 @@
 
 mod aggregate;
 mod capability;
+mod deadline;
 mod grouped;
 mod would_trim;
 
@@ -11,6 +12,7 @@ pub use aggregate::{
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,
 };
+pub use deadline::DeadlineGuard;
 pub use grouped::{
     BucketSpec, CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
     QuerySpec, QueryTotals, RowCost, SeriesBucket, query,
@@ -26,7 +28,7 @@ pub use would_trim::{
 pub enum QueryError {
     /// A SQLite operation failed while reading.
     #[error("usage query failed: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(#[source] rusqlite::Error),
 
     /// The query exceeded its deadline and was interrupted mid-statement. A
     /// distinct variant so the caller can shed it under its own code rather
@@ -40,6 +42,25 @@ pub enum QueryError {
     /// dividing by zero in SQL or densifying an unbounded vector.
     #[error("usage query received an unusable bucket grid")]
     InvalidBucket,
+}
+
+/// Separate a fired-deadline interrupt from every other SQLite failure, so a
+/// caller can shed it under its own code rather than reporting the ledger as
+/// unusable.
+///
+/// Deliberately hand-written rather than `#[from]`: the conversion is what
+/// every `?` in this module tree goes through, so classifying HERE is what
+/// makes [`QueryError::Interrupted`] reachable from every query function
+/// without any of them taking a deadline parameter. A deadline installed by
+/// [`DeadlineGuard`] can interrupt any statement on the connection, including
+/// ones run by functions that know nothing about it.
+impl From<rusqlite::Error> for QueryError {
+    fn from(err: rusqlite::Error) -> Self {
+        if err.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+            return Self::Interrupted;
+        }
+        Self::Sqlite(err)
+    }
 }
 
 /// The group-key columns shared by the aggregate and the raw-latency rows.

@@ -1594,8 +1594,11 @@ fn interrupt_error_maps_to_its_own_variant() {
     );
 
     // Act + Assert: a deadline interrupt is distinguishable from a real fault.
-    assert!(matches!(classify(interrupted), QueryError::Interrupted));
-    assert!(matches!(classify(corrupt), QueryError::Sqlite(_)));
+    assert!(matches!(
+        QueryError::from(interrupted),
+        QueryError::Interrupted
+    ));
+    assert!(matches!(QueryError::from(corrupt), QueryError::Sqlite(_)));
 }
 
 #[test]

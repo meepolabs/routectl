@@ -51,13 +51,39 @@ pub const STATUS_MAX_INFLIGHT: usize = 4;
 /// [`STATUS_MAX_INFLIGHT`] it bounds a fixed-cost diagnostic read rather than
 /// expressing an operator preference.
 ///
-/// Sized to bound a runaway scan without regressing against the unbounded
-/// `/status/usage` panel an operator already relies on: a fine-grained GROUP BY
-/// over a multi-million-row window is a sub-second full scan, so a tighter
-/// budget would interrupt legitimate large-ledger reads, while this one still
-/// leaves a whole query well inside a dashboard poll interval. An overrun sheds
-/// as an unavailable panel (`query_timeout`), never a 500.
+/// Sized to bound a runaway scan without interrupting legitimate large-ledger
+/// reads: a fine-grained GROUP BY over a multi-million-row window is a
+/// sub-second full scan, so a tighter budget would cut those short, while this
+/// one still leaves a whole query well inside the 3500ms abort the dashboard
+/// applies to this route and inside a poll interval. An overrun sheds as an
+/// unavailable panel (`query_timeout`), never a 500.
+///
+/// Raising it is not a local decision -- see [`USAGE_BUDGET_MS`] for the
+/// occupancy relationship both budgets share with [`STATUS_MAX_INFLIGHT`].
 pub const QUERY_BUDGET_MS: u64 = 1000;
+
+/// Wall-clock budget for ONE `/status/usage` panel build, milliseconds --
+/// covering the WHOLE collection (all four ledger reads on one connection),
+/// not any single statement. Hardcoded for the same reason as
+/// [`QUERY_BUDGET_MS`]: it bounds a fixed-cost diagnostic read, not an operator
+/// preference. An overrun sheds the panel as unavailable (`query_timeout`),
+/// never a 500.
+///
+/// Sized against the CLIENT's own aborts. The dashboard's per-GET abort is
+/// 2000ms and governs both `/status` and `/status/usage`; the 3500ms abort is
+/// `/status/query`-only. The aggregate route composes its panels sequentially,
+/// so the usage builder's budget is one term of a SUM that must still land
+/// inside 2000ms -- 1000ms leaves room for the three cheap panels and the
+/// response write, at a 5000ms poll cadence.
+///
+/// Occupancy, for whoever raises either budget: the capacity unit is ADMITTED
+/// REQUESTS ([`STATUS_MAX_INFLIGHT`]), and an admitted request holds at most one
+/// blocking builder at a time (the aggregate is sequential), so worst-case
+/// occupancy is `STATUS_MAX_INFLIGHT` builders each held for up to
+/// `max(QUERY_BUDGET_MS, USAGE_BUDGET_MS)`. Raising EITHER budget therefore
+/// requires re-checking it against the 2000ms GET abort and against the
+/// sequential aggregate's sum, not just against its own route.
+pub const USAGE_BUDGET_MS: u64 = 1000;
 
 /// Wire schema version of the fixed transport-level envelopes this module
 /// emits (the overload 503 and the forbidden-host 403). These are NOT panel
