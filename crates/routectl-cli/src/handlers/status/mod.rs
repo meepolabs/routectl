@@ -16,6 +16,7 @@
 //! same listener auth layer as `/v1/*`; token-less loopback keeps the
 //! zero-auth dev path. `/v1/*` inherits none of the status-only middleware.
 
+pub(crate) mod builder_probe;
 mod config;
 mod daemon_meta;
 mod doctor;
@@ -254,8 +255,15 @@ where
     T: Send + 'static,
     F: FnOnce() -> Panel<T> + Send + 'static,
 {
-    let joined =
-        tokio::task::spawn_blocking(move || panic::catch_unwind(AssertUnwindSafe(builder))).await;
+    // Captured on the async side: a blocking worker inherits no task-locals.
+    // Compiles away entirely outside test builds.
+    let probe = builder_probe::current();
+    builder_probe::submitted(&probe);
+    let joined = tokio::task::spawn_blocking(move || {
+        builder_probe::park(&probe);
+        panic::catch_unwind(AssertUnwindSafe(builder))
+    })
+    .await;
     match joined {
         Ok(Ok(panel)) => panel,
         _ => Panel::unavailable(schema_version, code),
@@ -301,19 +309,20 @@ struct AggregatePanels {
 }
 
 async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusAggregate> {
-    // Compose the four guarded builders CONCURRENTLY: each already isolates
-    // its own source failure / panic through `guard_panel` (so one bad panel
-    // renders only itself unavailable), and each does blocking I/O on a
-    // `spawn_blocking` worker, so joining them means one slow panel does not
-    // serialize behind -- or stall -- the other three. These are the SAME
-    // builders the per-panel endpoints call; there is no divergent second
+    // Compose the four guarded builders SEQUENTIALLY: each spawns its own
+    // `spawn_blocking` job, so awaiting them one at a time keeps a single
+    // admitted request to at most ONE in-flight blocking builder. That is what
+    // makes `STATUS_MAX_INFLIGHT` name a single unit -- admitted requests and
+    // in-flight builders are then numerically identical. A concurrent join
+    // would fan one admitted request into four blocking jobs, so the cap would
+    // admit up to four times as many builders as requests. Each builder still
+    // isolates its own source failure / panic through `guard_panel`, and these
+    // are the SAME builders the per-panel endpoints call -- no divergent second
     // mapping.
-    let (usage, health, config, doctor) = tokio::join!(
-        usage::build(&state),
-        health::build(&state),
-        config::build(&state),
-        doctor::build(&state),
-    );
+    let usage = usage::build(&state).await;
+    let health = health::build(&state).await;
+    let config = config::build(&state).await;
+    let doctor = doctor::build(&state).await;
     Json(StatusAggregate {
         panels: AggregatePanels {
             usage,
@@ -443,6 +452,11 @@ mod tests {
 
         let scans: &[(&str, &str, &[String])] = &[
             ("mod.rs", include_str!("mod.rs"), &panel_forbidden),
+            (
+                "builder_probe.rs",
+                include_str!("builder_probe.rs"),
+                &panel_forbidden,
+            ),
             ("page.rs", include_str!("page.rs"), &panel_forbidden),
             ("types.rs", include_str!("types.rs"), &panel_forbidden),
             ("usage.rs", include_str!("usage.rs"), &panel_forbidden),
@@ -534,11 +548,13 @@ mod tests {
     }
 
     /// Test #6 (panic isolation): the aggregate composes four guarded builders
-    /// with `tokio::join!`. A panic in ONE builder degrades only that panel to
-    /// unavailable; the other three build normally and no panic escapes.
-    /// Exercises the exact concurrent-join shape via a panicking test double.
+    /// with sequential awaits. A panic in ONE builder degrades only that panel
+    /// to unavailable; the builders after it still run and build normally, the
+    /// one before it keeps its value, and no panic escapes. Exercises the exact
+    /// sequential shape via a panicking test double, with the panicking builder
+    /// in the MIDDLE so both the before- and after-it cases are covered.
     #[tokio::test]
-    async fn concurrent_composition_isolates_a_panicking_panel() {
+    async fn sequential_composition_isolates_a_panicking_panel() {
         async fn ok_panel(value: u32) -> Panel<u32> {
             guard_panel(1, vocabulary::codes::DB_UNAVAILABLE, move || {
                 Panel::available(1, now_utc_rfc3339(), value)
@@ -552,8 +568,10 @@ mod tests {
             .await
         }
 
-        let (panicked, a, b, c) =
-            tokio::join!(panicking_panel(), ok_panel(2), ok_panel(3), ok_panel(4),);
+        let a = ok_panel(2).await;
+        let panicked = panicking_panel().await;
+        let b = ok_panel(3).await;
+        let c = ok_panel(4).await;
 
         assert_eq!(panicked.unavailable.as_deref(), Some("db_unavailable"));
         assert!(panicked.data.is_none());
