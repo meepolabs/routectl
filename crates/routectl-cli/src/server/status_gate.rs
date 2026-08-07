@@ -22,10 +22,28 @@ use serde_json::json;
 use crate::server::is_loopback;
 
 /// Ceiling on concurrent in-flight `/status*` requests across the WHOLE
-/// subtree. Deliberately a hardcoded const, not a config knob: the status
-/// surface is a fixed-cost diagnostic read, so a small shared cap keeps a
-/// poller burst from ever contending with the ingress proxy for runtime
-/// workers. Excess sheds immediately as a 503 (never queues).
+/// subtree. The unit is ADMITTED HTTP REQUESTS, and while those requests stay
+/// live it is equally the ceiling on concurrent blocking panel builders: the
+/// `/status` aggregate awaits its four panel builders SEQUENTIALLY, so a live
+/// admitted request holds at most one `spawn_blocking` builder at a time. One
+/// number, one meaning, on the aggregate and per-panel routes alike -- a
+/// concurrent fan-out inside the aggregate would silently multiply the builder
+/// count by four while this const stayed at its face value.
+///
+/// The "while live" qualifier is load-bearing and NOT yet closed. This layer's
+/// permit lives in the response future, so a client that aborts mid-request
+/// releases its permit while the `spawn_blocking` builder it already started
+/// keeps running to completion -- a later request can then be admitted
+/// alongside that detached builder, and the builder count can exceed this const
+/// until the detached work drains. Making the ceiling hold under cancellation
+/// requires the permit to be owned by the blocking closure itself; that is a
+/// separate change, and until it lands this const bounds live requests, not
+/// detached builders.
+///
+/// Deliberately a hardcoded const, not a config knob: the status surface is a
+/// fixed-cost diagnostic read, so a small shared cap keeps a poller burst from
+/// monopolizing the blocking pool the panel builders run on. Excess sheds
+/// immediately as a 503 (never queues).
 pub const STATUS_MAX_INFLIGHT: usize = 4;
 
 /// Wall-clock budget for ONE `/status/query` grouped aggregate, milliseconds.
@@ -645,6 +663,104 @@ mod tests {
             let resp = handle.await.unwrap().unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         }
+    }
+
+    /// The capacity UNIT: `STATUS_MAX_INFLIGHT` bounds admitted requests AND,
+    /// because no handler fans one admitted request into several builders, the
+    /// concurrent BLOCKING panel builders behind them. The `/status` aggregate
+    /// is the only route that could break that equality -- it builds four
+    /// panels -- so it is the one this pins.
+    ///
+    /// Same idiom as the shed tests above: park work in-flight, count arrivals,
+    /// release, assert. The park lives one level deeper (inside `guard_panel`'s
+    /// blocking closure, via the builder probe) because a builder count is
+    /// invisible from the wire -- a fan-out answers 200 on every panel too.
+    ///
+    /// Far more requests than permits are fired, so the excess sheds and only
+    /// admitted ones can build. With the aggregate awaiting its four builders
+    /// sequentially the plateau is `STATUS_MAX_INFLIGHT`; a concurrent join
+    /// parks `4 * STATUS_MAX_INFLIGHT`.
+    ///
+    /// Every assertion is deferred until AFTER `release`: a parked builder
+    /// occupies a blocking worker that no unwind can reclaim, so a panic while
+    /// the plateau is still held would hang the test binary at runtime shutdown
+    /// instead of reporting the failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_aggregates_hold_at_most_max_inflight_blocking_builders() {
+        use crate::handlers::status::builder_probe::{BUILDER_PROBE, BuilderProbe};
+        use crate::handlers::status::{DaemonMeta, StatusState, status_router};
+        use crate::server::AppState;
+        use arc_swap::ArcSwap;
+        use routectl_router::{Config, Router};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, b"version = 3\n").unwrap();
+
+        let router = Router::new(Arc::new(Config::default()));
+        let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        // A config path is required for the doctor panel to reach a builder at
+        // all, so all four panels are genuinely in play.
+        let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
+        status.usage_db_path = dir.path().join("absent-usage.db");
+        let app = apply_overload_layers(status_router().with_state(Arc::new(status)));
+
+        let probe = BuilderProbe::new();
+        let mut handles = Vec::new();
+        for _ in 0..(STATUS_MAX_INFLIGHT * 3) {
+            let app = app.clone();
+            let probe = Arc::clone(&probe);
+            handles.push(tokio::spawn(BUILDER_PROBE.scope(probe, async move {
+                let req = HttpRequest::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await
+            })));
+        }
+
+        // Wait for the plateau: every admitted request has parked one builder.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while probe.started() < STATUS_MAX_INFLIGHT && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Read SUBMISSIONS, not arrivals. Submission is counted on the async
+        // side the instant a handler decides to hand a builder to
+        // `spawn_blocking`, so once the admitted requests have parked their
+        // builders, every builder those requests will ever submit is already
+        // counted. A fan-out submits all four of a request's builders before
+        // any can be observed to start, so it registers here immediately --
+        // no settle window, and nothing for a slow blocking pool to hide.
+        let parked = probe.submitted();
+
+        probe.release();
+        let mut served = 0usize;
+        for handle in handles {
+            let resp = handle.await.unwrap().unwrap();
+            assert!(
+                matches!(
+                    resp.status(),
+                    StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE
+                ),
+                "unexpected aggregate status {}",
+                resp.status()
+            );
+            if resp.status() == StatusCode::OK {
+                served += 1;
+            }
+        }
+
+        assert_eq!(
+            parked, STATUS_MAX_INFLIGHT,
+            "an admitted request must hold exactly one blocking builder at a \
+             time: {parked} concurrent builders under a cap of {STATUS_MAX_INFLIGHT}"
+        );
+        assert!(
+            served >= STATUS_MAX_INFLIGHT,
+            "the admitted requests must complete once released, not deadlock: {served} served"
+        );
     }
 
     #[test]

@@ -2560,7 +2560,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   -- a subtree-wide (`Global`, one shared semaphore across all status routes,
   not per-route) hardcoded concurrency cap that sheds excess IMMEDIATELY as
   the fixed JSON 503 `{"schema_version":1,"error":{"code":"overloaded",...}}`
-  (never queues); `handle_status_overload` maps the shed error. Also owns
+  (never queues); `handle_status_overload` maps the shed error. The cap's UNIT
+  is ADMITTED REQUESTS, and equals the concurrent blocking-builder count
+  because the `/status` aggregate builds its panels sequentially -- pinned by
+  `concurrent_aggregates_hold_at_most_max_inflight_blocking_builders`, which
+  parks builders via `handlers/status/builder_probe.rs`. Also owns
   `QUERY_BUDGET_MS = 1000`, the per-request wall-clock budget for one
   `/status/query` grouped aggregate (an overrun sheds as the `query_timeout`
   unavailable panel). Neither const is a config knob (no `config_classify`
@@ -2700,8 +2704,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `guard_panel` runs every panel builder on `spawn_blocking` + `catch_unwind`,
   mapping a panic OR a join failure to an unavailable `Panel<T>` (never a
   500/crash). The `/status` aggregate composes the four REAL panel builders
-  CONCURRENTLY (`tokio::join!`, so one slow panel never stalls the others)
-  into `{panels:{usage,health,config,doctor}}` -- each an INDEPENDENT
+  SEQUENTIALLY (four awaits, no `tokio::join!`), so a LIVE admitted request
+  holds at most ONE blocking builder at a time and `STATUS_MAX_INFLIGHT` names a
+  single unit -- admitted requests AND concurrent blocking builders -- for as
+  long as those requests stay live; a client abort releases the Tower permit
+  while its already-started builder runs on, so the builder ceiling does not yet
+  hold under cancellation (see the const's own doc comment); latency is
+  the SUM of the four builders rather than the max, deliberately accepted.
+  Composed into `{panels:{usage,health,config,doctor}}` -- each an INDEPENDENT
   per-panel envelope with its OWN `schema_version` (usage = 3, health = 5,
   config = 2, doctor = 4)/`as_of`/availability, with NO outer envelope version
   (push-ready: a future push event is the same per-panel shape keyed by panel
@@ -2713,6 +2723,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `status_requires_auth` holds (tokens configured OR a non-loopback bind),
   beneath the same listener auth layer as `/v1/*` (the auth layer sits UNDER
   the host guard); token-less loopback keeps the zero-auth dev path
+- `src/handlers/status/builder_probe.rs` -- test-only observation seam inside
+  `guard_panel`'s blocking closure, letting a test count and park blocking
+  panel builders (the concurrency invariant is invisible from the wire, since
+  a fan-out answers 200 on every panel too). `BuilderProbe` is an arrival
+  counter + condvar release, scoped per request task through the
+  `BUILDER_PROBE` task-local so a probe test never parks another test's
+  builder. Compiles to a zero-sized token + empty `park` outside `cfg(test)`
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>
