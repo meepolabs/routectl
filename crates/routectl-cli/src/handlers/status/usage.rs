@@ -386,6 +386,10 @@ pub(super) const fn busy_or_unavailable(code: Option<ErrorCode>) -> &'static str
 }
 
 #[cfg(test)]
+#[path = "usage_equivalence_tests.rs"]
+mod equivalence_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::handlers::status::DaemonMeta;
