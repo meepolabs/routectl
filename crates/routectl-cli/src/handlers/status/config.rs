@@ -848,12 +848,18 @@ base_url = "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#s
         .expect("valid config");
 
         let panel = panel_from_config(&config);
-        let text = serde_json::to_string(&panel.providers).unwrap();
+        // Scan the WHOLE serialized panel, not just the provider rows: a future
+        // field anywhere on this wire that copies config text must fail here
+        // too. This is a Serialize scan on purpose -- a `Debug` scan proves only
+        // the Debug projection, and a hand-written redacting Debug (this repo
+        // has two, both of which keep base_url) would pass it while the wire
+        // leaks.
+        let text = serde_json::to_string(&panel).unwrap();
 
         for forbidden in ["sk-live-LEAKED", "user:", "LEAKY_SECRET_VAR", "/v1"] {
             assert!(
                 !text.contains(forbidden),
-                "provider rows leaked `{forbidden}`: {text}"
+                "the config panel wire leaked `{forbidden}`: {text}"
             );
         }
         assert!(text.contains("https://internal.example"));

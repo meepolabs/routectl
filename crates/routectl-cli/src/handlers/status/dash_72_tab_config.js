@@ -24,7 +24,10 @@
     }
     var stack = tabStack();
     stack.appendChild(sourceStrip(data.source));
-    if (!data.aliases.length && !data.models.length) {
+    // The default-state card claims nothing is configured, so ANY
+    // operator-authored surface below it makes it a contradiction -- a named
+    // provider is in effect even before an alias or model points at it.
+    if (!data.aliases.length && !data.models.length && !data.providers.length) {
       stack.appendChild(defaultConfigEmpty());
     }
     // A table with no rows is a header claiming a reading nobody made, so each
@@ -49,8 +52,9 @@
   // one edit that fills the tables above.
   function defaultConfigEmpty() {
     return emptyCard('Running on the default configuration',
-      'No aliases or models are configured yet. Name one under [aliases] and its resolved ' +
-      'chain, its targets, and the catalog rows behind them appear here.',
+      'No providers, aliases, or models are configured yet. Name one under [providers] and ' +
+      'its endpoint and limits appear here; add an alias and its resolved chain, its targets, ' +
+      'and the catalog rows behind them appear too.',
       ['current state', 'defaults in effect']);
   }
 

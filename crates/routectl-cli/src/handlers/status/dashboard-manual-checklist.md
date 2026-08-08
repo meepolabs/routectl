@@ -88,3 +88,10 @@ banner, no retry signal -- silently mislabeled data.
   (at attention weight, not faint), **unlimited**, and **`<n>` RPM**. A `0`
   reading as "unlimited" tells an operator a throttled provider is
   unrestricted, which is the misreport this column exists to prevent.
+- Config's default-state card must not contradict the tables under it. Serve
+  a config naming ONLY providers -- no aliases, no models -- and confirm the
+  "Running on the default configuration" card is ABSENT while the provider
+  table renders. Then serve a config naming nothing at all and confirm the
+  card IS present. Each operator-authored surface added to this tab has to
+  join that card's suppression condition, or the tab tells an operator their
+  configuration is not in effect while displaying it.
