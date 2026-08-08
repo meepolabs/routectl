@@ -7,6 +7,74 @@
 //! it). The status family is a bounded diagnostic read, so a burst of pollers
 //! or a browser-driven DNS-rebinding probe must never compete with -- or leak
 //! through -- the forwarding path.
+//!
+//! # The coupled status-timing numbers
+//!
+//! Five numbers bound how long a `/status*` request may occupy the process, and
+//! none of them can be changed on its own. They are collected here once so a
+//! reader of any one of them finds the whole derivation in one place; each
+//! const's own comment states what it is and points back here.
+//!
+//! | number | where | what it bounds |
+//! |---|---|---|
+//! | [`STATUS_MAX_INFLIGHT`] = 4 | this module | admitted concurrent `/status*` requests, and equally concurrent blocking panel builders |
+//! | [`QUERY_BUDGET_MS`] = 2000 | this module | one `/status/query` grouped aggregate |
+//! | [`USAGE_BUDGET_MS`] = 1000 | this module | one whole `/status/usage` panel build |
+//! | `BODY_READ_TIMEOUT` = 1000ms | `handlers::status::query` | how long that route waits for the client's request body |
+//! | `TIMEOUT_MS` = 2000 / `QUERY_TIMEOUT_MS` = 3500 | `dashboard.js` | the browser's own aborts -- the GET one covers `/status` and `/status/usage`, the QUERY one covers `/status/query` only |
+//!
+//! **The sum identity.** On `/status/query` the body read and the panel
+//! deadline are SERIAL in one handler (the handler awaits `to_bytes` under
+//! `BODY_READ_TIMEOUT`, and only then runs the build whose deadline is
+//! [`QUERY_BUDGET_MS`]), so the two BUDGETED stretches sum, and that sum is what
+//! must stay inside the client's QUERY abort:
+//!
+//! ```text
+//! BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 1000 + 2000 = 3000 <= 3500 (QUERY_TIMEOUT_MS)
+//! ```
+//!
+//! Raising either term alone inverts it: at 2000 + 2000 = 4000 the browser
+//! aborts before the server can shed its own panel, turning a clean
+//! `query_timeout` into a client-side timeout. Whoever changes one term must
+//! re-derive the sum, and the third number (3500) lives in JavaScript, so no
+//! compile-time assertion can carry this for you.
+//!
+//! **What the identity does NOT bound.** It covers the two BUDGETED stretches,
+//! not end-to-end request time, so 3000 <= 3500 is necessary but not sufficient
+//! for "the server always sheds before the browser aborts". Unbudgeted time sits
+//! between and around them:
+//!
+//! - the wait for a builder capacity permit. Capacity is held through the
+//!   blocking work and so survives cancellation, which is deliberate -- but it
+//!   means a replacement request admitted after a client abort can wait on a
+//!   detached builder before its own budget even starts. The query deadline is
+//!   anchored inside the build for exactly this reason: it measures the QUERY,
+//!   not the queueing.
+//! - `spawn_blocking` worker-queue delay.
+//! - opening the ledger, the `earliest_ts_start` anchor probe, the caller-side
+//!   fold, and JSON serialization -- none reachable by the SQLite progress
+//!   handler (see Occupancy below).
+//!
+//! So a saturated surface CAN exceed 3500ms and be client-aborted rather than
+//! returning a clean `query_timeout`. That is a degradation, not a correctness
+//! break: the panel is read-only and the client retries. Bounding it would take
+//! an end-to-end deadline started after the body read and threaded through the
+//! capacity wait, which is a separate change from sizing these budgets.
+//!
+//! **Occupancy.** The capacity unit is ADMITTED REQUESTS, and an admitted
+//! request holds at most one blocking builder at a time (the `/status`
+//! aggregate composes its panels sequentially), so worst-case occupancy is
+//! [`STATUS_MAX_INFLIGHT`] builders each held for roughly
+//! `max(QUERY_BUDGET_MS, USAGE_BUDGET_MS)`. Roughly, not exactly: the deadline
+//! is checked from a SQLite progress handler every `PROGRESS_OPS` VM ops, and
+//! opening the ledger, the `earliest_ts_start` anchor probe, the caller-side
+//! fold and the JSON serialization all sit outside its reach, so a builder can
+//! overshoot its budget by the cost of whichever of those it is in.
+//!
+//! On the `/status` aggregate -- and ONLY there -- the panel budgets are terms
+//! of a sequential sum that must land inside the 2000ms GET abort.
+//! [`QUERY_BUDGET_MS`] is not one of those terms: `/status/query` is its own
+//! route with its own abort.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,12 +91,10 @@ use crate::server::is_loopback;
 
 /// Ceiling on concurrent in-flight `/status*` requests across the WHOLE
 /// subtree. The unit is ADMITTED HTTP REQUESTS, and it is equally the ceiling
-/// on concurrent blocking panel builders: the `/status` aggregate awaits its
-/// four panel builders SEQUENTIALLY, so an admitted request holds at most one
-/// `spawn_blocking` builder at a time. One number, one meaning, on the
-/// aggregate and per-panel routes alike -- a concurrent fan-out inside the
-/// aggregate would silently multiply the builder count by four while this const
-/// stayed at its face value.
+/// on concurrent blocking panel builders -- see this module's own docs for that
+/// equivalence and for the timing numbers it composes with. A concurrent
+/// fan-out inside the aggregate would silently multiply the builder count by
+/// four while this const stayed at its face value.
 ///
 /// The builder half of the ceiling holds UNCONDITIONALLY, cancellation
 /// included. This layer's permit lives in the response future, so a client that
@@ -49,18 +115,17 @@ pub const STATUS_MAX_INFLIGHT: usize = 4;
 /// Wall-clock budget for ONE `/status/query` grouped aggregate, milliseconds.
 /// Deliberately a hardcoded const, not a config knob: like
 /// [`STATUS_MAX_INFLIGHT`] it bounds a fixed-cost diagnostic read rather than
-/// expressing an operator preference.
+/// expressing an operator preference. An overrun sheds as an unavailable panel
+/// (`query_timeout`), never a 500.
 ///
-/// Sized to bound a runaway scan without interrupting legitimate large-ledger
-/// reads: a fine-grained GROUP BY over a multi-million-row window is a
-/// sub-second full scan, so a tighter budget would cut those short, while this
-/// one still leaves a whole query well inside the 3500ms abort the dashboard
-/// applies to this route and inside a poll interval. An overrun sheds as an
-/// unavailable panel (`query_timeout`), never a 500.
+/// Sized to bound a runaway scan without cutting a legitimate large-ledger read
+/// short. A fine-grained GROUP BY is NOT sub-second at scale: on a million-row
+/// window it measures around 1.0s unpriced-aggregate and around 1.2s with a
+/// bucketed series, so a 1000ms budget shed real reads.
 ///
-/// Raising it is not a local decision -- see [`USAGE_BUDGET_MS`] for the
-/// occupancy relationship both budgets share with [`STATUS_MAX_INFLIGHT`].
-pub const QUERY_BUDGET_MS: u64 = 1000;
+/// Raising it is not a local decision -- it is one term of the sum identity in
+/// this module's own docs, and cannot move without the other.
+pub const QUERY_BUDGET_MS: u64 = 2000;
 
 /// Wall-clock budget for ONE `/status/usage` panel build, milliseconds --
 /// covering the WHOLE collection (all four ledger reads on one connection),
@@ -69,20 +134,12 @@ pub const QUERY_BUDGET_MS: u64 = 1000;
 /// preference. An overrun sheds the panel as unavailable (`query_timeout`),
 /// never a 500.
 ///
-/// Sized against the CLIENT's own aborts. The dashboard's per-GET abort is
-/// 2000ms and governs both `/status` and `/status/usage`; the 3500ms abort is
-/// `/status/query`-only. The aggregate route composes its panels sequentially,
-/// so the usage builder's budget is one term of a SUM that must still land
-/// inside 2000ms -- 1000ms leaves room for the three cheap panels and the
-/// response write, at a 5000ms poll cadence.
-///
-/// Occupancy, for whoever raises either budget: the capacity unit is ADMITTED
-/// REQUESTS ([`STATUS_MAX_INFLIGHT`]), and an admitted request holds at most one
-/// blocking builder at a time (the aggregate is sequential), so worst-case
-/// occupancy is `STATUS_MAX_INFLIGHT` builders each held for up to
-/// `max(QUERY_BUDGET_MS, USAGE_BUDGET_MS)`. Raising EITHER budget therefore
-/// requires re-checking it against the 2000ms GET abort and against the
-/// sequential aggregate's sum, not just against its own route.
+/// Sized against the CLIENT's 2000ms per-GET abort: the `/status` aggregate
+/// composes its panels sequentially, so this budget is one term of a sum that
+/// must still land inside that abort, leaving room for the three cheap panels
+/// and the response write. Raising it is not a local decision -- see this
+/// module's own docs for the coupled numbers and the occupancy relationship
+/// with [`STATUS_MAX_INFLIGHT`].
 pub const USAGE_BUDGET_MS: u64 = 1000;
 
 /// Wire schema version of the fixed transport-level envelopes this module

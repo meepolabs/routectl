@@ -2579,12 +2579,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and `cancelled_aggregate_requests_do_not_free_builder_capacity` abort saturating
   requests and assert no new blocking work starts until the detached builders
   finish (the next request is DELAYED, not shed). Also owns
-  `QUERY_BUDGET_MS = 1000`, the per-request wall-clock budget for one
+  `QUERY_BUDGET_MS = 2000`, the per-request wall-clock budget for one
   `/status/query` grouped aggregate, and `USAGE_BUDGET_MS = 1000`, the budget
   for one whole `/status/usage` collection (an overrun of either sheds as the
-  `query_timeout` unavailable panel); both doc comments carry the occupancy
-  relationship to `STATUS_MAX_INFLIGHT` and the client aborts. No const here is
-  a config knob (no `config_classify` section)
+  `query_timeout` unavailable panel). The MODULE doc block carries the five
+  coupled timing numbers once -- these two budgets, `STATUS_MAX_INFLIGHT`,
+  `handlers/status/query.rs`'s `BODY_READ_TIMEOUT`, and the dashboard's two
+  aborts -- plus the serial sum identity
+  (`BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 3000 <= QUERY_TIMEOUT_MS`, which bounds
+  the two BUDGETED stretches and explicitly NOT end-to-end request time: the
+  builder-capacity wait, worker queueing, ledger open, anchor probe, fold and
+  serialization sit outside it) and the
+  occupancy relationship; each const's own comment points there instead of
+  repeating it. No const here is a config knob (no `config_classify` section)
 - `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching
   `oauth://<provider>` to `OAuthStore` and `env://` / `file://` / `literal:`
   to `MemoryStore`; degrades gracefully when no `HOME` / `XDG_CONFIG_HOME`
@@ -2773,7 +2780,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   {today,week,month,all} / `group_by` {model,provider,alias} / `bucket`
   {hour,day} enums + optional
   alias/provider filters -- or over `MAX_BODY_BYTES` (8 KiB), or still arriving
-  at the `BODY_READ_TIMEOUT` (2s) read deadline that stops a stalled send from
+  at the `BODY_READ_TIMEOUT` (1s) read deadline that stops a stalled send from
   parking a concurrency permit; all refused with the FIXED envelope
   `{"schema_version":1,"error":{"code":"invalid_query",...}}` that never echoes
   serde text or body bytes and never opens the ledger), and 200 for everything
