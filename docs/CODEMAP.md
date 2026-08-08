@@ -2884,7 +2884,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   restated on the wire; capability cells with
   `route-away`/`force-supported` verdict + `provider`/`model`/`override`
   provenance reusing the shared vocabulary; `aliases` carrying each alias's
-  ORDERED fallback chain; a `source` strip with
+  ORDERED fallback chain; `providers` carrying one routing-shape row per
+  `[providers.X]` -- `provider_id`/`provider_kind`/`endpoint_origin` (the
+  derivation's ORIGIN reduction, never widened here)/`credential_ref_scheme`/
+  `auth_token`/`rpm_limit`, the last serialized WITHOUT
+  `skip_serializing_if` so an explicit `0` (immediately rate-limited) stays
+  distinct from an explicit `null` (unlimited) and from an absent field; a
+  `source` strip with
   `config_path`/`loaded_age_ms`/`alias_count`/`provider_count`/`listen_addr`/`version`,
   counts from the same effective view and daemon facts from the
   `daemon_meta` facade) plus the activation inventory
@@ -3113,7 +3119,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   vocabulary. Renders a source strip (config path, load age, resolved
   alias/provider counts, listen address, version) above the reference tables
   for aliases + their ordered chains, models + their winning catalog layer,
-  provider activation, the capability overrides (default-closed disclosure),
+  the configured ROUTING providers (id / kind / configured endpoint origin /
+  auth token / credential-ref scheme / rate limit, where `rpmLimitCell` is the
+  ONE formatter for the three non-interchangeable RPM states -- null-checked
+  before any coercion so an explicit `0` reads "0 RPM" rather than
+  "unlimited", `null` reads "unlimited", and an absent field reads "unknown"),
+  credential activation (a footnote naming it the FIXED routectl-owned OAuth
+  candidate universe rather than a slice of the routing set the strip counts),
+  the capability overrides (default-closed disclosure),
   and the retry-class policy whose columns are exactly retry cap / fallback /
   breaker debit (the wire's `debits_breaker`) / source
 - `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 12 of
