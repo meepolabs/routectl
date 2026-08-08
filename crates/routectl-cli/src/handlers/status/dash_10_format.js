@@ -82,9 +82,9 @@
 
   // Humanized labels + hover tooltips for the value-domain wire tokens,
   // keyed by token FAMILY. The families here MIRROR the `.tok` CSS families
-  // in dashboard.css (search "Value-domain tokens"): a new token is added in
-  // BOTH adjacent, mutually-pointing places -- a color rule there, a label
-  // entry here.
+  // in dash_components.css (search "Value-domain tokens"): a new token is
+  // added in BOTH adjacent, mutually-pointing places -- a color rule there, a
+  // label entry here.
   //
   // Each entry is `{ label, title }`. `label` is the humanized VISIBLE text
   // (falls back to the raw token when omitted, so cramped wire tokens like

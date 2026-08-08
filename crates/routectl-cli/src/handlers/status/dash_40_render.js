@@ -1,5 +1,10 @@
   // ---- render dispatch -------------------------------------------------
 
+  // NO automated runtime harness covers this part. Per-pass fault
+  // reconciliation and the state it drives are verified BY HAND only -- see
+  // dashboard-manual-checklist.md beside this source, and run it before
+  // shipping a change here.
+
   // Render one source's envelope under its own error boundary. A throw from
   // ANY source -- a malformed same-version payload, a builder fault -- becomes
   // `invalid_payload` for THAT source and nothing else: the caller's round
@@ -89,7 +94,7 @@
   function setIncompatible(name, received) {
     setSource(name, {
       state: 'incompatible',
-      code: 'expected ' + EXPECTED[name] + ', received ' + received,
+      code: 'expected ' + expectedVersion(name) + ', received ' + received,
       data: null,
       badge: { label: 'n/a', kind: 'muted' }
     });

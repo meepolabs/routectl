@@ -1,5 +1,10 @@
   // ---- transport -------------------------------------------------------
 
+  // NO automated runtime harness covers this part. The single-flight
+  // generation guard below is verified BY HAND only -- see
+  // dashboard-manual-checklist.md beside this source, and run it before
+  // shipping a change here.
+
   // Issue one request under an abort budget and classify the outcome. The
   // ONLY place a fetch happens; both the GET poll and the QUERY aggregate
   // share this classifier so their failure vocabularies cannot drift.

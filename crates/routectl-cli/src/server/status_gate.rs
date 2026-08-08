@@ -21,7 +21,7 @@
 //! | [`QUERY_BUDGET_MS`] = 2000 | this module | one `/status/query` grouped aggregate |
 //! | [`USAGE_BUDGET_MS`] = 1000 | this module | one whole `/status/usage` panel build |
 //! | `BODY_READ_TIMEOUT` = 1000ms | `handlers::status::query` | how long that route waits for the client's request body |
-//! | `TIMEOUT_MS` = 2000 / `QUERY_TIMEOUT_MS` = 3500 | `dashboard.js` | the browser's own aborts -- the GET one covers `/status` and `/status/usage`, the QUERY one covers `/status/query` only |
+//! | `TIMEOUT_MS` = 2000 / `QUERY_TIMEOUT_MS` = 3500 | `dash_00_state.js` | the browser's own aborts -- the GET one covers `/status` and `/status/usage`, the QUERY one covers `/status/query` only |
 //!
 //! **The sum identity.** On `/status/query` the body read and the panel
 //! deadline are SERIAL in one handler (the handler awaits `to_bytes` under
