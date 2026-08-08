@@ -1,0 +1,507 @@
+/*
+  Style body for the status dashboard. Assembled into a single inline
+  <style> by page.rs at compile time -- this file is never served on its
+  own, so it carries no @import, no url(), and no font reference that
+  would reach the network.
+
+  Design tokens. Every color, space, type, radius, and motion value is
+  defined once here and referenced by rules below -- no raw hex/px
+  sprinkled in components. Dark is the PRIMARY console look; the light
+  block is the same token names re-valued, so a component rule never
+  branches on theme.
+
+  Fonts are a deliberate SYSTEM stack, not a web font: the page is
+  self-contained with zero external dependencies, so a web font is
+  impossible by constraint. UI text uses the platform sans; every
+  numeral and code-like token uses the platform monospace so figures
+  align in tabular columns.
+*/
+:root {
+  color-scheme: dark light;
+
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* 8px grid. --sp-1 is the half-step used for hairline-adjacent gaps. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  --fs-xs: 0.72rem;
+  --fs-sm: 0.8rem;
+  --fs-md: 0.9rem;
+  --fs-lg: 1.05rem;
+  --fs-xl: 1.3rem;
+  --fs-stat: 1.6rem;
+
+  --r-sm: 5px;
+  --r-md: 9px;
+  --r-lg: 11px;
+  --r-pill: 999px;
+
+  --dur: 160ms;
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+
+  --strip-h: 46px;
+
+  /* Layout dimensions, all on the 8px grid. Named rather than inlined so a
+     column min-width is a decision with a home, not a number in a rule. The
+     grid stops at layout: hairlines, control padding, and dot sizes stay at
+     their intentional off-grid values. */
+  --col-provider: 200px;
+  --col-kpi: 216px;
+  --col-ustat: 136px;
+  --col-hcell: 160px;
+  --col-quota: 304px;
+  --col-docpass: 176px;
+  --fb-ucard-id: 224px;
+  --fb-docverdict: 304px;
+  --w-step: 208px;
+  --w-step-narrow: 176px;
+  --h-kpi-spark: 34px;
+
+  --bg: #0d0f12;
+  --surface: #15181c;
+  --surface-2: #1b1f24;
+  --border: #262b31;
+  --border-strong: #353d45;
+  --fg: #eef1f4;
+  --muted: #b4bdc6;
+  --faint: #8895a1;
+
+  /* One accent (blue) plus ONE non-semantic second data hue (violet) for
+     two-series charts. Nothing else earns a hue unless it is a state. */
+  --accent: oklch(0.74 0.13 248);
+  --accent-soft: rgba(96, 152, 240, 0.12);
+  --accent-2: oklch(0.74 0.13 305);
+  --accent-2-soft: rgba(170, 120, 240, 0.16);
+
+  /* Semantic states ONLY: good / degraded / broken. */
+  --ok: oklch(0.78 0.15 155);
+  --ok-soft: rgba(72, 190, 132, 0.16);
+  --warn: oklch(0.83 0.14 80);
+  --warn-soft: rgba(226, 175, 72, 0.17);
+  --neg: oklch(0.72 0.17 25);
+  --neg-soft: rgba(240, 112, 92, 0.17);
+
+  --hover: rgba(255, 255, 255, 0.04);
+  --skel: rgba(255, 255, 255, 0.07);
+
+  /* Value-domain pill palette, derived from the state tokens above so a
+     pill can never drift out of contrast with its own theme. The palette
+     carries NO hue of its own: a categorical distinction resolves to
+     neutral, the accent, or the second data hue, because only a STATE
+     earns a semantic color. */
+  --pill-neutral-bg: var(--surface-2);  --pill-neutral-fg: var(--muted);
+  --pill-ok-bg: var(--ok-soft);         --pill-ok-fg: var(--ok);
+  --pill-err-bg: var(--neg-soft);       --pill-err-fg: var(--neg);
+  --pill-warn-bg: var(--warn-soft);     --pill-warn-fg: var(--warn);
+  --pill-info-bg: var(--accent-soft);   --pill-info-fg: var(--accent);
+  --pill-accent-bg: var(--accent-2-soft); --pill-accent-fg: var(--accent-2);
+
+  --dot-size: 6px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f5f3;
+    --surface: #ffffff;
+    --surface-2: #f9f9f7;
+    --border: #e3e3df;
+    --border-strong: #cfcfca;
+    --fg: #101317;
+    --muted: #4b545d;
+    --faint: #6e7883;
+
+    --accent: oklch(0.55 0.14 248);
+    --accent-soft: rgba(40, 100, 200, 0.07);
+    --accent-2: oklch(0.52 0.15 305);
+    --accent-2-soft: rgba(120, 70, 200, 0.10);
+
+    --ok: oklch(0.50 0.13 155);
+    --ok-soft: rgba(40, 150, 95, 0.12);
+    --warn: oklch(0.58 0.12 70);
+    --warn-soft: rgba(180, 130, 20, 0.14);
+    --neg: oklch(0.52 0.18 25);
+    --neg-soft: rgba(200, 60, 40, 0.12);
+
+    --hover: rgba(0, 0, 0, 0.028);
+    --skel: rgba(0, 0, 0, 0.06);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: var(--font-ui);
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.45;
+  font-size: var(--fs-md);
+  -webkit-font-smoothing: antialiased;
+  /* The page never scrolls sideways; a wide table scrolls inside its card. */
+  overflow-x: hidden;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- verdict strip (persistent; plain-language state, never a cost) ---- */
+.verdict {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  min-height: var(--strip-h);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.verdict-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.verdict-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--faint);
+  box-shadow: 0 0 0 3px transparent;
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.verdict--ok .verdict-dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.verdict--warn .verdict-dot { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.verdict--bad .verdict-dot { background: var(--neg); box-shadow: 0 0 0 3px var(--neg-soft); }
+.verdict-text {
+  letter-spacing: -0.005em;
+  color: var(--fg);
+  min-width: 0;
+}
+/* req/span figures ride beside the sentence in mono so they read as data. */
+.verdict-stats {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.verdict-side {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+.poll {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+}
+.poll-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ok);
+  animation: pollpulse 2.4s var(--ease) infinite;
+}
+.poll--warn .poll-dot { background: var(--warn); }
+.poll--dead .poll-dot { background: var(--neg); animation: none; }
+.poll--idle .poll-dot { background: var(--faint); animation: none; }
+@keyframes pollpulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.poll-label {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* ---- window picker (dimmed + disabled on the windowless tabs) ---- */
+.windowsel {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  transition: opacity var(--dur) var(--ease);
+}
+.windowsel button {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.windowsel button:hover { background: var(--hover); color: var(--fg); }
+.windowsel button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.windowsel button[aria-pressed="true"] { background: var(--surface-2); color: var(--fg); }
+/* Windowless tab: the whole group dims and every button is inert, so the
+   picker reads as "not applicable here" rather than broken. */
+.windowsel[data-windowless="true"] { opacity: 0.4; }
+.windowsel[data-windowless="true"] button { cursor: default; }
+.windowsel button:disabled { cursor: default; }
+/* The word beside the dimmed picker: what this tab shows INSTEAD of a window,
+   so an inert picker reads as not-applicable rather than broken. */
+.windowless-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.windowless-label[hidden] { display: none; }
+
+.refresh {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.refresh:hover { background: var(--hover); color: var(--fg); }
+.refresh:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.refresh:disabled { opacity: 0.45; cursor: default; }
+
+/* ---- six-tab bar ---- */
+.tabbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-4);
+  align-items: stretch;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  /* The bar itself scrolls at 380px rather than wrapping the page. */
+  overflow-x: auto;
+}
+.tab {
+  font: inherit;
+  font-size: var(--fs-md);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-3) 10px;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.tab:hover { color: var(--fg); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tab-badge {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: var(--r-pill);
+  background: var(--pill-neutral-bg);
+  color: var(--pill-neutral-fg);
+}
+.tab-badge--warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+.tab-badge--error { background: var(--pill-err-bg); color: var(--pill-err-fg); }
+.tab-badge--muted { background: var(--pill-neutral-bg); color: var(--faint); }
+
+/* ---- banner ---- */
+.banner {
+  margin: var(--sp-3) var(--sp-5) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  border: 1px solid transparent;
+}
+.banner--warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); border-color: var(--pill-warn-fg); }
+.banner--error { background: var(--pill-err-bg); color: var(--pill-err-fg); border-color: var(--pill-err-fg); }
+.banner--terminal { background: var(--pill-accent-bg); color: var(--pill-accent-fg); border-color: var(--pill-accent-fg); }
+
+/* ---- panes (one visible tabpanel at a time) ---- */
+main { display: block; }
+.pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  padding: var(--sp-5) var(--sp-5) var(--sp-6);
+  animation: panein 220ms var(--ease) both;
+}
+.pane[hidden] { display: none; }
+@keyframes panein {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Card border = "a separate object"; the hairline grid inside a card =
+   "facets of one reading". Cards never nest a second card border. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4) var(--sp-5) var(--sp-5);
+  min-width: 0;
+}
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-3);
+}
+.card-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  margin: 0;
+}
+.card-hint {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+/* Per-pane line for a source that is NOT current (loading / stale / no current
+   data / invalid payload). A live source says nothing here -- the verdict strip
+   carries the as_of age. */
+.section-status {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.section-status:empty { display: none; }
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
+/* ---- per-source state records (loading / empty / unavailable / ...) ---- */
+
+/* A welcoming empty state: never a grid of zeros. */
+.empty {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-6) var(--sp-4);
+}
+.empty-inner {
+  max-width: 540px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.empty-title {
+  font-size: var(--fs-xl);
+  letter-spacing: -0.01em;
+}
+.empty-body {
+  color: var(--muted);
+  font-size: var(--fs-md);
+}
+.empty-facts {
+  display: flex;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+  margin-top: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+.code-inline {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+}
+
+.unavailable-msg {
+  color: var(--pill-err-fg);
+  background: var(--pill-err-bg);
+  border: 1px solid var(--pill-err-fg);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+}
+/* A schema mismatch is a build/cache fault, not a broken daemon: it reads
+   as a neutral notice with a reload hint, never as a red failure. */
+.incompatible-msg {
+  color: var(--pill-warn-fg);
+  background: var(--pill-warn-bg);
+  border: 1px solid var(--pill-warn-fg);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+}
+.incompatible-msg .hint {
+  display: block;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-xs);
+  opacity: 0.85;
+}
+.section--stale { opacity: 0.45; }
+.section--dead { opacity: 0.55; }
+
+.meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.footnote {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  margin: 0;
+}
+h3 {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: var(--sp-4) 0 var(--sp-2);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  color: var(--faint);
+}
+
+
+.neg { color: var(--neg); }
+

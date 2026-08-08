@@ -1,0 +1,758 @@
+/* ---- tables (scroll INSIDE the card; the page never scrolls sideways) ---- */
+.tablewrap {
+  overflow-x: auto;
+  margin: 0 calc(-1 * var(--sp-5));
+  padding: 0 var(--sp-5);
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--fs-sm);
+}
+thead th {
+  background: var(--surface);
+  color: var(--faint);
+  font-weight: 600;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  text-align: left;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+tbody th, tbody td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+  vertical-align: top;
+}
+tbody th[scope="row"] {
+  font-weight: 600;
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+tbody td { color: var(--muted); }
+tbody tr:hover th, tbody tr:hover td { background: var(--hover); }
+th.num, td.num {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+td.wrap {
+  white-space: normal;
+  min-width: 12rem;
+  max-width: 24rem;
+}
+
+/* ---- expandable rows ---- */
+.exp-cell { width: 1.6rem; text-align: center; }
+.exp-btn {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  width: 1.5rem;
+  height: 1.5rem;
+  line-height: 1;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.exp-btn:hover { background: var(--hover); color: var(--fg); }
+.exp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.exp-btn[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+tr.exp-row { cursor: pointer; }
+/* The opened panel sits on a distinct surface AND carries an accent edge: the
+   surface step alone is a few percent of luminance, which reads as no change
+   at all on a wide monitor and makes a working expander look inert. */
+.detail-row > td {
+  background: var(--surface-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-left: 2px solid var(--accent);
+}
+.nodetail {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  font-style: italic;
+}
+.deflist {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--sp-2) var(--sp-5);
+  margin: 0;
+}
+.deflist .def {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  border-bottom: 1px dotted var(--border);
+  padding-bottom: 2px;
+}
+.deflist dt {
+  color: var(--faint);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.deflist dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+/* A zero-traffic group stays in the sorted table but dims (data floor --
+   de-emphasis, never collapse). */
+.row--muted > th, .row--muted > td { opacity: 0.5; }
+
+/*
+  Value-domain tokens are rendered as their RAW wire string and styled by a
+  class keyed on the EXACT per-field string (three casings: snake_case,
+  PascalCase, kebab-case -- never normalized). `.tok` is the default
+  fallback, so a newly-added or unknown token renders as readable neutral
+  text rather than crashing or hiding.
+
+  CROSS-POINTER: the HUMANIZED labels + tooltips for these same token
+  families live in the script's `// ---- label maps ----` block (the
+  `LABELS` object). The families here and there are the SAME set -- a new
+  token gets a color rule HERE and a label entry THERE, two adjacent
+  mutually-pointing places, so neither drifts silently.
+*/
+.tok {
+  display: inline-block;
+  padding: 0.05em 0.55em;
+  border-radius: var(--r-pill);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--pill-neutral-bg);
+  color: var(--pill-neutral-fg);
+}
+.circuit-closed, .reach-reachable, .status-Pass, .learned-verified, .src-user {
+  background: var(--pill-ok-bg); color: var(--pill-ok-fg);
+}
+.circuit-open, .reach-degraded, .status-Fail, .verdict-route-away, .learned-broken, .src-missing {
+  background: var(--pill-err-bg); color: var(--pill-err-fg);
+}
+.circuit-half_open_ready, .status-Warn {
+  background: var(--pill-warn-bg); color: var(--pill-warn-fg);
+}
+.verdict-force-supported, .tier-self-identifying, .prov-provider, .prov-model, .src-import {
+  background: var(--pill-info-bg); color: var(--pill-info-fg);
+}
+/* Categorical (non-state) distinctions resolve inside the accent + second
+   data hue + neutral set. A provenance or catalog layer is not a state, so
+   it never earns a hue of its own. */
+.prov-override {
+  background: var(--pill-accent-bg); color: var(--pill-accent-fg);
+}
+.tier-inferred, .src-baked, .prov-learned {
+  background: var(--pill-neutral-bg); color: var(--pill-neutral-fg);
+}
+.src-disabled {
+  background: var(--pill-neutral-bg); color: var(--faint);
+}
+/* Quota STATUS / OVERAGE token colors. These values pass through from the
+   upstream ratelimit headers, so an unrecognized value keeps the neutral
+   `.tok` fallback rather than a wrong color. */
+.qstatus-allowed { background: var(--pill-ok-bg); color: var(--pill-ok-fg); }
+.qstatus-rejected { background: var(--pill-err-bg); color: var(--pill-err-fg); }
+.qstatus-queued, .qstatus-allowed_warning, .qstatus-triggered {
+  background: var(--pill-warn-bg); color: var(--pill-warn-fg);
+}
+/* Provider auto-activation status. Activated is a good state; unresolved is a
+   degraded one an operator can fix; an unrecognized state keeps the neutral
+   `.tok` fallback. */
+.actstatus-activated { background: var(--pill-ok-bg); color: var(--pill-ok-fg); }
+.actstatus-unresolved { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+/* Colorblind-safe leading dot on status-family pills, keyed on the
+   dedicated .tok-dot marker the token builder applies for those families
+   only -- no other family can grow a dot by sharing a class-name substring. */
+.tok.tok-dot::before {
+  content: "";
+  display: inline-block;
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 0.4em;
+  vertical-align: 0.04em;
+}
+
+/* Default-collapsed disclosure for list-shaped detail. Native <details>. */
+details > summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) 0;
+}
+details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.stacklist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg);
+}
+
+/*
+  Quantitative render helpers: per-tile trend sparklines, proportion bars,
+  ring gauges, magnitude-unit typography, change flash, heat bands. Every
+  color/dimension is a token above; this section carries no raw hex. All
+  additive over the numerals -- every figure still renders as text (data
+  floor), so deleting this section degrades to the plain look.
+*/
+.spark {
+  display: block;
+  width: 100%;
+  height: 24px;
+  margin-top: var(--sp-1);
+  overflow: visible;
+}
+.spark polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+/* The second, non-semantic data hue: a two-series chart's B series. */
+.spark polyline.series-b { stroke: var(--accent-2); }
+/* The area under a single series: the same hue at low opacity, so the fill
+   reads as the curve's own mass rather than as a second value. */
+.spark polygon {
+  fill: var(--accent);
+  fill-opacity: 0.16;
+  stroke: none;
+}
+
+/* Units (K/M/%/$/ms) sit in a faint fixed-width slot beside the numeral so
+   columns align. A zero / absent value de-emphasizes whole. */
+td.num .unit, th.num .unit {
+  font-size: 0.62em;
+  font-weight: 500;
+  color: var(--faint);
+  margin-left: 0.08em;
+}
+.mag-zero { color: var(--faint); }
+
+/* ---- loading skeleton ---- */
+.skeleton { display: flex; flex-direction: column; gap: var(--sp-2); }
+.skeleton span {
+  display: block;
+  height: 0.9rem;
+  border-radius: var(--r-sm);
+  background: var(--skel);
+  animation: shimmer 1.5s var(--ease) infinite;
+}
+.skeleton span:nth-child(1) { width: 80%; }
+.skeleton span:nth-child(2) { width: 55%; }
+.skeleton span:nth-child(3) { width: 68%; }
+@keyframes shimmer {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.95; }
+}
+
+/* ---- tab section stack ---- */
+.tabstack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  min-width: 0;
+}
+/* A group of separate objects (provider cards) or a bare header: it carries a
+   header and its own content, but NO card border -- the border belongs to the
+   objects inside it, not around them. */
+.ovsection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.ovsection > .card-head { margin-bottom: 0; }
+.scope-reset {
+  font: inherit;
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.scope-reset:hover { background: var(--hover); color: var(--fg); }
+.scope-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---- provider cards (a scope affordance plus the provider's seat quota) ---- */
+.provgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--col-provider), 1fr));
+  gap: var(--sp-2);
+}
+/* The expanded overflow sits directly under the row it came from, so it reads
+   as a continuation of that row rather than a second section. */
+.provgrid--rest { margin-top: calc(-1 * var(--sp-1)); }
+.provcard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  transition: border-color var(--dur) var(--ease);
+}
+.provcard--on { border-color: var(--accent); background: var(--accent-soft); }
+/* The all-providers aggregate leads the row and resets the scope; the overflow
+   card closes it and is not a reading of its own, so it carries no fill. */
+.provcard--all .provcard-name { color: var(--fg); }
+.provcard--more { background: transparent; }
+.provcard--more .provcard-name { color: var(--faint); }
+/* The scope button fills the card's reading area; the seat affordance below it
+   is a separate control, so the two cannot fire each other. */
+.provcard-scope {
+  font: inherit;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.provcard:hover { border-color: var(--border-strong); }
+.provcard-scope:hover { color: var(--fg); }
+.provcard-scope:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.provcard-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provcard-cost {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xl);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.provcard-facts {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The share bar sits at the bottom of the card's reading area, so cards of
+   different fact lengths still align their bars. The card is a COLUMN flex, so
+   the bar must not take the grow factor that serves it inside a row. */
+.provcard-scope > .sharebar { margin-top: auto; flex: none; }
+.sharebar {
+  display: block;
+  flex: 1 1 auto;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+/* The card's seat affordance: a hairline-separated control under the reading,
+   one dot per seat plus the count, opening the per-seat modal. */
+.provseats {
+  font: inherit;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.provseats:hover { background: var(--hover); }
+.provseats:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.seatdots { display: flex; gap: 3px; flex: none; }
+.seatdot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 2px;
+  flex: none;
+  background: var(--accent);
+}
+.provseats-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provseats-none {
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+.qlist--card { grid-template-columns: minmax(0, 1fr); margin-top: var(--sp-2); }
+.qlist--card .qtile { padding: var(--sp-2) var(--sp-3); }
+.sharebar-fill {
+  --pct: 0;
+  display: block;
+  height: 3px;
+  width: calc(var(--pct) * 1%);
+  background: var(--accent);
+  transition: width var(--dur) var(--ease);
+}
+
+/* ---- seat modal (the per-seat detour off the provider row) ----
+   A centered dialog over a dimmed page: the seat list is a detour off the
+   reading, not part of it. Backdrop and close control both dismiss. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background: rgba(0, 0, 0, 0.45);
+  animation: panein 180ms var(--ease) both;
+}
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: min(640px, 100%);
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+}
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+}
+.modal-title {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--fg);
+}
+.modal-sub {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  flex: 1 1 auto;
+}
+.modal-close {
+  font: inherit;
+  font-size: var(--fs-xs);
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  flex: none;
+}
+.modal-close:hover { background: var(--hover); color: var(--fg); }
+.modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.modal-body {
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-5) var(--sp-4);
+  margin-top: 0;
+}
+
+/* ---- KPI tile grid (facets of one reading: hairline grid, no card each) ---- */
+.kpigrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4) 0;
+  background: var(--surface);
+  overflow: hidden;
+}
+.kpi-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+}
+.kpi-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-stat);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.kpi-value .unit {
+  font-size: 0.5em;
+  font-weight: 500;
+  color: var(--faint);
+  margin-left: 0.08em;
+}
+.kpi-sub {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-height: 1.4em;
+}
+/* The tile's trend bleeds to the tile edges: it is a backdrop to the figure,
+   not a chart of its own. */
+.kpi > .spark {
+  margin: auto calc(-1 * var(--sp-4)) 0;
+  width: calc(100% + 2 * var(--sp-4));
+  height: var(--h-kpi-spark);
+}
+.kpi-split {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.kpi-half {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.kpi-half + .kpi-half { border-left: 1px solid var(--border); padding-left: var(--sp-3); }
+.kpi-key {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.kpi-dot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 2px;
+  flex: none;
+  background: var(--accent);
+}
+.kpi-dot--b { background: var(--accent-2); }
+.kpi-halfvalue {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.kpi-halfvalue .unit {
+  font-size: 0.6em;
+  font-weight: 500;
+  color: var(--faint);
+  margin-left: 0.08em;
+}
+
+/* ---- usage: group-by picker + group cards ---- */
+.gbstrip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.gblabel {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.gbseg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.gbbtn {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.gbbtn:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
+.gbbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gbbtn:disabled { cursor: default; opacity: 0.5; }
+.gbbtn--on { background: var(--accent-soft); color: var(--accent); }
+
+.ugroups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+/* A group card: a headline line over a hairline-separated detail line. */
+.ucard {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.ucard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.ucard-id {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  flex: 1 1 var(--fb-ucard-id);
+  min-width: 0;
+}
+.ucard-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ucard-share {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.ucard-sharepct {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  flex: none;
+}
+.ucard-figs {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-5);
+  flex: none;
+}
+.ufig {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+}
+.ufig-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+}
+.ufig-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xl);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.ufig-value .unit { font-size: 0.55em; color: var(--faint); }
+.ufig-note {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.ucard-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--col-ustat), 1fr));
+  gap: var(--sp-3) var(--sp-4);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+.ustat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.ustat-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.ustat-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ustat-value .unit { font-size: 0.8em; color: var(--faint); }
+.upair-sep { color: var(--faint); padding: 0 3px; }
+.upair-sep::before { content: "/"; }
+.upair-b { color: var(--faint); }
+
