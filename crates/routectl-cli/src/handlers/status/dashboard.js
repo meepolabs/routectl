@@ -86,8 +86,16 @@
   // steps, so the two schedules cannot drift apart.
   var BACKOFF_STEPS_MS = [10000, 20000, 30000];
   var TIMEOUT_MS = 2000;           // per-GET AbortController budget
-  // QUERY budget: 2000 body-read + 1000 query deadline + slack, still under
-  // the 5s cadence so a slow QUERY can never overlap its own next attempt.
+  // Per-QUERY AbortController budget. Like TIMEOUT_MS this is ONE abort timer
+  // covering the whole exchange -- connect, send, server work, and body decode
+  // (see safeRequest); the client enforces no decomposition of it. Larger than
+  // the GET budget because /status/query is the one route that reads a
+  // client-supplied body and then runs a grouped ledger scan, whose own
+  // server-side budgets are sized to sum below this. Those budgets do not cover
+  // queueing, so a saturated surface can still abort here rather than returning
+  // a served-but-unavailable panel; that is why a timeout is treated as
+  // transport failure and backed off, not as a panel verdict. Still under the 5s
+  // cadence, so a slow QUERY cannot overlap its own next scheduled attempt.
   var QUERY_TIMEOUT_MS = 3500;
   var SKEW_TOLERANCE_SEC = 2;      // future as_of within this is not clock skew
   var FRESH_SLACK_MS = 3000;       // grace past the due round before "stale"

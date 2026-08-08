@@ -326,6 +326,12 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
         }),
     };
     let budget = Duration::from_millis(QUERY_BUDGET_MS);
+    // Pinned ABSOLUTELY, not as a fraction of the budget: a relative guard
+    // silently widens every time the budget is raised, so a real regression at
+    // this ledger size would stop failing. 500ms is the ceiling this check
+    // actually enforced when it was written, held fixed here so it stays a
+    // regression guard on the fold rather than an echo of QUERY_BUDGET_MS.
+    let max_elapsed = Duration::from_millis(500);
 
     // Act: the deadline is the real one, so a run that blew the budget would
     // interrupt rather than report a misleading elapsed time.
@@ -337,8 +343,8 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
     // Assert: comfortably inside the budget, with every row folded into both the
     // groups and the series.
     assert!(
-        elapsed * 2 < budget,
-        "a 100k-row day series took {elapsed:?} against a {budget:?} budget"
+        elapsed < max_elapsed,
+        "a 100k-row day series took {elapsed:?} against a {max_elapsed:?} ceiling"
     );
     assert_eq!(result.totals.requests, 100_000);
     let series = result.series.as_ref().expect("series present");

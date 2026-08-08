@@ -73,7 +73,18 @@ const MAX_BODY_BYTES: usize = 8 * 1024;
 /// announce a body and then stall mid-send would hold every permit for as long
 /// as they keep the socket open and wedge the whole status surface, so a stalled
 /// send is refused as an invalid query and gives its permit back.
-const BODY_READ_TIMEOUT: Duration = Duration::from_secs(2);
+///
+/// One second, not two, and that STRENGTHENS the guard rather than weakening
+/// it: `MAX_BODY_BYTES` is 8 KiB, so a full-size body arriving over loopback
+/// within this deadline needs only 8 KB/s, and a sender slower than that is
+/// exactly the stalled sender this timeout exists to shed. A legitimate query
+/// body is a handful of short tokens and arrives in one segment.
+///
+/// It is also one term of a serial sum -- the build below runs under
+/// `QUERY_BUDGET_MS` only AFTER this read completes -- so it cannot be changed
+/// on its own. The derivation lives in `crate::server::status_gate`'s module
+/// docs.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The closed request vocabulary. `deny_unknown_fields` plus the two closed
 /// enums make every out-of-vocabulary body -- an unknown key, an unknown token,
