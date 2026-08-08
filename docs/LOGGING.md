@@ -589,7 +589,7 @@ leave no record at all.
 
 ## Stream first-activity mark
 
-`try_stream_with_first_chunk` (routectl-router) emits one DEBUG line the
+`try_stream_with_first_content` (routectl-router) emits one DEBUG line the
 instant a streaming upstream's response headers arrive -- before the
 first content chunk is awaited. This is the first sign of upstream
 life, distinct from the existing first-CONTENT `ttfb_ms` mark

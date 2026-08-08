@@ -526,9 +526,9 @@ mod max_output_tokens_resolution {
     }
 }
 
-// The M4 first-activity mark (see `try_stream_with_first_chunk` in
-// src/router.rs) is observed via a documented manual capture recipe
-// (docs/LOGGING.md, "First-activity mark (M4)") rather than an
+// The stream first-activity mark (see `try_stream_with_first_content` in
+// src/router/dispatch.rs) is observed via a documented manual capture
+// recipe (docs/LOGGING.md, "Stream first-activity mark") rather than an
 // automated test: capturing a `tracing` debug event through a
 // thread-local subscriber across the async runtime was flaky under
 // the parallel test harness (0 events captured intermittently under
