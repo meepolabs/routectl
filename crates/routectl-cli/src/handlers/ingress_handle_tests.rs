@@ -3271,18 +3271,10 @@ fn router_with_provider_credential_source(
 /// instance passed to `capture_forwarded_bearer`/`capture_stainless_headers`
 /// for the seam to be recognized as present.
 fn ingress_headers(nonce: Option<&MitmSeamNonce>, authorization: Option<&str>) -> HeaderMap {
-    use axum::http::{HeaderName, HeaderValue, header::AUTHORIZATION};
-    let mut h = HeaderMap::new();
-    if let Some(nonce) = nonce {
-        h.insert(
-            HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
-            nonce.header_value(),
-        );
+    match authorization {
+        Some(a) => ingress_headers_with(nonce, &[("authorization", a)]),
+        None => ingress_headers_with(nonce, &[]),
     }
-    if let Some(a) = authorization {
-        h.insert(AUTHORIZATION, HeaderValue::from_str(a).unwrap());
-    }
-    h
 }
 
 // ---- capture matrix (the security-critical contract) ----
