@@ -326,16 +326,33 @@ fn unavailable_from_overlay_error(_err: &str) -> Panel<ConfigPanel> {
 }
 
 pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
-    let view = state.router.view();
-    let activation = state.activation.load_full();
-    // The router snapshot and activation are pinned now, so request time IS
-    // the effective view's read time -- and the same instant anchors the
-    // source strip's config-load age. ONE clock read feeds both, so a request
-    // crossing a second boundary cannot report an age inconsistent with the
-    // `as_of` beside it.
+    // Read order is load-bearing. ONE clock read anchors both the `as_of` and
+    // the source strip's config-load age, so a request crossing a second
+    // boundary cannot report an age inconsistent with the `as_of` beside it.
+    //
+    // A reload writes three cells independently (router, then the config-load
+    // stamp, then activation), so a read landing mid-reload cannot see one
+    // generation and no ordering can give it one -- ordering only picks the
+    // skew DIRECTION. Reachable states are ordered
+    // `gen(router) >= gen(stamp) >= gen(activation)`, and that holds ONLY
+    // because `crate::server::reload` swaps the new router in BEFORE it stamps
+    // the load. Given that, taking the stamp FIRST skews conservatively: a
+    // mid-reload read shows the NEW alias/provider counts beside an age still
+    // measured from the previous load, which self-corrects on the next poll.
+    // Pinning the router first produces the harmful skew instead -- "loaded 0s
+    // ago" beside PRE-reload counts, which an operator reads as their edit
+    // having been ignored. Reordering these lines back to the intuitive
+    // router-first shape reintroduces that lie; the source-order guard in this
+    // module's tests fails if it does.
+    //
+    // Residual, accepted: router-vs-activation can still skew either way and
+    // no ordering fixes it. The dashboard already footnotes those as different
+    // sets.
     let now = chrono::Utc::now();
     let as_of = utc_rfc3339(now);
     let daemon = state.daemon_meta.snapshot(now.timestamp_millis());
+    let view = state.router.view();
+    let activation = state.activation.load_full();
     let config_path = state
         .config_path
         .as_ref()
@@ -684,6 +701,78 @@ mod tests {
                 "config unavailable payload leaked `{forbidden}`: {text}"
             );
         }
+    }
+
+    /// A read that lands mid-reload must skew CONSERVATIVELY: the source strip
+    /// reports the NEW alias counts beside an age still measured from the
+    /// PREVIOUS config load. The inverse -- a fresh age beside pre-reload
+    /// counts -- reads as "my edit was ignored", so it must be unreachable.
+    ///
+    /// Sequenced writes, no threads: the daemon snapshot is pinned FIRST (as
+    /// `build` pins it), the reload's router swap lands SECOND, and the panel
+    /// is built from both. That `build` actually reads in that order is pinned
+    /// by `build_reads_the_daemon_stamp_before_the_router_snapshot`.
+    #[test]
+    fn a_reload_after_the_daemon_read_skews_the_age_and_never_the_counts() {
+        let router_swap = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
+            Config::default(),
+        ))));
+        let (app, _dir) = AppState::for_test(router_swap.clone());
+        let state = StatusState::from_app(&app, None, DaemonMeta::for_test());
+        let pinned_daemon = DaemonMetaSnapshot {
+            listen_addr: "127.0.0.1:9000".to_string(),
+            version: env!("CARGO_PKG_VERSION"),
+            config_loaded_age_ms: Some(60_000),
+        };
+
+        let mut reloaded = Config::default();
+        reloaded
+            .aliases
+            .insert("fresh".to_string(), AliasValue::Single("opus".to_string()));
+        router_swap.store(Arc::new(Router::new(Arc::new(reloaded))));
+        let effective = state
+            .router
+            .view()
+            .effective_view(&CatalogOverlay::default());
+        let panel = build_panel(effective, &ActivationState::default(), None, pinned_daemon);
+
+        assert_eq!(
+            panel.source.alias_count, 1,
+            "the counts must come from the post-reload router, never the pre-reload one"
+        );
+        assert_eq!(
+            panel.source.loaded_age_ms,
+            Some(60_000),
+            "the age must stay the pre-reload (conservative) one, never be refreshed \
+             to sit beside stale counts"
+        );
+    }
+
+    /// Structural guard on `build`'s read ORDER, which IS the mechanism: the
+    /// daemon stamp is snapshotted BEFORE the router view is pinned. Reachable
+    /// reload states are ordered `gen(router) >= gen(stamp)`, so the reverse
+    /// order yields the harmful skew -- a fresh age beside pre-reload counts.
+    /// A refactor back to the intuitive router-first shape lands here.
+    #[test]
+    fn build_reads_the_daemon_stamp_before_the_router_snapshot() {
+        let src = include_str!("config.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a split yields at least one segment");
+
+        let stamp_read = production
+            .find("daemon_meta.snapshot(")
+            .expect("`build` snapshots the daemon meta");
+        let router_read = production
+            .find("router.view()")
+            .expect("`build` pins the router view");
+
+        assert!(
+            stamp_read < router_read,
+            "the daemon stamp must be read before the router view, or the source \
+             strip reports a fresh load age beside pre-reload counts"
+        );
     }
 
     #[tokio::test]
