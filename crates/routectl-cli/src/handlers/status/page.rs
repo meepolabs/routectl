@@ -650,6 +650,91 @@ mod tests {
         out
     }
 
+    /// Drift guard on the QUERY retry contract: which codes back off, and the
+    /// ladder they back off on.
+    ///
+    /// The code set is checked against the server's OWN `vocabulary::codes`
+    /// consts rather than a second hardcoded list of spellings, so this test
+    /// cannot rot into agreeing with itself: renaming or dropping a code in
+    /// `types.rs` moves the server's value and fails here instead of leaving
+    /// the dashboard silently no longer backing off on that failure.
+    ///
+    /// The ladder is pinned by its SEMANTIC properties only -- non-empty,
+    /// positive, strictly increasing -- because the cadence is a tuning
+    /// decision but "a failing source waits longer each time" is the contract.
+    /// QUERY and GET keep separate indexes over this one shared array, so a
+    /// non-monotonic or empty ladder would break both schedules at once.
+    #[test]
+    fn dashboard_query_retry_codes_and_backoff_ladder_match_the_server() {
+        use crate::handlers::status::types::vocabulary::codes;
+
+        let server_codes: std::collections::BTreeSet<&str> = [
+            codes::NO_DATA,
+            codes::SCHEMA_MISMATCH,
+            codes::DB_BUSY,
+            codes::DB_UNAVAILABLE,
+            codes::CONFIG_UNAVAILABLE,
+            codes::DOCTOR_UNAVAILABLE,
+            codes::NO_CONFIG_PATH,
+            codes::QUERY_TIMEOUT,
+        ]
+        .into_iter()
+        .collect();
+
+        let body = literal_body("QUERY_RETRY_CODES", '{', '}');
+        let retry_codes: Vec<String> = body
+            .split(',')
+            .filter_map(|entry| entry.split_once(':'))
+            .map(|(key, _)| {
+                key.trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string()
+            })
+            .filter(|key| !key.is_empty())
+            .collect();
+        assert!(
+            !retry_codes.is_empty(),
+            "QUERY_RETRY_CODES must name at least one code, or no 200-carried \
+             failure ever engages QUERY backoff"
+        );
+        for code in &retry_codes {
+            assert!(
+                server_codes.contains(code.as_str()),
+                "dashboard QUERY retry code `{code}` is not a server unavailable code; a code \
+                 was renamed or removed in types.rs and the dashboard will now silently stop \
+                 backing off on that failure"
+            );
+        }
+
+        let ladder: Vec<u64> = literal_body("BACKOFF_STEPS_MS", '[', ']')
+            .split(',')
+            .map(str::trim)
+            .filter(|step| !step.is_empty())
+            .map(|step| {
+                step.parse()
+                    .unwrap_or_else(|_| panic!("BACKOFF_STEPS_MS entry `{step}` is a u64 ms delay"))
+            })
+            .collect();
+        assert!(
+            !ladder.is_empty(),
+            "BACKOFF_STEPS_MS must have at least one step, or a failing source retries \
+             at the healthy cadence forever"
+        );
+        for pair in ladder.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "BACKOFF_STEPS_MS must increase strictly ({} then {}); a flat or falling \
+                 step means a failing source stops backing off",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(
+            ladder[0] > 0,
+            "BACKOFF_STEPS_MS steps must be positive delays"
+        );
+    }
+
     /// Self-containment guard on the ASSEMBLED page (what the handler serves,
     /// not the three authoring sources). The single-file, renders-offline
     /// constraint is what the compile-time assembly must preserve: no
