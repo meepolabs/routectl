@@ -961,10 +961,7 @@ base_url = "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#s
     #[test]
     fn build_reads_the_daemon_stamp_before_the_router_snapshot() {
         let src = include_str!("config.rs");
-        let production = src
-            .split("#[cfg(test)]")
-            .next()
-            .expect("a split yields at least one segment");
+        let production = crate::handlers::status::production_source::production_source(src);
 
         let stamp_read = production
             .find("daemon_meta.snapshot(")

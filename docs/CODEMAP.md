@@ -1126,7 +1126,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Chain verbatim -- the order IS the sequence dispatch walks) and
   `provider_ids` lists the `[providers.X]` keys, so a read surface counts
   aliases/providers off the same view it renders. Consumed by `config show
-  --effective` (cli) and the `/status/config` panel
+  --effective` (cli) and the `/status/config` panel. Also home to
+  `endpoint_origin`, the crate's ONE `base_url` -> origin
+  (`scheme://host:port`) reduction and the credential boundary for that field
+  (userinfo/path/query/fragment dropped, unparseable or ambiguous-`@` input
+  fail-safe to `None`); a second consumer is `ProviderEntry::redact_secrets`
+  via `redact_base_url`, so its `None` must never be softened into a
+  raw-string fallback
 - `src/schema_gen.rs` -- `render_schema_json() -> String`: the single source
   of the committed `routectl.schema.json` at the repo root, rendered from
   `schemars::schema_for!(Config)` as pretty JSON with a trailing newline
@@ -2762,6 +2768,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per request task through the `BUILDER_PROBE` task-local so a probe test never
   parks another test's builder. Compiles to a zero-sized token + empty hooks
   outside `cfg(test)`
+- `src/handlers/status/production_source.rs` -- test-only `production_source`,
+  the shared cut used by every `/status` guard that `include_str!`s its own
+  module and scans the PRODUCTION region for a forbidden call. Keys on the
+  `mod tests {` opener rather than the first `#[cfg(test)]` (that attribute also
+  decorates test-only items ABOVE the real module, so the old needle silently
+  shrank a guard's scanned region while it stayed green) and ASSERTS the opener
+  is unique, so a second test module forces the author to revisit the guard
+  instead of halving its reach. Used by the `doctor.rs`, `config.rs`, and
+  `mod.rs` panel guards; `config_effective.rs` in routectl-router carries the
+  same logic inline (crossing the crate boundary for four lines would mean a
+  public-API change plus a baseline regeneration). Its `#[should_panic]` test is
+  the durable proof the ambiguity check fires
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>
@@ -3352,7 +3370,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   unchanged (a display aid only, never a taxonomy change). `EXAMPLE_CONFIG`
   is the ONE `include_str!` of `examples/config.toml`, named by `config
   example` and by `init --scaffold`'s `STARTER_CONFIG`; an ungated test
-  gate-loads it so no build can emit an example it cannot itself parse
+  gate-loads it so no build can emit an example it cannot itself parse.
+  `show` renders through `render_show` (a testable seam over the stdout
+  `println!`), which runs `ProviderEntry::redact_secrets` -- sentinelling
+  literal key refs AND reducing each `base_url` to its origin -- and prefixes
+  one `#` TOML comment declaring the dump NOT round-trippable, since operators
+  paste this output into bug reports. There is deliberately no
+  `--raw`/`--no-redact` escape hatch
 - `src/commands/config_edit.rs` -- `routectl config set/unset`: the write
   pipeline through the shared gate. Order: RAW version preflight FIRST
   (refuses `version < CURRENT_CONFIG_VERSION` byte-identically BEFORE any
