@@ -1507,6 +1507,76 @@ kind = "anthropic-api"
         assert!(msg.contains("no-key"), "msg: {msg}");
         assert!(msg.contains("own"), "msg: {msg}");
     }
+
+    /// Pin: a rejected forwarded `base_url` carrying embedded userinfo must not
+    /// echo the credential, the host, the path, or the full URL. Mirrors
+    /// `base_url_validation_tests::cleartext_rejection_does_not_echo_userinfo_or_host`,
+    /// which pins the same property for the sibling scheme validator.
+    ///
+    /// Asserts BOTH directions: nothing operator-supplied survives, AND the
+    /// diagnostic still names the provider and the required host -- so the test
+    /// cannot pass by the message degrading into something useless.
+    #[test]
+    fn forwarded_host_rejection_does_not_echo_userinfo_or_base_url() {
+        let toml_text = r#"
+[providers.sneaky]
+kind = "anthropic-api"
+base_url = "https://user:sk-live-LEAKED@internal.example/v1?token=sk-query-LEAKED"
+credential_source = "forwarded"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_credential_sources(&cfg).unwrap_err();
+        let msg = err.to_string();
+
+        for secret in [
+            "sk-live-LEAKED",
+            "sk-query-LEAKED",
+            "internal.example",
+            "/v1",
+            "user:",
+            "https://user",
+        ] {
+            assert!(
+                !msg.contains(secret),
+                "operator-supplied `{secret}` must not surface; got: {msg}"
+            );
+        }
+
+        assert!(
+            msg.contains("sneaky"),
+            "the diagnostic must still name the provider; got: {msg}"
+        );
+        assert!(
+            msg.contains("api.anthropic.com"),
+            "the diagnostic must still name the required host; got: {msg}"
+        );
+        assert!(
+            msg.contains("withheld"),
+            "the diagnostic must say the configured value is withheld; got: {msg}"
+        );
+    }
+
+    /// Structural tripwire over the WHOLE of `validate.rs`: no `Error::Config`
+    /// message may interpolate the operator-supplied `base_url`. That value can
+    /// carry a credential in userinfo, a path, or a query, and every validator
+    /// error string reaches `/status/doctor` as a serialized `Finding.detail`.
+    ///
+    /// This pins all 43 `Error::Config(format!(..))` sites at once rather than
+    /// only the forwarded-host one, and needs no production/test slicing because
+    /// `validate.rs` keeps its tests in this sibling `#[path]` file.
+    ///
+    /// The needle is assembled from fragments so this test's own source line
+    /// cannot satisfy the scan it performs.
+    #[test]
+    fn no_validator_message_interpolates_the_raw_base_url() {
+        let src = include_str!("validate.rs");
+        assert!(
+            !src.contains(concat!("{", "base_url")),
+            "a validator message interpolates the raw base_url; that string may carry a \
+             credential and every validator error reaches /status/doctor as Finding.detail. \
+             Name the provider and the violated invariant instead, and withhold the value"
+        );
+    }
 }
 
 #[cfg(test)]
