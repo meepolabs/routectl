@@ -119,8 +119,8 @@ pub struct ElisionMark {
     /// Estimated tokens of the ORIGINAL payload (before placeholder).
     pub original_tokens: u64,
     /// Custom placeholder text for this mark, or `None` to use the fixed
-    /// `ELISION_PLACEHOLDER`. M1 always sets `None`; a later increment
-    /// (path-bearing placeholders) starts emitting `Some(...)` without a
+    /// `ELISION_PLACEHOLDER`. The near-lossless pass always sets `None`;
+    /// path-bearing placeholders start emitting `Some(...)` without a
     /// field-add or a retrofit of every mark consumer.
     pub replacement: Option<String>,
 }
@@ -314,9 +314,9 @@ pub fn trimmed_prefix_fingerprint(req: &ChatRequest, plan: &SteadyStateTrimPlan)
 }
 
 /// Replace a tool payload with a placeholder string in place. Emits
-/// `replacement` when `Some` (M3's path-bearing placeholders); falls back to
-/// the fixed [`ELISION_PLACEHOLDER`] when `None` (M1's only case). Leaves
-/// non-tool parts untouched.
+/// `replacement` when `Some` (a custom path-bearing placeholder); falls back
+/// to the fixed [`ELISION_PLACEHOLDER`] when `None` (the plain-placeholder
+/// case). Leaves non-tool parts untouched.
 fn substitute_placeholder(part: &mut ContentPart, replacement: Option<&str>) {
     let ContentPart::Known(known) = part else {
         return;
@@ -398,8 +398,8 @@ const PATH_KEYS: [&str; 2] = ["file_path", "path"];
 pub struct NearLosslessMarks {
     /// Raw elision marks in transcript order (sorted by `(message_index,
     /// part_index)`), OVERLAP-DEDUPED: each marked unit appears exactly once
-    /// and is attributed to exactly one heuristic. M1 marks always carry
-    /// `replacement: None` (the plain placeholder).
+    /// and is attributed to exactly one heuristic. Near-lossless marks always
+    /// carry `replacement: None` (the plain placeholder).
     pub marks: Vec<ElisionMark>,
     /// Freed tokens attributed to the DEDUP heuristic (sum of the original
     /// payload tokens of every dedup-marked unit).
@@ -714,7 +714,7 @@ fn emit_sorted_marks(units: &[ScanUnit], kinds: &[MarkKind]) -> (Vec<ElisionMark
     (marks, dedup_tokens, supersession_tokens)
 }
 
-/// Build an M1 [`ElisionMark`] (plain placeholder, `replacement: None`) from a
+/// Build a plain-placeholder [`ElisionMark`] (`replacement: None`) from a
 /// scanned unit.
 const fn near_lossless_mark(unit: &ScanUnit<'_>) -> ElisionMark {
     ElisionMark {
@@ -731,8 +731,9 @@ const fn near_lossless_mark(unit: &ScanUnit<'_>) -> ElisionMark {
 /// [`crate::cost_gate::evaluate`] / [`crate::cost_gate::break_even_k`].
 ///
 /// `d` = summed original payload tokens minus the placeholder tokens that
-/// replace each mark (M1 marks are `None` -> the fixed placeholder). `c_after`
-/// = the cached-token footprint from the FIRST marked message to the end of
+/// replace each mark (plain-placeholder marks are `None` -> the fixed
+/// placeholder). `c_after` = the cached-token footprint from the FIRST marked
+/// message to the end of
 /// the request (the one-time re-write suffix). `c` = the whole-request token
 /// estimate. Returns `None` when there is nothing to price (no marks).
 #[must_use]
@@ -742,8 +743,9 @@ pub fn near_lossless_candidate(
 ) -> Option<PrefixReductionCandidate> {
     let elided_tokens: u64 = marks.iter().map(|m| m.original_tokens).sum();
     let placeholder_tokens = estimate_str_tokens(ELISION_PLACEHOLDER);
-    // M1 marks carry `replacement: None`, so every mark is replaced by the
-    // fixed placeholder -- mirrors `propose_steady_state_trim`'s d-math.
+    // Near-lossless marks carry `replacement: None`, so every mark is
+    // replaced by the fixed placeholder -- mirrors
+    // `propose_steady_state_trim`'s d-math.
     let replaced = placeholder_tokens.saturating_mul(marks.len() as u64);
     let d = elided_tokens.saturating_sub(replaced);
 
@@ -1219,7 +1221,7 @@ mod tests {
     #[test]
     fn apply_trim_plan_substitutes_custom_replacement() {
         // Arrange: a real plan, with its first mark's replacement overridden
-        // to a custom string (the M3 path-bearing-placeholder shape).
+        // to a custom string (the path-bearing-placeholder shape).
         let req = long_conversation(6, 12_000);
         let params = SteadyStateTrimParams::default();
         let mut plan = propose_steady_state_trim(&req, &params).expect("plan");

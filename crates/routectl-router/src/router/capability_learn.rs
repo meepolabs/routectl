@@ -95,7 +95,7 @@ pub struct CapabilityLearnEvent {
     /// ride-along only -- no `capability_learn_events` column.
     pub phase: FailurePhase,
     /// Whether the evidence came from live traffic or an out-of-band probe.
-    /// Fixed to `Live` in this milestone.
+    /// Fixed to `Live` today.
     pub source: EvidenceSource,
 }
 

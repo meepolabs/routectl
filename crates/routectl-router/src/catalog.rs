@@ -354,9 +354,9 @@ pub(crate) fn cell_value_defects(
 }
 
 /// Field-level operator override for one `(provider_kind, model_glob)`
-/// cell, deserialized from a LEGACY `[cache_pricing]` TOML entry (retired
-/// in a later increment). Every
-/// field is optional; an omitted field inherits the baked-in value (see
+/// cell, deserialized from a LEGACY `[cache_pricing]` TOML entry (since
+/// retired). Every field is optional; an omitted field inherits the
+/// baked-in value (see
 /// [`CatalogRow::with_overrides`]).
 ///
 /// `Eq` is deliberately NOT derived: the multipliers are `f32`.

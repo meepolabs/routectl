@@ -230,7 +230,7 @@
     },
     "CachePricingOverride": {
       "additionalProperties": false,
-      "description": "Field-level operator override for one `(provider_kind, model_glob)`\ncell, deserialized from a LEGACY `[cache_pricing]` TOML entry (retired\nin a later increment). Every\nfield is optional; an omitted field inherits the baked-in value (see\n[`CatalogRow::with_overrides`]).\n\n`Eq` is deliberately NOT derived: the multipliers are `f32`.\n`#[serde(deny_unknown_fields)]` rejects typos at config-load time.",
+      "description": "Field-level operator override for one `(provider_kind, model_glob)`\ncell, deserialized from a LEGACY `[cache_pricing]` TOML entry (since\nretired). Every field is optional; an omitted field inherits the\nbaked-in value (see\n[`CatalogRow::with_overrides`]).\n\n`Eq` is deliberately NOT derived: the multipliers are `f32`.\n`#[serde(deny_unknown_fields)]` rejects typos at config-load time.",
       "properties": {
         "auto_cacher": {
           "description": "Auto-cacher override. `None` inherits the baked value.",

@@ -148,7 +148,7 @@ pub struct EconomicsProjection {
     /// no longer implies vendor-doc verification -- that per-row
     /// distinction was replaced by the merge's `source` provenance
     /// (`Baked` / `Import` / `User`), which this offline projection does
-    /// not yet render (deferred to a later increment).
+    /// not yet render.
     pub priced: bool,
     /// Break-even reuse count K*: the minimum future prefix reuses at which
     /// breaking the cache turns net-positive. `None` when `d == 0` or the row

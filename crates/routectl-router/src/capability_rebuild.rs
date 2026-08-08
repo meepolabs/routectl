@@ -64,7 +64,7 @@ impl ReplayTombstone {
 /// skips the row rather than crashing the boot (open-set tolerance at the
 /// rebuild boundary).
 ///
-/// `#[non_exhaustive]` so a later increment can carry an additional column
+/// `#[non_exhaustive]` so an additional column can be carried later
 /// without a breaking change; the cross-crate reader builds rows through
 /// [`CapabilityEventRow::new`].
 #[non_exhaustive]

@@ -95,8 +95,8 @@ fn ingress_anthropic_render_stop_reason_pause_turn() {
 // (the JSON fence) hit by a non-Anthropic backend (deepseek-v4-pro
 // via openai-compat) rendered with `stop_reason:"end_turn"`, which
 // the CLI couldn't reconcile and synthesized a `<synthetic>` wrap-up
-// message flagged `is_error: true`. Real $-impact failure
-// (2026-05-19 reviewer flow).
+// message flagged `is_error: true`. This was an observed real-cost
+// failure, not a hypothetical.
 
 #[test]
 fn ingress_anthropic_render_matched_stop_sequence() {

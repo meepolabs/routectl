@@ -108,9 +108,9 @@ struct QueryRequest {
     bucket: Option<QueryBucket>,
 }
 
-/// The closed `window` vocabulary. Bucketed / time-series shapes are reserved
-/// for a later increment and are deliberately absent here rather than accepted
-/// and ignored.
+/// The closed `window` vocabulary. Time-series granularity is NOT expressed
+/// here -- it is carried by the separate `bucket` field ([`QueryBucket`]),
+/// so a window token is only ever a range.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum QueryWindow {
@@ -121,7 +121,7 @@ enum QueryWindow {
 }
 
 /// The closed `group_by` vocabulary. `seat`, `upstream`, `outcome`, and `class`
-/// are reserved for later increments.
+/// are not accepted.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum QueryGroupBy {

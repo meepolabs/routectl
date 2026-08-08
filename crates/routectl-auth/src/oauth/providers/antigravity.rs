@@ -746,7 +746,7 @@ mod tests {
         reqwest::Response::from(http_resp)
     }
 
-    // NOTE(T2-1): `read_capped_body` is byte-identical across all four
+    // NOTE: `read_capped_body` is byte-identical across all four
     // OAuth providers (anthropic/codex/xai/antigravity). These two arms
     // are pinned here on the antigravity copy as the representative; the
     // other three copies are the same source.

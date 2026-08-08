@@ -6,7 +6,7 @@
 //! on the ordinary path.
 //!
 //! Each test drives a REAL `complete` dispatch through a mock provider that
-//! answers the m3 replay-rejection fixture on the carried variant and
+//! answers the replay-rejection fixture on the carried variant and
 //! succeeds on the stripped one, counting calls so the additive
 //! (never multiplicative, never nested) call bound is asserted directly.
 
@@ -26,17 +26,17 @@ use serde_json::json;
 use crate::config::{AliasValue, Config};
 use crate::resolved::ResolvedModel;
 
-/// The pinned m3 replay-rejection body, byte-exact. The replay-fixture
+/// The pinned replay-rejection body, byte-exact. The replay-fixture
 /// corpus is gitignored and never ships, so this is an inline constant; it
 /// carries no secret.
-const M3_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
+const REPLAY_REJECT_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
 
 /// A generic 400 that is NOT a replay rejection: its tokens match no proven
 /// signature, so the classifier keeps it a plain bad request.
 const GENERIC_400_BODY: &str =
     r#"{"error":{"type":"invalid_request_error","message":"malformed request"}}"#;
 
-/// A mock openai-responses backend whose lane is mantle. It answers the m3
+/// A mock openai-responses backend whose lane is mantle. It answers the
 /// replay rejection on any request that still carries a reasoning artifact
 /// and succeeds once the artifacts are stripped, so a repair round trip is
 /// exactly two counted provider calls. `always_reject` keeps rejecting even
@@ -113,7 +113,7 @@ impl Provider for ReplayMockProvider {
             .iter()
             .any(|message| !message.reasoning_details.is_empty());
         if self.always_reject || carries_artifact {
-            return Err(Error::upstream("replay-mock", 400, M3_BODY));
+            return Err(Error::upstream("replay-mock", 400, REPLAY_REJECT_BODY));
         }
         Ok(success_response())
     }

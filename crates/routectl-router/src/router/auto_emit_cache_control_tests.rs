@@ -1,4 +1,4 @@
-//! T5 dispatch-path auto-emission of a top-level `cache_control`
+//! Dispatch-path auto-emission of a top-level `cache_control`
 //! ephemeral_5m breakpoint. Tests assert on the captured per-attempt
 //! request (the bytes the egress would see), and the original request
 //! is never mutated.

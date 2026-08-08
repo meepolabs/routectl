@@ -701,17 +701,18 @@ pub struct DispatchMeta {
     /// when the near-lossless pass did not run (below trigger). Recording
     /// only.
     pub would_trim_path_extractable: Option<u64>,
-    /// Recorder-version marker: `None` on pre-M1 rows and on rows where the
-    /// near-lossless pass did not run (below the estimated-token trigger);
-    /// stamped with `NEAR_LOSSLESS_RECORDER_VERSION` by the M1 recorder
+    /// Recorder-version marker: `None` on rows written before the recorder
+    /// existed and on rows where the near-lossless pass did not run (below
+    /// the estimated-token trigger); stamped with
+    /// `NEAR_LOSSLESS_RECORDER_VERSION` by the near-lossless recorder
     /// (`Router::record_would_trim`) on every trigger-clearing row,
     /// regardless of whether the pass found any marks. Lets reporting
-    /// filter to non-NULL rows so aggregates never mix baseline vs M1
-    /// semantics.
+    /// filter to non-NULL rows so aggregates never mix unstamped baseline
+    /// against recorded semantics.
     pub would_trim_recorder_version: Option<i64>,
     /// Raw-marks JSON blob (uncapped at this layer): the near-lossless
-    /// pass's marks (dedup + supersession), captured for a future M3 sweep.
-    /// The byte cap is applied downstream by
+    /// pass's marks (dedup + supersession), captured for a future
+    /// path-extraction sweep. The byte cap is applied downstream by
     /// `routectl_usage::writer::capped_raw_marks_text` so the stored JSON
     /// is always valid. `None` when the near-lossless pass did not run
     /// (below trigger). Recording only.

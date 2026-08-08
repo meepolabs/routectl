@@ -59,7 +59,7 @@ pub struct CapabilityObserveEvent {
     /// Confidence tier of the observation.
     pub signal_tier: SignalTier,
     /// Whether the evidence came from live traffic or an out-of-band probe.
-    /// Fixed to `Live` in this milestone.
+    /// Fixed to `Live` today.
     pub source: EvidenceSource,
     /// The request's derived feature set at observation time. Replay
     /// verifies the observed capability was actually in flight.

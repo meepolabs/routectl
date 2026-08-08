@@ -157,17 +157,18 @@ CREATE TABLE IF NOT EXISTS requests (
     -- (plain columns, not a bitmask). `would_trim_path_units` /
     -- `would_trim_path_extractable` are a count-pair (NOT a pre-averaged
     -- rate) so the extractability rate is reconstructable offline via
-    -- SUM/SUM. `would_trim_recorder_version` is NULL on pre-M1 rows and
-    -- stamped by the M1 recorder, so reporting can filter to non-NULL rows
-    -- and never mix baseline vs M1 semantics in an aggregate.
+    -- SUM/SUM. `would_trim_recorder_version` is NULL on rows written before
+    -- the recorder existed and stamped by the near-lossless recorder, so
+    -- reporting can filter to non-NULL rows and never mix unstamped baseline
+    -- against recorded semantics in an aggregate.
     -- `would_trim_raw_marks` is a capped JSON blob (see
     -- `writer::capped_raw_marks_text`) capturing per-mark ordering for the
-    -- future M3 sweep. `would_trim_context_fraction` is NULL when the
-    -- pricing row's context window is unknown. Appended last so these
-    -- columns land in the same ordinal position whether the DB was created
-    -- fresh at v8 or migrated from v7 via `ALTER TABLE ... ADD COLUMN`
-    -- (which always appends). The live request is NEVER mutated -- this is
-    -- recording only.
+    -- future path-extraction sweep. `would_trim_context_fraction` is NULL
+    -- when the pricing row's context window is unknown. Appended last so
+    -- these columns land in the same ordinal position whether the DB was
+    -- created fresh at v8 or migrated from v7 via `ALTER TABLE ... ADD
+    -- COLUMN` (which always appends). The live request is NEVER mutated --
+    -- this is recording only.
     would_trim_dedup_tokens INTEGER,
     would_trim_supersession_tokens INTEGER,
     would_trim_path_units INTEGER,

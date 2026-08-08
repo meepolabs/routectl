@@ -39,7 +39,7 @@ use crate::catalog::CatalogRow;
 /// A proposed prefix reduction handed to the gate. Immutable; the gate never
 /// mutates it. Token counts are in prefix tokens.
 ///
-/// `#[non_exhaustive]`: later phases add edit-position / breakpoint detail,
+/// `#[non_exhaustive]`: edit-position / breakpoint detail may be added,
 /// so external crates construct this only through its public constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -63,7 +63,7 @@ impl PrefixReductionCandidate {
 
 /// Why the gate chose KEEP.
 ///
-/// `#[non_exhaustive]`: later phases add reasons (anti-pattern suppression,
+/// `#[non_exhaustive]`: more reasons may be added (anti-pattern suppression,
 /// quality floor), so callers must include a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -88,8 +88,9 @@ pub enum KeepReason {
 /// The gate's verdict over one candidate.
 ///
 /// `#[non_exhaustive]`: more verdicts may be added, so callers must include a
-/// wildcard arm. [`GateDecision::FreeBreak`] is reserved for a later phase
-/// (eviction-guard / incidental re-warm); [`evaluate`] never returns this today.
+/// wildcard arm. [`GateDecision::FreeBreak`] covers the eviction-guard /
+/// incidental-re-warm cases; [`evaluate`] never returns it, but consumers
+/// match and render it.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum GateDecision {
@@ -103,9 +104,10 @@ pub enum GateDecision {
         /// Tokens saved by breaking.
         delta_tokens: u64,
     },
-    /// RESERVED for a later phase: a break that is free by construction
-    /// (prefix already evicted, or an incidental re-warm that was happening
-    /// anyway). Never returned today; reserved for a later eviction-guard increment.
+    /// A break that is free by construction (prefix already evicted, or an
+    /// incidental re-warm that was happening anyway). Never returned by
+    /// [`evaluate`]; it exists for the eviction-guard path and is matched
+    /// and rendered by consumers.
     FreeBreak {
         /// Tokens saved by breaking.
         delta_tokens: u64,

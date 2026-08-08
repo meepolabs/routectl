@@ -37,9 +37,10 @@ impl AutoCacheRequestPlan {
 }
 
 /// Outcome of an auto-cache injection decision for one dispatch target.
-/// Drives control flow today (and is the stable per-target signal T6 will
-/// log). Every non-`Emitted` variant means `attempt_req` was left
-/// untouched -- the dispatched bytes equal the un-injected clone.
+/// Drives control flow today (and is the stable per-target signal the
+/// cache-decision log carries). Every non-`Emitted` variant means
+/// `attempt_req` was left untouched -- the dispatched bytes equal the
+/// un-injected clone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CacheInjection {
     /// A top-level ephemeral_5m breakpoint was injected and validated.

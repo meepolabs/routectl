@@ -18,7 +18,7 @@ use super::store::{KSessionKey, KSessionStore, KSessionWindow, Sample};
 
 /// One ledger row the rebuild consumes, in router-side terms.
 ///
-/// `#[non_exhaustive]` so a later increment can carry an additional column
+/// `#[non_exhaustive]` so an additional column can be carried later
 /// (e.g. the served cache TTL) without a breaking change. The reader maps
 /// usage-local column types into these fields; the rebuild derives the
 /// boolean reuse observation from `cache_read` here, not at the reader.

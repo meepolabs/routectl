@@ -98,7 +98,7 @@ impl ActivationStatus {
 /// One provider's activation record.
 ///
 /// `#[non_exhaustive]`: model-granularity fields are expected to be added
-/// additively by a later milestone.
+/// additively later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ActivationEntry {

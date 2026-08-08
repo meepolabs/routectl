@@ -398,7 +398,7 @@ impl Router {
                     .and_then(crate::config::ProviderEntry::auto_emit_top_level_breakpoint)
                     .unwrap_or(true),
             );
-            // T6 observability: stamp the per-request decision token so the
+            // Cache observability: stamp the per-request decision token so the
             // outcome log can see what was decided (the usage DB's
             // `strategy` column is write-stopped), and
             // emit the per-request decision at debug. No bodies / secrets:
@@ -1148,7 +1148,7 @@ impl Router {
                     .and_then(crate::config::ProviderEntry::auto_emit_top_level_breakpoint)
                     .unwrap_or(true),
             );
-            // T6 observability: see `complete_inner`. Stamp the decision
+            // Cache observability: see `complete_inner`. Stamp the decision
             // token and emit the per-request decision at debug. No bodies /
             // secrets: only provider name, model id, strategy token.
             let strategy_token = cache_injection.strategy_str();
@@ -1903,8 +1903,8 @@ impl Router {
 /// Recorder-version marker stamped onto `meta.would_trim_recorder_version`
 /// whenever the near-lossless pass runs (the estimated-token trigger
 /// cleared), regardless of whether it found any marks. Lets offline
-/// reporting filter M1-era rows from pre-M1 rows without confounding
-/// semantics across a deploy boundary.
+/// reporting filter version-stamped rows from rows written before the
+/// recorder existed, without confounding semantics across a deploy boundary.
 pub(super) const NEAR_LOSSLESS_RECORDER_VERSION: i64 = 1;
 
 /// NON-MUTATING near-lossless attribution pass. Measures the dedup +
@@ -1924,8 +1924,7 @@ pub(super) const NEAR_LOSSLESS_RECORDER_VERSION: i64 = 1;
 /// present-row-only, mirroring the `would_trim_break_even_k` convention --
 /// but only LOGS the result via `tracing::debug!`. There is no persisted
 /// column for it: unlike the shipped size-baseline plan, the near-lossless
-/// candidate has no DispatchMeta / UsageRecord economics field in this
-/// increment.
+/// candidate has no DispatchMeta / UsageRecord economics field.
 ///
 /// Single O(parts) walk: `collect_near_lossless_marks` performs one forward
 /// scan over the request's content parts; this function makes no second
@@ -2257,8 +2256,8 @@ fn is_content_bearing(chunk: &ChatChunk) -> bool {
 /// upstream error which is fallbackable per `should_fallback`.
 ///
 /// Also emits a debug-level first-activity log the moment the upstream
-/// response headers arrive, ahead of the pre-content pull below (M4:
-/// see the `attempt_start` comment inside).
+/// response headers arrive, ahead of the pre-content pull below (see the
+/// `attempt_start` comment inside).
 async fn try_stream_with_first_content(
     provider_name: &str,
     upstream_model: &str,
@@ -2272,7 +2271,7 @@ async fn try_stream_with_first_content(
     // common case (no prior fallback hop on this request) the two are
     // within noise of each other, so `elapsed_ms` here is directly
     // comparable to the ledger's `ttfb_ms` to derive the first-activity
-    // -> first-content gap (M4). A request that fell back through one
+    // -> first-content gap. A request that fell back through one
     // or more dead chain entries first will show extra unaccounted time
     // on the ttfb side that this attempt's clock does not carry -- that
     // is chain-walk overhead, a separate concern from the prefill gap
@@ -2291,8 +2290,8 @@ async fn try_stream_with_first_content(
         // Bedrock, gemini, openai-compat, openai-responses) since they
         // all share this `stream()` -> execute -> byte-stream shape.
         // Debug-only; no bodies/prompts/PII, structured fields only.
-        // Manual capture recipe: docs/LOGGING.md, "First-activity mark
-        // (M4)" -- run with ROUTECTL_LOG=routectl_router=debug and issue
+        // Manual capture recipe: docs/LOGGING.md, "Stream first-activity
+        // mark" -- run with ROUTECTL_LOG=routectl_router=debug and issue
         // a streaming request; this line's `elapsed_ms` is the gap
         // between upstream headers and the existing first-content
         // ttfb_ms mark.

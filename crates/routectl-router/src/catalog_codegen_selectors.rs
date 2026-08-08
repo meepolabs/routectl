@@ -282,8 +282,8 @@ pub const OPENAI_COMPAT_SELECTORS: &[AutoCacherSelector] = &[
         auto_cacher: true,
         economics_unconfirmed: false,
         context_ambiguous: false,
-        // Pinned to the M3 generation, which prices identically in both
-        // snapshots; the `minimax-*` catch-all below spans a 2x range.
+        // Pinned to the MiniMax-M3 generation, which prices identically in
+        // both snapshots; the `minimax-*` catch-all below spans a 2x range.
         price_ambiguous: false,
     },
     AutoCacherSelector {

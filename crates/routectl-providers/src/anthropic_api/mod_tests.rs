@@ -1986,7 +1986,7 @@ fn cloak_body_non_anthropic_host_leaves_body_untouched() {
     );
 }
 
-// -- cloak mode (T6) ---------------------------------------------------
+// -- cloak mode -------------------------------------------------------
 
 /// Build an OauthBearer + api.anthropic.com provider with an explicit
 /// `CloakConfig` and a stable session id, for the mode tests.
@@ -2124,7 +2124,7 @@ fn cloak_mode_always_stamps_identity_even_with_session_header() {
 /// WITH a session-id capture is treated as genuine CC (no identity stamp,
 /// no metadata), billing still stripped.
 #[test]
-fn cloak_mode_auto_matches_increment1_for_genuine_cc() {
+fn cloak_mode_auto_matches_baseline_for_genuine_cc() {
     let provider = oauth_provider_with_cloak(CloakConfig::default());
     let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
     let mut body = cloak_test_body();
