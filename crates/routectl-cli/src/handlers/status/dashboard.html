@@ -1,16 +1,17 @@
 <!DOCTYPE html>
 <!--
   routectl status dashboard: the MARKUP source of a single self-contained,
-  read-only document. page.rs inlines dashboard.css and dashboard.js into
-  the two asset slots below at COMPILE time, so the served artifact is one
-  offline HTML file with zero external network dependencies. This file is
-  never served on its own; do not add a <link> or <script src> here.
+  read-only document. page.rs inlines the `dash_*.css` style sources and the
+  `dash_*.js` script sources into the two asset slots below at COMPILE time,
+  so the served artifact is one offline HTML file with zero external network
+  dependencies. This file is never served on its own; do not add a <link>
+  or <script src> here.
 
   Co-versioning contract: this page ships in the SAME binary as the
   /status endpoints it polls, so the wire shapes it is built against
   cannot skew from what the server emits -- there is no client/server
   version negotiation, and the per-source schema_version check in
-  dashboard.js is recovery containment for a cached page or a bad build,
+  dash_40_render.js is recovery containment for a cached page or a bad build,
   not negotiation. If this document is ever served SEPARATELY from those
   endpoints (a CDN, a split asset bundle), the co-versioning guarantee
   breaks and real version negotiation must be added before that split
@@ -85,7 +86,7 @@
   <!--
     One pane per tab, each a shell of a freshness line plus a body the tab's
     `buildX` fills. The pane markup is IDENTICAL across tabs on purpose: the
-    tab's whole rendering lives in dashboard.js.
+    tab's whole rendering lives in its dash_6x/dash_7x tab source.
   -->
   <main>
     <section class="pane" id="pane-overview" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">

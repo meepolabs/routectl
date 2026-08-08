@@ -1,6 +1,10 @@
 
   // ---- chrome: age ticker ----------------------------------------------
 
+  // NO automated runtime harness covers this part. The chrome and animation
+  // surface is verified BY HAND only -- see dashboard-manual-checklist.md
+  // beside this source, and run it before shipping a change here.
+
   // Repaint the poll indicator every second so the as_of age it reports
   // advances between rounds instead of looking frozen at the last one's value.
   function startAgeTicker() {

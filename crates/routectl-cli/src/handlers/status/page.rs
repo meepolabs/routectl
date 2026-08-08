@@ -270,7 +270,8 @@ mod tests {
         out
     }
 
-    /// Strip CSS comments, so prose in `dashboard.css` cannot read as a rule.
+    /// Strip CSS comments, so prose in the `dash_*.css` sources cannot read
+    /// as a rule.
     fn strip_css_comments(src: &str) -> String {
         let mut out = String::with_capacity(src.len());
         let mut rest = src;
@@ -598,8 +599,8 @@ mod tests {
         }
 
         // Every declared request shape must parse as a valid query body. The
-        // shapes are written as strict JSON in dashboard.js precisely so they
-        // can be fed to the server's parser verbatim.
+        // shapes are written as strict JSON in the dashboard script sources
+        // precisely so they can be fed to the server's parser verbatim.
         let now = chrono::Local::now();
         let shapes = json_object_literals(&literal_body("QUERY_SHAPES", '[', ']'));
         assert!(
@@ -761,6 +762,29 @@ mod tests {
         assert!(
             ladder[0] > 0,
             "BACKOFF_STEPS_MS steps must be positive delays"
+        );
+    }
+
+    /// The client JS has no runtime harness, so the manual checklist beside
+    /// these sources IS the coverage for the transport, render, and DOM
+    /// surfaces. This pins the pointer to it: the checklist file must exist,
+    /// and the concatenated script must still name it. A part rewritten
+    /// without carrying the pointer forward, or a deleted checklist, fails the
+    /// build rather than quietly leaving the untested surfaces unannounced.
+    #[test]
+    fn dashboard_script_points_at_the_manual_checklist() {
+        const CHECKLIST: &str = include_str!("dashboard-manual-checklist.md");
+        const MARKER: &str = "dashboard-manual-checklist.md";
+
+        assert!(
+            CHECKLIST.contains("generation guard"),
+            "the manual checklist must still name the untested single-flight generation \
+             guard; it is the coverage gap this file exists to record"
+        );
+        assert!(
+            script().contains(MARKER),
+            "the dashboard script must point at `{MARKER}`: the client JS has no runtime \
+             harness, so that checklist is the only record of what is verified by hand"
         );
     }
 

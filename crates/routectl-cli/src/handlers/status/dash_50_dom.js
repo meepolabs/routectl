@@ -1,5 +1,9 @@
   // ---- DOM table helpers (textContent only, never innerHTML) -----------
 
+  // NO automated runtime harness covers this part. The drawing and DOM
+  // surface is verified BY HAND only -- see dashboard-manual-checklist.md
+  // beside this source, and run it before shipping a change here.
+
   // Column descriptors: C = text, N = numeric (right-aligned, mono,
   // tabular), R = row-header identifier column (<th scope="row">),
   // W = wrapping prose column.
