@@ -724,9 +724,8 @@ async fn tool_def_other_cache_control_counts_toward_breakpoint_cap() {
 
 #[tokio::test]
 async fn provider_extras_cannot_override_routectl_managed_keys() {
-    // MEDIUM-1 (arch): provider_extras allow-list. A malicious
-    // request should not be able to stomp on `messages` etc via the
-    // Anthropic-only escape hatch.
+    // provider_extras is an allow-list: a malicious request must not be
+    // able to stomp on `messages` etc via the Anthropic-only escape hatch.
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))

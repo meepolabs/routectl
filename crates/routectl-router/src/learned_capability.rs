@@ -1315,7 +1315,7 @@ mod tests {
         assert_eq!(entry.first_seen, t0);
         assert_eq!(entry.last_seen, t0);
         assert_eq!(entry.expires_at, t0 + DECAY);
-        // The observe path mints an F1/Live negative in the initial implementation.
+        // The observe path mints an F1/Live negative.
         assert_eq!(entry.phase, FailurePhase::F1);
         assert_eq!(entry.source, EvidenceSource::Live);
     }

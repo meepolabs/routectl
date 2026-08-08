@@ -29,15 +29,15 @@ use crate::resolved::ResolvedModel;
 /// Neither may surface in the WARN or in any captured log line.
 const REASONING_BLOB: &str = "SECRET-REASONING-BLOB-DO-NOT-LOG";
 const REASONING_ID: &str = "rs_SECRET_ITEM_ID_DO_NOT_LOG";
-/// A distinctive substring of the pinned m3 replay-rejection body. The
+/// A distinctive substring of the pinned replay-rejection body. The
 /// upstream body must never reach a generic log line once the rejection is
 /// classified and converted to a body-free structured error.
 const BODY_MARKER: &str = "encrypted content missing recognized prefix";
 
-/// The pinned m3 replay-rejection body, byte-exact and secret-free.
-const M3_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
+/// The pinned replay-rejection body, byte-exact and secret-free.
+const REPLAY_REJECT_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
 
-/// A mock openai-responses backend on the mantle lane. It answers the m3
+/// A mock openai-responses backend on the mantle lane. It answers the
 /// replay rejection whenever the request still carries a reasoning artifact
 /// and succeeds once stripped. `always_reject` keeps rejecting even the
 /// stripped variant (the repeat-rejection generic-error path).
@@ -83,7 +83,7 @@ impl Provider for ReplayMockProvider {
             .iter()
             .any(|message| !message.reasoning_details.is_empty());
         if self.always_reject || carries_artifact {
-            return Err(Error::upstream("replay-mock", 400, M3_BODY));
+            return Err(Error::upstream("replay-mock", 400, REPLAY_REJECT_BODY));
         }
         Ok(success_response())
     }
@@ -286,9 +286,10 @@ async fn trace_across_repair_path_leaks_no_blob_id_or_body() {
 
 #[tokio::test]
 async fn classified_replay_rejection_is_body_free_before_generic_logs() {
-    // Arrange: the stripped repair also draws the m3 rejection, so the
+    // Arrange: the stripped repair also draws the replay rejection, so the
     // classified replay rejection reaches the generic error logs. Without
-    // the body-free conversion the m3 body would render into `error = ?e`.
+    // the body-free conversion the replay-rejection body would render into
+    // `error = ?e`.
     let provider = Arc::new(ReplayMockProvider::always_reject());
     let router = router_with(provider.clone());
 

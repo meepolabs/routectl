@@ -359,8 +359,7 @@ pub fn filter_anthropic_betas<'a>(
 /// keys win EXCEPT for routectl-managed top-level keys (see
 /// `is_routectl_managed_key`); those are dropped so a malicious or
 /// careless `provider_extras = {"messages": [...]}` can't replace the
-/// assembled messages array. This was an architecture-review
-/// finding (MEDIUM-1).
+/// assembled messages array.
 ///
 /// Source: this helper only ever sees `req.provider_extras` -- the
 /// Anthropic ingress's forward-compat sweep destination. Drops here

@@ -18,10 +18,10 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The pinned m3 replay-rejection body (byte-exact, carries no secret),
+/// The pinned replay-rejection body (byte-exact, carries no secret),
 /// mirroring `replay_repair_tests`. An openai-responses 400 with this body
 /// classifies as a replay rejection, entering the strip-repair arm.
-const M3_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
+const REPLAY_REJECT_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`)","param":null,"type":"invalid_request_error"}}"#;
 
 /// A distinctive fragment that stands in for the reasoning-artifact blob a
 /// replay-rejection envelope can echo in its variable message tail. It must
@@ -29,12 +29,12 @@ const M3_BODY: &str = r#"{"error":{"code":"validation_error","message":"encrypte
 /// upstream-error path -- `replay_rejection_body_free` strips it.
 const BLOB_MARKER: &str = "REASONING_BLOB_MUST_NOT_LEAK";
 
-/// The m3 replay-rejection body with a blob marker appended to the message
+/// The replay-rejection body with a blob marker appended to the message
 /// TAIL. The message still opens with the classifier's anchor prefix
 /// (`encrypted content missing recognized prefix`), so it classifies as a
 /// replay rejection and enters the strip-repair arm, while the marker rides
 /// in the body that `replay_rejection_body_free` must drop.
-const M3_BODY_WITH_BLOB: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`) REASONING_BLOB_MUST_NOT_LEAK","param":null,"type":"invalid_request_error"}}"#;
+const REPLAY_REJECT_BODY_WITH_BLOB: &str = r#"{"error":{"code":"validation_error","message":"encrypted content missing recognized prefix (expected `rsn_` or `smry_`) REASONING_BLOB_MUST_NOT_LEAK","param":null,"type":"invalid_request_error"}}"#;
 
 /// Provider that returns a 401 on complete + stream-open (auth class -- no
 /// breaker debit) and refreshes successfully, so the router takes the
@@ -69,7 +69,7 @@ impl Provider for Auth401Provider {
     }
 }
 
-/// Provider that returns the m3 replay-rejection 400 on complete + stream so
+/// Provider that returns the replay-rejection 400 on complete + stream so
 /// the strip-repair arm fires and `continue`s. `replay_lane = Mantle` +
 /// openai-responses kind are the classifier's gate for the replay class.
 struct ReplayReject400Provider {
@@ -92,11 +92,11 @@ impl Provider for ReplayReject400Provider {
     }
     async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(Error::upstream("replay-reject", 400, M3_BODY))
+        Err(Error::upstream("replay-reject", 400, REPLAY_REJECT_BODY))
     }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(Error::upstream("replay-reject", 400, M3_BODY))
+        Err(Error::upstream("replay-reject", 400, REPLAY_REJECT_BODY))
     }
 }
 
@@ -124,11 +124,19 @@ impl Provider for ReplayRejectBlobProvider {
     }
     async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(Error::upstream("replay-reject", 400, M3_BODY_WITH_BLOB))
+        Err(Error::upstream(
+            "replay-reject",
+            400,
+            REPLAY_REJECT_BODY_WITH_BLOB,
+        ))
     }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(Error::upstream("replay-reject", 400, M3_BODY_WITH_BLOB))
+        Err(Error::upstream(
+            "replay-reject",
+            400,
+            REPLAY_REJECT_BODY_WITH_BLOB,
+        ))
     }
 }
 
@@ -196,7 +204,8 @@ fn plain_req() -> ChatRequest {
 }
 
 /// A request carrying one reasoning artifact toward the mantle lane, so the
-/// router builds a replay plan and the m3 400 enters the strip-repair arm.
+/// router builds a replay plan and the replay-rejection 400 enters the
+/// strip-repair arm.
 fn artifact_req() -> ChatRequest {
     let message = routectl_core::Message {
         role: Role::Assistant,
