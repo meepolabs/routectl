@@ -26,7 +26,7 @@ use routectl_router::class_policy::ConfigFailureClass;
 use routectl_router::{
     ActivationEntry, ActivationState, ActivationStatus, AliasChain, ClassPolicyCell,
     ClassPolicySource, EffectiveRow, EffectiveView, ModelCell, OverrideProvenance, OverrideRow,
-    OverrideVerdict, Source, class_debits,
+    OverrideVerdict, ProviderCell, Source, class_debits,
 };
 
 use super::daemon_meta::DaemonMetaSnapshot;
@@ -35,7 +35,7 @@ use super::{Panel, StatusState, guard_panel, utc_rfc3339};
 use crate::server::load_overlay_default;
 
 /// Wire-shape version of the config panel payload.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The provenance-annotated effective view plus the activation inventory. Every
 /// field is a display-safe projection: model economics and capability verdicts
@@ -50,6 +50,8 @@ pub(super) struct ConfigPanel {
     capabilities: Vec<CapabilityCellWire>,
     /// One entry per `[aliases]` entry, with its ordered fallback chain.
     aliases: Vec<AliasChainWire>,
+    /// One entry per `[providers.X]` entry: the routing-shape facts only.
+    providers: Vec<ProviderWire>,
     /// Provenance of the config in effect plus the daemon serving it.
     source: SourceWire,
     /// Auto-activation inventory: one entry per routectl-owned OAuth provider.
@@ -62,6 +64,46 @@ pub(super) struct ConfigPanel {
 struct AliasChainWire {
     alias: String,
     chain: Vec<String>,
+}
+
+/// One `[providers.X]` entry's routing shape, mapped field-by-field from the
+/// secret-safe [`ProviderCell`].
+///
+/// Every field is either a closed-vocabulary token or a structurally
+/// secret-free reduction the derivation already performed. Nothing here is
+/// reconstructed or widened: the endpoint is carried as the ORIGIN the
+/// derivation produced (a raw `base_url` may embed a credential in userinfo,
+/// path, or query, and provider validation does not reject that), and the
+/// credential ref contributes its SCHEME only, never its body. No field may
+/// ever carry a secret-store name, an account id, or a resolved credential.
+#[derive(Debug, Clone, Serialize)]
+struct ProviderWire {
+    /// The `[providers.<id>]` table key.
+    provider_id: String,
+    /// The entry's `kind = "..."` discriminant.
+    provider_kind: String,
+    /// The CONFIGURED endpoint origin (scheme + host + port), or `null` when
+    /// the entry's config carries no endpoint or the value does not parse.
+    /// `null` does NOT mean "no endpoint": several kinds derive theirs at
+    /// factory time, which a pure derivation over the config cannot reach.
+    endpoint_origin: Option<String>,
+    /// The URI SCHEME of the entry's primary `api_key_ref` (`env`, `file`,
+    /// `oauth`, ...), never the ref body.
+    credential_ref_scheme: Option<String>,
+    /// This variant's OWN auth-mechanism token, or `null` for a kind with no
+    /// auth discriminant. A closed vocabulary from the router's single
+    /// extraction point, never an operator-supplied value.
+    auth_token: Option<String>,
+    /// The configured requests-per-minute cap. Three states reach the client,
+    /// none interchangeable: a positive number is a live limit, an explicit
+    /// `0` means IMMEDIATELY rate-limited (it seeds a zero-capacity bucket),
+    /// and an explicit `null` means unlimited.
+    ///
+    /// Deliberately NOT `skip_serializing_if = "Option::is_none"`: skipping
+    /// would make "unlimited" indistinguishable from "the field never
+    /// arrived", and the renderer reports those as different words. The field
+    /// is therefore ALWAYS present on this wire, `null` included.
+    rpm_limit: Option<u32>,
 }
 
 /// Where the effective config came from and which daemon is serving it.
@@ -248,6 +290,21 @@ fn map_alias(chain: AliasChain) -> AliasChainWire {
     }
 }
 
+/// Map one secret-safe provider cell onto the wire. A pure field-for-field
+/// move: every reduction (the endpoint origin, the ref scheme, the auth token)
+/// already happened in the router's derivation, and re-deriving any of them
+/// here would mint a second source of truth for a secret boundary.
+fn map_provider(cell: ProviderCell) -> ProviderWire {
+    ProviderWire {
+        provider_id: cell.id,
+        provider_kind: cell.kind,
+        endpoint_origin: cell.endpoint_origin,
+        credential_ref_scheme: cell.credential_ref_scheme,
+        auth_token: cell.auth_token,
+        rpm_limit: cell.rpm_limit,
+    }
+}
+
 fn map_capability(row: OverrideRow) -> CapabilityCellWire {
     CapabilityCellWire {
         target_spec: row.target_spec,
@@ -311,6 +368,7 @@ fn build_panel(
             .map(map_capability)
             .collect(),
         aliases: effective.aliases.into_iter().map(map_alias).collect(),
+        providers: effective.providers.into_iter().map(map_provider).collect(),
         source,
         activation: activation.iter().map(map_activation).collect(),
     }
@@ -669,8 +727,149 @@ mod tests {
         assert!(obj.contains_key("referenced_by_aliases"));
     }
 
-    /// Test #7 (redaction): an overlay load failure whose raw error carries a
-    /// filesystem path and a secret-shaped value must never reach the payload.
+    /// The three-provider fixture the RPM contract is stated over: an
+    /// immediately-throttled entry, an unlimited one, and a capped one.
+    fn config_with_three_rpm_states() -> Config {
+        toml::from_str(
+            r#"
+version = 2
+
+[providers.throttled]
+kind = "anthropic-api"
+api_key_ref = "env://THROTTLED_KEY"
+base_url = "https://throttled.example/v1"
+rpm_limit = 0
+
+[providers.unlimited]
+kind = "anthropic-api"
+api_key_ref = "env://UNLIMITED_KEY"
+base_url = "https://unlimited.example:8443/v1"
+
+[providers.capped]
+kind = "openai-compat"
+api_key_ref = "file:///nonexistent/capped.key"
+base_url = "https://capped.example/v1"
+rpm_limit = 60
+"#,
+        )
+        .expect("valid config")
+    }
+
+    fn provider_json(config: &Config, id: &str) -> Value {
+        let panel = panel_from_config(config);
+        let value = serde_json::to_value(&panel.providers).unwrap();
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["provider_id"] == id)
+            .unwrap_or_else(|| panic!("provider `{id}` on the wire"))
+            .clone()
+    }
+
+    /// The RPM field's three states must be DISTINGUISHABLE on the wire, not
+    /// merely distinguishable in Rust. An immediately-throttled provider
+    /// carries an explicit numeric `0`; an unlimited one carries an explicit
+    /// `null`. Skipping the absent case (a `skip_serializing_if`) would
+    /// collapse "unlimited" into "the field never arrived", which the client
+    /// reports as a different word -- so the key is always present.
+    #[test]
+    fn zero_rpm_reaches_the_wire_as_an_explicit_zero_and_unlimited_as_null() {
+        let config = config_with_three_rpm_states();
+
+        let throttled = provider_json(&config, "throttled");
+        assert_eq!(
+            throttled["rpm_limit"],
+            Value::from(0),
+            "a zero cap must reach the wire as an explicit numeric 0"
+        );
+
+        let unlimited = provider_json(&config, "unlimited");
+        assert!(
+            unlimited.as_object().unwrap().contains_key("rpm_limit"),
+            "the unlimited case must carry the key explicitly, never omit it"
+        );
+        assert_eq!(unlimited["rpm_limit"], Value::Null);
+
+        assert_eq!(
+            provider_json(&config, "capped")["rpm_limit"],
+            Value::from(60)
+        );
+    }
+
+    /// Every declared provider field reaches the wire, and the endpoint is the
+    /// derivation's ORIGIN -- never widened back toward a fuller URL here.
+    #[test]
+    fn provider_wire_carries_the_contract_fields_and_only_the_origin() {
+        let config = config_with_three_rpm_states();
+        let unlimited = provider_json(&config, "unlimited");
+        let obj = unlimited.as_object().unwrap();
+        for key in [
+            "provider_id",
+            "provider_kind",
+            "endpoint_origin",
+            "credential_ref_scheme",
+            "auth_token",
+            "rpm_limit",
+        ] {
+            assert!(obj.contains_key(key), "provider row must carry `{key}`");
+        }
+        assert_eq!(unlimited["provider_kind"], "anthropic-api");
+        assert_eq!(
+            unlimited["endpoint_origin"],
+            "https://unlimited.example:8443"
+        );
+        assert_eq!(unlimited["credential_ref_scheme"], "env");
+        assert_eq!(unlimited["auth_token"], "api-key");
+
+        // The variant with no auth discriminant reports absence rather than a
+        // spanning token, and its ref contributes the scheme only.
+        let capped = provider_json(&config, "capped");
+        assert_eq!(capped["auth_token"], Value::Null);
+        assert_eq!(capped["credential_ref_scheme"], "file");
+    }
+
+    /// A `base_url` carrying a credential in userinfo, query, and fragment is
+    /// an ACCEPTED provider config, so the panel is the last line before it
+    /// would reach a browser. Nothing secret-shaped may survive the whole
+    /// serialized provider list.
+    #[test]
+    fn provider_rows_never_carry_a_credential_or_a_ref_body() {
+        let config: Config = toml::from_str(
+            r#"
+version = 2
+
+[providers.leaky]
+kind = "anthropic-api"
+api_key_ref = "env://LEAKY_SECRET_VAR"
+base_url = "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#sk-live-LEAKED"
+"#,
+        )
+        .expect("valid config");
+
+        let panel = panel_from_config(&config);
+        let text = serde_json::to_string(&panel.providers).unwrap();
+
+        for forbidden in ["sk-live-LEAKED", "user:", "LEAKY_SECRET_VAR", "/v1"] {
+            assert!(
+                !text.contains(forbidden),
+                "provider rows leaked `{forbidden}`: {text}"
+            );
+        }
+        assert!(text.contains("https://internal.example"));
+    }
+
+    /// The source strip's provider count and the provider table derive from the
+    /// SAME effective view, so a rendered row can never be missing from the
+    /// count.
+    #[test]
+    fn provider_count_matches_the_rendered_rows() {
+        let panel = panel_from_config(&config_with_three_rpm_states());
+        assert_eq!(panel.source.provider_count, panel.providers.len());
+        assert_eq!(panel.providers.len(), 3);
+    }
+
+    /// Test #7 (redaction): an overlay load failure whose raw error carries a    /// filesystem path and a secret-shaped value must never reach the payload.
     /// The failure folds to an unavailable panel with the fixed code and no
     /// data, so nothing to leak survives.
     #[test]
@@ -804,6 +1003,7 @@ mod tests {
         assert!(json["data"]["classes"].as_array().unwrap().len() >= 10);
         assert!(json["data"]["capabilities"].is_array());
         assert!(json["data"]["aliases"].is_array());
+        assert!(json["data"]["providers"].is_array());
         assert!(json["data"]["source"].is_object());
         assert!(json["data"]["activation"].is_array());
     }

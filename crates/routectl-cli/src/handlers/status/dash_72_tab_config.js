@@ -11,11 +11,14 @@
   }
 
   // Validate the WHOLE payload before any section is built: a config panel at
-  // this version always carries all six members, so a missing one is a
-  // malformed same-version payload and the throw takes the tab with it.
+  // this version always carries all seven members, so a missing one is a
+  // malformed same-version payload and the throw takes the tab with it. A
+  // missing FIELD inside a row is a different matter -- the cells below report
+  // it as unknown and keep the section.
   function buildConfigLive(rec) {
     var data = rec.data || {};
-    var lists = [data.aliases, data.models, data.classes, data.capabilities, data.activation];
+    var lists = [data.aliases, data.models, data.classes, data.capabilities,
+      data.providers, data.activation];
     if (!data.source || lists.some(function (l) { return !Array.isArray(l); })) {
       throw new Error('config payload does not carry the effective view');
     }
@@ -31,6 +34,7 @@
     // useful on a config that names nothing yet.
     appendIfAny(stack, data.aliases, aliasSection);
     appendIfAny(stack, data.models, modelSection);
+    appendIfAny(stack, data.providers, providerSection);
     appendIfAny(stack, data.capabilities, capabilitySection);
     appendIfAny(stack, data.activation, activationSection);
     appendIfAny(stack, data.classes, classSection);
@@ -135,11 +139,19 @@
     return wrap;
   }
 
+  // Both provider tables sit on this tab now, so a footnote merely asserting
+  // "a different set" leaves an operator to guess how they relate. Neither
+  // contains the other: this inventory is the FIXED universe of routectl-owned
+  // OAuth candidates (the server probes every one of them regardless of what
+  // the config names), while the routing table lists exactly what the config
+  // names. An id can appear here and route nowhere, and a routing provider
+  // authenticating by env key never appears here at all.
   function activationNote() {
     var note = document.createElement('p');
     note.className = 'footnote';
-    note.textContent = 'Credential activation only. The provider count in the strip above ' +
-      'counts the configured routing providers, which is a different set.';
+    note.textContent = 'Credential activation only: every provider routectl can own an OAuth ' +
+      'credential for, probed whether or not the config names it. Not the same set as the ' +
+      'routing providers above, which is what the provider count in the strip counts.';
     return note;
   }
 
@@ -174,6 +186,86 @@
     return pairs.filter(function (p) {
       return p[1] !== null && p[1] !== undefined && p[1] !== '';
     });
+  }
+
+  // ---- config: the routing providers -----------------------------------
+
+  // One row per `[providers.X]` entry: the routing shape an operator can act
+  // on. Deliberately NOT a credential view -- the server sends the endpoint
+  // ORIGIN (a configured base_url may embed a key in userinfo, path, or query)
+  // and the credential ref's SCHEME only, so there is nothing here to widen
+  // back into a fuller URL or a ref body.
+  function providerSection(providers) {
+    var tbl = mkTable('Configured routing providers',
+      [R('provider'), C('kind'), C('endpoint'), C('auth'), C('credential ref'), N('rate limit')],
+      false);
+    providers.forEach(function (p) {
+      trow(tbl, [
+        p.provider_id,
+        p.provider_kind,
+        configuredText(p.endpoint_origin, 'derived at startup'),
+        configuredText(p.auth_token, 'none'),
+        configuredText(p.credential_ref_scheme, 'none'),
+        rpmLimitCell(p.rpm_limit)
+      ]);
+    });
+    var wrap = card('Routing providers', 'what each configured provider dispatches to',
+      tableScroll(tbl));
+    wrap.appendChild(providerNote());
+    return wrap;
+  }
+
+  function providerNote() {
+    var note = document.createElement('p');
+    note.className = 'footnote';
+    note.textContent = 'Endpoints are the CONFIGURED origin (scheme, host, port); a kind that ' +
+      'derives its endpoint at startup shows none. A rate limit of 0 RPM means requests are ' +
+      'throttled immediately, which is not the same as unlimited.';
+    return note;
+  }
+
+  // A configured-or-absent text cell. An absent value is a real reading (the
+  // config carries none), so it reads as a faint word rather than a dash that
+  // could equally mean the field failed to arrive.
+  function configuredText(value, absentWord) {
+    if (value === null || value === undefined || value === '') {
+      return faintFigure(absentWord);
+    }
+    return String(value);
+  }
+
+  // The rate limit, whose THREE states are not interchangeable and whose
+  // null-check ORDER is the whole correctness of the cell:
+  //
+  //   absent field -> 'unknown'   the payload never carried a reading
+  //   null         -> 'unlimited' no cap is configured
+  //   a number     -> '<n> RPM'   INCLUDING 0, which seeds a zero-capacity
+  //                               bucket and therefore means immediately
+  //                               rate-limited
+  //
+  // The checks run BEFORE any numeric coercion for that last reason. A
+  // truthiness test (`rpm ? n : 'unlimited'`) reports a throttled provider as
+  // unrestricted because 0 is falsy; running the value through `num0` first
+  // reports an absent field as '0 RPM' because it coerces non-finite to 0.
+  // Both misreports are one helper call away, so this is the ONE place the
+  // field is formatted.
+  //
+  // A cap of 0 also has to LOOK different from an absence: `figure` faints any
+  // '0' on the premise that a zero measurement is nothing to see, which is
+  // exactly wrong for a cap that sheds every request, so this cell overrides
+  // that weighting.
+  function rpmLimitCell(rpm) {
+    if (rpm === undefined) { return faintFigure('unknown'); }
+    if (rpm === null) { return faintFigure('unlimited'); }
+    var x = Number(rpm);
+    if (!isFinite(x)) { return faintFigure('unknown'); }
+    var cell = figure(String(Math.floor(x)), 'RPM', null);
+    if (x <= 0) {
+      cell.classList.remove('mag-zero');
+      cell.classList.add('neg');
+      cell.title = 'a cap of 0 rejects every request immediately';
+    }
+    return cell;
   }
 
   // The capability overrides the config resolves, kept behind a default-closed

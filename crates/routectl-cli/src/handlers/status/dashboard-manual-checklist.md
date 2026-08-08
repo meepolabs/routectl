@@ -82,3 +82,9 @@ banner, no retry signal -- silently mislabeled data.
   and segment charts leave a hole instead of interpolating across it.
 - Enable the OS reduced-motion preference and reload. Pane transitions and
   any other motion must be suppressed.
+- Config's routing-provider table must distinguish all three rate-limit
+  states. Serve a config with one provider at `rpm_limit = 0`, one with no
+  `rpm_limit`, and one with a positive cap; the rows must read **0 RPM**
+  (at attention weight, not faint), **unlimited**, and **`<n>` RPM**. A `0`
+  reading as "unlimited" tells an operator a throttled provider is
+  unrestricted, which is the misreport this column exists to prevent.

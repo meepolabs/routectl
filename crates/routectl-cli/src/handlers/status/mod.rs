@@ -804,10 +804,10 @@ mod tests {
                 "{name} panel should carry data"
             );
         }
-        // Each panel carries its OWN schema_version (usage 2, health 5,
-        // doctor 4, config 2).
+        // Each panel carries its OWN schema_version (usage 3, health 5,
+        // doctor 4, config 3).
         assert_eq!(panels["health"]["schema_version"], 5);
-        assert_eq!(panels["config"]["schema_version"], 2);
+        assert_eq!(panels["config"]["schema_version"], 3);
         assert_eq!(panels["doctor"]["schema_version"], 4);
     }
 }
