@@ -152,15 +152,30 @@ fn secret_ref_parse_errors(config: &Config, raw_text: Option<&str>) -> Vec<Strin
 }
 
 /// Print the resolved config with secrets redacted.
+///
+/// The output is deliberately NOT round-trippable, and says so in a leading
+/// TOML comment: operators paste this into bug reports, so `base_url` is
+/// reduced to its origin (dropping any credential in userinfo, path, or query)
+/// and literal key refs become sentinels.
 pub fn show(config: &Config) -> Result<()> {
+    println!("{}", render_show(config)?);
+    Ok(())
+}
+
+/// The exact text `show` prints, so the redaction boundary is testable without
+/// capturing stdout.
+fn render_show(config: &Config) -> Result<String> {
     let mut redacted = config.clone();
     for entry in redacted.providers.values_mut() {
         redact_entry(entry);
     }
-    let s = toml::to_string_pretty(&redacted)
+    let body = toml::to_string_pretty(&redacted)
         .map_err(|e| Error::Internal(format!("serialize: {e}")))?;
-    println!("{s}");
-    Ok(())
+    Ok(format!(
+        "# Secrets are redacted and each provider base_url is reduced to its origin \
+         (scheme://host:port), so this output is NOT round-trippable back into a config \
+         file -- see your own config.toml for verbatim values.\n{body}"
+    ))
 }
 
 fn redact_entry(entry: &mut ProviderEntry) {
@@ -489,6 +504,69 @@ session_token_ref = ""
         assert!(
             parse_errors.is_empty(),
             "ref-less / empty creds fields must not surface a parse error: {parse_errors:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod show_redaction_tests {
+    use super::render_show;
+    use routectl_router::Config;
+
+    /// `config show` ADVERTISES redaction, and operators paste its output into
+    /// bug reports -- so a credential embedded in a `base_url` (accepted config:
+    /// only the `[mitm]` validator rejects userinfo) must appear NOWHERE in the
+    /// rendered text, in any position.
+    #[test]
+    fn show_never_renders_a_credential_carried_by_a_base_url() {
+        let toml_text = r#"
+[providers.relay]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-FAKE-KEY"
+base_url = "https://svc:sk-userinfo-FAKE@internal.example:8443/v1?key=sk-query-FAKE"
+"#;
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+        let rendered = render_show(&config).expect("render must succeed");
+
+        for secret in [
+            "sk-userinfo-FAKE",
+            "sk-query-FAKE",
+            "sk-ant-FAKE-KEY",
+            "internal.example:8443/v1",
+            "svc:",
+            "?key=",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "`{secret}` must not survive redaction; rendered:\n{rendered}"
+            );
+        }
+
+        assert!(
+            rendered.contains("https://internal.example:8443"),
+            "the origin must still be shown so the dump stays diagnostic; rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("literal:[REDACTED]"),
+            "the literal key ref must be sentinelled; rendered:\n{rendered}"
+        );
+    }
+
+    /// The leading comment is what tells the operator the dump cannot be pasted
+    /// back into a config file, which is the price of the reduction.
+    #[test]
+    fn show_leads_with_a_not_round_trippable_notice() {
+        let config = Config::default();
+        let rendered = render_show(&config).expect("render must succeed");
+        let first = rendered.lines().next().expect("at least one line");
+        assert!(
+            first.starts_with('#'),
+            "the notice must be a TOML comment; got: {first}"
+        );
+        assert!(
+            first.contains("NOT round-trippable"),
+            "the notice must say the dump is not round-trippable; got: {first}"
         );
     }
 }

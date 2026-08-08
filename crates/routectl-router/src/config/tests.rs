@@ -110,6 +110,148 @@ fn redact_secrets_redacts_literal_only() {
     assert_eq!(entry.secret_uris(), vec!["literal:[REDACTED]"]);
 }
 
+/// `redact_secrets` reduces `base_url` to its origin on the `String`-valued
+/// variants: userinfo, path, and query are all credential-carrying positions in
+/// practice, so none of them may survive into a displayed config.
+#[test]
+fn redact_secrets_reduces_base_url_to_origin_on_string_variants() {
+    let raw = "https://user:sk-live-FAKE@upstream.example:8443/v1?token=sk-query-FAKE";
+
+    let mut compat = ProviderEntry::openai_compat(raw, "literal:sk-test");
+    compat.redact_secrets();
+    match &compat {
+        ProviderEntry::OpenaiCompat { base_url, .. } => {
+            assert_eq!(base_url, "https://upstream.example:8443");
+        }
+        other => panic!("expected OpenaiCompat; got {other:?}"),
+    }
+
+    let mut anthropic = ProviderEntry::anthropic_api("literal:sk-ant-test").with_base_url(raw);
+    anthropic.redact_secrets();
+    match &anthropic {
+        ProviderEntry::AnthropicApi { base_url, .. } => {
+            assert_eq!(base_url, "https://upstream.example:8443");
+        }
+        other => panic!("expected AnthropicApi; got {other:?}"),
+    }
+}
+
+/// The Gemini arm reduces too -- every `base_url`-bearing variant is covered,
+/// not just the two api-backed ones.
+#[cfg(feature = "gemini")]
+#[test]
+fn redact_secrets_reduces_base_url_on_the_gemini_arm() {
+    let toml_text = r#"
+[providers.g]
+kind = "gemini"
+api_key_ref = "literal:super-secret"
+base_url = "https://user:sk-live-FAKE@gw.example/v1beta"
+"#;
+    let mut cfg: Config = toml::from_str(toml_text).expect("parse");
+    let entry = cfg.providers.get_mut("g").expect("gemini provider");
+    entry.redact_secrets();
+    match entry {
+        ProviderEntry::Gemini { base_url, .. } => {
+            assert_eq!(base_url, "https://gw.example");
+        }
+        other => panic!("expected Gemini entry; got {other:?}"),
+    }
+}
+
+/// `OpenaiResponses` carries `Option<String>`: `Some` reduces, `None` stays
+/// `None`. `None` means "the factory picks the default endpoint" -- turning it
+/// into a redaction sentinel would misreport a config that set nothing at all.
+#[cfg(feature = "openai-responses")]
+#[test]
+fn redact_secrets_reduces_some_base_url_and_preserves_none_on_openai_responses() {
+    let toml_text = r#"
+[providers.set]
+kind = "openai-responses"
+api_key_ref = "literal:sk-test"
+base_url = "https://user:sk-live-FAKE@gw.example/v1"
+
+[providers.unset]
+kind = "openai-responses"
+api_key_ref = "literal:sk-test"
+"#;
+    let mut cfg: Config = toml::from_str(toml_text).expect("parse");
+    for entry in cfg.providers.values_mut() {
+        entry.redact_secrets();
+    }
+    match cfg.providers.get("set").expect("set provider") {
+        ProviderEntry::OpenaiResponses { base_url, .. } => {
+            assert_eq!(base_url.as_deref(), Some("https://gw.example"));
+        }
+        other => panic!("expected OpenaiResponses; got {other:?}"),
+    }
+    match cfg.providers.get("unset").expect("unset provider") {
+        ProviderEntry::OpenaiResponses { base_url, .. } => {
+            assert!(
+                base_url.is_none(),
+                "an unset base_url must stay None, never a sentinel; got: {base_url:?}"
+            );
+        }
+        other => panic!("expected OpenaiResponses; got {other:?}"),
+    }
+}
+
+/// An EMPTY `base_url` must stay empty. This is a correctness constraint, not a
+/// formatting preference: the bedrock-mantle lane REQUIRES an empty `base_url`
+/// (the factory asserts on it, because `region` is the single source of truth
+/// for the mantle endpoint), so rewriting `""` to a sentinel would render a
+/// valid mantle config as broken in `config show`.
+#[test]
+fn redact_secrets_leaves_an_empty_base_url_empty() {
+    let toml_text = r#"
+[providers.mantle-shaped]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+base_url = ""
+"#;
+    let mut cfg: Config = toml::from_str(toml_text).expect("parse");
+    let entry = cfg
+        .providers
+        .get_mut("mantle-shaped")
+        .expect("provider entry");
+    entry.redact_secrets();
+    match entry {
+        ProviderEntry::AnthropicApi { base_url, .. } => {
+            assert_eq!(
+                base_url, "",
+                "the mantle lane requires an empty base_url; a sentinel here would \
+                 misreport a valid config as broken"
+            );
+        }
+        other => panic!("expected AnthropicApi entry; got {other:?}"),
+    }
+}
+
+/// A `base_url` the origin projection refuses to reduce becomes the fixed
+/// `[REDACTED]` sentinel, never an empty string -- empty means the mantle lane
+/// per `redact_secrets_leaves_an_empty_base_url_empty`, so the two outcomes must
+/// stay distinguishable.
+#[test]
+fn redact_secrets_withholds_an_unprojectable_base_url_as_a_sentinel() {
+    // A second `@` demoted past the authority: the projection withholds this
+    // whole rather than trusting the parsed host, which would be the secret.
+    let mut entry = ProviderEntry::openai_compat(
+        "https://x@sk-live-FAKE/y@real.example/v1",
+        "literal:sk-test",
+    );
+    entry.redact_secrets();
+    match &entry {
+        ProviderEntry::OpenaiCompat { base_url, .. } => {
+            assert_eq!(base_url, "[REDACTED]");
+            assert!(
+                !base_url.is_empty(),
+                "the withhold sentinel must never be empty: empty is a meaningful \
+                 mantle-lane value"
+            );
+        }
+        other => panic!("expected OpenaiCompat; got {other:?}"),
+    }
+}
+
 /// `forward_client_headers` defaults to an empty list when the
 /// field is omitted from the TOML (secure-by-default: drop every
 /// captured `x-claude-code-*` header). Explicit lists round-trip

@@ -2172,29 +2172,59 @@ impl ProviderEntry {
         self
     }
 
-    /// Redact any inline literal secrets in this entry's key references,
-    /// in place, so the entry is safe to serialize into diagnostics.
+    /// Redact any inline literal secrets in this entry's key references, and
+    /// reduce `base_url` to its origin, in place, so the entry is safe to
+    /// serialize into diagnostics.
+    ///
+    /// The output is NOT round-trippable back into a config file: `base_url`
+    /// loses its path, query, and any embedded credential (reduced to its
+    /// origin), and a literal key ref becomes a sentinel. Every arm binds
+    /// `base_url` explicitly rather than through `..` so a new variant, or a new
+    /// URL-bearing field on an existing one, fails to compile here instead of
+    /// silently shipping the raw value.
     pub fn redact_secrets(&mut self) {
         match self {
-            Self::OpenaiCompat { api_key_ref, .. } | Self::AnthropicApi { api_key_ref, .. } => {
-                *api_key_ref = redact_literal_secret(api_key_ref);
+            Self::OpenaiCompat {
+                api_key_ref,
+                base_url,
+                ..
             }
+            | Self::AnthropicApi {
+                api_key_ref,
+                base_url,
+                ..
+            } => {
+                *api_key_ref = redact_literal_secret(api_key_ref);
+                *base_url = redact_base_url(base_url);
+            }
+            // Carries no `base_url` at all: the region derives the endpoint.
             #[cfg(feature = "bedrock")]
             Self::Bedrock { creds, .. } => creds.redact(),
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses {
                 api_key_ref,
                 account_id_ref,
+                base_url,
                 ..
             } => {
                 *api_key_ref = redact_literal_secret(api_key_ref);
                 if let Some(a) = account_id_ref {
                     *a = redact_literal_secret(a);
                 }
+                // Optional here: `None` means "the factory picks the default"
+                // and must stay `None`, not become a redaction sentinel.
+                if let Some(url) = base_url {
+                    *url = redact_base_url(url);
+                }
             }
             #[cfg(feature = "gemini")]
-            Self::Gemini { api_key_ref, .. } => {
+            Self::Gemini {
+                api_key_ref,
+                base_url,
+                ..
+            } => {
                 *api_key_ref = redact_literal_secret(api_key_ref);
+                *base_url = redact_base_url(base_url);
             }
         }
     }
@@ -2317,6 +2347,46 @@ fn redact_literal_secret(uri: &str) -> String {
     } else {
         uri.to_string()
     }
+}
+
+/// Reduce a configured `base_url` to something safe to display, with exactly
+/// three outcomes:
+///
+/// - **empty stays EMPTY.** This is load-bearing, not a formatting nicety: the
+///   bedrock-mantle lane REQUIRES an empty `base_url` (the factory carries a
+///   `debug_assert!` on it, because `region` is the single source of truth for
+///   the endpoint there). Rewriting `""` to a sentinel would render a correct
+///   mantle config as broken.
+/// - **a projectable value becomes its ORIGIN** -- scheme, host, and port only.
+///   Userinfo, path, query, and fragment are dropped; each is a position a
+///   credential is known to occupy in practice.
+/// - **anything unprojectable becomes `[REDACTED]`** -- the fail-safe withhold,
+///   never an empty string, because empty now means the mantle lane per the
+///   first bullet.
+///
+/// # When a surface must reduce
+///
+/// A `base_url` is allowed to carry a credential: the provider validator checks
+/// scheme, link-local targets, and cleartext-on-non-loopback, but only the
+/// `[mitm]` origin validator rejects userinfo. So
+/// `https://user:<secret>@upstream.example/v1` is an ACCEPTED provider config
+/// and the raw string sits in the entry. Classify each surface that touches the
+/// value into one of three buckets:
+///
+/// - **EMIT** -- the value reaches stdout/stderr, a tracing field, an HTTP
+///   response body, or an error string that reaches either. REDUCE, through
+///   this function.
+/// - **WRITE or DIAL** -- the value travels config-file -> memory ->
+///   config-file, or is parsed as a network target. EXEMPT: reducing there
+///   CORRUPTS behavior, silently rewriting an operator's config or dialing the
+///   wrong endpoint.
+/// - **NAME-ONLY** -- the surface touches the identifier but never the value
+///   (key labels, allowlists, fixtures). EXEMPT, nothing to do.
+fn redact_base_url(base_url: &str) -> String {
+    if base_url.trim().is_empty() {
+        return base_url.to_string();
+    }
+    crate::config_effective::endpoint_origin(base_url).unwrap_or_else(|| "[REDACTED]".into())
 }
 
 /// Per-provider runtime knobs that gate dispatch: rate limits, circuit

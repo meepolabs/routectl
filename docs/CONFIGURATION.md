@@ -1978,7 +1978,13 @@ overlay dump.
 
 ## Inspecting the effective config (`config show --effective`)
 
-`routectl config show` dumps `config.toml` verbatim, secrets redacted.
+`routectl config show` dumps `config.toml` with secrets redacted: inline
+`literal:` key references become sentinels, and every provider
+`base_url` is reduced to its ORIGIN (`scheme://host:port`), dropping any
+path, query, or embedded `user:pass@` credential. That reduction means
+the output is NOT round-trippable back into a config file, which the
+dump says in a leading `#` comment -- your own `config.toml` remains the
+authoritative source for verbatim `base_url` values.
 Adding `--effective` appends a provenance-annotated view of the two
 surfaces where MORE THAN ONE LAYER can supply a value -- so you can see
 which layer actually won without cross-referencing the baked table, the
@@ -2641,9 +2647,12 @@ breaks every Bedrock request, so the validator surfaces it as a clean
 `oauth://` references remain as opaque URIs (they are non-secret
 pointers, not credential values); defaults are filled in; layered
 overlays NOT yet applied
-(those compose per request, not at startup). There is nothing to redact
-here -- a config carrying an inline `literal:` secret is rejected at
-validation before this view is ever produced. Useful when chasing
+(those compose per request, not at startup). Key references need no
+redaction here -- a config carrying an inline `literal:` secret is
+rejected at validation before this view is ever produced -- but
+`base_url` DOES get reduced to its origin, because a `base_url` may
+legitimately carry a credential and is not rejected for it. Useful when
+chasing
 "why is my model picking provider Y instead of Z" without flipping
 trace logging.
 
