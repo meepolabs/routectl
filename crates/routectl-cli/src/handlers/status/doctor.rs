@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn production_source_never_calls_the_probe_dial() {
         let src = include_str!("doctor.rs");
-        let production = src.split("#[cfg(test)]").next().unwrap();
+        let production = crate::handlers::status::production_source::production_source(src);
         assert!(
             !production.contains(concat!("gather_probe", "_results(")),
             "doctor panel must not call the probe gather"

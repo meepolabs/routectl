@@ -1075,7 +1075,28 @@ api_key_ref = "env://K"
         // pure `(&Config, &CatalogOverlay)` signature is the real invariant;
         // this scan tripwires an accidental reintroduction.
         let src = include_str!("config_effective.rs");
-        let production = src.split("#[cfg(test)]").next().unwrap();
+        // Cut at the inline test module, NOT at the first `#[cfg(test)]`: that
+        // attribute also decorates test-only items which can sit above the real
+        // module, which would silently shrink the scanned region while this
+        // guard stayed green. The uniqueness assert is what closes that -- a
+        // second test module has to be dealt with here, deliberately.
+        //
+        // Twin of `production_source` in routectl-cli's `handlers::status`,
+        // duplicated rather than shared: crossing the crate boundary for four
+        // lines would mean a public-API change plus a baseline regeneration
+        // plus a cross-crate test dependency.
+        //
+        // The needle is assembled from fragments so THIS code's own source
+        // lines are not counted as test-module openers.
+        let needle = concat!("mod ", "tests {");
+        let occurrences = src.matches(needle).count();
+        assert_eq!(
+            occurrences, 1,
+            "the production cut is ambiguous with {occurrences} test-module openers; \
+             decide explicitly what this guard must cover"
+        );
+        let production = &src[..src.find(needle).expect("an inline test module")];
+
         assert!(!production.contains("build_resolved_models"));
         assert!(!production.contains("build_provider"));
     }

@@ -22,6 +22,8 @@ mod daemon_meta;
 mod doctor;
 mod health;
 mod page;
+#[cfg(test)]
+mod production_source;
 mod query;
 mod router_view;
 mod types;
@@ -575,10 +577,7 @@ mod tests {
             ),
         ];
         for (name, src, forbidden) in scans {
-            let production = match src.find("#[cfg(test)]") {
-                Some(idx) => &src[..idx],
-                None => *src,
-            };
+            let production = production_source::production_source(src);
             for token in *forbidden {
                 assert!(
                     !production.contains(token.as_str()),
