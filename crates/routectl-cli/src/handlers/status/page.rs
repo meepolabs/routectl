@@ -2,7 +2,7 @@
 //!
 //! Serves a single self-contained HTML document at `GET /`. The document is
 //! ASSEMBLED AT COMPILE TIME from its authoring sources -- `dashboard.html`
-//! (markup), `dashboard.css` (style body), and the [`SCRIPT_PARTS`] script
+//! (markup), the [`STYLE_PARTS`] style sources, and the [`SCRIPT_PARTS`] script
 //! sources -- each embedded via `include_str!` and spliced into the markup's
 //! two asset slots as one inline `<style>` and one inline `<script>`. The split
 //! is an authoring
@@ -32,13 +32,19 @@ use axum::routing::get;
 /// authoring inputs the tests read directly (a scan of the JS is a scan of the
 /// script, with none of the markup around it).
 ///
-/// The script body may be authored as SEVERAL files: `SCRIPT_PARTS` holds them
-/// in concatenation order and is spliced into [`PARTS`] as one run, so the
-/// served page still carries a single `<script>` block. Guards must scan the
-/// whole concatenation (`tests::script`), never one part -- a guard reading one
-/// element would silently stop covering the others.
+/// The style and script bodies may each be authored as SEVERAL files:
+/// `STYLE_PARTS` and `SCRIPT_PARTS` hold them in concatenation order and are
+/// each spliced into [`PARTS`] as one run, so the served page still carries a
+/// single `<style>` and a single `<script>` block. For the style that order IS
+/// the cascade. Guards must scan the whole concatenation (`tests::style`,
+/// `tests::script`), never one part -- a guard reading one element would
+/// silently stop covering the others.
 const MARKUP: &str = include_str!("dashboard.html");
-const STYLE: &str = include_str!("dashboard.css");
+const STYLE_PARTS: &[&str] = &[
+    include_str!("dash_base.css"),
+    include_str!("dash_components.css"),
+    include_str!("dash_tabs.css"),
+];
 const SCRIPT_PARTS: &[&str] = &[
     include_str!("dash_00_state.js"),
     include_str!("dash_10_format.js"),
@@ -103,11 +109,13 @@ const BETWEEN: &str = slice(MARKUP, STYLE_AT + STYLE_SLOT.len(), SCRIPT_AT);
 const TAIL: &str = slice(MARKUP, SCRIPT_AT + SCRIPT_SLOT.len(), MARKUP.len());
 
 /// The assembled document in render order. Each entry is a GROUP of adjacent
-/// fragments, so a multi-file script body splices in as one run without the
-/// order of the surrounding markup being stated anywhere else.
+/// fragments, so a multi-file style or script body splices in as one run
+/// without the order of the surrounding markup being stated anywhere else.
 const PARTS: &[&[&str]] = &[
     &[HEAD],
-    &["<style>\n", STYLE, "</style>"],
+    &["<style>\n"],
+    STYLE_PARTS,
+    &["</style>"],
     &[BETWEEN],
     &["<script>\n"],
     SCRIPT_PARTS,
@@ -186,6 +194,13 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// The whole style body as one string, in cascade order: guards scan THIS,
+    /// not a single element of [`STYLE_PARTS`], so a style split across more
+    /// sources keeps every guard covering all of it.
+    fn style() -> String {
+        STYLE_PARTS.concat()
+    }
 
     /// The whole script body as one string: every guard scans THIS, not a
     /// single element of [`SCRIPT_PARTS`], so a script split across more files
@@ -809,13 +824,14 @@ mod tests {
         // carries each source verbatim is what makes that scan a statement
         // about the SERVED bytes rather than about the authoring inputs.
         let script = script();
+        let style = style();
         assert!(
-            PAGE.contains(STYLE) && PAGE.contains(&script),
+            PAGE.contains(&style) && PAGE.contains(&script),
             "the assembled page must carry both asset sources verbatim"
         );
         let code = [
             compact(&strip_html_comments(MARKUP)),
-            compact(&strip_css_comments(STYLE)),
+            compact(&strip_css_comments(&style)),
             compact(&strip_js_comments(&script)),
         ];
         for source in &code {

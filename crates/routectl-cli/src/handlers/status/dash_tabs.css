@@ -1,0 +1,728 @@
+/* ---- routing: configured chains, live state, estimated attribution ----
+
+   Three visually distinct blocks on purpose. The chain cards and the state
+   list carry EXACT facts (the configured order, the breaker phase reported
+   now); the attribution block is an estimate, so it sits apart behind its own
+   hairline rule and every figure in it is prefixed with a tilde. Nothing in
+   the estimate borrows the chain cards' chrome. */
+.chainlist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.chain {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+}
+.chain-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.chain-alias {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chain-meta {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+/* The steps scroll INSIDE the card; the page never scrolls sideways. */
+.chain-steps {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-2);
+  margin: var(--sp-3) calc(-1 * var(--sp-4)) 0;
+  padding: 0 var(--sp-4);
+  overflow-x: auto;
+}
+.step-sep {
+  display: flex;
+  align-items: center;
+  flex: none;
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.step-sep::before { content: ">"; padding-right: var(--sp-1); }
+.chain-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px var(--sp-2);
+  flex: none;
+  width: var(--w-step);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.step-n {
+  grid-row: span 2;
+  align-self: start;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  line-height: 1.1rem;
+  width: 1.1rem;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--pill-neutral-bg);
+  color: var(--faint);
+}
+.step-model {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.step-prov {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statelist {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-1) var(--sp-4);
+  min-width: 0;
+}
+.staterow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.tdot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  flex: none;
+  background: var(--faint);
+}
+.tdot--ok { background: var(--ok); }
+.tdot--warn { background: var(--warn); }
+.tdot--bad { background: var(--neg); }
+.tdot--unknown { background: var(--border-strong); }
+.state-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.state-meta {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attr {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+.attr-headline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.attr-figure {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-stat);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.attr-figure .unit { font-size: 0.5em; font-weight: 500; color: var(--faint); }
+.attr-headnote {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  min-width: 0;
+}
+.attrlist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.attr-alias {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.attr-aliashead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.attr-aliasname {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attr-aliastotal {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+.attr-step {
+  display: grid;
+  grid-template-columns: 4.2rem minmax(0, 1fr) 5rem 3.4rem;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+}
+.attr-stepn {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+}
+.attr-model {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attr-count,
+.attr-pct {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+.attr-pct .unit { font-size: 0.8em; color: var(--faint); }
+/* The proportion bar spans the row under the figures it belongs to. */
+.attr-step > .sharebar { grid-column: 2 / -1; }
+.attr-off { color: var(--muted); }
+
+/* ---- health: per-target cards + per-seat quota tiles ----
+
+   A target is a separate object an operator acts on, so it gets a card;
+   the facets INSIDE a card (rate limit, last outcome, circuit, learned
+   negatives) sit on a hairline grid because they are readings of one
+   target. The needs-attention / healthy / not-observed split is carried
+   by the section headers, and reinforced on the card border only -- a
+   card never floods with a state color. */
+.hgroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.hlist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.hcard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.hcard--attention { border-color: var(--neg); }
+.hcard--unknown { border-style: dashed; }
+.hcard-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.hstate { flex: none; }
+.hident {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.hname {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hsub,
+.hreason {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hcard--attention .hreason { color: var(--neg); }
+.hanchors {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-5);
+  flex: none;
+}
+.hanchor {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-end;
+  min-width: 0;
+}
+.hanchor-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+}
+.hanchor-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-lg);
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.hgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--col-hcell), 1fr));
+  gap: var(--sp-3) var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.hcell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.hcell-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.hcell-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hcell-value .unit { font-size: 0.8em; color: var(--faint); }
+.hage { color: var(--faint); padding-left: var(--sp-2); }
+.hchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  align-items: center;
+  min-width: 0;
+}
+.hchip {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+  white-space: nowrap;
+  flex: none;
+}
+
+.qlist {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--col-quota), 1fr));
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.qtile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.qtile-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.qseat {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qkind {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.qfresh {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  flex: none;
+}
+.qfresh--stale {
+  font-family: var(--font-mono);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--pill-warn-bg);
+  color: var(--pill-warn-fg);
+}
+.qlines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.qline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+}
+.qline-label {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qline-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-md);
+  color: var(--fg);
+  text-align: right;
+  white-space: nowrap;
+}
+.qline-value .unit { font-size: 0.7em; color: var(--faint); }
+/* The bar spans the row under the figure it belongs to. A line with no
+   measured utilization renders no bar at all. */
+.qline > .sharebar { grid-column: 1 / -1; }
+.qline--missing { grid-template-columns: minmax(0, 1fr); }
+/* The window separator is drawn by CSS: this script carries no
+   slash-leading string literal (see the mutation-channel scan in page.rs). */
+.qsep { color: var(--faint); padding: 0 2px; }
+.qsep::before { content: "/"; }
+.qmeta { padding-top: var(--sp-1); }
+
+/* ---- config: source strip (lowest visual energy on the page) ----
+   One card, hairline-free: the facts are facets of ONE reading (which config
+   is in effect), so they carry no per-fact border and no color at all. Every
+   value is monospace because every one of them is data. */
+.cfgstrip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-3) var(--sp-5) var(--sp-4);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--col-docpass), 1fr));
+  gap: var(--sp-3) var(--sp-5);
+  min-width: 0;
+}
+.cfgfact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cfgfact-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.cfgfact-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- doctor: verdict card, findings, collapsed passes ----
+
+   The verdict is ONE reading, so it is one card with no internal hairline;
+   each finding is a separate object an operator acts on, so each gets its
+   own card. State color rides the dot, the severity pill, and (for a
+   failure only) the card border -- a card never floods with it. */
+.docverdict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+}
+.docverdict-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 1 1 var(--fb-docverdict);
+  min-width: 0;
+}
+.docdot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--faint);
+}
+.docdot--ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.docdot--warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.docdot--bad { background: var(--neg); box-shadow: 0 0 0 3px var(--neg-soft); }
+.docdot--unknown { background: var(--border-strong); }
+.docverdict-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.docverdict-head {
+  font-size: var(--fs-lg);
+  color: var(--fg);
+  min-width: 0;
+}
+.docverdict-sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doccounts {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-5);
+  flex: none;
+}
+.doccount {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-end;
+  min-width: 0;
+}
+.doccount-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.doccount-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xl);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+.doccount-value--warn { color: var(--warn); }
+.doccount-value--bad { color: var(--neg); }
+
+.doclist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.docfinding {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.docfinding--fail { border-color: var(--neg); }
+.docfinding-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.docfinding-name {
+  font-size: var(--fs-md);
+  color: var(--fg);
+  min-width: 0;
+}
+.docfinding-section {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.docfinding-detail {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  min-width: 0;
+}
+.docfix {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  align-items: flex-start;
+  max-width: 100%;
+  min-width: 0;
+}
+.docfix-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+}
+/* A remediation is something to run verbatim, so it keeps its own spacing
+   and scrolls inside its own box rather than wrapping mid-token. */
+.docfix-text {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.docpassgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-1) var(--sp-5);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.docpass {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.docpass-dot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  flex: none;
+  background: var(--ok);
+}
+.docpass-name {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  flex: 0 0 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.docpass-detail {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- narrow viewport (down to 380px) ---- */
+@media (max-width: 1000px) {
+  .kpigrid { grid-template-columns: repeat(auto-fit, minmax(var(--col-kpi), 1fr)); }
+}
+
+@media (max-width: 640px) {
+  :root { --fs-stat: 1.35rem; }
+  .verdict { padding: var(--sp-3) var(--sp-4); gap: var(--sp-3); }
+  .verdict-text { white-space: normal; }
+  .banner { margin: var(--sp-3) var(--sp-4) 0; }
+  .pane { padding: var(--sp-4) var(--sp-4) var(--sp-6); gap: var(--sp-5); }
+  .card { padding: var(--sp-3) var(--sp-4) var(--sp-4); }
+  .tablewrap { margin: 0 calc(-1 * var(--sp-4)); padding: 0 var(--sp-4); }
+  .ucard-figs { gap: var(--sp-4); }
+  .ucard-head { gap: var(--sp-3); }
+  .chain-steps { margin: var(--sp-3) calc(-1 * var(--sp-4)) 0; padding: 0 var(--sp-4); }
+  .chain-step { width: var(--w-step-narrow); }
+  .attr-step { grid-template-columns: 4.2rem minmax(0, 1fr) 4.4rem 3rem; }
+  .hanchors { gap: var(--sp-4); }
+  .hcard-head { gap: var(--sp-2); }
+  .doccounts { gap: var(--sp-4); }
+  .docpass-name { flex: 0 0 7rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+  .skeleton span,
+  .poll-dot { animation: none; }
+  .pane,
+  .modal-backdrop { animation: none; }
+}
+
+
