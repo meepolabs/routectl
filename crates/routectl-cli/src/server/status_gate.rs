@@ -22,23 +22,23 @@ use serde_json::json;
 use crate::server::is_loopback;
 
 /// Ceiling on concurrent in-flight `/status*` requests across the WHOLE
-/// subtree. The unit is ADMITTED HTTP REQUESTS, and while those requests stay
-/// live it is equally the ceiling on concurrent blocking panel builders: the
-/// `/status` aggregate awaits its four panel builders SEQUENTIALLY, so a live
-/// admitted request holds at most one `spawn_blocking` builder at a time. One
-/// number, one meaning, on the aggregate and per-panel routes alike -- a
-/// concurrent fan-out inside the aggregate would silently multiply the builder
-/// count by four while this const stayed at its face value.
+/// subtree. The unit is ADMITTED HTTP REQUESTS, and it is equally the ceiling
+/// on concurrent blocking panel builders: the `/status` aggregate awaits its
+/// four panel builders SEQUENTIALLY, so an admitted request holds at most one
+/// `spawn_blocking` builder at a time. One number, one meaning, on the
+/// aggregate and per-panel routes alike -- a concurrent fan-out inside the
+/// aggregate would silently multiply the builder count by four while this const
+/// stayed at its face value.
 ///
-/// The "while live" qualifier is load-bearing and NOT yet closed. This layer's
-/// permit lives in the response future, so a client that aborts mid-request
-/// releases its permit while the `spawn_blocking` builder it already started
-/// keeps running to completion -- a later request can then be admitted
-/// alongside that detached builder, and the builder count can exceed this const
-/// until the detached work drains. Making the ceiling hold under cancellation
-/// requires the permit to be owned by the blocking closure itself; that is a
-/// separate change, and until it lands this const bounds live requests, not
-/// detached builders.
+/// The builder half of the ceiling holds UNCONDITIONALLY, cancellation
+/// included. This layer's permit lives in the response future, so a client that
+/// aborts mid-request does release its admission permit -- but not its builder
+/// capacity, which `handlers::status::guard_panel` moves into the
+/// `spawn_blocking` closure itself (see `handlers::status::BuilderCapacity`).
+/// A detached builder therefore keeps its permit until the blocking work ends,
+/// and the next request is DELAYED behind it rather than admitted alongside it.
+/// Delayed, never shed: shedding at that point would need a panel-level reason
+/// code the wire does not carry.
 ///
 /// Deliberately a hardcoded const, not a config knob: the status surface is a
 /// fixed-cost diagnostic read, so a small shared cap keeps a poller burst from
@@ -786,6 +786,247 @@ mod tests {
         assert!(
             served >= STATUS_MAX_INFLIGHT,
             "the admitted requests must complete once released, not deadlock: {served} served"
+        );
+    }
+
+    /// Build a status app whose four panels all reach a real builder, plus the
+    /// temp dir keeping its config path alive. Shared by the cancellation tests
+    /// so they exercise the same wiring the capacity test above does.
+    fn cancellation_test_app() -> (axum::Router, tempfile::TempDir) {
+        use crate::handlers::status::{DaemonMeta, StatusState, status_router};
+        use crate::server::AppState;
+        use arc_swap::ArcSwap;
+        use routectl_router::{Config, Router};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, b"version = 3\n").unwrap();
+
+        let router = Router::new(Arc::new(Config::default()));
+        let (app, _writer_dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        // A config path is required for the doctor panel to reach a builder at
+        // all, so all four panels are genuinely in play.
+        let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
+        status.usage_db_path = dir.path().join("absent-usage.db");
+        (
+            apply_overload_layers(status_router().with_state(Arc::new(status))),
+            dir,
+        )
+    }
+
+    /// Poll `probe` until `ready` holds, using `deadline_secs` ONLY as a hang
+    /// bound. Returns whether the condition was reached, so the caller can
+    /// defer the assertion until after it has released the parked builders --
+    /// asserting while builders sit on blocking workers would unwind into a
+    /// runtime shutdown that cannot reclaim them, hanging the test binary
+    /// instead of reporting the failure.
+    async fn wait_for(
+        probe: &Arc<crate::handlers::status::builder_probe::BuilderProbe>,
+        deadline_secs: u64,
+        ready: impl Fn(&crate::handlers::status::builder_probe::BuilderProbe) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(deadline_secs);
+        while Instant::now() < deadline {
+            if ready(probe) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        ready(probe)
+    }
+
+    /// CANCELLATION, single-panel route: a client that aborts mid-request must
+    /// not free builder capacity while the builder it already started is still
+    /// running.
+    ///
+    /// The Tower gate's permit lives in the RESPONSE FUTURE, so aborting the
+    /// request drops it and admission is immediately free again -- that half is
+    /// correct and deliberate (the next request is DELAYED, not shed). What must
+    /// NOT come back with it is the blocking-builder capacity, which is held by
+    /// a `spawn_blocking` job the abort cannot reach.
+    ///
+    /// Deterministic by construction, with no settle window anywhere. All
+    /// `STATUS_MAX_INFLIGHT` builders are parked on blocking workers first;
+    /// their requests are then aborted; a fresh request is issued. Because every
+    /// permit is owned by a parked builder, the fresh request can only reach the
+    /// capacity gate and wait -- and `capacity_exhausted` is the positive event
+    /// that says it did. That state cannot end without the test releasing, so
+    /// the snapshot taken after it is stable and the timeouts are pure hang
+    /// bounds. Against the pre-fix code the aborted requests' permits are gone
+    /// with their futures, so the fresh request submits a builder immediately
+    /// and `submitted` overshoots.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_single_panel_requests_do_not_free_builder_capacity() {
+        use crate::handlers::status::builder_probe::{BUILDER_PROBE, BuilderProbe};
+
+        let (app, _dir) = cancellation_test_app();
+        let probe = BuilderProbe::new();
+
+        // Saturate: every admitted request parks its one builder on a blocking
+        // worker, so all STATUS_MAX_INFLIGHT builder permits are held.
+        let mut cancelled = Vec::new();
+        for _ in 0..STATUS_MAX_INFLIGHT {
+            let app = app.clone();
+            let probe = Arc::clone(&probe);
+            cancelled.push(tokio::spawn(BUILDER_PROBE.scope(probe, async move {
+                let req = HttpRequest::builder()
+                    .method("GET")
+                    .uri("/status/health")
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await
+            })));
+        }
+        let saturated = wait_for(&probe, 10, |p| p.started() >= STATUS_MAX_INFLIGHT).await;
+
+        // Abort every request future. Each drops its Tower permit; each leaves
+        // its builder running on a blocking worker.
+        for handle in &cancelled {
+            handle.abort();
+        }
+        for handle in cancelled {
+            assert!(handle.await.is_err(), "request future must have aborted");
+        }
+        let submitted_before = probe.submitted();
+
+        // A fresh request is admitted (capacity to ADMIT is free again) but must
+        // find no builder permit.
+        let follow_up = {
+            let app = app.clone();
+            let probe = Arc::clone(&probe);
+            tokio::spawn(BUILDER_PROBE.scope(probe, async move {
+                let req = HttpRequest::builder()
+                    .method("GET")
+                    .uri("/status/health")
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await
+            }))
+        };
+        let delayed = wait_for(&probe, 10, |p| p.capacity_exhausted() >= 1).await;
+        let submitted_while_detached = probe.submitted();
+
+        // Release BEFORE asserting: a parked builder owns a blocking worker no
+        // unwind can reclaim.
+        probe.release();
+        let served = follow_up.await.unwrap().unwrap();
+
+        assert!(
+            saturated,
+            "the builders never parked; nothing was saturated"
+        );
+        assert!(
+            delayed,
+            "the follow-up request never hit the builder-capacity gate: the \
+             cancelled requests' builder permits were freed by their futures dropping"
+        );
+        assert_eq!(
+            submitted_while_detached, submitted_before,
+            "no new blocking work may start while the detached builders hold \
+             capacity: {submitted_while_detached} builders submitted, expected \
+             {submitted_before}"
+        );
+        // Capacity recovers: once the detached builders finish, the delayed
+        // request gets its permit and completes normally.
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(
+            probe.submitted(),
+            submitted_before + 1,
+            "the delayed builder must run once capacity is released"
+        );
+    }
+
+    /// CANCELLATION, aggregate route: the same property via `GET /status`.
+    ///
+    /// Worth its own case because the aggregate is the route that composes four
+    /// builders, so it is the one where a regression to a concurrent fan-out
+    /// would break the permit accounting. The `uri` is the only difference from
+    /// the single-panel case, which is the point: the permit lives in
+    /// `guard_panel`, the chokepoint BOTH routes go through, so the aggregate
+    /// inherits the property rather than restating it. That the aggregate's
+    /// builders really took that path is what `submitted` measures -- it is only
+    /// ever incremented inside `guard_panel`, so a synthetic stand-in could not
+    /// move it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_aggregate_requests_do_not_free_builder_capacity() {
+        use crate::handlers::status::builder_probe::{BUILDER_PROBE, BuilderProbe};
+
+        let (app, _dir) = cancellation_test_app();
+        let probe = BuilderProbe::new();
+
+        let mut cancelled = Vec::new();
+        for _ in 0..STATUS_MAX_INFLIGHT {
+            let app = app.clone();
+            let probe = Arc::clone(&probe);
+            cancelled.push(tokio::spawn(BUILDER_PROBE.scope(probe, async move {
+                let req = HttpRequest::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await
+            })));
+        }
+        let saturated = wait_for(&probe, 10, |p| p.started() >= STATUS_MAX_INFLIGHT).await;
+
+        for handle in &cancelled {
+            handle.abort();
+        }
+        for handle in cancelled {
+            assert!(handle.await.is_err(), "request future must have aborted");
+        }
+        // The aggregate is SEQUENTIAL, so each cancelled request had submitted
+        // exactly its first builder -- the count is the saturation plateau, not
+        // four times it.
+        let submitted_before = probe.submitted();
+
+        let follow_up = {
+            let app = app.clone();
+            let probe = Arc::clone(&probe);
+            tokio::spawn(BUILDER_PROBE.scope(probe, async move {
+                let req = HttpRequest::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await
+            }))
+        };
+        let delayed = wait_for(&probe, 10, |p| p.capacity_exhausted() >= 1).await;
+        let submitted_while_detached = probe.submitted();
+
+        probe.release();
+        let served = follow_up.await.unwrap().unwrap();
+
+        assert!(
+            saturated,
+            "the builders never parked; nothing was saturated"
+        );
+        assert_eq!(
+            submitted_before, STATUS_MAX_INFLIGHT,
+            "a sequential aggregate submits ONE builder per admitted request"
+        );
+        assert!(
+            delayed,
+            "the follow-up aggregate never hit the builder-capacity gate: the \
+             cancelled requests' builder permits were freed by their futures dropping"
+        );
+        assert_eq!(
+            submitted_while_detached, submitted_before,
+            "no new blocking work may start while the detached builders hold \
+             capacity: {submitted_while_detached} builders submitted, expected \
+             {submitted_before}"
+        );
+        // Capacity recovers and the whole aggregate completes -- all four of its
+        // builders ran through the same permit-owning path, which is also the
+        // no-deadlock check (a sequential aggregate re-acquiring per panel must
+        // not starve itself).
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(
+            probe.submitted(),
+            submitted_before + 4,
+            "the delayed aggregate must build all four panels once released"
         );
     }
 

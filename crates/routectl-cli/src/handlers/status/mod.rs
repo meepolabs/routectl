@@ -39,6 +39,7 @@ use axum::{Json, Router as AxumRouter};
 use parking_lot::Mutex;
 use routectl_router::ActivationState;
 use serde::Serialize;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError as TryAcquire};
 
 pub use types::{Panel, now_utc_rfc3339, utc_rfc3339, vocabulary};
 
@@ -47,8 +48,68 @@ pub use daemon_meta::DaemonMeta;
 pub use page::page_router;
 
 use crate::server::AppState;
+use crate::server::status_gate::STATUS_MAX_INFLIGHT;
 use daemon_meta::DaemonMetaHandle;
 use router_view::StatusRouterHandle;
+
+/// Capacity for the blocking panel builders, sized to [`STATUS_MAX_INFLIGHT`].
+///
+/// The Tower concurrency gate cannot express this. Its permit lives inside the
+/// RESPONSE FUTURE, so a client that aborts mid-request releases it while the
+/// `spawn_blocking` builder that request already started keeps running --
+/// capacity reads as free while detached blocking scans pile up. A permit taken
+/// from here is MOVED into the blocking closure instead, so it is released by
+/// the blocking work ending, never by the request future or the `JoinHandle`
+/// being dropped.
+///
+/// Waiting on it cannot deadlock. Tower admits at most [`STATUS_MAX_INFLIGHT`]
+/// requests, and an admitted request holds at most ONE builder permit at a time
+/// (the `/status` aggregate awaits its four panels sequentially, in
+/// `status_aggregate`), so there is no hold-and-wait edge to close a cycle
+/// with. In the uncancelled steady state it is therefore never contended; it
+/// blocks only in the case it exists for, a permit still held by a detached
+/// builder from a cancelled request. That case DELAYS the next builder, it does
+/// not shed it: shedding would need a panel-level reason code the wire does not
+/// have.
+///
+/// One instance per [`StatusState`], i.e. one per serve process -- the same
+/// scope as the single subtree-wide semaphore the Tower gate installs.
+pub struct BuilderCapacity(Arc<Semaphore>);
+
+impl Default for BuilderCapacity {
+    fn default() -> Self {
+        Self(Arc::new(Semaphore::new(STATUS_MAX_INFLIGHT)))
+    }
+}
+
+impl BuilderCapacity {
+    /// Take one builder permit without waiting.
+    ///
+    /// This is NOT a shed path -- [`guard_panel`] falls through to
+    /// [`acquire`](Self::acquire) on [`TryAcquire::NoPermits`] and waits. It
+    /// exists only to split the uncontended fast path (the whole steady state)
+    /// from the contended one, so the contended path is observable at the
+    /// instant it is taken rather than inferred from an absence.
+    fn try_acquire(&self) -> Result<OwnedSemaphorePermit, TryAcquire> {
+        Arc::clone(&self.0).try_acquire_owned()
+    }
+
+    /// Take one builder permit, waiting for capacity.
+    ///
+    /// `None` means the semaphore was closed. Nothing closes it, but the result
+    /// is matched by value rather than unwrapped: the release profile is
+    /// `panic = "abort"`, so a reachable panic on the serve path would take the
+    /// whole daemon -- including the live proxy -- with it. The caller degrades
+    /// a `None` to an unavailable panel carrying an existing reason code.
+    async fn acquire(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.0).acquire_owned().await.ok()
+    }
+
+    #[cfg(test)]
+    fn available_permits(&self) -> usize {
+        self.0.available_permits()
+    }
+}
 
 /// Shared state for the `/status` family. Carries ONLY read handles: the
 /// live `Router` (behind a read-only facade, `StatusRouterHandle`) and the
@@ -78,6 +139,11 @@ pub struct StatusState {
     /// records its outcome here; an availability edge logs a single
     /// transition line (never per poll).
     pub observability: PanelObservability,
+    /// Cancellation-survivable capacity for the blocking panel builders. A
+    /// permit is moved INTO each `spawn_blocking` closure by `guard_panel`, so
+    /// it is released by the blocking work ending -- not by a cancelled
+    /// request's future dropping. See [`BuilderCapacity`].
+    pub builder_capacity: BuilderCapacity,
 }
 
 impl StatusState {
@@ -96,6 +162,7 @@ impl StatusState {
             config_path,
             daemon_meta: DaemonMetaHandle::new(daemon_meta),
             observability: PanelObservability::default(),
+            builder_capacity: BuilderCapacity::default(),
         }
     }
 }
@@ -239,14 +306,25 @@ impl PanelCounters {
 
 /// Panic-isolation wrapper every panel builder runs through. A status panel
 /// is best-effort: a broken data source degrades that one panel to
-/// unavailable, never a 500 and never a process crash. This maps both
-/// failure modes to an unavailable panel carrying `code`:
+/// unavailable, never a 500 and never a process crash. This maps three
+/// outcomes to an unavailable panel carrying `code`:
 ///   - the builder panics (caught via `catch_unwind`),
-///   - the `spawn_blocking` join itself fails.
+///   - the `spawn_blocking` join itself fails,
+///   - the builder-capacity semaphore is closed (never happens; matched by
+///     value rather than unwrapped so no reachable panic reaches the daemon).
 ///
 /// The builder runs on a blocking worker because real panel sources do
 /// synchronous I/O (open the usage ledger, re-read the config file).
+///
+/// One capacity permit is taken on the async side and MOVED into the blocking
+/// closure, so it is held for the builder's whole run and released only when
+/// the blocking work ends -- on normal return, on error return, and (in unwind
+/// builds) on panic. Dropping the response future or the `JoinHandle` does NOT
+/// release it, because the permit lives inside the already-queued blocking
+/// task. That is the property that keeps a cancelled request from freeing
+/// capacity while its detached builder runs on. See [`BuilderCapacity`].
 pub(super) async fn guard_panel<T, F>(
+    capacity: &BuilderCapacity,
     schema_version: u32,
     code: &'static str,
     builder: F,
@@ -258,8 +336,29 @@ where
     // Captured on the async side: a blocking worker inherits no task-locals.
     // Compiles away entirely outside test builds.
     let probe = builder_probe::current();
+    // Match by value: a closed semaphore degrades to an unavailable panel, it
+    // never unwraps into a panic on the serve path (`panic = "abort"`).
+    let permit = match capacity.try_acquire() {
+        Ok(permit) => permit,
+        Err(TryAcquire::NoPermits) => {
+            // Contended: every builder permit is held (in practice only by a
+            // detached builder from a cancelled request). Signal the gate so a
+            // test can observe the delay deterministically, then WAIT -- this is
+            // a delay, never a shed.
+            builder_probe::capacity_exhausted(&probe);
+            match capacity.acquire().await {
+                Some(permit) => permit,
+                None => return Panel::unavailable(schema_version, code),
+            }
+        }
+        Err(TryAcquire::Closed) => return Panel::unavailable(schema_version, code),
+    };
     builder_probe::submitted(&probe);
     let joined = tokio::task::spawn_blocking(move || {
+        // The permit is owned here, so it drops when this closure exits by any
+        // path -- return, error, or (in unwind builds) panic -- and never when
+        // a cancelled request drops the future or the join handle.
+        let _permit = permit;
         builder_probe::park(&probe);
         panic::catch_unwind(AssertUnwindSafe(builder))
     })
@@ -489,6 +588,66 @@ mod tests {
         }
     }
 
+    /// The builder permit is released on the NON-success exits too, so a panel
+    /// that fails repeatedly cannot leak capacity a poll at a time until the
+    /// status surface wedges.
+    ///
+    /// Success is covered by every other test in this module (they would all
+    /// hang at the fourth build otherwise). This pins the two that a naive
+    /// implementation gets wrong:
+    ///   - an ERROR return, i.e. a builder that returns an unavailable panel;
+    ///   - a PANIC, which unwinds THROUGH the permit rather than returning past
+    ///     it.
+    ///
+    /// Scope note on the panic case: it holds under `debug_assertions` only, and
+    /// proves that an unwind drops the permit. It does NOT -- and cannot --
+    /// prove release-build panic recovery: the release profile is
+    /// `panic = "abort"`, so a panicking builder there takes the process, and
+    /// permit accounting is moot because restart reconstructs all state.
+    #[tokio::test]
+    async fn builder_permit_is_released_on_error_and_on_unwinding_panic() {
+        let capacity = BuilderCapacity::default();
+        let all = capacity.available_permits();
+        assert_eq!(all, STATUS_MAX_INFLIGHT);
+
+        let errored: Panel<u32> = guard_panel(&capacity, 1, vocabulary::codes::DB_BUSY, || {
+            Panel::unavailable(1, vocabulary::codes::DB_UNAVAILABLE)
+        })
+        .await;
+        assert_eq!(errored.unavailable.as_deref(), Some("db_unavailable"));
+        assert_eq!(
+            capacity.available_permits(),
+            all,
+            "an unavailable panel must return its builder permit"
+        );
+
+        #[cfg(debug_assertions)]
+        {
+            let panicked: Panel<u32> =
+                guard_panel(&capacity, 1, vocabulary::codes::DB_UNAVAILABLE, || {
+                    panic!("data source blew up")
+                })
+                .await;
+            assert_eq!(panicked.unavailable.as_deref(), Some("db_unavailable"));
+            assert_eq!(
+                capacity.available_permits(),
+                all,
+                "an unwinding builder must drop its permit on the way out"
+            );
+        }
+
+        // Capacity is genuinely reusable afterwards, not merely counted back:
+        // STATUS_MAX_INFLIGHT more builders run without blocking.
+        for _ in 0..STATUS_MAX_INFLIGHT {
+            let ok: Panel<u32> = guard_panel(&capacity, 1, vocabulary::codes::NO_DATA, || {
+                Panel::available(1, now_utc_rfc3339(), 1)
+            })
+            .await;
+            assert_eq!(ok.data, Some(1));
+        }
+        assert_eq!(capacity.available_permits(), all);
+    }
+
     #[test]
     fn available_panel_clears_unavailable_and_sets_as_of() {
         let panel = Panel::available(3, "2026-07-15T00:00:00Z".to_string(), 42u32);
@@ -532,14 +691,16 @@ mod tests {
 
     #[tokio::test]
     async fn guard_isolates_panic() {
-        let panicked: Panel<u32> = guard_panel(1, vocabulary::codes::DB_UNAVAILABLE, || {
-            panic!("data source blew up");
-        })
-        .await;
+        let capacity = BuilderCapacity::default();
+        let panicked: Panel<u32> =
+            guard_panel(&capacity, 1, vocabulary::codes::DB_UNAVAILABLE, || {
+                panic!("data source blew up");
+            })
+            .await;
         assert_eq!(panicked.unavailable.as_deref(), Some("db_unavailable"));
         assert!(panicked.data.is_none());
 
-        let ok: Panel<u32> = guard_panel(1, vocabulary::codes::NO_DATA, || {
+        let ok: Panel<u32> = guard_panel(&capacity, 1, vocabulary::codes::NO_DATA, || {
             Panel::available(1, now_utc_rfc3339(), 5)
         })
         .await;
@@ -555,23 +716,24 @@ mod tests {
     /// in the MIDDLE so both the before- and after-it cases are covered.
     #[tokio::test]
     async fn sequential_composition_isolates_a_panicking_panel() {
-        async fn ok_panel(value: u32) -> Panel<u32> {
-            guard_panel(1, vocabulary::codes::DB_UNAVAILABLE, move || {
+        async fn ok_panel(capacity: &BuilderCapacity, value: u32) -> Panel<u32> {
+            guard_panel(capacity, 1, vocabulary::codes::DB_UNAVAILABLE, move || {
                 Panel::available(1, now_utc_rfc3339(), value)
             })
             .await
         }
-        async fn panicking_panel() -> Panel<u32> {
-            guard_panel(1, vocabulary::codes::DB_UNAVAILABLE, || {
+        async fn panicking_panel(capacity: &BuilderCapacity) -> Panel<u32> {
+            guard_panel(capacity, 1, vocabulary::codes::DB_UNAVAILABLE, || {
                 panic!("panel source blew up")
             })
             .await
         }
 
-        let a = ok_panel(2).await;
-        let panicked = panicking_panel().await;
-        let b = ok_panel(3).await;
-        let c = ok_panel(4).await;
+        let capacity = BuilderCapacity::default();
+        let a = ok_panel(&capacity, 2).await;
+        let panicked = panicking_panel(&capacity).await;
+        let b = ok_panel(&capacity, 3).await;
+        let c = ok_panel(&capacity, 4).await;
 
         assert_eq!(panicked.unavailable.as_deref(), Some("db_unavailable"));
         assert!(panicked.data.is_none());

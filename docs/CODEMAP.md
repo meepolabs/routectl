@@ -2573,7 +2573,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   is ADMITTED REQUESTS, and equals the concurrent blocking-builder count
   because the `/status` aggregate builds its panels sequentially -- pinned by
   `concurrent_aggregates_hold_at_most_max_inflight_blocking_builders`, which
-  parks builders via `handlers/status/builder_probe.rs`. Also owns
+  parks builders via `handlers/status/builder_probe.rs`. The builder half holds
+  under CANCELLATION too, since `guard_panel` owns its capacity permit inside
+  the blocking closure: `cancelled_single_panel_requests_do_not_free_builder_capacity`
+  and `cancelled_aggregate_requests_do_not_free_builder_capacity` abort saturating
+  requests and assert no new blocking work starts until the detached builders
+  finish (the next request is DELAYED, not shed). Also owns
   `QUERY_BUDGET_MS = 1000`, the per-request wall-clock budget for one
   `/status/query` grouped aggregate, and `USAGE_BUDGET_MS = 1000`, the budget
   for one whole `/status/usage` collection (an overrun of either sheds as the
@@ -2714,13 +2719,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `QUERY` against any sibling path is still a 405.
   `guard_panel` runs every panel builder on `spawn_blocking` + `catch_unwind`,
   mapping a panic OR a join failure to an unavailable `Panel<T>` (never a
-  500/crash). The `/status` aggregate composes the four REAL panel builders
-  SEQUENTIALLY (four awaits, no `tokio::join!`), so a LIVE admitted request
-  holds at most ONE blocking builder at a time and `STATUS_MAX_INFLIGHT` names a
-  single unit -- admitted requests AND concurrent blocking builders -- for as
-  long as those requests stay live; a client abort releases the Tower permit
-  while its already-started builder runs on, so the builder ceiling does not yet
-  hold under cancellation (see the const's own doc comment); latency is
+  500/crash). It also takes one `BuilderCapacity` permit (a `StatusState`-owned
+  semaphore sized to `STATUS_MAX_INFLIGHT`) and MOVES it into the blocking
+  closure, so the permit is released by the blocking work ending -- on return,
+  on error, and (in unwind builds) on panic -- and NOT by a cancelled request's
+  future or `JoinHandle` dropping; a closed semaphore degrades to an unavailable
+  panel, never an unwrap (release is `panic = "abort"`). The `/status` aggregate
+  composes the four REAL panel builders SEQUENTIALLY (four awaits, no
+  `tokio::join!`), so an admitted request holds at most ONE blocking builder at a
+  time and `STATUS_MAX_INFLIGHT` names a single unit -- admitted requests AND
+  concurrent blocking builders -- cancellation included: waiting on the builder
+  permit cannot deadlock (no hold-and-wait edge), and a request arriving behind a
+  detached builder is DELAYED, never shed. Latency is
   the SUM of the four builders rather than the max, deliberately accepted.
   Composed into `{panels:{usage,health,config,doctor}}` -- each an INDEPENDENT
   per-panel envelope with its OWN `schema_version` (usage = 3, health = 5,
@@ -2735,12 +2745,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   beneath the same listener auth layer as `/v1/*` (the auth layer sits UNDER
   the host guard); token-less loopback keeps the zero-auth dev path
 - `src/handlers/status/builder_probe.rs` -- test-only observation seam inside
-  `guard_panel`'s blocking closure, letting a test count and park blocking
+  `guard_panel`, letting a test count and park blocking
   panel builders (the concurrency invariant is invisible from the wire, since
-  a fan-out answers 200 on every panel too). `BuilderProbe` is an arrival
-  counter + condvar release, scoped per request task through the
-  `BUILDER_PROBE` task-local so a probe test never parks another test's
-  builder. Compiles to a zero-sized token + empty `park` outside `cfg(test)`
+  a fan-out answers 200 on every panel too). `BuilderProbe` counts builders at
+  three points -- `capacity_exhausted` (found the builder-capacity pool empty
+  and waited, the positive signal a cancellation test asserts on), `submitted`
+  (permit in hand, handed to `spawn_blocking`), `started` (running on a blocking
+  worker) -- and parks each started builder on a condvar until `release`. Scoped
+  per request task through the `BUILDER_PROBE` task-local so a probe test never
+  parks another test's builder. Compiles to a zero-sized token + empty hooks
+  outside `cfg(test)`
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>

@@ -8,14 +8,25 @@
 //! every panel builder passes through, where a test can count builders that
 //! have actually STARTED and hold them there.
 //!
+//! The cancellation half of the invariant needs one more observation point.
+//! Whether a detached builder still holds capacity is invisible from the wire
+//! AND from a builder count alone: the assertion is about a builder that did
+//! NOT run, and "it has not run yet" is never distinguishable from "it is about
+//! to" by waiting. [`capacity_exhausted`] turns that negative into a positive.
+//! It fires only when a builder actually found the capacity pool empty and had
+//! to wait, which -- while every permit is held by a parked builder no test has
+//! released -- is a state nothing can leave without the test acting. So a test
+//! can wait for it, snapshot, and assert, with the timeout serving only as a
+//! hang bound.
+//!
 //! Outside a test build the seam compiles to nothing: [`current`] yields a
-//! zero-sized token and [`park`] has an empty body.
+//! zero-sized token and the hooks have empty bodies.
 
 #[cfg(not(test))]
-pub use inert::{current, park, submitted};
+pub use inert::{capacity_exhausted, current, park, submitted};
 
 #[cfg(test)]
-pub use active::{BUILDER_PROBE, BuilderProbe, current, park, submitted};
+pub use active::{BUILDER_PROBE, BuilderProbe, capacity_exhausted, current, park, submitted};
 
 #[cfg(not(test))]
 mod inert {
@@ -26,6 +37,8 @@ mod inert {
     pub const fn current() -> Probe {
         Probe
     }
+
+    pub const fn capacity_exhausted(_probe: &Probe) {}
 
     pub const fn submitted(_probe: &Probe) {}
 
@@ -54,6 +67,7 @@ mod active {
     /// the runtime, where an async semaphore cannot be awaited.
     #[derive(Default)]
     pub struct BuilderProbe {
+        capacity_exhausted: AtomicUsize,
         submitted: AtomicUsize,
         started: AtomicUsize,
         released: Mutex<bool>,
@@ -65,8 +79,22 @@ mod active {
             Arc::new(Self::default())
         }
 
+        /// How many blocking builders found the capacity pool EMPTY and had to
+        /// wait for a permit.
+        ///
+        /// This is the signal a cancellation test waits on. "No new blocking
+        /// work started" is an absence, and no amount of waiting distinguishes
+        /// an absence from a not-yet; this counter is the positive event that
+        /// says the request reached the gate and the gate held it. While every
+        /// permit is owned by a parked builder, that is a state the test alone
+        /// can end.
+        pub fn capacity_exhausted(&self) -> usize {
+            self.capacity_exhausted.load(Ordering::SeqCst)
+        }
+
         /// How many blocking builders have been SUBMITTED -- counted on the
-        /// async side, before `spawn_blocking` hands the job to a worker.
+        /// async side, once the capacity permit is in hand and before
+        /// `spawn_blocking` hands the job to a worker.
         ///
         /// This is the number a capacity assertion must read, not [`started`]:
         /// submission is what the handler DECIDES to do, whereas starting also
@@ -94,6 +122,10 @@ mod active {
             self.wakeup.notify_all();
         }
 
+        fn exhaust(&self) {
+            self.capacity_exhausted.fetch_add(1, Ordering::SeqCst);
+        }
+
         fn submit(&self) {
             self.submitted.fetch_add(1, Ordering::SeqCst);
         }
@@ -113,6 +145,15 @@ mod active {
 
     pub fn current() -> Probe {
         BUILDER_PROBE.try_with(Arc::clone).ok()
+    }
+
+    /// Record that a builder found no free capacity permit and is about to wait
+    /// for one. Called only on the contended path, so the counter is a positive
+    /// observation of the gate holding a builder back.
+    pub fn capacity_exhausted(probe: &Probe) {
+        if let Some(probe) = probe {
+            probe.exhaust();
+        }
     }
 
     /// Record that a builder is about to be handed to `spawn_blocking`. Called
