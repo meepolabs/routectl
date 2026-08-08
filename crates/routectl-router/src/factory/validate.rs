@@ -768,11 +768,13 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
                 if !is_anthropic_api_host(base_url) {
                     return Err(Error::Config(format!(
                         "provider `{name}`: credential_source = \"forwarded\" requires \
-                         base_url's host to be exactly api.anthropic.com (got {base_url:?}) -- \
-                         a path, port, or credentials prefix on that host is fine, but no other \
-                         host is accepted. This is a hard containment guarantee: a forwarded \
-                         provider carries the client's full-scope claude.ai bearer, which must \
-                         never be sent to a non-Anthropic egress"
+                         base_url's host to be exactly api.anthropic.com -- a path, port, or \
+                         credentials prefix on that host is fine, but no other host is \
+                         accepted. This is a hard containment guarantee: a forwarded provider \
+                         carries the client's full-scope claude.ai bearer, which must never be \
+                         sent to a non-Anthropic egress. The configured base_url is withheld \
+                         from this message because it may carry credentials in userinfo, a \
+                         path, or a query; see your own config.toml for the value"
                     )));
                 }
             }
