@@ -92,7 +92,7 @@ impl TryFrom<&str> for Outcome {
 /// Timestamps are epoch-millis UTC (`i64`). JSON-text columns are
 /// `serde_json::Value`. Token counts are unsigned (`u64`) and nullable
 /// because not every upstream reports every counter.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct UsageRecord {
     // IDENTITY
     /// Request start time, epoch-millis UTC.

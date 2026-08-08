@@ -13,12 +13,6 @@
 //! a future AWS block type ships without a rebuild on the
 //! all-passthrough path.
 
-// Forward-compat fields (`metrics`, `latency_ms`, `role`, tuple-struct
-// payloads) are deserialized so the shape round-trips cleanly; nothing
-// reads them yet, but dropping them would make a future field addition
-// silently lossy on the wire.
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -44,6 +38,9 @@ pub struct ConverseResponse {
     pub(crate) stop_reason: Option<String>,
     #[serde(default)]
     pub(crate) usage: Option<ConverseUsage>,
+    /// Bound so a malformed `metrics` object fails the parse; nothing
+    /// reads the value.
+    #[allow(dead_code)]
     #[serde(default)]
     pub(crate) metrics: Option<ConverseMetrics>,
     /// AWS-side reflection of `additionalModelResponseFieldPaths` from
@@ -60,6 +57,10 @@ pub struct ConverseOutput {
 
 #[derive(Debug, Deserialize)]
 pub struct ConverseResponseMessage {
+    /// Required on the AWS wire (no `serde(default)`): a reply missing
+    /// `role` must fail the parse rather than parse as empty. Nothing
+    /// reads the value yet.
+    #[allow(dead_code)]
     pub(crate) role: String,
     pub(crate) content: Vec<ConverseResponseContentBlock>,
 }
@@ -144,9 +145,14 @@ pub struct ConverseCacheDetail {
     pub(crate) ttl: String,
 }
 
+/// Wire shape of the AWS `metrics` object.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConverseMetrics {
+    /// Required on the AWS wire (no `serde(default)`) so a malformed
+    /// metrics object fails the parse rather than yielding a zero;
+    /// nothing reads the value.
+    #[allow(dead_code)]
     pub(crate) latency_ms: u64,
 }
 
@@ -162,6 +168,9 @@ pub struct ConverseMetrics {
 
 #[derive(Debug, Deserialize)]
 pub struct StreamMessageStart {
+    /// Bound so a non-string `role` fails the parse; nothing reads the
+    /// value.
+    #[allow(dead_code)]
     #[serde(default)]
     pub(crate) role: Option<String>,
 }
@@ -222,8 +231,10 @@ pub enum StreamDelta {
         reasoning_content: StreamReasoningDelta,
     },
     /// Forward compat: anything we don't recognize lands here so the
-    /// stream doesn't error out on a new AWS delta type.
-    Other(Value),
+    /// stream doesn't error out on a new AWS delta type. The payload is
+    /// intentionally unread -- the binding exists so serde absorbs an
+    /// unknown delta object instead of failing the whole stream.
+    Other(#[allow(dead_code)] Value),
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +279,9 @@ pub struct StreamMessageStop {
 pub struct StreamMetadata {
     #[serde(default)]
     pub(crate) usage: Option<ConverseUsage>,
+    /// Bound so a malformed `metrics` object fails the parse; nothing
+    /// reads the value.
+    #[allow(dead_code)]
     #[serde(default)]
     pub(crate) metrics: Option<ConverseMetrics>,
 }
