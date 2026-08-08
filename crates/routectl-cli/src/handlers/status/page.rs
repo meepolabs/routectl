@@ -39,7 +39,21 @@ use axum::routing::get;
 /// element would silently stop covering the others.
 const MARKUP: &str = include_str!("dashboard.html");
 const STYLE: &str = include_str!("dashboard.css");
-const SCRIPT_PARTS: &[&str] = &[include_str!("dashboard.js")];
+const SCRIPT_PARTS: &[&str] = &[
+    include_str!("dash_00_state.js"),
+    include_str!("dash_10_format.js"),
+    include_str!("dash_20_query_vocab.js"),
+    include_str!("dash_30_transport.js"),
+    include_str!("dash_40_render.js"),
+    include_str!("dash_50_dom.js"),
+    include_str!("dash_60_tab_overview.js"),
+    include_str!("dash_61_tab_usage.js"),
+    include_str!("dash_70_tab_routing.js"),
+    include_str!("dash_71_tab_health.js"),
+    include_str!("dash_72_tab_config.js"),
+    include_str!("dash_73_tab_doctor.js"),
+    include_str!("dash_90_chrome.js"),
+];
 
 /// The markup's asset slots. Each appears EXACTLY once and is replaced by the
 /// corresponding inline block; a missing slot is a compile error, not a
