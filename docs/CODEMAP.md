@@ -2908,14 +2908,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   second copy). `config_path: None` -> `no_config_path` unavailable; a gather
   failure -> `doctor_unavailable`
 - `src/handlers/status/page.rs` -- the embedded dashboard page. ASSEMBLES the
-  document at COMPILE time from three sources (`include_str!` x3 --
-  `dashboard.html` markup + `dashboard.css` + `dashboard.js`) by splicing the
+  document at COMPILE time from its authoring sources (`include_str!` --
+  `dashboard.html` markup + `dashboard.css` + the `SCRIPT_PARTS` script
+  sources, concatenated in declaration order) by splicing the
   style and script bodies into the markup's two `@@DASHBOARD_*@@` slots as one
   inline `<style>` + one inline `<script>`; the join is `const fn` work over
-  byte arrays, so the served `PAGE: &str` is still static bytes and the split
-  is authoring-only (the house `include_str!` pattern -- no
+  byte arrays (`PARTS` is a list of fragment GROUPS, so a multi-file script
+  body splices in as one run), so the served `PAGE: &str` is still static bytes
+  and the split is authoring-only (the house `include_str!` pattern -- no
   `ServeDir`/`rust-embed`). A missing or duplicated slot is a compile-time
-  panic. `page_router() -> Router<()>` serves the single self-contained
+  panic. Guard tests scan `tests::script()` -- the whole concatenation, never
+  one part. `page_router() -> Router<()>` serves the single self-contained
   document at `GET /` with a `Cache-Control: no-store` header, stateless and
   static-bytes-only (structurally read-only; covered by the `mod.rs`
   forbidden-import scan + its own GET-only 405 assertion). Merged into the
