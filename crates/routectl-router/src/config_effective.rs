@@ -146,6 +146,29 @@ pub struct ProviderCell {
 /// userinfo, path, query, and fragment are DROPPED, and a value that does not
 /// parse yields `None`. There is deliberately no raw-string fallback -- a
 /// fallback would publish exactly the string this function exists to withhold.
+///
+/// The boundary is enforced HERE and deliberately does not lean on any
+/// validator, because `validate_base_url_scheme` is reached only from the
+/// per-model factory loop while this projection walks every `[providers.X]`
+/// entry: a provider that no `[models.X]` references is projected having never
+/// been scheme-checked at all. Two failure modes are therefore handled
+/// explicitly rather than assumed away.
+///
+/// **Only `http` and `https` project.** For any other scheme the url crate
+/// gives an OPAQUE host, which it does not percent-decode, so
+/// `weird://h.example%40<secret>` would carry credential bytes straight through
+/// `host_str()`. A scheme with no `//` authority (`mailto:`, `unix:/path`)
+/// yields `None` merely because there is no host to read -- NOT because the
+/// scheme was checked; the explicit gate is what covers the `//` cases.
+///
+/// **A `@` the parser did not read as userinfo yields `None`.** For a special
+/// scheme the authority ends at the first `/`, so
+/// `https://<key>:8080/x@h.example/v1` parses as host `<key>`, port 8080, with
+/// the real host demoted into the path -- and a base64 secret routinely
+/// contains a `/`. When the credential is in the USERNAME position (a real
+/// pattern on some relays) that puts it directly into the projected origin.
+/// Trusting `host_str()` to be the operator's intended host is the leak, so a
+/// remainder carrying an unconsumed `@` is withheld whole.
 fn endpoint_origin(base_url: &str) -> Option<String> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -155,26 +178,63 @@ fn endpoint_origin(base_url: &str) -> Option<String> {
     // parsed url: `Url::set_username`/`set_password` fail silently on
     // cannot-be-a-base URLs, which would leave userinfo in the output.
     let url = url::Url::parse(trimmed).ok()?;
-    let host = url.host_str()?;
     let scheme = url.scheme();
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    // The AUTHORITY as written: everything after `://` up to the first `/`,
+    // `?`, or `#`. The parser's authority scan stops at that same first `/`,
+    // and it takes userinfo from the LAST `@` before it -- so a SECOND `@`
+    // lets a benign leading userinfo satisfy any "was userinfo consumed?"
+    // question while the host slot is filled from the bytes between the two.
+    // `https://x@<secret-with-a-slash>/y@h.example/v1` is the vector, and it is
+    // why this predicate asks about the WRITTEN AUTHORITY rather than about
+    // what the parse happened to consume: at most one `@` in the authority, and
+    // none demoted past it into the path.
+    let remainder = trimmed.split_once("://").map(|(_, rest)| rest)?;
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or(remainder);
+    // BOTH clauses are load-bearing and neither subsumes the other, verified by
+    // probe against the real parser:
+    //   - two `@` INSIDE the authority: the parse takes userinfo from the LAST
+    //     one, so a benign leading `x@` cannot be used to vouch for the rest.
+    //   - any `@` AFTER the authority ends: in
+    //     `https://x@<secret-with-a-slash>/y@h.example/v1` the written authority
+    //     is just `x@<secret-prefix>` (one `@`, so the first clause passes) and
+    //     the real host is demoted into the path -- the secret becomes the host.
+    // Dropping the second clause reopens that leak; it was measured, not
+    // assumed. The cost is that a legitimate `@` in a path or query withholds
+    // the origin too (rendered as "derived at startup"): a fail-SAFE
+    // imprecision, deliberately preferred over publishing credential bytes.
+    let rest_after_authority = &remainder[authority.len()..];
+    if authority.matches('@').count() > 1 || rest_after_authority.contains('@') {
+        return None;
+    }
     Some(match url.port() {
         Some(port) => format!("{scheme}://{host}:{port}"),
         None => format!("{scheme}://{host}"),
     })
 }
 
-/// The URI scheme of a secret ref (`env://VAR` -> `env`), never the body.
+/// The leak-safe scheme of a secret ref (`env://VAR` -> `env`), never the body.
 ///
 /// The body names a variable, a filesystem path, or an OAuth provider id; only
 /// the scheme says WHERE the credential class lives, which is the whole of what
 /// a read surface needs.
+///
+/// The vocabulary is an ALLOWLIST, matching the decision this codebase already
+/// made for the doctor surface's `scheme_label`: an unrecognized ref is not a
+/// ref with an exotic scheme, it is a bare value someone pasted into the field,
+/// and a bare value IS secret material. `api_key_ref` is a plain `String` and
+/// `SecretRef::parse` never runs for a provider no model references, so a
+/// pasted `AKIA<id>:<secret>` reaches here intact -- returning the text before
+/// its first colon would publish the key id. Anything off the list collapses to
+/// `None`, echoing none of its bytes.
 fn credential_ref_scheme(api_key_ref: Option<&str>) -> Option<String> {
     let raw = api_key_ref?.trim();
     let (scheme, _) = raw.split_once(':')?;
-    if scheme.is_empty() {
-        return None;
-    }
-    Some(scheme.to_ascii_lowercase())
+    let scheme = scheme.to_ascii_lowercase();
+    matches!(scheme.as_str(), "env" | "file" | "oauth" | "literal").then_some(scheme)
 }
 
 /// Extract the entry's own auth-mechanism token.
@@ -672,6 +732,125 @@ base_url = "{base_url}"
             !format!("{cell:?}").contains("ACME_KEY"),
             "the ref body must not surface"
         );
+    }
+
+    /// An unrecognized ref is a bare value someone pasted into the field, not a
+    /// ref with an exotic scheme -- and a bare value IS secret material, so the
+    /// text before its first colon is a key id, not a scheme.
+    #[test]
+    fn unrecognized_credential_ref_publishes_none_of_its_bytes() {
+        for pasted in [
+            "AKIAEXAMPLE:wJalrXUtnFEMI",
+            "sk-live-abc:def",
+            "sk-live-no-colon-at-all",
+            ":sk-live-leading",
+        ] {
+            assert_eq!(
+                credential_ref_scheme(Some(pasted)),
+                None,
+                "`{pasted}` is not an allowlisted ref scheme; it must project nothing"
+            );
+        }
+        // The allowlisted four still project, case-insensitively.
+        for (raw, expected) in [
+            ("env://VAR", "env"),
+            ("FILE:///etc/k", "file"),
+            ("oauth://anthropic", "oauth"),
+            ("literal:k", "literal"),
+        ] {
+            assert_eq!(credential_ref_scheme(Some(raw)).as_deref(), Some(expected));
+        }
+    }
+
+    /// Only `http`/`https` project. Every other scheme carries an OPAQUE host,
+    /// which the url crate does NOT percent-decode, so credential bytes would
+    /// ride straight through `host_str()`. This cannot lean on
+    /// `validate_base_url_scheme`: that runs only from the per-model factory
+    /// loop, while this projection walks every provider entry, so a provider no
+    /// model references arrives here unvalidated.
+    #[test]
+    fn non_http_scheme_projects_no_origin() {
+        for raw in [
+            "weird://h.example%40sk-live-LEAKED/v1",
+            "gopher://user:sk-live-P@h.example/x",
+            "ftp://h.example/v1",
+            // These two have no `//` authority, so they would yield None even
+            // without the gate -- pinned so a future reader does not mistake
+            // that for scheme checking.
+            "mailto:a@b.example",
+            "unix:/var/run/x.sock",
+        ] {
+            assert_eq!(
+                endpoint_origin(raw),
+                None,
+                "`{raw}` is not http(s); it must project nothing"
+            );
+            assert!(!format!("{:?}", endpoint_origin(raw)).contains("sk-live"));
+        }
+    }
+
+    /// For a special scheme the authority ends at the first `/`, so a `/` inside
+    /// a credential truncates it and the parser reads the pre-`@` text as the
+    /// HOST. When the credential sits in the username position that puts it
+    /// straight into the projected origin.
+    #[test]
+    fn at_sign_the_parser_did_not_consume_projects_no_origin() {
+        // Parses as host "sk-live-KEY", port 8080 -- the real host is demoted
+        // into the path, so the origin would have BEEN the credential.
+        assert_eq!(
+            endpoint_origin("https://sk-live-KEY:8080/x@h.example/v1"),
+            None
+        );
+        assert_eq!(
+            endpoint_origin("https://user:8080/sk-live-REST@h.example/v1"),
+            None
+        );
+        // A genuine userinfo authority still projects its real origin: the
+        // parser consumed the `@`, so host_str() is the operator's host.
+        assert_eq!(
+            endpoint_origin("https://user:sk-live-X@h.example/v1").as_deref(),
+            Some("https://h.example")
+        );
+        // No `@` at all is the ordinary case and is unaffected.
+        assert_eq!(
+            endpoint_origin("https://h.example:8443/v1").as_deref(),
+            Some("https://h.example:8443")
+        );
+    }
+
+    /// TWO `@` is a distinct vector from one, and defeats any guard that asks
+    /// "did the parse consume userinfo?": the parser takes userinfo from the
+    /// LAST `@` before the first `/`, so a benign leading `x@` vouches for a
+    /// secret that then lands in the host slot. Both of these projected
+    /// credential-derived origins before the authority-scoped predicate.
+    #[test]
+    fn a_second_at_sign_cannot_vouch_for_a_demoted_credential() {
+        assert_eq!(
+            endpoint_origin("https://x@sk-live-AB/CD@h.example/v1"),
+            None
+        );
+        assert_eq!(
+            endpoint_origin("https://x@sk-live-KEY:8080/y@h.example/v1"),
+            None
+        );
+        // Neither may leak even a lowercased fragment of the credential.
+        for raw in [
+            "https://x@sk-live-AB/CD@h.example/v1",
+            "https://x@sk-live-KEY:8080/y@h.example/v1",
+        ] {
+            assert!(!format!("{:?}", endpoint_origin(raw)).contains("sk-live"));
+        }
+    }
+
+    /// The withholding is deliberately fail-SAFE rather than precise: an `@`
+    /// that is legitimately in a path or query also suppresses the origin,
+    /// which the panel renders as "derived at startup". Pinned so the
+    /// imprecision is a recorded decision rather than a surprise -- tightening
+    /// it must not reopen `a_second_at_sign_cannot_vouch_for_a_demoted_credential`.
+    #[test]
+    fn an_at_sign_past_the_authority_withholds_fail_safe() {
+        assert_eq!(endpoint_origin("https://gw.example/v1?tenant=a@b"), None);
+        assert_eq!(endpoint_origin("https://h.example/v1@beta"), None);
     }
 
     #[test]
