@@ -766,55 +766,55 @@ impl<T> core::convert::From<T> for routectl_usage::KCalibration
 pub fn routectl_usage::KCalibration::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::KCalibration
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::KCalibration
-pub struct routectl_usage::M1AttributionSummary
-pub routectl_usage::M1AttributionSummary::context_fraction_present: i64
-pub routectl_usage::M1AttributionSummary::context_fraction_sum: f64
-pub routectl_usage::M1AttributionSummary::dedup_tokens: i64
-pub routectl_usage::M1AttributionSummary::path_extractable: i64
-pub routectl_usage::M1AttributionSummary::path_units: i64
-pub routectl_usage::M1AttributionSummary::recorder_requests: i64
-pub routectl_usage::M1AttributionSummary::supersession_tokens: i64
-impl core::clone::Clone for routectl_usage::M1AttributionSummary
-pub fn routectl_usage::M1AttributionSummary::clone(&self) -> routectl_usage::M1AttributionSummary
-impl core::cmp::PartialEq for routectl_usage::M1AttributionSummary
-pub fn routectl_usage::M1AttributionSummary::eq(&self, &routectl_usage::M1AttributionSummary) -> bool
-impl core::default::Default for routectl_usage::M1AttributionSummary
-pub fn routectl_usage::M1AttributionSummary::default() -> routectl_usage::M1AttributionSummary
-impl core::fmt::Debug for routectl_usage::M1AttributionSummary
-pub fn routectl_usage::M1AttributionSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for routectl_usage::M1AttributionSummary
-impl core::marker::StructuralPartialEq for routectl_usage::M1AttributionSummary
-impl core::marker::Freeze for routectl_usage::M1AttributionSummary
-impl core::marker::Send for routectl_usage::M1AttributionSummary
-impl core::marker::Sync for routectl_usage::M1AttributionSummary
-impl core::marker::Unpin for routectl_usage::M1AttributionSummary
-impl core::marker::UnsafeUnpin for routectl_usage::M1AttributionSummary
-impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::M1AttributionSummary
-impl core::panic::unwind_safe::UnwindSafe for routectl_usage::M1AttributionSummary
-impl<T, U> core::convert::Into<U> for routectl_usage::M1AttributionSummary where U: core::convert::From<T>
-pub fn routectl_usage::M1AttributionSummary::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for routectl_usage::M1AttributionSummary where U: core::convert::Into<T>
-pub type routectl_usage::M1AttributionSummary::Error = core::convert::Infallible
-pub fn routectl_usage::M1AttributionSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for routectl_usage::M1AttributionSummary where U: core::convert::TryFrom<T>
-pub type routectl_usage::M1AttributionSummary::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn routectl_usage::M1AttributionSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for routectl_usage::M1AttributionSummary where T: core::clone::Clone
-pub type routectl_usage::M1AttributionSummary::Owned = T
-pub fn routectl_usage::M1AttributionSummary::clone_into(&self, &mut T)
-pub fn routectl_usage::M1AttributionSummary::to_owned(&self) -> T
-impl<T> core::any::Any for routectl_usage::M1AttributionSummary where T: 'static + ?core::marker::Sized
-pub fn routectl_usage::M1AttributionSummary::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for routectl_usage::M1AttributionSummary where T: ?core::marker::Sized
-pub fn routectl_usage::M1AttributionSummary::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for routectl_usage::M1AttributionSummary where T: ?core::marker::Sized
-pub fn routectl_usage::M1AttributionSummary::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for routectl_usage::M1AttributionSummary where T: core::clone::Clone
-pub unsafe fn routectl_usage::M1AttributionSummary::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for routectl_usage::M1AttributionSummary
-pub fn routectl_usage::M1AttributionSummary::from(T) -> T
-impl<T> tracing::instrument::Instrument for routectl_usage::M1AttributionSummary
-impl<T> tracing::instrument::WithSubscriber for routectl_usage::M1AttributionSummary
+pub struct routectl_usage::NearLosslessAttributionSummary
+pub routectl_usage::NearLosslessAttributionSummary::context_fraction_present: i64
+pub routectl_usage::NearLosslessAttributionSummary::context_fraction_sum: f64
+pub routectl_usage::NearLosslessAttributionSummary::dedup_tokens: i64
+pub routectl_usage::NearLosslessAttributionSummary::path_extractable: i64
+pub routectl_usage::NearLosslessAttributionSummary::path_units: i64
+pub routectl_usage::NearLosslessAttributionSummary::recorder_requests: i64
+pub routectl_usage::NearLosslessAttributionSummary::supersession_tokens: i64
+impl core::clone::Clone for routectl_usage::NearLosslessAttributionSummary
+pub fn routectl_usage::NearLosslessAttributionSummary::clone(&self) -> routectl_usage::NearLosslessAttributionSummary
+impl core::cmp::PartialEq for routectl_usage::NearLosslessAttributionSummary
+pub fn routectl_usage::NearLosslessAttributionSummary::eq(&self, &routectl_usage::NearLosslessAttributionSummary) -> bool
+impl core::default::Default for routectl_usage::NearLosslessAttributionSummary
+pub fn routectl_usage::NearLosslessAttributionSummary::default() -> routectl_usage::NearLosslessAttributionSummary
+impl core::fmt::Debug for routectl_usage::NearLosslessAttributionSummary
+pub fn routectl_usage::NearLosslessAttributionSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::NearLosslessAttributionSummary
+impl core::marker::StructuralPartialEq for routectl_usage::NearLosslessAttributionSummary
+impl core::marker::Freeze for routectl_usage::NearLosslessAttributionSummary
+impl core::marker::Send for routectl_usage::NearLosslessAttributionSummary
+impl core::marker::Sync for routectl_usage::NearLosslessAttributionSummary
+impl core::marker::Unpin for routectl_usage::NearLosslessAttributionSummary
+impl core::marker::UnsafeUnpin for routectl_usage::NearLosslessAttributionSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::NearLosslessAttributionSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::NearLosslessAttributionSummary
+impl<T, U> core::convert::Into<U> for routectl_usage::NearLosslessAttributionSummary where U: core::convert::From<T>
+pub fn routectl_usage::NearLosslessAttributionSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::NearLosslessAttributionSummary where U: core::convert::Into<T>
+pub type routectl_usage::NearLosslessAttributionSummary::Error = core::convert::Infallible
+pub fn routectl_usage::NearLosslessAttributionSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::NearLosslessAttributionSummary where U: core::convert::TryFrom<T>
+pub type routectl_usage::NearLosslessAttributionSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::NearLosslessAttributionSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::NearLosslessAttributionSummary where T: core::clone::Clone
+pub type routectl_usage::NearLosslessAttributionSummary::Owned = T
+pub fn routectl_usage::NearLosslessAttributionSummary::clone_into(&self, &mut T)
+pub fn routectl_usage::NearLosslessAttributionSummary::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::NearLosslessAttributionSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::NearLosslessAttributionSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::NearLosslessAttributionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::NearLosslessAttributionSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::NearLosslessAttributionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::NearLosslessAttributionSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::NearLosslessAttributionSummary where T: core::clone::Clone
+pub unsafe fn routectl_usage::NearLosslessAttributionSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::NearLosslessAttributionSummary
+pub fn routectl_usage::NearLosslessAttributionSummary::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::NearLosslessAttributionSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::NearLosslessAttributionSummary
 pub struct routectl_usage::ParseOutcomeError(pub alloc::string::String)
 impl core::error::Error for routectl_usage::ParseOutcomeError
 impl core::fmt::Debug for routectl_usage::ParseOutcomeError
@@ -1492,10 +1492,6 @@ impl core::default::Default for routectl_usage::UsageRecord
 pub fn routectl_usage::UsageRecord::default() -> routectl_usage::UsageRecord
 impl core::fmt::Debug for routectl_usage::UsageRecord
 pub fn routectl_usage::UsageRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl serde_core::ser::Serialize for routectl_usage::UsageRecord
-pub fn routectl_usage::UsageRecord::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for routectl_usage::UsageRecord
-pub fn routectl_usage::UsageRecord::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 impl core::marker::Freeze for routectl_usage::UsageRecord
 impl core::marker::Send for routectl_usage::UsageRecord
 impl core::marker::Sync for routectl_usage::UsageRecord
@@ -1525,7 +1521,6 @@ impl<T> core::clone::CloneToUninit for routectl_usage::UsageRecord where T: core
 pub unsafe fn routectl_usage::UsageRecord::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for routectl_usage::UsageRecord
 pub fn routectl_usage::UsageRecord::from(T) -> T
-impl<T> serde_core::de::DeserializeOwned for routectl_usage::UsageRecord where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for routectl_usage::UsageRecord
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageRecord
 pub struct routectl_usage::UsageWriter
@@ -1620,7 +1615,7 @@ pub fn routectl_usage::insert_capability_event(&rusqlite::Connection, &routectl_
 pub fn routectl_usage::k_calibration_summary(&routectl_usage::UsageDb) -> core::result::Result<routectl_usage::KCalibration, routectl_usage::QueryError>
 pub fn routectl_usage::latest_quota_by_seat(&routectl_usage::UsageDb) -> core::result::Result<alloc::vec::Vec<routectl_usage::QuotaSnapshot>, routectl_usage::QueryError>
 pub fn routectl_usage::latest_tombstone(&rusqlite::Connection) -> rusqlite::Result<core::option::Option<routectl_usage::TombstoneRow>>
-pub fn routectl_usage::m1_attribution_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::M1AttributionSummary, routectl_usage::QueryError>
+pub fn routectl_usage::near_lossless_attribution_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::NearLosslessAttributionSummary, routectl_usage::QueryError>
 pub fn routectl_usage::open(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
 pub fn routectl_usage::open_readonly(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
 pub fn routectl_usage::open_readonly_fastfail(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>

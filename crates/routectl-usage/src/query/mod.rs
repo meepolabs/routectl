@@ -18,9 +18,9 @@ pub use grouped::{
     QuerySpec, QueryTotals, RowCost, SeriesBucket, query,
 };
 pub use would_trim::{
-    KCalibration, M1AttributionSummary, ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary,
-    k_calibration_summary, m1_attribution_summary, read_reuse_samples_since,
-    shadow_misfire_summary, would_trim_summary,
+    KCalibration, NearLosslessAttributionSummary, ReuseSampleRow, ShadowMisfireSummary,
+    WouldTrimSummary, k_calibration_summary, near_lossless_attribution_summary,
+    read_reuse_samples_since, shadow_misfire_summary, would_trim_summary,
 };
 
 /// Errors raised while querying the usage DB.
