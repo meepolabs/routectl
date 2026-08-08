@@ -161,21 +161,6 @@ fn text_chunk(text: &str, finish: Option<&str>) -> ChatChunk {
     }
 }
 
-#[test]
-fn stream_emits_message_start_then_text_block() {
-    let mut s = fresh_state();
-    let events = render_chunk_internal(text_chunk("hello", None), &mut s).unwrap();
-    let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
-    assert_eq!(
-        names,
-        vec![
-            "message_start",
-            "content_block_start",
-            "content_block_delta"
-        ]
-    );
-}
-
 /// Finish_reason WITHOUT usage on the same chunk: the renderer must
 /// buffer the finish_reason and emit `message_delta + message_stop`
 /// either on the next usage chunk OR at `render_eos`. Emitting
@@ -1013,8 +998,9 @@ fn empty_opaque_events_no_op() {
     // Act
     let out = render_chunk_internal(text_chunk("hello", None), &mut s).unwrap();
 
-    // Assert: identical event sequence to the legacy unit test
-    // `stream_emits_message_start_then_text_block`.
+    // Assert: the canonical-only event sequence -- a text chunk with no
+    // opaque events emits message_start, content_block_start, then
+    // content_block_delta, and leaves the opaque index map untouched.
     let names: Vec<&str> = out.iter().filter_map(|e| e.event.as_deref()).collect();
     assert_eq!(
         names,
