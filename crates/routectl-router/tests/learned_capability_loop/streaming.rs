@@ -11,7 +11,7 @@ use super::*;
 // file already uses so the learned-probe loop runs over `router.stream()`.
 //
 // A 2xx step serves a byte-accurate `text/event-stream` body the openai-compat
-// streaming egress parses into chunks (so `try_stream_with_first_chunk` yields
+// streaming egress parses into chunks (so `try_stream_with_first_content` yields
 // a first chunk and the dispatch returns Ok); a non-2xx step serves the JSON
 // error envelope verbatim, so the `provider.stream()` open call fails with the
 // SAME real classification the complete path learns from. This keeps the
