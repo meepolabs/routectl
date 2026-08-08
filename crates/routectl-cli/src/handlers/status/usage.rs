@@ -187,9 +187,12 @@ async fn build_window(
     // Stamp `as_of` at request time (before the blocking read), so a lock
     // wait or slow disk cannot skew the freshness marker.
     let as_of = now_utc_rfc3339();
-    let panel = guard_panel(SCHEMA_VERSION, codes::DB_UNAVAILABLE, move || {
-        build_panel(&db_path, token, bounds, as_of)
-    })
+    let panel = guard_panel(
+        &state.builder_capacity,
+        SCHEMA_VERSION,
+        codes::DB_UNAVAILABLE,
+        move || build_panel(&db_path, token, bounds, as_of),
+    )
     .await;
     state.observability.usage.record(&panel);
     panel

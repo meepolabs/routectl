@@ -285,9 +285,12 @@ async fn build(
     // Stamped before the blocking read so a lock wait cannot skew the
     // freshness marker.
     let as_of = now_utc_rfc3339();
-    let panel = guard_panel(SCHEMA_VERSION, codes::DB_UNAVAILABLE, move || {
-        build_panel(&db_path, spec, bucket, &pricer, as_of, now)
-    })
+    let panel = guard_panel(
+        &state.builder_capacity,
+        SCHEMA_VERSION,
+        codes::DB_UNAVAILABLE,
+        move || build_panel(&db_path, spec, bucket, &pricer, as_of, now),
+    )
     .await;
     if bucket.is_some() {
         state.observability.query_series.record(&panel);

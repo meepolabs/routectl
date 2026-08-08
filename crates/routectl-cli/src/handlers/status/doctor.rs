@@ -86,6 +86,7 @@ async fn build_from_path(state: &StatusState, config_path: PathBuf) -> Panel<Doc
     // The snapshot is pinned now, so request time IS the read time.
     let as_of = now_utc_rfc3339();
     guard_panel(
+        &state.builder_capacity,
         DOCTOR_SCHEMA_VERSION,
         codes::DOCTOR_UNAVAILABLE,
         move || {

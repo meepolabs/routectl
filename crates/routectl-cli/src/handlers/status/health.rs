@@ -203,10 +203,15 @@ pub(super) async fn build(state: &StatusState) -> Panel<HealthPanel> {
     let view = state.router.view();
     // The snapshot is pinned at `view()`, so request time IS the read time.
     let as_of = now_utc_rfc3339();
-    let panel = guard_panel(SCHEMA_VERSION, codes::DB_UNAVAILABLE, move || {
-        let dto = build_from_view(&view);
-        Panel::available(SCHEMA_VERSION, as_of, dto)
-    })
+    let panel = guard_panel(
+        &state.builder_capacity,
+        SCHEMA_VERSION,
+        codes::DB_UNAVAILABLE,
+        move || {
+            let dto = build_from_view(&view);
+            Panel::available(SCHEMA_VERSION, as_of, dto)
+        },
+    )
     .await;
     state.observability.health.record(&panel);
     panel

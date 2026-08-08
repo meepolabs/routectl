@@ -340,15 +340,20 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
         .config_path
         .as_ref()
         .map(|path| path.display().to_string());
-    let panel = guard_panel(SCHEMA_VERSION, codes::CONFIG_UNAVAILABLE, move || {
-        let overlay = match load_overlay_default() {
-            Ok(overlay) => overlay,
-            Err(err) => return unavailable_from_overlay_error(&err),
-        };
-        let effective = view.effective_view(&overlay);
-        let dto = build_panel(effective, &activation, config_path.as_deref(), daemon);
-        Panel::available(SCHEMA_VERSION, as_of, dto)
-    })
+    let panel = guard_panel(
+        &state.builder_capacity,
+        SCHEMA_VERSION,
+        codes::CONFIG_UNAVAILABLE,
+        move || {
+            let overlay = match load_overlay_default() {
+                Ok(overlay) => overlay,
+                Err(err) => return unavailable_from_overlay_error(&err),
+            };
+            let effective = view.effective_view(&overlay);
+            let dto = build_panel(effective, &activation, config_path.as_deref(), daemon);
+            Panel::available(SCHEMA_VERSION, as_of, dto)
+        },
+    )
     .await;
     state.observability.config.record(&panel);
     panel
