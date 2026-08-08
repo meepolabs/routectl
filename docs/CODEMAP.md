@@ -2185,10 +2185,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `UsageWriter`/`CHANNEL_CAPACITY`,
   `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`open_rw`/`OpenError`,
   the read-side query surface
-  (`aggregate`/`ttfbs`/`latest_quota_by_seat`/`query`/`k_calibration_summary`/`m1_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`
+  (`aggregate`/`ttfbs`/`latest_quota_by_seat`/`query`/`k_calibration_summary`/`near_lossless_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`
   + the capability-ledger reads
   `read_capability_events_after`/`latest_tombstone` + the row/summary types
-  `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`M1AttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
+  `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`NearLosslessAttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
   `estimate_cost_tokens`/`CostBreakdown`/`Rates` (+ the `#[doc(hidden)]`
   record-path `estimate_cost`), `CapabilityLearnEvent`, `CapabilityEvent` +
   `insert_capability_event` (the append-only capability-ledger writer,
@@ -2308,9 +2308,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `as_str` returns
 - `src/query/would_trim.rs` -- would-trim + K-calibration read queries;
   exports `would_trim_summary`, `shadow_misfire_summary`,
-  `m1_attribution_summary`, `k_calibration_summary`,
+  `near_lossless_attribution_summary`, `k_calibration_summary`,
   `read_reuse_samples_since` with their summary/row types (`WouldTrimSummary`,
-  `ShadowMisfireSummary`, `M1AttributionSummary`, `KCalibration`,
+  `ShadowMisfireSummary`, `NearLosslessAttributionSummary`, `KCalibration`,
   `ReuseSampleRow`); carries the COALESCE zero-row guards so a SUM/CASE over
   an empty ledger reads as 0 rather than erroring
 - `src/query/capability.rs` -- capability-ledger read queries for the

@@ -1,4 +1,5 @@
-// The would-trim / M1-attribution / per-seat-quota / earliest-timestamp
+// The would-trim / near-lossless-attribution / per-seat-quota /
+// earliest-timestamp
 // readers, plus the read-only-open equivalence pins. Split from `tests.rs` to
 // keep each file under the size ceiling; `include!`d into the same `tests`
 // module so the helpers there stay in scope. All imports come from the host
@@ -71,12 +72,12 @@ fn would_trim_summary_on_empty_ledger_returns_all_zeros() {
     assert_eq!(s, WouldTrimSummary::default());
 }
 
-/// Insert a row carrying the M1 attribution columns, or a baseline
-/// (pre-M1) row when `recorder_version` is `None` -- the latter must
-/// never contribute to `m1_attribution_summary` totals even when it
+/// Insert a row carrying the near-lossless attribution columns, or a baseline
+/// (pre-recorder) row when `recorder_version` is `None` -- the latter must
+/// never contribute to `near_lossless_attribution_summary` totals even when it
 /// carries a `would_trim_tokens` baseline candidate.
 #[allow(clippy::too_many_arguments)]
-fn insert_m1_attribution_row(
+fn insert_near_lossless_attribution_row(
     db: &UsageDb,
     request_id: &str,
     ts_start: i64,
@@ -108,18 +109,18 @@ fn insert_m1_attribution_row(
                 context_fraction,
             ],
         )
-        .expect("insert m1 attribution row");
+        .expect("insert near-lossless attribution row");
 }
 
 #[test]
-fn m1_attribution_summary_excludes_baseline_rows_without_recorder_version() {
-    // Arrange: two M1-recorded rows (recorder_version = 1) and one
+fn near_lossless_attribution_summary_excludes_baseline_rows_without_recorder_version() {
+    // Arrange: two recorder-marked rows (recorder_version = 1) and one
     // baseline row (recorder_version = NULL) that also carries a
     // baseline would_trim_tokens candidate and would incorrectly inflate
-    // the M1 totals if the recorder-version filter were dropped.
+    // the near-lossless totals if the recorder-version filter were dropped.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
-    insert_m1_attribution_row(
+    insert_near_lossless_attribution_row(
         &db,
         "m1",
         100,
@@ -130,7 +131,7 @@ fn m1_attribution_summary_excludes_baseline_rows_without_recorder_version() {
         Some(3),
         Some(0.10),
     );
-    insert_m1_attribution_row(
+    insert_near_lossless_attribution_row(
         &db,
         "m2",
         110,
@@ -141,10 +142,10 @@ fn m1_attribution_summary_excludes_baseline_rows_without_recorder_version() {
         Some(2),
         Some(0.20),
     );
-    insert_m1_attribution_row(&db, "baseline", 120, None, None, None, None, None, None);
+    insert_near_lossless_attribution_row(&db, "baseline", 120, None, None, None, None, None, None);
 
     // Act
-    let s = m1_attribution_summary(&db, 100, 1000).expect("summary");
+    let s = near_lossless_attribution_summary(&db, 100, 1000).expect("summary");
 
     // Assert: only the two recorder-version rows contribute.
     assert_eq!(s.recorder_requests, 2);
@@ -157,14 +158,14 @@ fn m1_attribution_summary_excludes_baseline_rows_without_recorder_version() {
 }
 
 #[test]
-fn m1_attribution_summary_is_zero_when_no_recorder_rows() {
-    // Arrange: only a baseline row with no M1 recording.
+fn near_lossless_attribution_summary_is_zero_when_no_recorder_rows() {
+    // Arrange: only a baseline row with no near-lossless recording.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
-    insert_m1_attribution_row(&db, "baseline", 100, None, None, None, None, None, None);
+    insert_near_lossless_attribution_row(&db, "baseline", 100, None, None, None, None, None, None);
 
     // Act + Assert
-    let s = m1_attribution_summary(&db, 0, 1000).expect("summary");
+    let s = near_lossless_attribution_summary(&db, 0, 1000).expect("summary");
     assert_eq!(s.recorder_requests, 0);
     assert_eq!(s.dedup_tokens, 0);
     assert_eq!(s.supersession_tokens, 0);

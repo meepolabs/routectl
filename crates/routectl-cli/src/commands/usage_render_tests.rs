@@ -1236,11 +1236,11 @@ fn would_trim_render_no_verdict_line_when_zero_candidates() {
     );
 }
 
-/// Insert a row carrying the M1 near-lossless attribution columns.
-/// `recorder_version = None` yields a baseline (pre-M1) row that must never
-/// surface in the M1 attribution render block.
+/// Insert a row carrying the near-lossless attribution columns.
+/// `recorder_version = None` yields a baseline (pre-recorder) row that must
+/// never surface in the near-lossless attribution render block.
 #[allow(clippy::too_many_arguments)]
-fn m1_attribution_row(
+fn near_lossless_attribution_row(
     db: &UsageDb,
     request_id: &str,
     recorder_version: Option<i64>,
@@ -1268,15 +1268,15 @@ fn m1_attribution_row(
                 path_extractable
             ],
         )
-        .expect("insert m1 attribution row");
+        .expect("insert near-lossless attribution row");
 }
 
 #[test]
-fn render_detail_shows_m1_attribution_line() {
-    // Arrange: two M1-recorded rows.
+fn render_detail_shows_near_lossless_attribution_line() {
+    // Arrange: two recorder-marked rows.
     let (_dir, _path, db) = temp_db();
-    m1_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
-    m1_attribution_row(&db, "m2", Some(1), 20_000, 20_000, 2, 2);
+    near_lossless_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
+    near_lossless_attribution_row(&db, "m2", Some(1), 20_000, 20_000, 2, 2);
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
@@ -1286,8 +1286,8 @@ fn render_detail_shows_m1_attribution_line() {
     // humanized: 60_000 -> "60K", 30_000 -> "30K"), the extractability rate
     // (5/6 -> 83%), and the advisory framing.
     assert!(
-        out.contains("m1-attribution: 2 reqs recorded"),
-        "detail output must surface the M1 attribution block: {out}"
+        out.contains("near-lossless-attribution: 2 reqs recorded"),
+        "detail output must surface the near-lossless attribution block: {out}"
     );
     assert!(out.contains("dedup=60K"), "summed dedup tokens: {out}");
     assert!(
@@ -1302,35 +1302,35 @@ fn render_detail_shows_m1_attribution_line() {
 }
 
 #[test]
-fn render_non_detail_omits_m1_attribution_line() {
-    // Arrange: an M1 recording exists, but the default table must not
+fn render_non_detail_omits_near_lossless_attribution_line() {
+    // Arrange: a near-lossless recording exists, but the default table must not
     // surface it (only --detail does).
     let (_dir, _path, db) = temp_db();
-    m1_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
+    near_lossless_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act + Assert
     let out = render_report(&report);
     assert!(
-        !out.contains("m1-attribution"),
-        "the default (non-detail) table must omit the M1 attribution line: {out}"
+        !out.contains("near-lossless-attribution"),
+        "the default (non-detail) table must omit the near-lossless attribution line: {out}"
     );
 }
 
 #[test]
-fn render_detail_omits_m1_attribution_line_when_no_recorder_rows() {
-    // Arrange: only a baseline (pre-M1) row -- would_trim_recorder_version is
-    // NULL, so it must not surface an M1 attribution block even under
-    // --detail.
+fn render_detail_omits_near_lossless_attribution_line_when_no_recorder_rows() {
+    // Arrange: only a baseline (pre-recorder) row -- would_trim_recorder_version
+    // is NULL, so it must not surface a near-lossless attribution block even
+    // under --detail.
     let (_dir, _path, db) = temp_db();
-    m1_attribution_row(&db, "baseline", None, 0, 0, 0, 0);
+    near_lossless_attribution_row(&db, "baseline", None, 0, 0, 0, 0);
     let report = report_all(&db, &cost_config(), None, true);
 
-    // Act + Assert: no M1 recorder rows -> no attribution block.
+    // Act + Assert: no recorder rows -> no attribution block.
     let out = render_report(&report);
     assert!(
-        !out.contains("m1-attribution"),
-        "no recorder rows -> no M1 attribution line: {out}"
+        !out.contains("near-lossless-attribution"),
+        "no recorder rows -> no near-lossless attribution line: {out}"
     );
 }
 

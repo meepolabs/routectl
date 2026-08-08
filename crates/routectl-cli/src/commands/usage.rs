@@ -19,10 +19,11 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    AggRow, BucketSpec, GroupKey, KCalibration, M1AttributionSummary, OpenError, QueryError,
-    QuotaSnapshot, Rates, RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate,
-    estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat, m1_attribution_summary,
-    open_readonly, shadow_misfire_summary, ttfbs, would_trim_summary,
+    AggRow, BucketSpec, GroupKey, KCalibration, NearLosslessAttributionSummary, OpenError,
+    QueryError, QuotaSnapshot, Rates, RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary,
+    aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
+    near_lossless_attribution_summary, open_readonly, shadow_misfire_summary, ttfbs,
+    would_trim_summary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -467,10 +468,10 @@ pub struct WindowReport {
     /// Shadow misfire monitor summary over the window (advisory; only
     /// populated and surfaced under `--detail`).
     pub shadow_misfire: ShadowMisfireSummary,
-    /// M1 near-lossless per-heuristic attribution over the window (advisory;
+    /// Near-lossless per-heuristic attribution over the window (advisory;
     /// only populated and surfaced under `--detail`). Restricted at the
     /// query layer to `would_trim_recorder_version IS NOT NULL`.
-    pub m1_attribution: M1AttributionSummary,
+    pub near_lossless_attribution: NearLosslessAttributionSummary,
 }
 
 /// True iff `provider` is a managed-OAuth subscription provider: its
@@ -698,12 +699,12 @@ pub fn build_window_report(
         ShadowMisfireSummary::default()
     };
 
-    // M1 near-lossless attribution: only queried (and surfaced) under
+    // Near-lossless attribution: only queried (and surfaced) under
     // --detail. Restricted at the query layer to recorder-version rows.
-    let m1_attribution = if detail {
-        m1_attribution_summary(db, bounds.from_ms, bounds.to_ms)?
+    let near_lossless_attribution = if detail {
+        near_lossless_attribution_summary(db, bounds.from_ms, bounds.to_ms)?
     } else {
-        M1AttributionSummary::default()
+        NearLosslessAttributionSummary::default()
     };
 
     let mut display_rows: Vec<DisplayRow> = groups
@@ -732,7 +733,7 @@ pub fn build_window_report(
         client_disconnects_pre_dispatch,
         would_trim,
         shadow_misfire,
-        m1_attribution,
+        near_lossless_attribution,
     })
 }
 
@@ -1061,15 +1062,15 @@ fn render_latency_summary(report: &WindowReport) -> String {
 /// The verdict line is derived at render time from the persisted numeric
 /// columns; it is never a stored token and never touches `reduction_strategy`.
 ///
-/// Appends the M1 near-lossless attribution block when the recorder ran in
+/// Appends the near-lossless attribution block when the recorder ran in
 /// the window, independent of whether the baseline would-cut candidate line
 /// above it is present -- the two summaries are gated separately because a
-/// window can carry M1 recordings with zero baseline candidates (or vice
-/// versa) without either implying the other.
+/// window can carry near-lossless recordings with zero baseline candidates (or
+/// vice versa) without either implying the other.
 fn render_would_trim(report: &WindowReport) -> String {
     let wt = &report.would_trim;
-    let m1 = &report.m1_attribution;
-    if wt.candidate_requests == 0 && m1.recorder_requests == 0 {
+    let near_lossless = &report.near_lossless_attribution;
+    if wt.candidate_requests == 0 && near_lossless.recorder_requests == 0 {
         return String::new();
     }
     let mut out = String::new();
@@ -1084,30 +1085,30 @@ fn render_would_trim(report: &WindowReport) -> String {
             wt.verdict_unpriced,
         ));
     }
-    if m1.recorder_requests > 0 {
-        out.push_str(&render_m1_attribution(m1));
+    if near_lossless.recorder_requests > 0 {
+        out.push_str(&render_near_lossless_attribution(near_lossless));
     }
     out
 }
 
-/// The M1 near-lossless attribution block: the recorder candidate count, the
+/// The near-lossless attribution block: the recorder candidate count, the
 /// per-heuristic freed-token breakdown (dedup vs supersession), and the
 /// path-extractability rate (summed counts divided AFTER summing, never a
 /// per-row average). Advisory (measurement candidates; nothing is cut).
-fn render_m1_attribution(m1: &M1AttributionSummary) -> String {
-    let path_rate = if m1.path_units > 0 {
+fn render_near_lossless_attribution(summary: &NearLosslessAttributionSummary) -> String {
+    let path_rate = if summary.path_units > 0 {
         format!(
             "{}%",
-            (100.0 * m1.path_extractable as f64 / m1.path_units as f64).round() as i64
+            (100.0 * summary.path_extractable as f64 / summary.path_units as f64).round() as i64
         )
     } else {
         "-".to_string()
     };
     format!(
-        "m1-attribution: {} reqs recorded (advisory; not applied)\n  dedup={} supersession={} tokens  |  path-extractable {}\n",
-        m1.recorder_requests,
-        human_count(m1.dedup_tokens),
-        human_count(m1.supersession_tokens),
+        "near-lossless-attribution: {} reqs recorded (advisory; not applied)\n  dedup={} supersession={} tokens  |  path-extractable {}\n",
+        summary.recorder_requests,
+        human_count(summary.dedup_tokens),
+        human_count(summary.supersession_tokens),
         path_rate,
     )
 }

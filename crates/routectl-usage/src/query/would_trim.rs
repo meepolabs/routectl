@@ -123,20 +123,21 @@ pub fn shadow_misfire_summary(
     Ok(summary)
 }
 
-/// Windowed M1 near-lossless attribution: per-heuristic freed-token sums,
+/// Windowed near-lossless attribution: per-heuristic freed-token sums,
 /// the path-extractability count-pair, and the context-fraction count-pair,
 /// RESTRICTED to rows where `would_trim_recorder_version IS NOT NULL` (the
-/// M1 near-lossless pass ran). This filter is load-bearing: pre-M1 rows never
-/// carry these columns, so without it a mixed-history window would silently
-/// blend baseline and M1 semantics. Count-pairs (`path_units`/
+/// near-lossless recorder pass ran). This filter is load-bearing:
+/// pre-recorder rows never carry these columns, so without it a mixed-history
+/// window would silently blend baseline and near-lossless semantics.
+/// Count-pairs (`path_units`/
 /// `path_extractable`, `context_fraction_present`/`context_fraction_sum`) are
 /// summed as raw counters here -- divide AFTER summing; never average a
 /// per-row rate. Plain data; the caller decides how to display it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct M1AttributionSummary {
-    /// Count of requests where the M1 recorder ran
+pub struct NearLosslessAttributionSummary {
+    /// Count of requests where the near-lossless recorder ran
     /// (`would_trim_recorder_version IS NOT NULL`), regardless of whether it
-    /// found any marks. The M1-recorder candidate count.
+    /// found any marks. The recorder candidate count.
     pub recorder_requests: i64,
     /// Summed dedup-heuristic freed-token count over `recorder_requests`.
     pub dedup_tokens: i64,
@@ -157,7 +158,7 @@ pub struct M1AttributionSummary {
     pub context_fraction_sum: f64,
 }
 
-const M1_ATTRIBUTION_SQL: &str = "\
+const NEAR_LOSSLESS_ATTRIBUTION_SQL: &str = "\
 SELECT
     COUNT(would_trim_recorder_version)                      AS recorder_requests,
     COALESCE(SUM(would_trim_dedup_tokens), 0)                AS dedup_tokens,
@@ -170,18 +171,18 @@ FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
   AND would_trim_recorder_version IS NOT NULL";
 
-/// The window's M1 near-lossless attribution. Restricted to
-/// `would_trim_recorder_version IS NOT NULL` so baseline (pre-M1) rows never
-/// mix into these totals. All fields are 0 when no row in the window carried
-/// an M1 recording.
-pub fn m1_attribution_summary(
+/// The window's near-lossless attribution. Restricted to
+/// `would_trim_recorder_version IS NOT NULL` so baseline (pre-recorder) rows
+/// never mix into these totals. All fields are 0 when no row in the window
+/// carried a near-lossless recording.
+pub fn near_lossless_attribution_summary(
     db: &UsageDb,
     from_ms: i64,
     to_ms: i64,
-) -> Result<M1AttributionSummary, QueryError> {
-    let mut stmt = db.conn().prepare(M1_ATTRIBUTION_SQL)?;
+) -> Result<NearLosslessAttributionSummary, QueryError> {
+    let mut stmt = db.conn().prepare(NEAR_LOSSLESS_ATTRIBUTION_SQL)?;
     let summary = stmt.query_row([from_ms, to_ms], |row| {
-        Ok(M1AttributionSummary {
+        Ok(NearLosslessAttributionSummary {
             recorder_requests: row.get(0)?,
             dedup_tokens: row.get(1)?,
             supersession_tokens: row.get(2)?,
