@@ -643,6 +643,36 @@ impl<T> core::convert::From<T> for routectl_usage::CostBreakdown
 pub fn routectl_usage::CostBreakdown::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::CostBreakdown
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::CostBreakdown
+pub struct routectl_usage::DeadlineGuard<'a>
+impl<'a> routectl_usage::DeadlineGuard<'a>
+pub fn routectl_usage::DeadlineGuard<'a>::install(&'a routectl_usage::UsageDb, std::time::Instant) -> core::result::Result<Self, routectl_usage::QueryError>
+impl core::ops::drop::Drop for routectl_usage::DeadlineGuard<'_>
+pub fn routectl_usage::DeadlineGuard<'_>::drop(&mut self)
+impl<'a> core::marker::Freeze for routectl_usage::DeadlineGuard<'a>
+impl<'a> !core::marker::Send for routectl_usage::DeadlineGuard<'a>
+impl<'a> !core::marker::Sync for routectl_usage::DeadlineGuard<'a>
+impl<'a> core::marker::Unpin for routectl_usage::DeadlineGuard<'a>
+impl<'a> core::marker::UnsafeUnpin for routectl_usage::DeadlineGuard<'a>
+impl<'a> !core::panic::unwind_safe::RefUnwindSafe for routectl_usage::DeadlineGuard<'a>
+impl<'a> !core::panic::unwind_safe::UnwindSafe for routectl_usage::DeadlineGuard<'a>
+impl<T, U> core::convert::Into<U> for routectl_usage::DeadlineGuard<'a> where U: core::convert::From<T>
+pub fn routectl_usage::DeadlineGuard<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::DeadlineGuard<'a> where U: core::convert::Into<T>
+pub type routectl_usage::DeadlineGuard<'a>::Error = core::convert::Infallible
+pub fn routectl_usage::DeadlineGuard<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::DeadlineGuard<'a> where U: core::convert::TryFrom<T>
+pub type routectl_usage::DeadlineGuard<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::DeadlineGuard<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_usage::DeadlineGuard<'a> where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::DeadlineGuard<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::DeadlineGuard<'a> where T: ?core::marker::Sized
+pub fn routectl_usage::DeadlineGuard<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::DeadlineGuard<'a> where T: ?core::marker::Sized
+pub fn routectl_usage::DeadlineGuard<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_usage::DeadlineGuard<'a>
+pub fn routectl_usage::DeadlineGuard<'a>::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::DeadlineGuard<'a>
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::DeadlineGuard<'a>
 pub struct routectl_usage::GroupKey
 pub routectl_usage::GroupKey::alias: alloc::string::String
 pub routectl_usage::GroupKey::model: core::option::Option<alloc::string::String>
