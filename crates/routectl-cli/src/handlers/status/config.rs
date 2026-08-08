@@ -286,7 +286,7 @@ fn build_source(
         config_path: config_path.map(str::to_string),
         loaded_age_ms: daemon.config_loaded_age_ms,
         alias_count: effective.aliases.len(),
-        provider_count: effective.provider_ids.len(),
+        provider_count: effective.providers.len(),
         listen_addr: daemon.listen_addr,
         version: daemon.version,
     }
@@ -505,7 +505,7 @@ mod tests {
                 provenance: OverrideProvenance::Override,
             }],
             aliases: Vec::new(),
-            provider_ids: Vec::new(),
+            providers: Vec::new(),
         };
         let activation = ActivationState::default();
 

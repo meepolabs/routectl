@@ -21,10 +21,17 @@
 //! of scope for this pure view.
 
 use routectl_core::failure_class::FailureClass;
+use routectl_providers::anthropic_api::AuthKind;
+#[cfg(feature = "gemini")]
+use routectl_providers::gemini::GeminiAuthMode;
+#[cfg(feature = "openai-responses")]
+use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 
 use crate::catalog::{EffectiveRow, lookup_baked_with_overrides, lookup_overlay_cell, merge};
 use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ConfigFailureClass;
+#[cfg(feature = "bedrock")]
+use crate::config::BedrockCredsConfig;
 use crate::config::{Config, ProviderEntry};
 use crate::override_registry::{OverrideRegistry, OverrideRow};
 
@@ -79,6 +86,172 @@ pub struct AliasChain {
     pub chain: Vec<String>,
 }
 
+/// The secret-safe projection of one `[providers.X]` entry: the routing-shape
+/// facts a read surface may display, and nothing else.
+///
+/// Every field is either a closed-vocabulary token or a structurally
+/// secret-free reduction of a config string. No field carries a resolved
+/// credential, a secret-ref body, or a raw `base_url` -- the endpoint in
+/// particular is reduced to its origin rather than copied, because a
+/// `base_url` may legitimately embed a credential (see `endpoint_origin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCell {
+    /// The `[providers.<id>]` table key.
+    pub id: String,
+    /// The entry's `kind = "..."` discriminant, from
+    /// [`ProviderEntry::kind_str`].
+    pub kind: String,
+    /// The CONFIGURED endpoint origin (scheme + host + port), or `None` when
+    /// the entry's config carries no endpoint or the value does not parse.
+    ///
+    /// `None` does NOT mean "no endpoint": Bedrock derives its host from
+    /// `region`, both mantle lanes require `base_url` be left unset and derive
+    /// it from `bedrock_mantle.region`, and an unset-`base_url`
+    /// `openai-responses` entry gets an auth-kind-appropriate default. All
+    /// three are resolved at FACTORY time, which a pure derivation over
+    /// `&Config` cannot reach without duplicating factory logic and minting a
+    /// second source of truth. This field reports what the CONFIG says.
+    pub endpoint_origin: Option<String>,
+    /// The URI SCHEME of the entry's primary `api_key_ref` (`env`, `file`,
+    /// `oauth`, ...), never the ref body. `None` for a variant with no single
+    /// canonical key slot, or a ref with no `scheme:` prefix.
+    pub credential_ref_scheme: Option<String>,
+    /// This variant's OWN existing serde auth token (`api-key`,
+    /// `oauth-bearer`, `chatgpt-oauth`, `bedrock-mantle`, `cloud-code`,
+    /// `bearer-key`, `static`, `profile`, `default-chain`), or `None` for
+    /// `openai-compat`, which has no auth discriminant at all.
+    ///
+    /// There is deliberately NO cross-kind vocabulary here: each provider kind
+    /// carries the token its own config already uses, so the projection adds no
+    /// vocabulary of its own. The extraction point states the prohibition that
+    /// keeps this field secret-free.
+    pub auth_token: Option<String>,
+    /// The configured requests-per-minute cap. Three states, none
+    /// interchangeable: `Some(n)` with `n > 0` is a live limit, `Some(0)` seeds
+    /// a zero-capacity bucket and therefore means IMMEDIATELY rate-limited, and
+    /// `None` means unlimited.
+    pub rpm_limit: Option<u32>,
+}
+
+/// Reduce a configured `base_url` to its ORIGIN: scheme, host, and port only.
+///
+/// A `base_url` may legitimately carry a credential. `validate_base_url_scheme`
+/// rejects bad schemes, link-local targets, and cleartext-on-non-loopback, but
+/// it does NOT reject userinfo -- only the `[mitm]` origin validator does. So
+/// `https://user:<secret>@upstream.example/v1` is an ACCEPTED provider config,
+/// and that raw string is what sits in the entry. Path and query are equally
+/// unsafe: some compat gateways carry the key there.
+///
+/// So this reduction is the security boundary, not a formatting nicety:
+/// userinfo, path, query, and fragment are DROPPED, and a value that does not
+/// parse yields `None`. There is deliberately no raw-string fallback -- a
+/// fallback would publish exactly the string this function exists to withhold.
+fn endpoint_origin(base_url: &str) -> Option<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Reconstructed field-by-field rather than by clearing components on the
+    // parsed url: `Url::set_username`/`set_password` fail silently on
+    // cannot-be-a-base URLs, which would leave userinfo in the output.
+    let url = url::Url::parse(trimmed).ok()?;
+    let host = url.host_str()?;
+    let scheme = url.scheme();
+    Some(match url.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
+}
+
+/// The URI scheme of a secret ref (`env://VAR` -> `env`), never the body.
+///
+/// The body names a variable, a filesystem path, or an OAuth provider id; only
+/// the scheme says WHERE the credential class lives, which is the whole of what
+/// a read surface needs.
+fn credential_ref_scheme(api_key_ref: Option<&str>) -> Option<String> {
+    let raw = api_key_ref?.trim();
+    let (scheme, _) = raw.split_once(':')?;
+    if scheme.is_empty() {
+        return None;
+    }
+    Some(scheme.to_ascii_lowercase())
+}
+
+/// Extract the entry's own auth-mechanism token.
+///
+/// PROHIBITION -- this is the single extraction point, so the rule lives here:
+/// the returned token is a CLOSED-VOCABULARY auth-MECHANISM name. It must never
+/// encode a credential path, a secret-store name, an OAuth provider id, an
+/// account id, a region, or any other operator-supplied value. Every token
+/// below is a compile-time `&'static str` from a closed enum, which is what
+/// makes that hold today.
+///
+/// Both matches are deliberately EXHAUSTIVE with no wildcard arm, so a new
+/// provider variant or a new auth discriminant breaks the build HERE rather
+/// than silently defaulting. Whoever fixes that break must supply another
+/// closed-vocabulary token -- or, if the new discriminant cannot be reduced to
+/// one, return `Some("redacted")` instead of passing its value through. Adding
+/// a wildcard to make the break go away would turn a display field into a
+/// credential-shape disclosure.
+const fn auth_token(entry: &ProviderEntry) -> Option<&'static str> {
+    match entry {
+        // No auth discriminant exists on this variant: the credential ref is
+        // the only auth fact, and its scheme is reported separately.
+        ProviderEntry::OpenaiCompat { .. } => None,
+        ProviderEntry::AnthropicApi { auth_kind, .. } => Some(match auth_kind {
+            AuthKind::ApiKey => "api-key",
+            AuthKind::OauthBearer => "oauth-bearer",
+        }),
+        #[cfg(feature = "openai-responses")]
+        ProviderEntry::OpenaiResponses { auth_kind, .. } => Some(match auth_kind {
+            OpenaiResponsesAuthKind::ChatgptOauth => "chatgpt-oauth",
+            OpenaiResponsesAuthKind::ApiKey => "api-key",
+            OpenaiResponsesAuthKind::BedrockMantle => "bedrock-mantle",
+        }),
+        #[cfg(feature = "gemini")]
+        ProviderEntry::Gemini { auth_mode, .. } => Some(match auth_mode {
+            GeminiAuthMode::ApiKey => "api-key",
+            GeminiAuthMode::CloudCode => "cloud-code",
+        }),
+        #[cfg(feature = "bedrock")]
+        ProviderEntry::Bedrock { creds, .. } => Some(match creds {
+            BedrockCredsConfig::BearerKey { .. } => "bearer-key",
+            BedrockCredsConfig::Static { .. } => "static",
+            BedrockCredsConfig::Profile { .. } => "profile",
+            BedrockCredsConfig::DefaultChain => "default-chain",
+        }),
+    }
+}
+
+/// The configured `base_url` for an entry, or `None` for a variant whose
+/// endpoint is derived at factory time rather than carried in config.
+fn configured_base_url(entry: &ProviderEntry) -> Option<&str> {
+    match entry {
+        ProviderEntry::OpenaiCompat { base_url, .. }
+        | ProviderEntry::AnthropicApi { base_url, .. } => Some(base_url),
+        #[cfg(feature = "openai-responses")]
+        ProviderEntry::OpenaiResponses { base_url, .. } => base_url.as_deref(),
+        #[cfg(feature = "gemini")]
+        ProviderEntry::Gemini { base_url, .. } => Some(base_url),
+        // Bedrock carries no base_url at all: the factory derives the host
+        // from `region`.
+        #[cfg(feature = "bedrock")]
+        ProviderEntry::Bedrock { .. } => None,
+    }
+}
+
+/// Project one `[providers.X]` entry into its secret-safe cell.
+fn provider_cell(id: &str, entry: &ProviderEntry) -> ProviderCell {
+    ProviderCell {
+        id: id.to_string(),
+        kind: entry.kind_str().to_string(),
+        endpoint_origin: configured_base_url(entry).and_then(endpoint_origin),
+        credential_ref_scheme: credential_ref_scheme(entry.api_key_ref()),
+        auth_token: auth_token(entry).map(str::to_string),
+        rpm_limit: entry.runtime().rpm_limit,
+    }
+}
+
 /// The provenance-annotated effective view: the layered surfaces only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveView {
@@ -94,8 +267,8 @@ pub struct EffectiveView {
     pub capabilities: Vec<OverrideRow>,
     /// One entry per `[aliases]` table entry, in alias-key order.
     pub aliases: Vec<AliasChain>,
-    /// The `[providers.X]` table keys, in provider-key order.
-    pub provider_ids: Vec<String>,
+    /// One secret-safe cell per `[providers.X]` entry, in provider-key order.
+    pub providers: Vec<ProviderCell>,
 }
 
 /// Every operator-nameable failure class, in a stable render order.
@@ -178,14 +351,18 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
         })
         .collect();
 
-    let provider_ids = config.providers.keys().cloned().collect();
+    let providers = config
+        .providers
+        .iter()
+        .map(|(id, entry)| provider_cell(id, entry))
+        .collect();
 
     EffectiveView {
         models,
         classes,
         capabilities,
         aliases,
-        provider_ids,
+        providers,
     }
 }
 
@@ -403,6 +580,293 @@ upstream = "claude-opus-4-8"
             .expect("seeded override must surface as a capability cell");
         assert_eq!(cell.verdict, OverrideVerdict::RouteAway);
         assert_eq!(cell.provenance, OverrideProvenance::Override);
+    }
+
+    /// The exact fixture `factory::validate_tests` uses to pin that a REJECTED
+    /// base_url's embedded credential never reaches an error message. Here it
+    /// pins the ACCEPTED case: a config carrying userinfo passes validation, so
+    /// the projection is the only thing standing between it and a read surface.
+    const LEAKY_BASE_URL: &str =
+        "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#sk-live-LEAKED";
+
+    fn config_with_provider_base_url(base_url: &str) -> Config {
+        toml::from_str(&format!(
+            r#"
+version = 2
+
+[providers.acme]
+kind = "anthropic-api"
+api_key_ref = "env://ACME_KEY"
+base_url = "{base_url}"
+"#
+        ))
+        .expect("valid config")
+    }
+
+    #[test]
+    fn endpoint_origin_strips_userinfo_path_query_and_fragment() {
+        // Arrange: an accepted config whose base_url embeds a credential in
+        // userinfo, in the query, and in the fragment.
+        let config = config_with_provider_base_url(LEAKY_BASE_URL);
+
+        // Act
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+
+        // Assert: only the origin survives.
+        let cell = &view.providers[0];
+        assert_eq!(
+            cell.endpoint_origin.as_deref(),
+            Some("https://internal.example")
+        );
+    }
+
+    #[test]
+    fn credential_never_appears_anywhere_in_the_projection() {
+        // Arrange
+        let config = config_with_provider_base_url(LEAKY_BASE_URL);
+
+        // Act: scan the WHOLE projection, not just the endpoint field -- a
+        // future field that copies config text must fail this too.
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        let rendered = format!("{:?}", view.providers);
+
+        // Assert
+        assert!(
+            !rendered.contains("sk-live-LEAKED"),
+            "credential must not surface; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("user:"),
+            "userinfo must not surface; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn endpoint_origin_keeps_a_nondefault_port() {
+        let config = config_with_provider_base_url("http://127.0.0.1:8080/v1");
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        assert_eq!(
+            view.providers[0].endpoint_origin.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn unparseable_endpoint_yields_none_not_a_raw_fallback() {
+        // A non-URL base_url must project to None. A raw-string fallback here
+        // would republish whatever the operator wrote, which is the entire
+        // hazard this projection exists to close.
+        let config = config_with_provider_base_url("sk-live-LEAKED-not-a-url");
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        assert_eq!(view.providers[0].endpoint_origin, None);
+        assert!(!format!("{:?}", view.providers).contains("sk-live-LEAKED"));
+    }
+
+    #[test]
+    fn credential_ref_scheme_carries_the_scheme_only() {
+        let config = config_with_provider_base_url("https://upstream.example");
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        let cell = &view.providers[0];
+        assert_eq!(cell.credential_ref_scheme.as_deref(), Some("env"));
+        assert!(
+            !format!("{cell:?}").contains("ACME_KEY"),
+            "the ref body must not surface"
+        );
+    }
+
+    #[test]
+    fn anthropic_entry_carries_its_own_auth_token_and_kind() {
+        let config = config_with_provider_base_url("https://upstream.example");
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        let cell = &view.providers[0];
+        assert_eq!(cell.id, "acme");
+        assert_eq!(cell.kind, "anthropic-api");
+        assert_eq!(cell.auth_token.as_deref(), Some("api-key"));
+    }
+
+    #[test]
+    fn openai_compat_has_no_auth_token() {
+        // The variant carries no auth discriminant, so the projection reports
+        // absence rather than inventing a spanning token.
+        let config: Config = toml::from_str(
+            r#"
+version = 2
+
+[providers.compat]
+kind = "openai-compat"
+api_key_ref = "env://COMPAT_KEY"
+base_url = "https://compat.example/v1"
+"#,
+        )
+        .expect("valid config");
+
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        assert_eq!(view.providers[0].auth_token, None);
+    }
+
+    /// Every auth arm the build carries, asserted against the token its own
+    /// config vocabulary already uses. The `auth_token` match is exhaustive
+    /// with no wildcard, so a new variant breaks the BUILD -- but a typo'd or
+    /// swapped token in an existing arm compiles fine and would publish a
+    /// wrong mechanism name on the panel. Only these tests catch that, and
+    /// each is cfg-gated to the feature that compiles its arm.
+    fn only_provider(toml_text: &str) -> ProviderCell {
+        let config: Config = toml::from_str(toml_text).expect("valid config");
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        view.providers
+            .into_iter()
+            .next()
+            .expect("one provider projected")
+    }
+
+    #[test]
+    fn anthropic_oauth_bearer_carries_its_own_token() {
+        let cell = only_provider(
+            r#"
+version = 2
+
+[providers.oauth]
+kind = "anthropic-api"
+api_key_ref = "oauth://anthropic"
+auth_kind = "oauth-bearer"
+"#,
+        );
+        assert_eq!(cell.kind, "anthropic-api");
+        assert_eq!(cell.auth_token.as_deref(), Some("oauth-bearer"));
+        assert_eq!(cell.credential_ref_scheme.as_deref(), Some("oauth"));
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn openai_responses_carries_each_of_its_own_auth_tokens() {
+        for (auth_kind, expected) in [
+            ("api-key", "api-key"),
+            ("chatgpt-oauth", "chatgpt-oauth"),
+            ("bedrock-mantle", "bedrock-mantle"),
+        ] {
+            let cell = only_provider(&format!(
+                r#"
+version = 2
+
+[providers.r]
+kind = "openai-responses"
+api_key_ref = "env://K"
+auth_kind = "{auth_kind}"
+"#
+            ));
+            assert_eq!(cell.kind, "openai-responses");
+            assert_eq!(
+                cell.auth_token.as_deref(),
+                Some(expected),
+                "auth_kind {auth_kind} must project its own token"
+            );
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn gemini_carries_each_of_its_own_auth_modes() {
+        for (auth_mode, expected) in [("api-key", "api-key"), ("cloud-code", "cloud-code")] {
+            let cell = only_provider(&format!(
+                r#"
+version = 2
+
+[providers.g]
+kind = "gemini"
+api_key_ref = "env://GEMINI_API_KEY"
+auth_mode = "{auth_mode}"
+"#
+            ));
+            assert_eq!(cell.kind, "gemini");
+            assert_eq!(
+                cell.auth_token.as_deref(),
+                Some(expected),
+                "auth_mode {auth_mode} must project its own token"
+            );
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_carries_its_creds_kind_and_no_configured_endpoint() {
+        let cell = only_provider(
+            r#"
+version = 2
+
+[providers.b]
+kind = "bedrock"
+region = "us-east-1"
+
+[providers.b.creds]
+kind = "default-chain"
+"#,
+        );
+        assert_eq!(cell.kind, "bedrock");
+        assert_eq!(cell.auth_token.as_deref(), Some("default-chain"));
+        // Bedrock carries no `base_url` at all -- the factory derives the host
+        // from `region`. A pure derivation reports absence rather than
+        // duplicating that factory logic.
+        assert_eq!(cell.endpoint_origin, None);
+    }
+
+    #[test]
+    fn zero_rpm_limit_stays_distinct_from_unlimited() {
+        // `Some(0)` seeds a zero-capacity bucket -- immediately rate-limited.
+        // Collapsing it into `None` (unlimited) would invert the meaning.
+        let limited: Config = toml::from_str(
+            r#"
+version = 2
+
+[providers.zero]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+rpm_limit = 0
+
+[providers.unlimited]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+
+[providers.capped]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+rpm_limit = 60
+"#,
+        )
+        .expect("valid config");
+
+        let view = derive_effective_view(&limited, &CatalogOverlay::default());
+        let rpm = |id: &str| {
+            view.providers
+                .iter()
+                .find(|p| p.id == id)
+                .expect("provider projected")
+                .rpm_limit
+        };
+        assert_eq!(rpm("zero"), Some(0));
+        assert_eq!(rpm("unlimited"), None);
+        assert_eq!(rpm("capped"), Some(60));
+    }
+
+    #[test]
+    fn providers_are_projected_in_provider_key_order() {
+        let config: Config = toml::from_str(
+            r#"
+version = 2
+
+[providers.zeta]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+
+[providers.alpha]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+"#,
+        )
+        .expect("valid config");
+
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        let ids: Vec<&str> = view.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["alpha", "zeta"]);
     }
 
     #[test]
