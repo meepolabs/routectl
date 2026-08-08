@@ -169,7 +169,18 @@ pub struct ProviderCell {
 /// pattern on some relays) that puts it directly into the projected origin.
 /// Trusting `host_str()` to be the operator's intended host is the leak, so a
 /// remainder carrying an unconsumed `@` is withheld whole.
-fn endpoint_origin(base_url: &str) -> Option<String> {
+///
+/// Two crate-internal consumers depend on this being the ONLY base_url
+/// projection: the effective-config view here, and
+/// [`crate::config::ProviderEntry::redact_secrets`] via `redact_base_url`. Its
+/// fail-safe `None` is the contract, not an inconvenience -- it must never be
+/// softened into a raw-string or best-effort fallback for a caller that would
+/// rather always have something to print.
+///
+/// `pub` only within this `pub(crate) mod`, matching `derive_effective_view`:
+/// the crate's re-export list is explicit and omits this function, so it is not
+/// part of the public API.
+pub fn endpoint_origin(base_url: &str) -> Option<String> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
         return None;
