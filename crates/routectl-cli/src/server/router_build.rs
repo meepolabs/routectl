@@ -49,6 +49,13 @@ pub async fn build_router_from_config_with_overlay(
     // pass-through and accepted; see `validate_bedrock_global_config`.
     routectl_router::validate_bedrock_global_config(&config)?;
 
+    // Reject a `[models.X]` entry that routes a non-Anthropic model at a
+    // Bedrock provider on the InvokeModel lane. That lane assembles and
+    // parses the Anthropic wire shape, so the entry cannot work; failing
+    // here names the model and both lane options instead of leaving the
+    // operator with a first-request 400.
+    routectl_router::validate_bedrock_invoke_model_family(&config)?;
+
     // Reject empty-string `thinking = ""` on any provider before
     // building, so the operator gets a clean error rather than
     // silently emitting `effort: ""` on every routed request.

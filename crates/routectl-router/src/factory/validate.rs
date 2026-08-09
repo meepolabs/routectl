@@ -300,6 +300,71 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
     )
 }
 
+/// Validate that every `[models.X]` routed at a Bedrock provider on the
+/// InvokeModel lane names an Anthropic-family model.
+///
+/// The InvokeModel body is assembled by the Anthropic-shape normalizer
+/// (hardcoded `anthropic_version`, `max_tokens`, Anthropic message
+/// blocks), and the response is parsed back through the same shape, so a
+/// non-Anthropic model on that lane cannot work -- both halves of the
+/// wire contract are wrong. The Converse lane is vendor-neutral and is
+/// never rejected here regardless of model family.
+///
+/// Rejection is deliberate rather than silently switching the entry to
+/// Converse: the shape selects the response translation too, so an
+/// inferred switch would move behavior the operator did not ask for,
+/// and it would leave `api_shape` with a configured value distinct from
+/// its effective one for every downstream consumer to reconcile.
+///
+/// Because the model id lives at `[models.X] upstream` rather than on
+/// the provider entry, this walks `config.models` and joins each entry
+/// to its `[providers]` row.
+///
+/// A model id that proves nothing -- an inference-profile ARN, which may
+/// carry no vendor token -- PASSES. This gate is an ergonomics guard,
+/// not a proof obligation, and rejecting an ARN would break working
+/// Claude-on-ARN deployments.
+///
+/// A model whose `provider` names no configured provider is ignored
+/// here; `build_resolved_models` owns that diagnostic.
+///
+/// Call once per process startup BEFORE building any providers.
+#[cfg(feature = "bedrock")]
+pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> Result<()> {
+    use crate::anthropic_family::{AnthropicFamily, anthropic_family};
+    use routectl_core::Error;
+
+    let mut errors: Vec<String> = Vec::new();
+    for (nickname, model) in &config.models {
+        let Some(crate::config::ProviderEntry::Bedrock { api_shape, .. }) =
+            config.providers.get(&model.provider)
+        else {
+            continue;
+        };
+        if !matches!(api_shape, crate::config::BedrockApiShapeConfig::Invoke) {
+            continue;
+        }
+        if anthropic_family(&model.upstream) == AnthropicFamily::No {
+            errors.push(format!(
+                "[models.{nickname}] upstream `{upstream}` is not an Anthropic-family \
+                 model, but its provider `{provider}` is configured with \
+                 `api_shape = \"invoke\"`. The invoke lane sends and parses the \
+                 Anthropic wire shape, so this model cannot work on it: set \
+                 `api_shape = \"converse\"` on [providers.{provider}] (the \
+                 vendor-neutral lane), or point this model at an Anthropic upstream.",
+                upstream = model.upstream,
+                provider = model.provider,
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Config(errors.join("\n")))
+    }
+}
+
 /// Validate the `[models.X] effort_levels` allowlist across every
 /// configured model.
 ///
@@ -1344,6 +1409,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     }
     #[cfg(feature = "bedrock")]
     if let Err(e) = validate_bedrock_global_config(config) {
+        errors.push(bare_validation_message(e));
+    }
+    #[cfg(feature = "bedrock")]
+    if let Err(e) = validate_bedrock_invoke_model_family(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_reasoning_defaults(config) {

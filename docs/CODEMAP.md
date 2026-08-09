@@ -992,6 +992,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ActivationState` is a read-only newtype over a `BTreeMap<String,
   ActivationEntry>` (iter/get/len/is_empty; no mutation surface, honoring the
   immutability invariant); growth types are `#[non_exhaustive]`
+- `src/anthropic_family.rs` -- purely lexical classification of an upstream
+  model id as Anthropic-family: `anthropic_family(&str) -> AnthropicFamily
+  {Yes, No, Unknown}`. Strips at most ONE leading routing-prefix segment
+  (`us.`/`eu.`/`apac.`/`global.`/`us-gov.`), then requires `anthropic` as the
+  first dot-segment (admits the bracket-suffixed catalog form); an
+  `arn:`-prefixed id is `Unknown` because an inference-profile ARN may carry no
+  vendor token. THREE outcomes rather than a bool because its two consumers
+  want opposite defaults on the unprovable case -- the Bedrock invoke-lane
+  config gate accepts `Unknown`, a tokenizer-family predicate must not.
+  Un-gated (holds no provider types) so both consumers reach it with no
+  `#[cfg]` of their own
 - `src/doctor.rs` -- serialize-safe `routectl doctor` report data types
   (orchestration + rendering stay CLI-side): `Status` (fixed
   `Pass`/`Warn`/`Fail` triad), `Finding`
@@ -1219,7 +1230,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`build_provider`, `build_provider_with_options`, `build_resolved_models`,
   `apply_catalog_overlay`, `BuildOptions`, the `validate_*` family,
   `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,
-  `validate_bedrock_global_config`, `class_policy_warnings`,
+  `validate_bedrock_global_config`, `validate_bedrock_invoke_model_family`,
+  `class_policy_warnings`,
   `codex_identity_warnings`) so `crate::factory::X` and the `lib.rs` `pub use
   factory::{...}` block resolve unchanged
 - `src/factory/build.rs` -- secret resolution +
@@ -1287,8 +1299,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   never sanitized) and ERRORS when two openai-responses entries set DIFFERENT
   values (the codex identity is process-global; the error names both
   providers), with `resolved_codex_version(&Config)` returning the single
-  agreed value (None -> pinned) for the factory's `set_resolved`; the `[mitm]`
-  validator is deliberately excluded (router-build-specific)
+  agreed value (None -> pinned) for the factory's `set_resolved`; the
+  cfg(`bedrock`) `validate_bedrock_invoke_model_family` walks `[models]` and
+  JOINS each entry to its `[providers]` row (the model id lives at `[models.X]
+  upstream`, not on the provider entry), rejecting a model whose `upstream`
+  classifies `No` via `anthropic_family` while its Bedrock provider's
+  `api_shape` is Invoke (defaulted or explicit) -- that lane assembles AND
+  parses the Anthropic wire shape, so the entry cannot work; `Unknown` (an
+  inference-profile ARN) and any `api_shape = "converse"` entry pass, and the
+  message names the model id plus both lane options. Rejects rather than
+  auto-selecting Converse, since the shape also selects the response
+  translation and would otherwise split `api_shape` into a configured vs
+  effective value; the `[mitm]` validator is deliberately excluded
+  (router-build-specific)
 - `src/factory/warnings.rs` -- non-fatal config warnings;
   `class_policy_warnings` is the advisory twin of `validate_class_policy` over
   the same surface (never fails): a `class_overrides` remap whose SOURCE
