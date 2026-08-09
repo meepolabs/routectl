@@ -7,8 +7,23 @@
 //! one-shot Converse JSON body and the per-frame ConverseStream
 //! payloads).
 //!
-//! All types tolerate missing fields with `#[serde(default)]` so a
-//! minimal AWS reply (e.g. text-only with no metrics) parses cleanly.
+//! Serde tolerance here is deliberately NOT uniform: three distinct
+//! stances are in play.
+//!
+//! 1. Most fields carry `#[serde(default)]`, so a minimal AWS reply
+//!    (e.g. text-only with no `metrics`) parses cleanly -- pinned by
+//!    `minimal_response_parses_without_optionals`.
+//! 2. Two fields carry no default: `ConverseResponseMessage.role` and
+//!    `ConverseMetrics.latency_ms`. Their absence fails
+//!    deserialization, pinned by the negative tests
+//!    `missing_role_field_fails_parse` and
+//!    `missing_latency_ms_field_fails_parse`.
+//! 3. `StreamMessageStart.role` is tolerant but TYPE-bound
+//!    (`#[serde(default)] Option<String>`): absence parses, a non-string
+//!    value fails the parse -- pinned by
+//!    `stream_message_start_without_role_parses_as_none` and
+//!    `stream_message_start_non_string_role_fails_parse`.
+//!
 //! Forward-compat is via `Other(Value)` arms on the union enums --
 //! a future AWS block type ships without a rebuild on the
 //! all-passthrough path.
@@ -522,6 +537,90 @@ mod tests {
         assert_eq!(d.text.as_deref(), Some("thinking..."));
         assert!(d.signature.is_none());
         assert!(d.redacted_content.is_none());
+    }
+
+    #[test]
+    fn minimal_response_parses_without_optionals() {
+        // Arrange: the smallest reply AWS can send -- one text block,
+        // no stopReason, no usage, no metrics.
+        let raw = r#"{"output":{"message":{"role":"assistant",
+                      "content":[{"text":"hi"}]}}}"#;
+
+        // Act
+        let resp: ConverseResponse = serde_json::from_str(raw).unwrap();
+
+        // Assert
+        assert_eq!(resp.output.message.role, "assistant");
+        assert_eq!(resp.output.message.content.len(), 1);
+        assert!(resp.stop_reason.is_none());
+        assert!(resp.usage.is_none());
+        assert!(resp.metrics.is_none());
+        assert!(resp.additional_model_response_fields.is_none());
+    }
+
+    #[test]
+    fn missing_role_field_fails_parse() {
+        // Arrange
+        let raw = json!({
+            "output": {"message": {"content": [{"text": "hi"}]}},
+            "stopReason": "end_turn"
+        });
+
+        // Act
+        let parsed = serde_json::from_value::<ConverseResponse>(raw);
+
+        // Assert
+        let err = parsed.expect_err("a message without role must not parse");
+        assert!(err.to_string().contains("role"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn missing_latency_ms_field_fails_parse() {
+        // Arrange
+        let raw = json!({
+            "output": {
+                "message": {"role": "assistant", "content": [{"text": "hi"}]}
+            },
+            "metrics": {}
+        });
+
+        // Act
+        let parsed = serde_json::from_value::<ConverseResponse>(raw);
+
+        // Assert
+        let err = parsed.expect_err("a metrics object without latencyMs must not parse");
+        assert!(
+            err.to_string().contains("latencyMs"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn stream_message_start_without_role_parses_as_none() {
+        // Arrange: AWS may send a messageStart frame with no role.
+        let raw = json!({});
+
+        // Act
+        let ev: StreamMessageStart = serde_json::from_value(raw).unwrap();
+
+        // Assert
+        assert!(ev.role.is_none());
+    }
+
+    #[test]
+    fn stream_message_start_non_string_role_fails_parse() {
+        // Arrange
+        let raw = json!({"role": 7});
+
+        // Act
+        let parsed = serde_json::from_value::<StreamMessageStart>(raw);
+
+        // Assert
+        let err = parsed.expect_err("a non-string role must not parse");
+        assert!(
+            err.to_string().contains("expected a string"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
