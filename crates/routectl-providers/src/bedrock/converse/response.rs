@@ -17,7 +17,7 @@
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use routectl_core::schema::CacheCreation;
@@ -31,6 +31,7 @@ use crate::anthropic_api::response::{map_stop_reason, sum_prompt_tokens};
 use super::response_types::{
     ConverseCacheDetail, ConverseResponse, ConverseResponseContentBlock, ConverseUsage,
 };
+use super::tools::HISTORY_COMPAT_TOOL_NAME;
 
 /// Format tag mirroring the Anthropic-API egress so multi-turn callers
 /// echoing reasoning_details back don't see a different format string
@@ -155,6 +156,10 @@ fn walk_content_blocks(
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut detail_index: u32 = 0;
     let mut parts: Vec<ContentPart> = Vec::new();
+    // `translate` calls this once per upstream response and the walk is
+    // flat (no recursion into nested blocks), so a local flag is exactly
+    // once-per-response for the reserved-dummy diagnostic below.
+    let mut history_compat_selection_warned = false;
 
     for block in blocks {
         match block {
@@ -167,6 +172,16 @@ fn walk_content_blocks(
                 }));
             }
             ConverseResponseContentBlock::ToolUse { tool_use } => {
+                // DIAGNOSTIC: remove once a live Bedrock probe confirms
+                // whether the model ever selects the reserved dummy tool.
+                if tool_use.name == HISTORY_COMPAT_TOOL_NAME && !history_compat_selection_warned {
+                    history_compat_selection_warned = true;
+                    warn!(
+                        provider = provider_id,
+                        reserved_tool_name = HISTORY_COMPAT_TOOL_NAME,
+                        "converse: model selected the reserved history-compat dummy tool"
+                    );
+                }
                 let arguments = serde_json::to_string(&tool_use.input)
                     .map_err(|e| Error::normalize_response(provider_id, e.to_string()))?;
                 tool_calls.push(json!({
@@ -335,6 +350,8 @@ pub fn translate_cache_details(details: &[ConverseCacheDetail]) -> CacheCreation
 mod tests {
     use super::*;
     use serde_json::json;
+
+    include!("response_history_compat_tests.rs");
 
     #[test]
     fn text_only_response_translates_to_canonical_text_message() {

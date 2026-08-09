@@ -25,7 +25,11 @@ use super::types::{
 /// tool-history validation. The double-underscore prefix keeps it clear
 /// of caller-supplied tool names (a caller tool named exactly this would
 /// be a deliberate collision, not an accident).
-const HISTORY_COMPAT_TOOL_NAME: &str = "routectl__history_compat_noop";
+///
+/// Visible across the `converse` module tree so the response lanes can
+/// recognize it if the model ever selects it (`toolChoice` is left absent,
+/// so Converse defaults to `auto` and selection is possible).
+pub(super) const HISTORY_COMPAT_TOOL_NAME: &str = "routectl__history_compat_noop";
 
 /// Translate `req.tools` + `req.tool_choice` into AWS `toolConfig`.
 ///
