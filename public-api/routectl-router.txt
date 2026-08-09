@@ -11672,6 +11672,7 @@ pub fn routectl_router::validate_alias_chain_targets(&routectl_router::config::C
 pub fn routectl_router::validate_alias_patterns(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_creds_refs(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_bedrock_global_config(&routectl_router::config::Config) -> routectl_core::error::Result<()>
+pub fn routectl_router::validate_bedrock_invoke_model_family(&routectl_router::config::Config) -> routectl_core::error::Result<()>
 pub fn routectl_router::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::validate_capability_overrides(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
 pub fn routectl_router::validate_class_policy(&routectl_router::config::Config) -> routectl_core::error::Result<()>

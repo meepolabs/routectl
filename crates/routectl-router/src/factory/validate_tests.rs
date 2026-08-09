@@ -2558,3 +2558,148 @@ mod codex_version_validation_tests {
         assert!(codex_identity_warnings(&config).is_empty());
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "bedrock")]
+mod bedrock_invoke_model_family_tests {
+    //! Config-BOUNDARY tests (parse via `toml::from_str`) for the gate
+    //! that keeps a non-Anthropic model off the Bedrock InvokeModel lane.
+    //! The lane assembles and parses the Anthropic wire shape, so such an
+    //! entry cannot work; the Converse lane is vendor-neutral and never
+    //! rejected here.
+
+    use super::{collect_config_validation, validate_bedrock_invoke_model_family};
+    use crate::config::Config;
+
+    /// A Bedrock provider plus one model, with the provider's `api_shape`
+    /// line and the model's `upstream` supplied by the caller. An absent
+    /// `shape_line` exercises the defaulted (invoke) shape.
+    fn config_with(shape_line: &str, upstream: &str) -> Config {
+        let toml_text = format!(
+            "[providers.aws]\n\
+             kind = \"bedrock\"\n\
+             region = \"us-west-2\"\n\
+             creds = {{ kind = \"default-chain\" }}\n\
+             {shape_line}\n\
+             [models.seat]\n\
+             provider = \"aws\"\n\
+             upstream = \"{upstream}\"\n"
+        );
+        toml::from_str(&toml_text).expect("config must parse")
+    }
+
+    #[test]
+    fn rejects_a_non_anthropic_model_on_the_defaulted_invoke_shape() {
+        // Arrange
+        let config = config_with("", "meta.llama3-70b-instruct-v1:0");
+
+        // Act
+        let result = validate_bedrock_invoke_model_family(&config);
+
+        // Assert
+        let message = result.expect_err("non-Anthropic invoke seat must be rejected");
+        let message = message.to_string();
+        assert!(
+            message.contains("meta.llama3-70b-instruct-v1:0"),
+            "message must name the model id: {message}"
+        );
+        assert!(
+            message.contains("invoke") && message.contains("converse"),
+            "message must name both wire shapes: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_anthropic_model_on_the_explicit_invoke_shape() {
+        let config = config_with("api_shape = \"invoke\"", "mistral.mistral-large-2402-v1:0");
+
+        let result = validate_bedrock_invoke_model_family(&config);
+
+        let message = result
+            .expect_err("explicit invoke shape must be gated too")
+            .to_string();
+        assert!(
+            message.contains("mistral.mistral-large-2402-v1:0"),
+            "message must name the model id: {message}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_non_anthropic_model_on_the_converse_shape() {
+        let config = config_with("api_shape = \"converse\"", "meta.llama3-70b-instruct-v1:0");
+
+        let result = validate_bedrock_invoke_model_family(&config);
+
+        assert!(
+            result.is_ok(),
+            "the vendor-neutral lane is unaffected by model family: {result:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_region_prefixed_anthropic_models_on_the_invoke_shape() {
+        for upstream in [
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "global.anthropic.claude-opus-4-7",
+            "global.anthropic.claude-opus-4-7[1m]",
+        ] {
+            let config = config_with("", upstream);
+
+            let result = validate_bedrock_invoke_model_family(&config);
+
+            assert!(result.is_ok(), "{upstream} must pass: {result:?}");
+        }
+    }
+
+    #[test]
+    fn accepts_an_inference_profile_arn_on_the_invoke_shape() {
+        // An ARN may carry no vendor token, so the family is unprovable.
+        // The gate is an ergonomics guard, not a proof obligation --
+        // rejecting would break working Claude-on-ARN deployments.
+        let config = config_with(
+            "",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/my-profile",
+        );
+
+        let result = validate_bedrock_invoke_model_family(&config);
+
+        assert!(result.is_ok(), "an ARN must pass: {result:?}");
+    }
+
+    #[test]
+    fn ignores_a_model_routed_at_a_non_bedrock_provider() {
+        let config: Config = toml::from_str(
+            "[providers.oai]\n\
+             kind = \"openai-compat\"\n\
+             base_url = \"https://x\"\n\
+             api_key_ref = \"literal:k\"\n\
+             [models.seat]\n\
+             provider = \"oai\"\n\
+             upstream = \"meta.llama3-70b-instruct-v1:0\"\n",
+        )
+        .expect("config must parse");
+
+        let result = validate_bedrock_invoke_model_family(&config);
+
+        assert!(result.is_ok(), "non-Bedrock providers are out of scope");
+    }
+
+    #[test]
+    fn collect_config_validation_reports_the_invoke_family_error() {
+        // Proves the validator is wired into the collected suite every
+        // config surface routes through, not just callable directly.
+        let config = config_with("", "meta.llama3-70b-instruct-v1:0");
+
+        let errors = collect_config_validation(&config).errors;
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("meta.llama3-70b-instruct-v1:0")),
+            "the collected suite must surface the error: {errors:?}"
+        );
+    }
+}

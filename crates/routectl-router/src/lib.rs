@@ -11,6 +11,7 @@
 //! the OAuth activation inventory, and the `doctor` report shapes.
 
 pub(crate) mod activation;
+pub(crate) mod anthropic_family;
 pub(crate) mod capability_detect;
 pub(crate) mod capability_display;
 pub(crate) mod capability_matcher;
@@ -129,6 +130,8 @@ pub use doctor::{
 pub use factory::validate_bedrock_creds_refs;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
+#[cfg(feature = "bedrock")]
+pub use factory::validate_bedrock_invoke_model_family;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_provider_bedrock_mantle;
 #[cfg(feature = "bedrock")]
