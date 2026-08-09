@@ -26,6 +26,8 @@ default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses", "gem
 # To skip the AWS deps entirely when building this providers library:
 #   cargo check -p routectl-providers --no-default-features \
 #     --features openai-compat,anthropic-api
+# At least one provider feature must always be enabled: a zero-provider
+# build is rejected by a `compile_error!` in src/lib.rs.
 # (A --workspace build still pulls in AWS: routectl-cli always links
 #  bedrock, and Cargo feature unification re-enables it graph-wide.)
 "bedrock" = [
