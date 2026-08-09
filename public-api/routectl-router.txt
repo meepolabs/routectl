@@ -3187,11 +3187,12 @@ pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
+pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub const fn routectl_router::router::Router::has_forwarded_provider(&self) -> bool
+pub fn routectl_router::router::Router::install_catalog_overlay(&mut self, alloc::sync::Arc<routectl_router::CatalogOverlay>)
 pub fn routectl_router::router::Router::install_resolved_models(&mut self, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>)
 pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::config::Config>) -> Self
-pub const fn routectl_router::router::Router::note_overlay_revision(&mut self, u64)
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary
@@ -10509,11 +10510,12 @@ pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
+pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub const fn routectl_router::router::Router::has_forwarded_provider(&self) -> bool
+pub fn routectl_router::router::Router::install_catalog_overlay(&mut self, alloc::sync::Arc<routectl_router::CatalogOverlay>)
 pub fn routectl_router::router::Router::install_resolved_models(&mut self, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>)
 pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::config::Config>) -> Self
-pub const fn routectl_router::router::Router::note_overlay_revision(&mut self, u64)
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary

@@ -3,6 +3,15 @@ use crate::config::{ProviderEntry, RetryPolicy};
 use routectl_core::capability::EvidenceSource;
 use std::collections::BTreeMap;
 
+/// An otherwise-empty overlay stamped at `revision`, for the carry-over
+/// tests that turn on a revision CHANGE and not on any cell content.
+fn overlay_at_revision(revision: u64) -> Arc<crate::catalog_overlay::CatalogOverlay> {
+    Arc::new(crate::catalog_overlay::CatalogOverlay {
+        revision,
+        ..Default::default()
+    })
+}
+
 /// Build a Router with one openai-compat provider that has the given
 /// runtime-policy timeouts, and an alias chain of length 1 pointing
 /// at it. The base RetryPolicy passed to compose_attempt_policy
@@ -866,7 +875,7 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
     // Arrange: the outgoing Router was built against overlay revision 3.
     let config = Arc::new(Config::default());
     let mut before = Router::new(config.clone());
-    before.note_overlay_revision(3);
+    before.install_catalog_overlay(overlay_at_revision(3));
     before.learned_capabilities.observe(
         "nick",
         "web_search",
@@ -878,7 +887,7 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
     );
     // The rebuild picked up a newer overlay revision.
     let mut after = Router::new(config);
-    after.note_overlay_revision(4);
+    after.install_catalog_overlay(overlay_at_revision(4));
 
     // Act
     let events = routectl_testkit::capture_events(|| {

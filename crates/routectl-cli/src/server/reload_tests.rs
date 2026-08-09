@@ -187,6 +187,74 @@ async fn credentials_reload_reexpands_seat_set() {
     );
 }
 
+/// A credentials-only reload rebuilds the Router off the CURRENT (unchanged)
+/// overlay, so the replacement must carry that overlay through -- both the
+/// revision stamp the capability boundary compares and the retained generation
+/// the status read side derives the in-effect view from. Dropping either would
+/// silently reset the operator's overlay to empty on a routine seat change.
+#[tokio::test]
+async fn credentials_reload_seat_change_carries_the_overlay_onto_the_new_router() {
+    // Arrange: one seat on disk, and a live Router built against a real
+    // overlay rather than the empty default.
+    let dir = tempfile::tempdir().unwrap();
+    let creds = dir.path().join("routectl").join("credentials.json");
+    write_pool_credentials(&creds, &[("anthropic", "tok-default")]);
+    let config = pooled_oauth_config();
+    let overlay: Arc<CatalogOverlay> = Arc::new(
+        serde_json::from_str(
+            r#"{"schema_version":1,"revision":5,"cells":{"anthropic-api:claude-sonnet-4-6*":
+                 {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+        )
+        .expect("valid overlay"),
+    );
+    let composite = CompositeStore::open_at(&creds)
+        .await
+        .expect("open composite store at temp creds path");
+    let oauth = composite.oauth_store().expect("oauth arm present");
+    let secrets: Arc<dyn SecretStore> = Arc::new(composite);
+    let router = build_router_from_config_with_overlay(config.clone(), &overlay, secrets.clone())
+        .await
+        .expect("initial router build");
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let before = swap.load_full();
+    assert_eq!(before.overlay_revision(), 5);
+
+    // Act: add a second seat on disk (a real seat-set change), then reload.
+    write_pool_credentials(
+        &creds,
+        &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
+    );
+    handle_credentials_reload(
+        &Some(oauth),
+        &config,
+        &overlay,
+        secrets,
+        &swap,
+        &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
+    )
+    .await;
+
+    // Assert: the rebuild happened, and the replacement carries the same
+    // overlay generation -- never the empty default.
+    let after = swap.load_full();
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "a seat-set change must rebuild and swap the router"
+    );
+    assert_eq!(
+        after.overlay_revision(),
+        5,
+        "the replacement must keep the accepted overlay's revision stamp"
+    );
+    assert!(
+        after
+            .catalog_overlay()
+            .cells
+            .contains_key("anthropic-api:claude-sonnet-4-6*"),
+        "the replacement must retain the accepted overlay itself, not an empty one"
+    );
+}
+
 /// A credentials reload that changes only a token VALUE (same seat
 /// keys) -- the routine auto-refresh case -- must NOT rebuild the
 /// Router. Proven by pointer-equality of the `ArcSwap` payload across
@@ -383,7 +451,7 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
     let (usage, _writer) = build_usage_writer(&initial_config);
     let router = build_router_from_config_with_overlay(
         initial_config.clone(),
-        &CatalogOverlay::default(),
+        &Arc::default(),
         secrets.clone(),
     )
     .await
@@ -468,13 +536,10 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
     let _usage_dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, _writer) = build_usage_writer(&config);
-    let router = build_router_from_config_with_overlay(
-        config.clone(),
-        &CatalogOverlay::default(),
-        secrets.clone(),
-    )
-    .await
-    .unwrap();
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(router));
 
     // Act: the SAME function, once per trigger. `Box::pin` keeps
@@ -555,7 +620,7 @@ async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
     let (usage, _writer) = build_usage_writer(&initial_config);
     let router = build_router_from_config_with_overlay(
         initial_config.clone(),
-        &CatalogOverlay::default(),
+        &Arc::default(),
         secrets.clone(),
     )
     .await
@@ -658,7 +723,7 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
     let (usage, _writer) = build_usage_writer(&initial_config);
     let router = build_router_from_config_with_overlay(
         initial_config.clone(),
-        &CatalogOverlay::default(),
+        &Arc::default(),
         secrets.clone(),
     )
     .await
@@ -733,7 +798,7 @@ async fn config_reload_revision_change_enqueues_one_new_revision_tombstone() {
 
     let router = build_router_from_config_with_overlay(
         start_config.clone(),
-        &CatalogOverlay::default(),
+        &Arc::default(),
         secrets.clone(),
     )
     .await
@@ -818,7 +883,7 @@ async fn config_reload_without_revision_change_enqueues_no_tombstone() {
 
     let router = build_router_from_config_with_overlay(
         start_config.clone(),
-        &CatalogOverlay::default(),
+        &Arc::default(),
         secrets.clone(),
     )
     .await
@@ -884,7 +949,7 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
     let (usage, _writer) = build_usage_writer(&initial_config);
     let router = build_router_from_config_with_overlay(
         initial_config.clone(),
-        &CatalogOverlay::default(),
+        &Arc::default(),
         secrets.clone(),
     )
     .await

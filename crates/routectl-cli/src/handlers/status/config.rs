@@ -7,14 +7,14 @@
 //! internally. The raw `Config` is never imported or serialized here; a
 //! regression that tried to would trip the forbidden-import seam test.
 //!
-//! Per request the panel loads a fresh catalog overlay from disk (a SYNC
-//! loader, so it runs inside the `spawn_blocking` builder [`guard_panel`]
-//! wraps it in) and folds it against the live config into the effective view.
-//! No overlay is retained on the router. On an overlay load/parse failure the
-//! raw loader error -- which can carry a filesystem path or a config value --
-//! is dropped entirely: the wire carries only a fixed reason code, and the
-//! panel's availability edge is logged centrally by that fixed code (see
-//! [`super::PanelCounters`]), never per poll and never with the raw error.
+//! The overlay half of that view is the generation the daemon ACCEPTED at
+//! its last successful boot or reload: it is retained on the live router and
+//! read from memory, never re-read from disk per request. Reading disk here
+//! would let the panel render economics and provenance from a file the daemon
+//! REJECTED (routing continues on the previous generation), and would make a
+//! corrupt file on disk take the whole panel down while routing is healthy.
+//! Because config and overlay now come from the SAME pinned router, one
+//! render can never pair a config generation with a different overlay one.
 
 use std::sync::Arc;
 
@@ -32,7 +32,6 @@ use routectl_router::{
 use super::daemon_meta::DaemonMetaSnapshot;
 use super::vocabulary::{codes, provenance};
 use super::{Panel, StatusState, guard_panel, utc_rfc3339};
-use crate::server::load_overlay_default;
 
 /// Wire-shape version of the config panel payload.
 pub const SCHEMA_VERSION: u32 = 3;
@@ -111,8 +110,7 @@ struct ProviderWire {
 /// `config_path` is the ONE deliberate filesystem path on this wire: the
 /// dashboard's source strip exists to answer "which file is in effect", and
 /// the whole status surface is already gated behind the host allowlist plus
-/// listener auth. It is the resolved path only -- never config CONTENT, and
-/// never a loader error string (see [`unavailable_from_overlay_error`]).
+/// listener auth. It is the resolved path only -- never config CONTENT.
 #[derive(Debug, Clone, Serialize)]
 struct SourceWire {
     /// Resolved `config.toml` path, or `None` when serving from a config
@@ -374,15 +372,6 @@ fn build_panel(
     }
 }
 
-/// Fold an overlay load failure into an unavailable panel. The raw loader
-/// error (`_err`) can carry a filesystem path or a config value, so it is
-/// dropped entirely -- only the fixed [`codes::CONFIG_UNAVAILABLE`] reaches
-/// the wire, and the availability edge is logged centrally by that code (see
-/// [`super::PanelCounters`]), never per poll and never with the raw error.
-fn unavailable_from_overlay_error(_err: &str) -> Panel<ConfigPanel> {
-    Panel::unavailable(SCHEMA_VERSION, codes::CONFIG_UNAVAILABLE)
-}
-
 pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
     // Read order is load-bearing. ONE clock read anchors both the `as_of` and
     // the source strip's config-load age, so a request crossing a second
@@ -420,11 +409,7 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
         SCHEMA_VERSION,
         codes::CONFIG_UNAVAILABLE,
         move || {
-            let overlay = match load_overlay_default() {
-                Ok(overlay) => overlay,
-                Err(err) => return unavailable_from_overlay_error(&err),
-            };
-            let effective = view.effective_view(&overlay);
+            let effective = view.effective_view();
             let dto = build_panel(effective, &activation, config_path.as_deref(), daemon);
             Panel::available(SCHEMA_VERSION, as_of, dto)
         },
@@ -448,6 +433,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use routectl_router::config::AliasValue;
     use routectl_router::{CatalogOverlay, CatalogRow, Config, Router, derive_effective_view};
+    use routectl_testkit::ScopedEnv;
     use serde_json::Value;
     use std::path::PathBuf;
     use tower::ServiceExt;
@@ -474,11 +460,21 @@ mod tests {
         )
     }
 
+    /// A router over `config` with `overlay` RETAINED on it, matching what the
+    /// server builder installs -- the panel derives its view from these two,
+    /// so a test that wants an overlay in the view injects it here rather than
+    /// writing a file the panel no longer reads.
+    fn router_with(config: Config, overlay: CatalogOverlay) -> Router {
+        let mut router = Router::new(Arc::new(config));
+        router.install_catalog_overlay(Arc::new(overlay));
+        router
+    }
+
     fn test_state() -> Arc<StatusState> {
-        let router = Router::new(Arc::new(Config::default()));
-        // The config panel reads only the live router and the catalog overlay
-        // (a missing overlay file loads as empty), never the usage ledger, so
-        // the temp dir may drop immediately.
+        let router = router_with(Config::default(), CatalogOverlay::default());
+        // The config panel reads only the live router (config plus the overlay
+        // retained on it), never the usage ledger or the overlay file, so the
+        // temp dir may drop immediately.
         let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         Arc::new(StatusState::from_app(
             &app,
@@ -865,6 +861,33 @@ base_url = "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#s
         assert!(text.contains("https://internal.example"));
     }
 
+    /// This panel's UNAVAILABLE envelope carries a fixed reason code and
+    /// nothing else. `effective_view()` is infallible now, so no loader error
+    /// string exists to leak -- but `guard_panel` takes a `&'static str` code,
+    /// and widening that to `String` (the natural move for someone wanting
+    /// richer reasons) would silently let a formatted error onto this wire.
+    /// Anchored on the SERIALIZED envelope, not Debug, per the sibling no-leak
+    /// test above.
+    #[test]
+    fn the_unavailable_envelope_carries_only_a_fixed_code() {
+        let panel: Panel<ConfigPanel> =
+            Panel::unavailable(SCHEMA_VERSION, codes::CONFIG_UNAVAILABLE);
+        let text = serde_json::to_string(&panel).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(value["unavailable"], codes::CONFIG_UNAVAILABLE);
+        assert!(value["data"].is_null(), "data must be dropped: {text}");
+        assert!(value["as_of"].is_null(), "as_of must be dropped: {text}");
+        // A filesystem path, a config value, or a secret ref would all have to
+        // arrive through the reason field; none of these can appear in a code.
+        for forbidden in ["/", "literal:", "env://", "catalog overlay"] {
+            assert!(
+                !value["unavailable"].as_str().unwrap().contains(forbidden),
+                "the unavailable reason leaked `{forbidden}`: {text}"
+            );
+        }
+    }
+
     /// The source strip's provider count and the provider table derive from the
     /// SAME effective view, so a rendered row can never be missing from the
     /// count.
@@ -875,37 +898,87 @@ base_url = "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#s
         assert_eq!(panel.providers.len(), 3);
     }
 
-    /// Test #7 (redaction): an overlay load failure whose raw error carries a    /// filesystem path and a secret-shaped value must never reach the payload.
-    /// The failure folds to an unavailable panel with the fixed code and no
-    /// data, so nothing to leak survives.
-    #[test]
-    fn overlay_failure_yields_code_only_unavailable_panel() {
-        let leaky = "catalog overlay load error: catalog overlay \
-                     /home/someone/.config/routectl/catalog_overlay.json: corrupt or \
-                     invalid: literal:sk-live-LEAKED at env://SECRET file:///etc/passwd \
-                     oauth://anthropic";
-        let panel = unavailable_from_overlay_error(leaky);
-        assert_eq!(panel.unavailable.as_deref(), Some("config_unavailable"));
-        assert!(panel.data.is_none());
-        assert!(panel.as_of.is_none());
+    /// The panel serves the LAST ACCEPTED catalog generation, so a corrupt
+    /// overlay sitting on disk cannot take it down while routing is healthy.
+    /// The overlay file here is structurally invalid (no `cells` key, which
+    /// `catalog_overlay::load` rejects -- a merely MISSING file loads as an
+    /// empty overlay and would prove nothing), and the ambient config dir is
+    /// pointed at it, so a panel that re-read disk would fold that load error
+    /// into an unavailable payload.
+    ///
+    /// `#[serial]` per the `ScopedEnv` contract.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_corrupt_overlay_on_disk_never_unavailables_the_panel() {
+        // Arrange: an isolated config dir holding a corrupt overlay file, and
+        // a live router carrying the accepted generation in memory.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let overlay_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&overlay_dir).unwrap();
+        std::fs::write(
+            overlay_dir.join("catalog_overlay.json"),
+            br#"{"schema_version":1,"revision":4}"#,
+        )
+        .unwrap();
+        assert!(
+            routectl_router::load_catalog_overlay(&routectl_router::overlay_default_path())
+                .is_err(),
+            "the fixture must be a genuinely CORRUPT overlay, not a missing one"
+        );
 
-        let text = serde_json::to_string(&panel).unwrap();
-        for forbidden in [
-            "LEAKED",
-            "literal:",
-            "env://",
-            "file://",
-            "oauth://",
-            "/home/",
-            "/etc/",
-            "catalog_overlay.json",
-            "config.toml",
-        ] {
-            assert!(
-                !text.contains(forbidden),
-                "config unavailable payload leaked `{forbidden}`: {text}"
-            );
-        }
+        let config: Config = toml::from_str(
+            r#"
+version = 2
+
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "env://ACCEPTED_KEY"
+base_url = "https://accepted.example/v1"
+
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-8"
+"#,
+        )
+        .expect("valid config");
+        // The accepted generation, in the same JSON shape the loader parses,
+        // so the fixture cannot drift from what a real accepted overlay is.
+        let accepted: CatalogOverlay = serde_json::from_str(
+            r#"{"schema_version":1,"revision":2,"cells":{"anthropic-api:claude-opus-4-8*":
+                 {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+        )
+        .expect("valid overlay");
+        let router = router_with(config, accepted);
+        let (app, _dir) = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let state = Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()));
+
+        // Act
+        let panel = build(&state).await;
+
+        // Assert: available, and rendering the ACCEPTED generation's
+        // provenance -- not the baked fallback and not an unavailable code.
+        assert!(
+            panel.unavailable.is_none(),
+            "a corrupt overlay on disk must not unavailable the panel: {:?}",
+            panel.unavailable
+        );
+        let data = panel.data.expect("the panel must carry data");
+        let opus = data
+            .models
+            .iter()
+            .find(|m| m.nickname == "opus")
+            .expect("the configured model reaches the wire");
+        assert_eq!(
+            opus.source, "user",
+            "the panel must render the accepted overlay's provenance, not the baked layer"
+        );
+        assert_eq!(opus.verified_at.as_deref(), Some("2026-07-01"));
+        assert_eq!(
+            opus.economics.as_ref().expect("economics present").wm,
+            9.5,
+            "the economics must come from the accepted overlay cell"
+        );
     }
 
     /// A read that lands mid-reload must skew CONSERVATIVELY: the source strip
@@ -935,10 +1008,7 @@ base_url = "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#s
             .aliases
             .insert("fresh".to_string(), AliasValue::Single("opus".to_string()));
         router_swap.store(Arc::new(Router::new(Arc::new(reloaded))));
-        let effective = state
-            .router
-            .view()
-            .effective_view(&CatalogOverlay::default());
+        let effective = state.router.view().effective_view();
         let panel = build_panel(effective, &ActivationState::default(), None, pinned_daemon);
 
         assert_eq!(

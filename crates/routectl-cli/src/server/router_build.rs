@@ -23,7 +23,7 @@ pub async fn build_router_from_config(
     config: Arc<Config>,
     secrets: Arc<dyn SecretStore>,
 ) -> Result<Router> {
-    build_router_from_config_with_overlay(config, &CatalogOverlay::default(), secrets).await
+    build_router_from_config_with_overlay(config, &Arc::default(), secrets).await
 }
 
 /// Build a `Router` from the parsed config + catalog overlay + a shared
@@ -32,9 +32,13 @@ pub async fn build_router_from_config(
 /// triggers a Router rebuild reuses the SAME store handle, preserving
 /// the OAuthStore in-memory token cache and the per-provider
 /// single-flight refresh mutex across rebuilds.
+///
+/// The overlay arrives as an `Arc` because the built Router RETAINS it (see
+/// `Router::install_catalog_overlay`): every caller already holds one, so
+/// retention costs a refcount rather than a clone of the overlay map.
 pub async fn build_router_from_config_with_overlay(
     config: Arc<Config>,
-    catalog_overlay: &CatalogOverlay,
+    catalog_overlay: &Arc<CatalogOverlay>,
     secrets: Arc<dyn SecretStore>,
 ) -> Result<Router> {
     let mut router = Router::new(config.clone());
@@ -140,10 +144,12 @@ pub async fn build_router_from_config_with_overlay(
     let resolved_models =
         routectl_router::apply_catalog_overlay(resolved_models, &config, catalog_overlay);
     router.install_resolved_models(resolved_models);
-    // Stamp the overlay revision the resolved-model table was merged
-    // against so a later hot-reload can detect an overlay change and
-    // invalidate the learned-capability registry.
-    router.note_overlay_revision(routectl_router::overlay_revision(catalog_overlay));
+    // Retain the overlay the resolved-model table was merged against, which
+    // also stamps its revision so a later hot-reload can detect an overlay
+    // change and invalidate the learned-capability registry. Retaining it
+    // (rather than leaving each reader to re-read the file) is what lets the
+    // status read side report the ACCEPTED generation.
+    router.install_catalog_overlay(catalog_overlay.clone());
 
     // Provider build failures are normally non-fatal (an operator
     // may have an unused-but-declared model whose provider creds

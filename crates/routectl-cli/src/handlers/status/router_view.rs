@@ -16,9 +16,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use routectl_router::router::RouteTargetStatus;
-use routectl_router::{
-    CatalogOverlay, EffectiveView, LearnedRegistryEntry, Router, derive_effective_view,
-};
+use routectl_router::{EffectiveView, LearnedRegistryEntry, Router, derive_effective_view};
 use routectl_usage::{AggRow, RowCost};
 
 use crate::commands::usage::cost_for_row;
@@ -92,11 +90,16 @@ impl StatusRouterView {
         self.router.learned_capability_snapshot()
     }
 
-    /// The derived effective-config view for the config panel. The raw
-    /// `Config` is read only inside this method; the panel receives the
-    /// already-derived, secret-free [`EffectiveView`].
-    pub fn effective_view(&self, overlay: &CatalogOverlay) -> EffectiveView {
-        derive_effective_view(&self.router.config, overlay)
+    /// The derived effective-config view for the config panel, folding the
+    /// live config together with the catalog overlay the pinned Router was
+    /// BUILT against -- the generation the daemon accepted, read out of
+    /// memory. Neither input is re-read from disk here, so one derivation can
+    /// never pair a config generation with a different overlay generation.
+    ///
+    /// The raw `Config` is read only inside this method; the panel receives
+    /// the already-derived, secret-free [`EffectiveView`].
+    pub fn effective_view(&self) -> EffectiveView {
+        derive_effective_view(&self.router.config, self.router.catalog_overlay())
     }
 }
 
@@ -121,7 +124,7 @@ mod tests {
         // whose contract is these three calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
         let _learned: Vec<LearnedRegistryEntry> = view.learned_capabilities();
-        let _effective: EffectiveView = view.effective_view(&CatalogOverlay::default());
+        let _effective: EffectiveView = view.effective_view();
     }
 
     #[test]
