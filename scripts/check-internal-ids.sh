@@ -32,9 +32,15 @@ fi
 # They are not author-written content, so exclude those trees from the
 # scan. The scanner's own self-test carries synthetic ID-shaped fixtures
 # by design, so it is excluded too.
+#
+# This script excludes ITSELF for the same reason: it IS the rule set, so
+# its pattern literals are indistinguishable from real leaks and any diff
+# that edits the rule set would block its own commit. Accepted cost: the
+# scanner's own source is never scanned for genuine leaks.
 EXCLUDE_PATHS=(
     "crates/routectl-cli/tests/fixtures/captured/"
     "crates/routectl-router/catalog_data/"
+    "scripts/check-internal-ids.sh"
     "scripts/check-internal-ids.test.sh"
 )
 
@@ -65,10 +71,10 @@ is_excluded() {
 }
 
 # High-signal, anchored patterns ONLY. Deliberately NOT matching bare
-# L\d / T\d / H\d -- those collide with ordinary prose, line refs, and
-# type names. Each entry is the CORE of an extended-regex (grep -E)
-# alternative; the surrounding whole-token boundaries are added by
-# `joined_pattern` so the rule set stays readable here.
+# L\d / H\d -- those collide with ordinary prose and line refs. Each entry
+# is the CORE of an extended-regex (grep -E) alternative; the surrounding
+# whole-token boundaries are added by `joined_pattern` so the rule set
+# stays readable here.
 #
 # Boundaries are POSIX-portable, NOT `\b`: `\b` is a GNU grep extension
 # that BSD/macOS grep does not honor, which would let a local hook
@@ -96,8 +102,36 @@ PATTERNS=(
     'D[0-9]{2}'
 )
 
-# Join the cores into one ERE: each core is wrapped in
-# whole-token boundaries, then OR-ed with `|`.
+# Second tier: same whole-token wrapping, but the LEFT boundary also
+# excludes `-` (`(^|[^[:alnum:]_-])`). This tier exists because its cores
+# are short enough to collide with hyphenated vendor model names.
+# MEASURED: with the default left boundary, `minimax/MiniMax-M3` and
+# `models_dev_model: "MiniMax-M3"` false-match the bare `M<n>` core; the
+# hyphen-excluding left boundary drops both to zero while still catching
+# `the M1 recorder` and `M3 generation`. Accepted cost, by design:
+# `pre-M1`-style and `M3_BODY`-style identifier-embedded tokens do NOT
+# match this tier -- those were removed by a one-time tree-wide scrub, and
+# this gate is not their safety net.
+#
+# The existing PATTERNS tier MUST keep its own boundary: `R2-`, `RV-`, and
+# `(pre-|post-)f<n>` legitimately sit after or contain a hyphen.
+#
+# Bare `T<n>` is MEASURED-safe here (this supersedes the older refusal to
+# match it): across all tracked files, minus `catalog_data/` and this
+# scanner's self-test, whole-token `T<n>` returned exactly 6 lines, every
+# one an internal label the scrub removed -- zero generic-parameter or
+# type-name collisions. Bare `F<n>` stays uncatchable: `FailurePhase::F1`
+# / `F2` / `F3` are real enum variants.
+PATTERNS_NO_HYPHEN=(
+    'M[0-9]{1,3}'
+    'T[0-9]{1,3}'
+    'later (increment|phase|milestone)'
+    'this milestone'
+)
+
+# Join the cores of both tiers into one ERE: each core is wrapped in
+# whole-token boundaries (the second tier's left boundary additionally
+# excludes `-`), then all are OR-ed with `|`.
 joined_pattern() {
     local out=""
     local p
@@ -108,6 +142,10 @@ joined_pattern() {
         else
             out="$out|$wrapped"
         fi
+    done
+    for p in "${PATTERNS_NO_HYPHEN[@]}"; do
+        local wrapped="(^|[^[:alnum:]_-])($p)([^[:alnum:]_]|\$)"
+        out="$out|$wrapped"
     done
     printf '%s' "$out"
 }

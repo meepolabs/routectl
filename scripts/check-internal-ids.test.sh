@@ -90,6 +90,29 @@ assert_caught "(pre-)f<n> planning commentary" "adjust pre-f2 before merge"
 assert_caught "(post-)f<n> planning commentary" "post-f3 cleanup pass"
 assert_caught "D<nn> decision shorthand" "recorded under D42 rationale"
 
+# POSITIVE (hyphen-excluding tier): the bare-label class is caught when it
+# stands alone as a token.
+assert_caught "bare M<n> label" "the M1 recorder writes here"
+assert_caught "bare M<n> label mid-sentence" "planned for M3 generation"
+assert_caught "bare T<n> label" "covered by T5 already"
+assert_caught "later increment phrase" "deferred to a later increment"
+assert_caught "later phase phrase" "handled in a later phase"
+assert_caught "later milestone phrase" "punted to a later milestone"
+assert_caught "this milestone phrase" "out of scope for this milestone"
+
+# NEGATIVE (hyphen-excluding tier): hyphenated vendor model names carry an
+# `M<n>` tail and must NOT trip -- this is why the tier excludes `-` on the
+# LEFT boundary.
+assert_clean "vendor model MiniMax-M2" "route to MiniMax-M2 for cheap calls"
+assert_clean "vendor model MiniMax-M3" "route to MiniMax-M3 for cheap calls"
+assert_clean "vendor model with provider prefix" "id is minimax/MiniMax-M3 upstream"
+assert_clean "vendor model in JSON value" '{"models_dev_model":"MiniMax-M3"}'
+
+# NEGATIVE (hyphen-excluding tier, whole-token boundary): the bare cores
+# embedded in a larger identifier must NOT trip.
+assert_clean "M<n> inside identifier" "the M3_BODY constant"
+assert_clean "T<n> inside identifier" "field T5_total here"
+
 # NEGATIVE: ordinary content must NOT be caught.
 assert_clean "plain TODO" "TODO: refactor this later"
 assert_clean "issue ref" "fixes #123 in the tracker"
@@ -141,6 +164,24 @@ assert_diff_clean "captured fixtures dir is excluded" \
 assert_diff_caught "ordinary source file IS scanned" \
 "+++ b/crates/routectl-core/src/lib.rs
 +// TODO(M99) wire this up"
+
+# DIFF-PATH (self-exemption): the scanner IS the rule set, so a diff that
+# adds its own pattern literals must not block. A sibling path must still
+# be scanned.
+assert_diff_clean "scanner excludes itself" \
+"+++ b/scripts/check-internal-ids.sh
++    'later (increment|phase|milestone)'
++    'this milestone'"
+
+assert_diff_caught "sibling .bak of scanner IS scanned" \
+"+++ b/scripts/check-internal-ids.sh.bak
++    'this milestone'"
+
+# DIFF-PATH: the vendored catalog selector source is NOT path-excluded and
+# must stay clean of bare labels on its own merits.
+assert_diff_clean "catalog selector source with vendor model name is clean" \
+"+++ b/crates/routectl-router/src/catalog_codegen_selectors.rs
++// keeps MiniMax-M3 selectable"
 
 if [[ "$fails" -ne 0 ]]; then
     echo "check-internal-ids self-test: $fails failure(s)" >&2
