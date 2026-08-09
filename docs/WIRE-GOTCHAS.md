@@ -198,8 +198,12 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
   Operators triaging "why is the model losing context?" should grep
   for the WARN line `skipping Thinking blocks on replay: signature
-  missing or empty` to correlate (one WARN per request with
-  `skipped_count=N` and `skipped_indices=[...]`, NOT one per detail).
+  missing or empty` to correlate (one WARN per assistant turn that
+  drops unsigned reasoning, carrying `skipped_count=N` and
+  `skipped_indices=[...]`, NOT one per detail -- a request with several
+  such turns emits one line each).
+  `skipped_count` is exact; `skipped_indices` is a sample capped at 8
+  entries, with `indices_truncated=true` when the list was cut.
   Mirrored in `bedrock/converse/messages.rs` (`emit_reasoning_blocks_converse`) for the Converse
   stream path.
 

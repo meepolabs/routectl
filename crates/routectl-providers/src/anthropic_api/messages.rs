@@ -32,6 +32,13 @@ use routectl_core::{
 use super::parts::{parse_file_document_source, parse_image_url_source, strip_text_after_tool_use};
 use super::types::{AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlock};
 
+/// Cap on how many skipped reasoning indices reach the aggregated WARN.
+/// A reply can carry arbitrarily many unsigned reasoning details, so an
+/// uncapped index list turns one WARN into an unbounded log record. The
+/// sample is capped as it is COLLECTED, not at format time, so the
+/// diagnostic path never allocates the full list either.
+const MAX_LOGGED_SKIPPED_INDICES: usize = 8;
+
 /// Walk the canonical `ChatRequest` messages and apply two outgoing
 /// replay invariants. `history_reasoning` gates ONLY the second
 /// (unsigned-thinking strip); the tool_call_id reject is unconditional.
@@ -611,7 +618,13 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
     sorted.sort_by_key(|d| d.index.unwrap_or(0));
 
     let mut blocks: Vec<ContentBlock> = Vec::with_capacity(sorted.len());
-    let mut skipped_unsigned: Vec<Option<u32>> = Vec::new();
+    // Exact drop count for the operator, plus a sample of the dropped
+    // indices capped at collection time. `None` in the sample preserves
+    // an index the upstream did not supply, kept as `None` rather than
+    // flattened to a plausible integer so a missing index stays
+    // distinguishable from index 0.
+    let mut skipped_unsigned_count: usize = 0;
+    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_SKIPPED_INDICES);
     // Track reasoning details dropped because their format is not
     // `anthropic-claude-v1`. These cannot be replayed as Anthropic blocks
     // regardless of signature presence; a separate WARN aggregates them so
@@ -634,7 +647,12 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                     skipped_format_values
                         .push(detail.format.as_deref().unwrap_or("<none>").to_string());
                 }
-                ReasoningDetailKind::Text => skipped_unsigned.push(detail.index),
+                ReasoningDetailKind::Text => {
+                    skipped_unsigned_count = skipped_unsigned_count.saturating_add(1);
+                    if skipped_unsigned.len() < MAX_LOGGED_SKIPPED_INDICES {
+                        skipped_unsigned.push(detail.index);
+                    }
+                }
                 ReasoningDetailKind::Encrypted | ReasoningDetailKind::Summary => {}
             }
             continue;
@@ -673,11 +691,12 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
             ReasoningDetailKind::Summary => {}
         }
     }
-    if !skipped_unsigned.is_empty() {
+    if skipped_unsigned_count > 0 {
         tracing::warn!(
             provider = id,
-            skipped_count = skipped_unsigned.len(),
+            skipped_count = skipped_unsigned_count,
             skipped_indices = ?skipped_unsigned,
+            indices_truncated = skipped_unsigned_count > skipped_unsigned.len(),
             "skipping Thinking blocks on replay: signature missing or empty \
              (multi-block thinking history is now partially echoed; \
              see CLAUDE.md \"Anthropic streaming reasoning replay\" residual)"
@@ -2176,3 +2195,7 @@ mod tool_result_coalescing_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "messages_tests.rs"]
+mod sidecar_tests;

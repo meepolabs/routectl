@@ -31,6 +31,14 @@ use super::types::{
     ConverseToolResultContent, ConverseToolUse,
 };
 
+/// Cap on how many skipped reasoning indices reach the aggregated WARN.
+/// Mirrors `anthropic_api::messages::MAX_LOGGED_SKIPPED_INDICES`. A reply
+/// can carry arbitrarily many unsigned reasoning details, so an uncapped
+/// index list turns one WARN into an unbounded log record. The sample is
+/// capped as it is COLLECTED, not at format time, so the diagnostic path
+/// never allocates the full list either.
+const MAX_LOGGED_SKIPPED_INDICES: usize = 8;
+
 /// Translate every message in `req.messages` into a `ConverseMessage`,
 /// dropping Role::System (handled by the top-level `system` array) and
 /// rejecting Role::Tool messages without a `tool_call_id` (AWS rejects
@@ -270,7 +278,14 @@ fn emit_reasoning_blocks_converse(
     sorted.sort_by_key(|d| d.index.unwrap_or(0));
 
     let mut blocks: Vec<ConverseContentBlock> = Vec::with_capacity(sorted.len());
-    let mut skipped_unsigned: Vec<Option<u32>> = Vec::new();
+    // Exact drop count for the operator, plus a sample of the dropped
+    // indices capped at collection time. Mirrors
+    // `anthropic_api::messages::emit_reasoning_blocks`. `None` in the
+    // sample preserves an index the upstream did not supply, kept as
+    // `None` rather than flattened to a plausible integer so a missing
+    // index stays distinguishable from index 0.
+    let mut skipped_unsigned_count: usize = 0;
+    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_SKIPPED_INDICES);
     for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
@@ -293,7 +308,10 @@ fn emit_reasoning_blocks_converse(
                     // replay and 400s without it. Skip the block so replay
                     // doesn't fail on a guaranteed-bad echo; aggregate the
                     // WARN to avoid per-detail log spam.
-                    skipped_unsigned.push(detail.index);
+                    skipped_unsigned_count = skipped_unsigned_count.saturating_add(1);
+                    if skipped_unsigned.len() < MAX_LOGGED_SKIPPED_INDICES {
+                        skipped_unsigned.push(detail.index);
+                    }
                     continue;
                 }
                 blocks.push(ConverseContentBlock::ReasoningContent {
@@ -326,11 +344,12 @@ fn emit_reasoning_blocks_converse(
             }
         }
     }
-    if !skipped_unsigned.is_empty() {
+    if skipped_unsigned_count > 0 {
         tracing::warn!(
             provider = id,
-            skipped_count = skipped_unsigned.len(),
+            skipped_count = skipped_unsigned_count,
             skipped_indices = ?skipped_unsigned,
+            indices_truncated = skipped_unsigned_count > skipped_unsigned.len(),
             "skipping Thinking blocks on Converse replay: signature missing or empty; \
              Bedrock Converse requires a signature on replayed reasoningContent blocks"
         );
@@ -3156,3 +3175,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "messages_tests.rs"]
+mod sidecar_tests;
