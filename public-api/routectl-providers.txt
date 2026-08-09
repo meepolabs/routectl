@@ -651,6 +651,7 @@ pub fn routectl_providers::bedrock::converse::normalize_response(&str, serde_jso
 pub mod routectl_providers::bedrock::endpoint
 pub fn routectl_providers::bedrock::endpoint::bedrock_runtime_url(&str) -> alloc::string::String
 pub fn routectl_providers::bedrock::endpoint::converse_url(&str, &str, bool) -> alloc::string::String
+pub fn routectl_providers::bedrock::endpoint::count_tokens_url(&str, &str) -> alloc::string::String
 pub fn routectl_providers::bedrock::endpoint::invoke_url(&str, &str, bool) -> alloc::string::String
 pub mod routectl_providers::bedrock::eventstream
 pub fn routectl_providers::bedrock::eventstream::converse_stream<S>(alloc::string::String, S) -> futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>> where S: futures_core::stream::Stream<Item = core::result::Result<bytes::bytes::Bytes, reqwest::error::Error>> + core::marker::Send + 'static
@@ -845,6 +846,7 @@ impl routectl_providers::bedrock::BedrockProvider
 pub fn routectl_providers::bedrock::BedrockProvider::new(routectl_providers::bedrock::BedrockConfig, routectl_providers::bedrock::auth::ResolvedCreds) -> Self
 impl routectl_core::provider::Provider for routectl_providers::bedrock::BedrockProvider
 pub fn routectl_providers::bedrock::BedrockProvider::complete<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::ChatResponse>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
+pub fn routectl_providers::bedrock::BedrockProvider::count_tokens<'life0, 'async_trait>(&'life0 self, routectl_core::schema::ChatRequest) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = routectl_core::error::Result<routectl_core::schema::TokenCount>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_providers::bedrock::BedrockProvider::id(&self) -> &str
 pub fn routectl_providers::bedrock::BedrockProvider::normalize_request(&self, &routectl_core::schema::ChatRequest) -> routectl_core::error::Result<serde_json::value::Value>
 pub fn routectl_providers::bedrock::BedrockProvider::normalize_response(&self, serde_json::value::Value) -> routectl_core::error::Result<routectl_core::schema::ChatResponse>

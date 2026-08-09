@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, sanitize_for_log,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, TokenCount, sanitize_for_log,
 };
 
 use crate::aws_error::{
@@ -72,6 +72,7 @@ pub mod auth;
 pub(crate) mod betas;
 pub(crate) mod body_fields;
 pub mod converse;
+pub(crate) mod count_tokens;
 pub mod endpoint;
 pub mod eventstream;
 pub(crate) mod frame;
@@ -89,8 +90,10 @@ pub(crate) const CLIENT_FINGERPRINT_METADATA_KEY: &str = "metadata";
 
 /// How routectl talks to Bedrock for a given provider entry.
 ///
-/// `Invoke` sends the per-vendor body shape directly (e.g. Anthropic
-/// Messages JSON for Claude, Mistral instruction shape for Mistral).
+/// `Invoke` sends the vendor-native `InvokeModel` body. Today that adapter
+/// builds the Anthropic Messages JSON shape only (patched with Bedrock's
+/// body-side `anthropic_version`); it shapes no other vendor's body, so
+/// non-Anthropic models belong on `Converse`.
 /// `Converse` sends AWS's vendor-neutral `{messages, inferenceConfig,
 /// toolConfig, additionalModelRequestFields}` envelope and lets AWS
 /// translate per vendor internally.
@@ -580,6 +583,103 @@ impl Provider for BedrockProvider {
             self.cfg.api_shape.provider_kind_str(),
             provider_id,
         ))
+    }
+
+    /// `POST /model/{modelId}/count-tokens` -- the token count for a
+    /// request without running inference.
+    ///
+    /// Wire reference:
+    /// <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html>
+    ///
+    /// Body assembly reuses `normalize_request`, so the counted body is the
+    /// one that would actually ship, then wraps it per lane: the Invoke
+    /// body rides verbatim (base64) in the `invokeModel` union member,
+    /// while the Converse body is copied through the allowlist AWS's
+    /// `converse` member accepts. Signing, error-body reading, and header
+    /// tracing are the exact path `complete()` uses; the only divergence is
+    /// the capability lift on a 404.
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
+    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        let normalized = self.normalize_request(&req)?;
+        let body = match self.cfg.api_shape {
+            BedrockApiShape::Invoke => count_tokens::invoke_tokens_body(&self.cfg.id, &normalized)?,
+            BedrockApiShape::Converse => {
+                count_tokens::converse_tokens_body(&self.cfg.id, &normalized)?
+            }
+        };
+
+        routectl_core::trace_outgoing_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
+
+        let url = endpoint::count_tokens_url(&self.cfg.region, &self.cfg.model_id);
+        let body_str = serde_json::to_vec(&body)
+            .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
+        let request = self
+            .build_signed_request(body_str, &req, &url, "application/json")
+            .await?;
+
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
+            let upstream_request_id =
+                crate::upstream_request_id::parse_upstream_request_id(resp.headers());
+            let (prefix, hit_cap, upstream_type, upstream_code) =
+                read_error_body(self.cfg.api_shape.provider_kind_str(), &self.cfg.id, resp).await;
+            let client_error = build_client_error(
+                &self.cfg.id,
+                status,
+                retry_after,
+                &prefix,
+                hit_cap,
+                upstream_type,
+                upstream_code,
+            )
+            .with_upstream_request_id(upstream_request_id);
+            return Err(count_tokens::map_capability_status(
+                &self.cfg.id,
+                status,
+                client_error,
+            ));
+        }
+
+        crate::header_trace::upstream(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            resp.headers(),
+        );
+        let content_length = resp.content_length();
+        let (body_bytes, hit_cap) =
+            crate::http_client::read_body_capped(resp, crate::http_client::MAX_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        if hit_cap {
+            crate::http_client::warn_body_cap(
+                &self.cfg.id,
+                status,
+                content_length,
+                "count_tokens_success_body",
+            );
+        }
+        let raw_body: Value = map_success_body(&self.cfg.id, status, &body_bytes, hit_cap)?;
+        routectl_core::trace_upstream_success_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &raw_body,
+        );
+        count_tokens::parse_token_count(&self.cfg.id, &raw_body)
     }
 
     /// Free reachability probe: resolve the AWS credential chain, no
