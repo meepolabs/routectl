@@ -2656,9 +2656,10 @@ mod bedrock_invoke_model_family_tests {
 
     #[test]
     fn accepts_an_inference_profile_arn_on_the_invoke_shape() {
-        // An ARN may carry no vendor token, so the family is unprovable.
-        // The gate is an ergonomics guard, not a proof obligation --
-        // rejecting would break working Claude-on-ARN deployments.
+        // An inference profile is opaque by resource form, so the family
+        // is unprovable. The gate is an ergonomics guard, not a proof
+        // obligation -- rejecting would break working Claude-on-ARN
+        // deployments.
         let config = config_with(
             "",
             "arn:aws:bedrock:us-east-1:123456789012:inference-profile/my-profile",
@@ -2667,6 +2668,42 @@ mod bedrock_invoke_model_family_tests {
         let result = validate_bedrock_invoke_model_family(&config);
 
         assert!(result.is_ok(), "an ARN must pass: {result:?}");
+    }
+
+    /// A foundation-model ARN embeds the plain model id, so the vendor IS
+    /// provable and the gate must act on it. Without this, a
+    /// non-Anthropic model reaches the Anthropic-shaped lane just by
+    /// being written as an ARN -- the hole the gate exists to close.
+    #[test]
+    fn rejects_a_non_anthropic_foundation_model_arn_on_the_invoke_shape() {
+        let config = config_with(
+            "",
+            "arn:aws:bedrock:us-east-1::foundation-model/meta.llama3-70b-instruct-v1:0",
+        );
+
+        let result = validate_bedrock_invoke_model_family(&config);
+
+        let message = result.expect_err("a provable non-Anthropic ARN must be rejected");
+        let rendered = message.to_string();
+        assert!(
+            rendered.contains("meta.llama3-70b-instruct-v1:0"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn accepts_an_anthropic_foundation_model_arn_on_the_invoke_shape() {
+        let config = config_with(
+            "",
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5",
+        );
+
+        let result = validate_bedrock_invoke_model_family(&config);
+
+        assert!(
+            result.is_ok(),
+            "a provable Anthropic ARN must pass: {result:?}"
+        );
     }
 
     #[test]

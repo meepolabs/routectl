@@ -68,11 +68,14 @@ pub trait Provider: Send + Sync {
     /// invoking model inference. claude-code uses this for context-budget
     /// display.
     ///
-    /// Default impl returns `Error::NotImplemented` so non-Anthropic
-    /// providers don't need explicit overrides; the router treats this
-    /// as a hard 501 rather than retrying or falling back. Anthropic's
-    /// `AnthropicApiProvider` overrides this to call
-    /// `POST /v1/messages/count_tokens`.
+    /// Default impl returns `Error::NotImplemented` so a provider with no
+    /// token-count endpoint needs no override. The router treats that as a
+    /// CAPABILITY signal rather than a health failure: it advances past
+    /// the seat to the next one in the chain that can count, without
+    /// debiting the seat's circuit breaker, and only reports a 501 once no
+    /// seat served a count. Overriders today are Anthropic's
+    /// `AnthropicApiProvider` (`POST /v1/messages/count_tokens`) and
+    /// `BedrockProvider` (`POST /model/{modelId}/count-tokens`).
     ///
     /// Wire reference (Anthropic):
     /// <https://docs.anthropic.com/en/api/messages-count-tokens>

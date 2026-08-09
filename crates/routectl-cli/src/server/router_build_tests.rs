@@ -57,3 +57,50 @@ async fn build_router_from_config_rejects_forwarded_provider_on_non_anthropic_ho
     };
     assert!(matches!(err, Error::Config(_)), "got: {err:?}");
 }
+
+/// The Bedrock invoke-lane model-family gate is wired into
+/// `build_router_from_config_with_overlay` itself, not only into the
+/// collected-validation path that `config check` and the serve pre-parse
+/// use. Serve startup and hot reload call this builder directly, so a
+/// gate reachable only from collected validation would leave both
+/// unprotected.
+///
+/// Not feature-gated: this crate declares no provider-gating features
+/// (see its manifest), so the whole provider set is always compiled and
+/// a `#[cfg(feature = "bedrock")]` here would silently exclude the test.
+#[tokio::test]
+async fn build_router_from_config_rejects_a_non_anthropic_model_on_the_invoke_lane() {
+    use routectl_router::Config;
+
+    // A defaulted `api_shape` IS the invoke lane, so the omission below
+    // is the case an operator actually hits.
+    let mut config: Config = toml::from_str(
+        "[providers.aws]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-west-2\"\n\
+         creds = { kind = \"default-chain\" }\n\
+         [models.seat]\n\
+         provider = \"aws\"\n\
+         upstream = \"meta.llama3-70b-instruct-v1:0\"\n",
+    )
+    .expect("config must parse");
+    let _usage_dir = isolate_usage_db(&mut config);
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+
+    // `Router` is not `Debug`, so match rather than `expect_err`.
+    let err = match build_router_from_config(Arc::new(config), secrets).await {
+        Ok(_) => panic!("a non-Anthropic model on the invoke lane must fail the router build"),
+        Err(e) => e,
+    };
+    let Error::Config(message) = &err else {
+        panic!("expected a config error, got: {err:?}");
+    };
+    // The operator must be able to act on this without reading source:
+    // the offending id plus both lane names.
+    assert!(
+        message.contains("meta.llama3-70b-instruct-v1:0"),
+        "{message}"
+    );
+    assert!(message.contains("invoke"), "{message}");
+    assert!(message.contains("converse"), "{message}");
+}

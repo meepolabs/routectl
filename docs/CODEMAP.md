@@ -1644,9 +1644,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `gate_status_for` gate read
 - `src/router/count_tokens.rs` -- the token-counting dispatch path
   (`Router::count_tokens` + `count_tokens_try_seat`): walks past
-  count_tokens-incapable targets by provider kind, runs no reducer/cache, so
-  it never touches the would-trim seam. Owns the `pub(super)`
-  `COUNT_TOKENS_CAPABLE_KIND` (the sole count_tokens-capable egress kind) and
+  count_tokens-incapable targets, runs no reducer/cache, so
+  it never touches the would-trim seam. Owns the private
+  `seat_can_count_tokens` (egress kind + upstream model id -> capable; a
+  `bedrock` seat needs an Anthropic-family model id) and the `pub(super)`
   `CountSeatOutcome` (the per-seat walk outcome)
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (per-target header/payload/beta/reasoning
