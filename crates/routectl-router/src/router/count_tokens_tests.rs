@@ -1,13 +1,18 @@
 //! Pin: `Router::count_tokens` walks PAST count_tokens-incapable
-//! targets (provider_kind != "anthropic-api") to the first capable
-//! one, returning 501 NotImplemented only when NO target in the
-//! chain is capable. The capability skip is keyed statically on
-//! provider kind BEFORE dispatch -- a kind-skip is operator-known,
-//! not upstream health -- so it never touches the breaker. A
-//! CAPABLE target that returns a real upstream error propagates as
-//! today (no further walk). All anthropic-api targets share the
-//! same Anthropic tokenizer family, so walking past incapable kinds
-//! does NOT reintroduce the wrong-tokenizer hazard.
+//! targets to the first capable one, returning 501 NotImplemented
+//! only when NO target in the chain is capable. The capability skip
+//! is decided from static config (egress kind + upstream model id)
+//! BEFORE dispatch -- it is operator-known, not upstream health --
+//! so it never touches the breaker. A CAPABLE target that returns a
+//! real upstream error propagates as today (no further walk). Every
+//! admitted target shares the same Anthropic tokenizer family, so
+//! walking past incapable targets does NOT reintroduce the
+//! wrong-tokenizer hazard.
+//!
+//! Host module for this sidecar's test groups: the breaker-accounting
+//! and seat-capability groups live in the `include!`d fragments at the
+//! bottom and compile into THIS module, so all imports and shared
+//! helpers stay here.
 use super::*;
 use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
@@ -34,10 +39,11 @@ enum CountBehavior {
 }
 
 /// Mock provider that records every `count_tokens` call so a test
-/// can prove a target was (or was NOT) dispatched to. Its kind in
-/// the capability walk is decided by the matching `ProviderEntry`
-/// in config, NOT by this impl -- so a Bedrock-kind entry skips the
-/// walk regardless of what this returns.
+/// can prove a target was (or was NOT) dispatched to. Whether the
+/// walk admits the seat at all is decided by the matching
+/// `ProviderEntry` plus the seat's upstream model id, NOT by this
+/// impl -- so a skipped seat stays skipped regardless of what this
+/// would have returned.
 struct CountingProvider {
     id: String,
     calls: Arc<AtomicUsize>,
@@ -122,9 +128,25 @@ fn openai_compat_entry() -> ProviderEntry {
     }
 }
 
-/// A count_tokens-incapable provider entry (kind == "bedrock").
-/// Mirrors the motivating scenario from the spec. Bedrock has no
-/// count_tokens endpoint, so its kind is skipped before dispatch.
+/// A Bedrock model id whose vendor segment is not Anthropic, so a seat
+/// on it counts with a different tokenizer and must never be admitted.
+#[cfg(feature = "bedrock")]
+const NON_ANTHROPIC_BEDROCK_MODEL: &str = "us.meta.llama4-scout-17b-instruct-v1:0";
+
+/// A Bedrock model id that is provably Anthropic-family.
+#[cfg(feature = "bedrock")]
+const ANTHROPIC_BEDROCK_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+/// An inference-profile ARN: the string proves no vendor, so the
+/// tokenizer behind it is unknown.
+#[cfg(feature = "bedrock")]
+const ARN_BEDROCK_MODEL: &str =
+    "arn:aws:bedrock:us-east-1:123456789012:inference-profile/some-profile";
+
+/// A provider entry of kind "bedrock". Whether such a seat can count
+/// depends on its upstream model id: the Bedrock lane counts with the
+/// model's own tokenizer, so only an Anthropic-family model id is
+/// admitted.
 #[cfg(feature = "bedrock")]
 fn bedrock_entry() -> ProviderEntry {
     use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
@@ -150,6 +172,10 @@ struct Leg {
     provider_name: &'static str,
     entry: ProviderEntry,
     behavior: CountBehavior,
+    /// Wire model id this seat would send upstream. `None` derives a
+    /// synthetic id from the nickname, which is all a seat whose
+    /// capability does not depend on the model id needs.
+    upstream: Option<&'static str>,
 }
 
 /// Build a router whose alias `"alias"` resolves to the given legs
@@ -172,13 +198,16 @@ fn build_router(legs: Vec<Leg>) -> (Router, Vec<Arc<AtomicUsize>>) {
             calls,
             behavior: leg.behavior,
         });
+        let upstream = leg
+            .upstream
+            .map_or_else(|| format!("upstream-{}", leg.nickname), str::to_string);
         models.insert(
             leg.nickname.to_string(),
             Arc::new(ResolvedModel::new(
                 leg.nickname,
                 leg.provider_name,
                 provider,
-                format!("upstream-{}", leg.nickname),
+                upstream,
             )),
         );
         chain.push(leg.nickname.to_string());
@@ -202,22 +231,24 @@ fn count_req() -> ChatRequest {
 #[cfg(feature = "bedrock")]
 #[tokio::test]
 async fn walks_past_incapable_bedrock_to_capable_anthropic() {
-    // Arrange: chain [bedrock, anthropic-api]. Bedrock is not
-    // count_tokens-capable and must be skipped BEFORE dispatch
-    // (no call, no breaker account); the anthropic-api target
-    // serves the count.
+    // Arrange: chain [bedrock, anthropic-api]. The bedrock seat's
+    // upstream id names no Anthropic-family model, so it is not
+    // count_tokens-capable and must be skipped BEFORE dispatch (no
+    // call, no breaker account); the anthropic-api target serves.
     let (router, counters) = build_router(vec![
         Leg {
-            nickname: "bedrock-haiku",
+            nickname: "bedrock-llama",
             provider_name: "bedrock-prov",
             entry: bedrock_entry(),
             behavior: CountBehavior::Ok(99),
+            upstream: Some(NON_ANTHROPIC_BEDROCK_MODEL),
         },
         Leg {
             nickname: "anthropic-haiku",
             provider_name: "anthropic-prov",
             entry: anthropic_api_entry(),
             behavior: CountBehavior::Ok(42),
+            upstream: None,
         },
     ]);
 
@@ -244,12 +275,14 @@ async fn walks_past_incapable_bedrock_to_capable_anthropic() {
 #[cfg(feature = "bedrock")]
 #[tokio::test]
 async fn all_incapable_chain_returns_not_implemented() {
-    // Arrange: chain [bedrock] only -- no capable target anywhere.
+    // Arrange: chain [bedrock] only, on a non-Anthropic-family
+    // upstream id -- no capable target anywhere.
     let (router, counters) = build_router(vec![Leg {
-        nickname: "bedrock-haiku",
+        nickname: "bedrock-llama",
         provider_name: "bedrock-prov",
         entry: bedrock_entry(),
         behavior: CountBehavior::Ok(7),
+        upstream: Some(NON_ANTHROPIC_BEDROCK_MODEL),
     }]);
 
     // Act
@@ -282,6 +315,7 @@ async fn all_incapable_openai_compat_chain_returns_not_implemented() {
         provider_name: "compat-prov",
         entry: openai_compat_entry(),
         behavior: CountBehavior::Ok(7),
+        upstream: None,
     }]);
 
     let err = router.count_tokens(count_req()).await.unwrap_err();
@@ -309,12 +343,14 @@ async fn walks_past_incapable_openai_compat_to_capable_anthropic() {
             provider_name: "compat-prov",
             entry: openai_compat_entry(),
             behavior: CountBehavior::Ok(99),
+            upstream: None,
         },
         Leg {
             nickname: "anthropic-haiku",
             provider_name: "anthropic-prov",
             entry: anthropic_api_entry(),
             behavior: CountBehavior::Ok(42),
+            upstream: None,
         },
     ]);
 
@@ -348,12 +384,14 @@ async fn capable_primary_serves_unchanged() {
             provider_name: "anthropic-prov-a",
             entry: anthropic_api_entry(),
             behavior: CountBehavior::Ok(11),
+            upstream: None,
         },
         Leg {
             nickname: "anthropic-secondary",
             provider_name: "anthropic-prov-b",
             entry: anthropic_api_entry(),
             behavior: CountBehavior::Ok(22),
+            upstream: None,
         },
     ]);
 
@@ -384,12 +422,14 @@ async fn capable_target_upstream_error_propagates_without_walking() {
             provider_name: "anthropic-prov-a",
             entry: anthropic_api_entry(),
             behavior: CountBehavior::UpstreamError(500),
+            upstream: None,
         },
         Leg {
             nickname: "anthropic-secondary",
             provider_name: "anthropic-prov-b",
             entry: anthropic_api_entry(),
             behavior: CountBehavior::Ok(22),
+            upstream: None,
         },
     ]);
 
@@ -423,6 +463,7 @@ async fn single_capable_seat_not_implemented_yields_terminal_not_implemented_onc
         provider_name: "anthropic-prov",
         entry: anthropic_api_entry(),
         behavior: CountBehavior::NotImplemented,
+        upstream: None,
     }]);
 
     let err = router.count_tokens(count_req()).await.unwrap_err();
@@ -460,6 +501,19 @@ fn anthropic_api_entry_with_breaker(
     entry
 }
 
+/// A "bedrock" entry whose breaker is configured, so a test can observe
+/// whether an outcome on that seat debited it (see
+/// `anthropic_api_entry_with_breaker`).
+#[cfg(feature = "bedrock")]
+fn bedrock_entry_with_breaker(circuit_failures: u32, circuit_cooldown_ms: u64) -> ProviderEntry {
+    let mut entry = bedrock_entry();
+    if let ProviderEntry::Bedrock { runtime, .. } = &mut entry {
+        runtime.circuit_failures = Some(circuit_failures);
+        runtime.circuit_cooldown_ms = Some(circuit_cooldown_ms);
+    }
+    entry
+}
+
 /// Whether the seat keyed by `state_key` currently holds the half-open
 /// probe slot.
 fn half_open_in_flight(router: &Router, state_key: &str) -> bool {
@@ -479,317 +533,5 @@ fn circuit_phase(router: &Router, state_key: &str) -> crate::runtime_state::Circ
         .circuit
 }
 
-#[tokio::test]
-async fn wire_501_on_half_open_probe_releases_slot_without_debiting_breaker() {
-    // The incident pin. A capable-by-kind seat whose upstream cannot
-    // count returns a WIRE 501. On a half-open count_tokens probe this
-    // must be treated as a capability signal: release the probe slot
-    // and leave the shared breaker un-debited. Recording it as a
-    // health failure would re-trip the breaker (baseline cooldown) and
-    // starve completions that gate on the same per-seat breaker.
-    let (router, counters) = build_router(vec![Leg {
-        nickname: "anthropic-only",
-        provider_name: "anthropic-prov",
-        entry: anthropic_api_entry_with_breaker(1, 60_000),
-        behavior: CountBehavior::UpstreamError(501),
-    }]);
-    assert!(
-        router.force_open_breaker("anthropic-only", Duration::ZERO),
-        "seat breaker slot must exist to arm half-open",
-    );
-
-    let _ = router.count_tokens(count_req()).await;
-
-    assert_eq!(
-        counters[0].load(Ordering::SeqCst),
-        1,
-        "the half-open probe must reach the upstream exactly once",
-    );
-    assert!(
-        !half_open_in_flight(&router, "anthropic-only"),
-        "a capability wire-501 must release the half-open probe slot",
-    );
-    assert_eq!(
-        circuit_phase(&router, "anthropic-only"),
-        crate::runtime_state::CircuitPhase::HalfOpenReady,
-        "a capability wire-501 must NOT debit the breaker: no record_failure, \
-             so the breaker keeps its armed zero-cooldown state (HalfOpenReady) \
-             rather than re-tripping Open with the 60s baseline",
-    );
-}
-
-#[tokio::test]
-async fn local_not_implemented_on_half_open_probe_releases_slot_without_debiting() {
-    // Guards the already-exempt case: a local Error::NotImplemented
-    // from the selected capable seat is a capability signal and must
-    // behave exactly like the wire-501 -- release the half-open slot,
-    // no breaker debit.
-    let (router, counters) = build_router(vec![Leg {
-        nickname: "anthropic-only",
-        provider_name: "anthropic-prov",
-        entry: anthropic_api_entry_with_breaker(1, 60_000),
-        behavior: CountBehavior::NotImplemented,
-    }]);
-    assert!(
-        router.force_open_breaker("anthropic-only", Duration::ZERO),
-        "seat breaker slot must exist to arm half-open",
-    );
-
-    let _ = router.count_tokens(count_req()).await;
-
-    assert_eq!(counters[0].load(Ordering::SeqCst), 1);
-    assert!(
-        !half_open_in_flight(&router, "anthropic-only"),
-        "a capability NotImplemented must release the half-open probe slot",
-    );
-    assert_eq!(
-        circuit_phase(&router, "anthropic-only"),
-        crate::runtime_state::CircuitPhase::HalfOpenReady,
-        "a capability NotImplemented must NOT debit the breaker",
-    );
-}
-
-#[tokio::test]
-async fn walks_to_next_capable_seat_on_wire_501_and_returns_its_count() {
-    // Chain [anthropic-api(501), anthropic-api(ok)]. The selected
-    // capable seat returns a capability wire-501; count_tokens must
-    // advance to the NEXT capable seat and return its count -- not
-    // surface the 501 to the client. The first seat's breaker must
-    // NOT be debited.
-    let (router, counters) = build_router(vec![
-        Leg {
-            nickname: "anthropic-first",
-            provider_name: "anthropic-prov-a",
-            entry: anthropic_api_entry_with_breaker(1, 60_000),
-            behavior: CountBehavior::UpstreamError(501),
-        },
-        Leg {
-            nickname: "anthropic-second",
-            provider_name: "anthropic-prov-b",
-            entry: anthropic_api_entry(),
-            behavior: CountBehavior::Ok(42),
-        },
-    ]);
-
-    let tc = router
-        .count_tokens(count_req())
-        .await
-        .expect("walk must reach the second capable seat and return its count");
-
-    assert_eq!(
-        tc.input_tokens, 42,
-        "the second capable seat serves the count",
-    );
-    assert_eq!(
-        counters[0].load(Ordering::SeqCst),
-        1,
-        "first seat attempted once",
-    );
-    assert_eq!(
-        counters[1].load(Ordering::SeqCst),
-        1,
-        "walk advanced to the second seat",
-    );
-    assert_eq!(
-        circuit_phase(&router, "anthropic-first"),
-        crate::runtime_state::CircuitPhase::Closed,
-        "a capability 501 must not debit the first seat's breaker (stays Closed)",
-    );
-}
-
-#[tokio::test]
-async fn walk_terminates_with_not_implemented_when_all_capable_seats_501() {
-    // Every capable seat returns a capability error. The walk must
-    // visit each seat at most once (bounded upstream calls) and
-    // terminate with the stable Error::NotImplemented rather than
-    // looping or leaking the last upstream's raw 501 to the client.
-    let (router, counters) = build_router(vec![
-        Leg {
-            nickname: "anthropic-first",
-            provider_name: "anthropic-prov-a",
-            entry: anthropic_api_entry(),
-            behavior: CountBehavior::UpstreamError(501),
-        },
-        Leg {
-            nickname: "anthropic-second",
-            provider_name: "anthropic-prov-b",
-            entry: anthropic_api_entry(),
-            behavior: CountBehavior::UpstreamError(501),
-        },
-    ]);
-
-    let err = router.count_tokens(count_req()).await.unwrap_err();
-
-    match err {
-        Error::NotImplemented(model, msg) => {
-            assert_eq!(model, "alias");
-            assert!(
-                msg.contains("count_tokens"),
-                "message must name the operation; got: {msg}",
-            );
-        }
-        other => panic!("expected a terminal Error::NotImplemented; got {other:?}"),
-    }
-    assert_eq!(
-        counters[0].load(Ordering::SeqCst),
-        1,
-        "first seat visited exactly once",
-    );
-    assert_eq!(
-        counters[1].load(Ordering::SeqCst),
-        1,
-        "second seat visited exactly once (no re-visit, no loop)",
-    );
-}
-
-#[tokio::test]
-async fn non_capability_429_debits_and_returns_without_walking() {
-    // Scope guard: a 429 is a HEALTH error, not a capability error. It
-    // must keep today's behavior -- debit the breaker and propagate --
-    // and must NOT walk to a later capable seat.
-    let (router, counters) = build_router(vec![
-        Leg {
-            nickname: "anthropic-first",
-            provider_name: "anthropic-prov-a",
-            entry: anthropic_api_entry_with_breaker(1, 60_000),
-            behavior: CountBehavior::UpstreamError(429),
-        },
-        Leg {
-            nickname: "anthropic-second",
-            provider_name: "anthropic-prov-b",
-            entry: anthropic_api_entry(),
-            behavior: CountBehavior::Ok(42),
-        },
-    ]);
-
-    let err = router.count_tokens(count_req()).await.unwrap_err();
-
-    assert!(
-        matches!(err, Error::Upstream { status: 429, .. }),
-        "a 429 must propagate verbatim; got {err:?}",
-    );
-    assert_eq!(
-        counters[0].load(Ordering::SeqCst),
-        1,
-        "first seat attempted once",
-    );
-    assert_eq!(
-        counters[1].load(Ordering::SeqCst),
-        0,
-        "a health error must NOT walk to a later capable seat",
-    );
-    assert_eq!(
-        circuit_phase(&router, "anthropic-first"),
-        crate::runtime_state::CircuitPhase::Open,
-        "a 429 must debit the breaker (threshold 1 -> Open)",
-    );
-}
-
-#[tokio::test]
-async fn non_retryable_4xx_leaves_breaker_closed() {
-    // A caller-shaped 4xx (BadRequest class) from a capable count_tokens
-    // seat must NOT debit the per-seat breaker that also gates
-    // completions and streams. The debit keys off the failure CLASS, so
-    // a repeated 4xx storm here leaves the shared breaker CLOSED and
-    // every dispatch keeps reaching the seat.
-    let (router, counters) = build_router(vec![Leg {
-        nickname: "anthropic-only",
-        provider_name: "anthropic-prov",
-        entry: anthropic_api_entry_with_breaker(2, 60_000),
-        behavior: CountBehavior::UpstreamError(400),
-    }]);
-
-    for _ in 0..4 {
-        let err = router.count_tokens(count_req()).await.unwrap_err();
-        assert!(
-            matches!(err, Error::Upstream { status: 400, .. }),
-            "a count_tokens 4xx must surface verbatim; got {err:?}",
-        );
-    }
-
-    assert_eq!(
-        counters[0].load(Ordering::SeqCst),
-        4,
-        "a non-debiting 4xx must never trip the breaker, so every \
-             dispatch reaches the capable seat",
-    );
-    assert_eq!(
-        circuit_phase(&router, "anthropic-only"),
-        crate::runtime_state::CircuitPhase::Closed,
-        "a non-retryable 4xx storm must leave the count_tokens seat \
-             breaker CLOSED (BadRequest class does not debit)",
-    );
-}
-
-#[tokio::test]
-async fn health_5xx_still_debits_breaker() {
-    // Complement to the 4xx case: a 5xx (ServerError class) from a
-    // capable count_tokens seat is a health failure and must still debit
-    // and trip the shared per-seat breaker.
-    let (router, counters) = build_router(vec![Leg {
-        nickname: "anthropic-only",
-        provider_name: "anthropic-prov",
-        entry: anthropic_api_entry_with_breaker(1, 60_000),
-        behavior: CountBehavior::UpstreamError(503),
-    }]);
-
-    let err = router.count_tokens(count_req()).await.unwrap_err();
-
-    assert!(
-        matches!(err, Error::Upstream { status: 503, .. }),
-        "a count_tokens 5xx must surface verbatim; got {err:?}",
-    );
-    assert_eq!(counters[0].load(Ordering::SeqCst), 1);
-    assert_eq!(
-        circuit_phase(&router, "anthropic-only"),
-        crate::runtime_state::CircuitPhase::Open,
-        "a count_tokens 5xx (ServerError class) must debit and trip the \
-             breaker (threshold 1 -> Open)",
-    );
-}
-
-#[tokio::test]
-async fn walk_reruns_gate_on_next_seat_and_respects_open_breaker() {
-    // Guardrail: the capability walk must re-run the gate on each new
-    // seat. If the next capable seat's breaker is open, the walk must
-    // NOT bypass it -- the gate blocks the dispatch and the
-    // circuit-open error surfaces (the seat is never called).
-    let (router, counters) = build_router(vec![
-        Leg {
-            nickname: "anthropic-first",
-            provider_name: "anthropic-prov-a",
-            entry: anthropic_api_entry(),
-            behavior: CountBehavior::UpstreamError(501),
-        },
-        Leg {
-            nickname: "anthropic-second",
-            provider_name: "anthropic-prov-b",
-            entry: anthropic_api_entry(),
-            behavior: CountBehavior::Ok(42),
-        },
-    ]);
-    // Park the second seat's breaker open for a long, un-elapsed
-    // cooldown so its gate returns CircuitOpen (not a half-open probe
-    // admission).
-    assert!(
-        router.force_open_breaker("anthropic-second", Duration::from_hours(1)),
-        "second seat breaker slot must exist",
-    );
-
-    let err = router.count_tokens(count_req()).await.unwrap_err();
-
-    assert!(
-        matches!(&err, Error::Upstream { status: 0, body, .. } if body.contains("circuit breaker")),
-        "the walk must re-gate the second seat and surface its open-breaker block; got {err:?}",
-    );
-    assert_eq!(
-        counters[0].load(Ordering::SeqCst),
-        1,
-        "first seat attempted once (capability 501)",
-    );
-    assert_eq!(
-        counters[1].load(Ordering::SeqCst),
-        0,
-        "an open breaker on the walked-to seat must block the dispatch, not be bypassed",
-    );
-}
+include!("count_tokens_breaker_tests.rs");
+include!("count_tokens_seat_capability_tests.rs");

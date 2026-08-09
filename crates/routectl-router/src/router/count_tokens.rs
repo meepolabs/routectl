@@ -12,22 +12,38 @@ use super::dispatch::{
     upstream_status_for_remap,
 };
 use super::{DispatchTarget, Router, StripDecision, apply_layered_overlays};
+use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 
-/// The single count_tokens-capable egress kind. `anthropic-api` is the
-/// only `Provider` impl that overrides `Provider::count_tokens` (every
-/// other kind uses the 501-ing trait default), and it is Claude-only,
-/// so all capable targets share the same Anthropic tokenizer family.
-/// `count_tokens` walks the dispatch chain to the first target whose
-/// `provider_kind` matches this token and skips the rest. Matches the
-/// `kind = "..."` discriminant from `ProviderEntry::kind_str`.
+/// Whether one dispatch seat can serve a token count, decided from its
+/// egress kind together with the upstream model id that kind would be
+/// asked to count for. Kinds are the `kind = "..."` discriminant from
+/// `ProviderEntry::kind_str`.
 ///
-/// This is a routectl implementation boundary, NOT a provider-surface
-/// fact: AWS does ship `POST /model/{modelId}/count-tokens`, so Bedrock
-/// is absent here because routectl has not implemented that lane yet.
-/// Widening this to a slice needs the tokenizer-family invariant above
-/// re-established explicitly -- the walk is only safe today because
-/// every capable kind shares Anthropic's tokenizer.
-pub(super) const COUNT_TOKENS_CAPABLE_KIND: &str = "anthropic-api";
+/// Every seat this admits shares the SAME Anthropic tokenizer family,
+/// and that is what makes the walk in [`Router::count_tokens`] safe:
+/// `anthropic-api` is Claude-only, and a `bedrock` seat is admitted
+/// only when its upstream model id is provably an Anthropic-family id.
+/// A count produced by a different tokenizer than the one the caller's
+/// request bills against is a wrong number delivered as a success, with
+/// no error anywhere -- so the family check happens on the seat, before
+/// dispatch, and never on the answer.
+///
+/// A model id that proves neither family (an inference-profile ARN,
+/// which may carry no vendor token) is refused for the same reason: the
+/// ARN says nothing about the tokenizer behind it, and callers size
+/// context windows with this number, so a clean 501 is the better
+/// answer than a plausible wrong count.
+///
+/// The `bedrock` arm needs no feature gate: it matches a plain string
+/// literal, so a build without that egress compiled in simply never
+/// produces a seat that reaches it.
+fn seat_can_count_tokens(kind: Option<&str>, upstream: &str) -> bool {
+    match kind {
+        Some("anthropic-api") => true,
+        Some("bedrock") => matches!(anthropic_family(upstream), AnthropicFamily::Yes),
+        _ => false,
+    }
+}
 
 /// Outcome of dispatching `count_tokens` to one capable seat, driving
 /// the walk in [`Router::count_tokens`].
@@ -38,7 +54,7 @@ pub(super) enum CountSeatOutcome {
     /// Covers a settled health error (breaker already debited/parked), a
     /// non-fallbackable 4xx, a gate block, or an auth-refresh failure.
     Terminal(Error),
-    /// The seat is capable-by-kind but its upstream cannot count (local
+    /// The seat was admitted as capable but its upstream cannot count (local
     /// `NotImplemented` or a wire 501). The probe slot was released
     /// without a breaker debit; advance to the next capable seat.
     Capability,
@@ -51,26 +67,24 @@ impl Router {
     /// `/v1/messages/count_tokens` endpoint.
     ///
     /// Capability walk (not a try-and-fallback over health): the chain is
-    /// scanned for targets whose `provider_kind == "anthropic-api"` -- the
-    /// only count_tokens-capable egress kind (it is the only kind that
-    /// overrides `Provider::count_tokens`; every other kind uses the trait
-    /// default that 501s). Incapable-by-kind targets are skipped BEFORE
-    /// dispatch (DEBUG log, no upstream call, no breaker account); a
-    /// kind-skip is operator-known config, not upstream health, so it must
-    /// not touch the breaker. This mirrors `filter_chain_by_features`
-    /// discipline.
+    /// scanned for targets `seat_can_count_tokens` admits. Incapable
+    /// targets are skipped BEFORE dispatch (DEBUG log, no upstream call,
+    /// no breaker account); a capability skip is operator-known config,
+    /// not upstream health, so it must not touch the breaker. This
+    /// mirrors `filter_chain_by_features` discipline.
     ///
-    /// Why walking is safe for tokenizer correctness: `anthropic-api` is
-    /// Claude-only, so every capable target the walk can select uses the
-    /// SAME Anthropic tokenizer family. Walking therefore never
-    /// reintroduces the wrong-tokenizer hazard -- it only steps over kinds
-    /// or seats that cannot count.
+    /// Why walking is safe for tokenizer correctness: every seat the
+    /// predicate admits is provably Anthropic-family, so every capable
+    /// target the walk can select uses the SAME tokenizer family.
+    /// Walking therefore never reintroduces the wrong-tokenizer hazard
+    /// -- it only steps over seats that cannot count, or cannot be
+    /// proven to count in the caller's tokenizer.
     ///
     /// Once a CAPABLE target is selected, the outcome decides the walk:
     ///
     /// - `Ok` -> return the count.
     /// - A CAPABILITY error (`is_capability_error`: local
-    ///   `NotImplemented`, or a WIRE 501 from a capable-by-kind seat whose
+    ///   `NotImplemented`, or a WIRE 501 from an admitted seat whose
     ///   upstream cannot count) -> release the probe slot WITHOUT debiting
     ///   the breaker, then advance to the NEXT capable seat in the
     ///   already-resolved chain. This is the incident fix: a
@@ -115,12 +129,12 @@ impl Router {
         }
         let mut saw_capable = false;
         for candidate in chain {
-            if candidate.provider_kind != Some(COUNT_TOKENS_CAPABLE_KIND) {
+            if !seat_can_count_tokens(candidate.provider_kind, &candidate.upstream) {
                 tracing::debug!(
                     provider = %candidate.provider_name,
                     kind = candidate.provider_kind.unwrap_or("unknown"),
                     model = %candidate.nickname.as_deref().unwrap_or(""),
-                    "provider skipped: kind cannot count_tokens",
+                    "provider skipped: seat cannot count_tokens",
                 );
                 continue;
             }
@@ -128,7 +142,7 @@ impl Router {
             match self.count_tokens_try_seat(&req, candidate).await {
                 CountSeatOutcome::Count(tc) => return Ok(tc),
                 CountSeatOutcome::Terminal(e) => return Err(e),
-                // Capability error: the seat is capable-by-kind but its
+                // Capability error: the seat was admitted as capable but its
                 // upstream cannot count. The slot was already released
                 // without a breaker debit; advance to the next capable
                 // seat in the already-resolved chain (single-visit,
@@ -137,7 +151,7 @@ impl Router {
             }
         }
         // Two distinct terminal shapes, both mapping to a 501 at the
-        // handler: no capable-by-kind seat existed at all, versus capable
+        // handler: no capable seat existed at all, versus capable
         // seats existed but every one returned a capability error.
         let detail = if saw_capable {
             "count_tokens: all capable providers returned a capability error (cannot count)"
@@ -145,7 +159,7 @@ impl Router {
             tracing::warn!(
                 alias = %req.model,
                 "alias chain has no count_tokens-capable provider; \
-                 no target in chain overrides count_tokens",
+                 no target in chain can count tokens for its upstream model",
             );
             "count_tokens: no count_tokens-capable provider in chain"
         };
@@ -287,8 +301,8 @@ impl Router {
                     }
 
                     // CAPABILITY error, checked BEFORE should_fallback so a
-                    // wire-501 can never reach record_failure: the seat is
-                    // capable-by-kind but its upstream cannot count. Release
+                    // wire-501 can never reach record_failure: the seat was
+                    // admitted as capable but its upstream cannot count. Release
                     // the probe slot WITHOUT debiting the breaker, then let
                     // the caller walk to the next capable seat.
                     if is_capability_error(&e) {
@@ -303,7 +317,7 @@ impl Router {
                                 provider = provider_name,
                                 state_key = %target.state_key,
                                 status = 501,
-                                "count_tokens got wire-501 from capable-by-kind target; \
+                                "count_tokens got wire-501 from admitted target; \
                                  treating as capability, not debiting breaker",
                             );
                         }
