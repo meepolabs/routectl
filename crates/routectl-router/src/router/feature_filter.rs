@@ -251,9 +251,10 @@ impl Router {
     /// it. The `in_flight` flip itself happens inside `acting_negative_for`.
     ///
     /// Strip-vs-route verdict: when the learned pass finds acting negatives,
-    /// each is classified by [`capability_strip::action_for`]. If EVERY
-    /// acting negative is a droppable `Strip` capability detected in phase
-    /// F1 that no operator beta floor pins to the wire, the target is NOT
+    /// each is classified by
+    /// [`capability_strip::action_for`](crate::capability_strip::action_for).
+    /// If EVERY acting negative is a droppable `Strip` capability detected in
+    /// phase F1 that no operator beta floor pins to the wire, the target is NOT
     /// unsupported -- it returns `None` and the strip keys land in
     /// `strip_keys` (sorted, normalized) for the caller to attach. If ANY
     /// acting negative maps to `RouteAway`, is operator-pinned, or was
@@ -583,11 +584,11 @@ pub(super) fn catalog_capabilities(effective_row: &EffectiveRow) -> BTreeMap<Str
 
 /// Emit the stable FeatureUnsupported observability event at a dispatch
 /// error arm. Fired only when the classifier lifted the failure to
-/// [`FailureClass::FeatureUnsupported`]. Carries only safe, structured
-/// dimensions -- NEVER a body, prompt, header, token, or the error's
-/// Display/Debug text. `capability` is the upstream token the classifier
-/// matched, already best-effort and non-sensitive. `remapped` is true
-/// when this FeatureUnsupported came from an operator status remap
+/// [`FailureClass::FeatureUnsupported`](routectl_core::failure_class::FailureClass::FeatureUnsupported).
+/// Carries only safe, structured dimensions -- NEVER a body, prompt, header,
+/// token, or the error's Display/Debug text. `capability` is the upstream token
+/// the classifier matched, already best-effort and non-sensitive. `remapped` is
+/// true when this FeatureUnsupported came from an operator status remap
 /// (carrying the `OPERATOR_REMAP_CAPABILITY` token) rather than a real
 /// upstream lift.
 #[allow(clippy::too_many_arguments)]

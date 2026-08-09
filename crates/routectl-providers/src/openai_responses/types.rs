@@ -253,7 +253,7 @@ pub enum ReasoningContentItem {
 ///
 /// Wire shape: the chatgpt-oauth backend rejects the chat-completions
 /// nested shape `{type,function:{name,...}}` with:
-///   "Missing required parameter: 'tools[0].name'"
+///   `"Missing required parameter: 'tools[0].name'"`
 /// and requires the flat Responses shape:
 ///   {type:"function", name:"X", description:"...", parameters:{}}
 /// Smoke-confirmed 2026-05-12.

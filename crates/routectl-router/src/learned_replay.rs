@@ -22,7 +22,7 @@
 //!   persisted only once the stripped repair actually succeeds
 //!   ([`ReplayProbeGuard::commit`]). A repair that fails, or an unrelated
 //!   error, drops the provisional state without learning
-//!   ([`ReplayProbeGuard::release`]). Persisting on the rejection alone
+//!   (`ReplayProbeGuard::release`). Persisting on the rejection alone
 //!   would let one misread request fault silently disable working
 //!   reasoning continuity until decay.
 //! - **Single-flight.** Only ONE in-flight request carries artifacts for an
@@ -227,9 +227,8 @@ impl ReplayLearnRegistry {
 ///   stripped repair succeeded: persist (or refresh) the negative.
 /// - [`clear`](ReplayProbeGuard::clear) -- the carry SUCCEEDED: the pair
 ///   works; drop any resident negative.
-/// - [`release`](ReplayProbeGuard::release) -- the repair failed, or the
-///   request hit an unrelated error: learn nothing, leave any resident
-///   entry exactly as it was.
+/// - `release` -- the repair failed, or the request hit an unrelated error:
+///   learn nothing, leave any resident entry exactly as it was.
 ///
 /// Dropping the guard without settling releases the slot as `release`
 /// would, so an early return, a `?` propagation, or a client disconnect can

@@ -24,8 +24,10 @@ impl Router {
     /// multi-seat pool. Resolves the pin (with its one-time overflow marker)
     /// FIRST, gathers the per-seat capacity snapshots (one lock each; N is
     /// small and locks are uncontended), then asks the pure selector for the
-    /// walk order and a [`SelectionOutcome`]. On a birth it pins the chosen
-    /// home (`repinned: false`); on a one-time overflow-repin it pins the new
+    /// walk order and a
+    /// [`SelectionOutcome`](crate::seat_pool::SelectionOutcome). On a birth it
+    /// pins the chosen home (`repinned: false`); on a one-time overflow-repin
+    /// it pins the new
     /// home (`repinned: true`). A healthy home, an already-repinned home, or a
     /// no-healthy-sibling case stays put with no pin write -- the one-time cap
     /// + hysteresis. Never logs the raw session key.

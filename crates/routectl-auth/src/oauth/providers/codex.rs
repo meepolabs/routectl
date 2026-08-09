@@ -281,7 +281,7 @@ async fn decode_token_response(
 
 /// Refresh-only variant of [`decode_token_response`]. Wraps the same
 /// decoder pipeline with `tracing::debug!` / `tracing::error!` events
-/// keyed off [`sha8`] of the refresh token so operators can correlate
+/// keyed off [`sha8`](super::sha8) of the refresh token so operators can correlate
 /// a 401 across logs without ever seeing token VALUES.
 ///
 /// Identical behavior to [`decode_token_response`] on the
