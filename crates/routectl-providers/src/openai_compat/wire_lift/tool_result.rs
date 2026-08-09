@@ -15,8 +15,8 @@
 //! Mixed content (text + tool_result blocks in one user message)
 //! splits into multiple wire messages preserving order:
 //!
-//!   user[ text + tool_result + text + tool_result ]
-//!     -> user[text], tool[tr1], user[text], tool[tr2]
+//!   `user[ text + tool_result + text + tool_result ]`
+//!     -> `user[text], tool[tr1], user[text], tool[tr2]`
 //!
 //! `tool_result.content` may be a string OR an array of blocks
 //! (Anthropic supports `[{type:"text", text}]` and image blocks

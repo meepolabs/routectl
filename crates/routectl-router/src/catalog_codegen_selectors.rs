@@ -26,7 +26,7 @@ pub struct TieredSelector {
 
 /// Anthropic direct-API selectors. `models_dev` provider key is
 /// `"anthropic"` for all of these (see
-/// [`crate::catalog_codegen::anthropic_like_cells`]).
+/// `catalog_codegen::anthropic_like_cells`).
 pub const ANTHROPIC_SELECTORS: &[TieredSelector] = &[
     TieredSelector {
         model_glob: "claude-opus-4-8*",

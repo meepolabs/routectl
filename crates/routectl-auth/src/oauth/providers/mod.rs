@@ -76,14 +76,14 @@ pub trait OAuthFlow: Send + Sync {
     /// bypasses this list entirely.
     ///
     /// The default covers two cases:
-    /// - preferred port present (e.g. codex: 1455) -> [preferred, 1457],
+    /// - preferred port present (e.g. codex: 1455) -> `[preferred, 1457]`,
     ///   so a single busy port does not abort the login.
-    /// - no preferred port (e.g. Anthropic) -> [0] for a kernel-assigned
+    /// - no preferred port (e.g. Anthropic) -> `[0]` for a kernel-assigned
     ///   ephemeral port.
     ///
     /// A provider whose redirect URIs are registered against exactly one
     /// fixed port and where 1457 is NOT in its allow-list MUST override
-    /// to return only [preferred_port], preventing the driver from falling
+    /// to return only `[preferred_port]`, preventing the driver from falling
     /// back to a codex-specific port and advertising an unregistered
     /// redirect URI.
     fn callback_port_candidates(&self) -> Vec<u16> {

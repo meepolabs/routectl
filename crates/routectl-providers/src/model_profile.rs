@@ -12,7 +12,7 @@
 //! enforces the field set; no other file changes needed.
 //!
 //! Lookup: [`profile_for`] takes a model id string and returns the first
-//! matching profile in declaration order, or [`DEFAULT`] if none match.
+//! matching profile in declaration order, or [`DEFAULT_PROFILE`] if none match.
 //! Match semantics are governed by [`MatchKind`].
 
 /// How a model id is matched against [`ModelProfile::pattern`].
