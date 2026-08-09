@@ -863,6 +863,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `output_config.format` never egresses without its gating flag
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke
   body + Converse `additionalModelRequestFields`)
+- `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
+  `invokeModel` union member (invoke body verbatim, base64) and the
+  `converse` member (four-key allowlist), the `inputTokens` response parse,
+  and the 404-to-capability status lift
 - `src/bedrock/body_fields.rs` -- shared `allowed_body_fields` filter against
   AWS strict-schema 400s
 

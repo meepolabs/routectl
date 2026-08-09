@@ -36,6 +36,18 @@ pub fn converse_url(region: &str, model_id: &str, streaming: bool) -> String {
     format!("{}/model/{encoded}/{suffix}", bedrock_runtime_url(region))
 }
 
+/// Build the CountTokens URL for `model_id` in `region`.
+///
+/// Wire reference:
+/// <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html>
+pub fn count_tokens_url(region: &str, model_id: &str) -> String {
+    let encoded = urlencoded(model_id);
+    format!(
+        "{}/model/{encoded}/count-tokens",
+        bedrock_runtime_url(region)
+    )
+}
+
 /// Bedrock model ids may contain bracket-suffixed inference profile
 /// markers (`[1m]`) or full ARN forms
 /// (`arn:aws:bedrock:us-west-2:123456789012:inference-profile/...`).
@@ -94,6 +106,30 @@ mod tests {
         assert!(
             url.contains("/model/arn%3Aaws%3Abedrock%3Aus-west-2%3A123456789012%3Ainference-profile%2Fabc/invoke"),
             "got: {url}"
+        );
+    }
+
+    #[test]
+    fn count_tokens_url_uses_the_documented_path() {
+        assert_eq!(
+            count_tokens_url("us-west-2", "anthropic.claude-opus-4-7"),
+            "https://bedrock-runtime.us-west-2.amazonaws.com/model/anthropic.claude-opus-4-7/count-tokens",
+        );
+    }
+
+    #[test]
+    fn count_tokens_url_encodes_arn_and_bracket_model_ids() {
+        let arn = "arn:aws:bedrock:us-west-2:123456789012:inference-profile/abc";
+        assert!(
+            count_tokens_url("us-west-2", arn).ends_with(
+                "/model/arn%3Aaws%3Abedrock%3Aus-west-2%3A123456789012%3Ainference-profile%2Fabc/count-tokens"
+            ),
+            "got: {}",
+            count_tokens_url("us-west-2", arn)
+        );
+        assert!(
+            count_tokens_url("us-west-2", "global.anthropic.claude-opus-4-7[1m]")
+                .ends_with("claude-opus-4-7%5B1m%5D/count-tokens"),
         );
     }
 
