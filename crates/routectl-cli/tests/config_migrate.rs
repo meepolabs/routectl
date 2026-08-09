@@ -164,3 +164,134 @@ fn migrate_force_alias_still_skips_confirmation_and_warns() {
         "the alias must skip the confirm and write v3: {text}"
     );
 }
+
+/// A v2 config whose provider carries an obviously-fake secret in BOTH accepted
+/// positions: `base_url` userinfo (only the `[mitm]` validator rejects it) and a
+/// `literal:` key ref. `--dry-run` must reproduce these bytes verbatim.
+const V2_CONFIG_WITH_SECRETS: &str = "\
+version = 2
+
+[server]
+host = \"127.0.0.1\"
+port = 8787
+
+[retry]
+max_attempts = 2
+retry_allowlist = []
+retry_denylist = []
+
+[providers.fast]
+kind = \"openai-compat\"
+base_url = \"https://svc:sk-userinfo-FAKE@internal.example:8443/v1\"
+api_key_ref = \"literal:sk-literal-FAKE\"
+
+[models.gpt]
+provider = \"fast\"
+upstream = \"gpt-4o\"
+
+[aliases]
+default = \"gpt\"
+";
+
+/// Run `config migrate` with `args` on a temp copy of `body`, returning
+/// (stdout, stderr, final file text).
+fn run_migrate(body: &str, args: &[&str]) -> (String, String, String) {
+    let bin = env!("CARGO_BIN_EXE_routectl");
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, body).unwrap();
+
+    let out = std::process::Command::new(bin)
+        .args(["config", "migrate"])
+        .args(args)
+        .arg("--config")
+        .arg(&config_path)
+        // Pin the child's config dir into the tempdir. Without this the child
+        // resolves the catalog overlay from the ambient `~/.config/routectl/`,
+        // so a fixture that produces an overlay write (any v1 config carrying
+        // `[cache_pricing]`) would mutate the operator's live overlay.
+        .env("XDG_CONFIG_HOME", dir.path())
+        .output()
+        .expect("run `config migrate`");
+    assert!(
+        out.status.success(),
+        "migrate {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (
+        String::from_utf8(out.stdout).expect("stdout is utf-8"),
+        String::from_utf8(out.stderr).expect("stderr is utf-8"),
+        std::fs::read_to_string(&config_path).unwrap(),
+    )
+}
+
+/// Pull the candidate block out of `--dry-run` stdout, between the framing
+/// lines.
+fn candidate_block(stdout: &str) -> String {
+    let after_header = stdout
+        .split_once("---\n")
+        .expect("stdout must carry the candidate header")
+        .1;
+    after_header
+        .split_once("--- end candidate ---")
+        .expect("stdout must carry the end marker")
+        .0
+        .to_string()
+}
+
+/// The dry-run contract is byte-exactness: the candidate on STDOUT must equal
+/// the bytes a real migration writes, secrets included. The credential warning
+/// therefore lives on STDERR -- a future change that redacts stdout must fail
+/// this test.
+#[test]
+fn dry_run_stdout_is_byte_exact_and_the_credential_warning_is_on_stderr() {
+    let (stdout, stderr, unwritten) = run_migrate(V2_CONFIG_WITH_SECRETS, &["--dry-run"]);
+    assert_eq!(unwritten, V2_CONFIG_WITH_SECRETS, "dry-run must not write");
+
+    let (_, _, written) = run_migrate(V2_CONFIG_WITH_SECRETS, &["--yes"]);
+    assert_eq!(
+        candidate_block(&stdout),
+        written,
+        "the dry-run candidate must be byte-identical to what a real migration writes"
+    );
+
+    for secret in ["sk-userinfo-FAKE", "literal:sk-literal-FAKE"] {
+        assert!(
+            stdout.contains(secret),
+            "`{secret}` must survive verbatim on stdout; stdout:\n{stdout}"
+        );
+        assert!(
+            !stderr.contains(secret),
+            "the warning must not echo `{secret}`; stderr:\n{stderr}"
+        );
+    }
+
+    for phrase in ["byte-exact", "credentials", "bug report", "ROTATE"] {
+        assert!(
+            stderr.contains(phrase),
+            "the stderr warning must mention `{phrase}`; stderr:\n{stderr}"
+        );
+    }
+    // Exactly ONE `warning:` line, not a duplicate and not split across lines:
+    // the phrase checks above would pass either way.
+    let warning_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("warning:"))
+        .collect();
+    assert_eq!(
+        warning_lines.len(),
+        1,
+        "expected exactly one `warning:` line on stderr; stderr:\n{stderr}"
+    );
+    for phrase in ["byte-exact", "credentials", "bug report", "ROTATE"] {
+        assert!(
+            warning_lines[0].contains(phrase),
+            "the single warning line must carry `{phrase}`; line:\n{}",
+            warning_lines[0]
+        );
+    }
+    assert!(
+        !stdout.contains("warning:"),
+        "the warning must not reach stdout; stdout:\n{stdout}"
+    );
+}

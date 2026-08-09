@@ -520,7 +520,21 @@ fn render_write_error(err: ConfigWriteError<CommitError>) -> Error {
     Error::Config(err.to_string())
 }
 
+/// The candidate block goes to stdout BYTE-EXACT -- that is this surface's
+/// contract (the operator is shown exactly what would be written), so there is
+/// no masking path: re-rendering through `toml::to_string_pretty` to redact
+/// would change key order and formatting too. The credential warning therefore
+/// goes to STDERR, where it cannot contaminate the bytes it warns about. Note
+/// stdout also carries the framing and summary lines around the block, so it is
+/// the delimited block that is byte-exact, not the whole stream.
 fn render_dry_run(candidate_text: &str, from_version: u32, to_version: u32, removed: &[String]) {
+    eprintln!(
+        "warning: the candidate below is printed byte-exact and may carry credentials \
+         anywhere the file does -- e.g. userinfo, query, or fragment in a `base_url`, \
+         `literal:` key refs, or a secret placed in `header_extras`. Do not paste it into \
+         a bug report; if you already did, ROTATE the exposed credentials -- deleting the \
+         report is not enough."
+    );
     println!("--- candidate config.toml (version {to_version}) ---");
     print!("{candidate_text}");
     if !candidate_text.ends_with('\n') {

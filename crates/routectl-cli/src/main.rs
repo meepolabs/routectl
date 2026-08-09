@@ -377,7 +377,11 @@ enum ConfigCmd {
     /// interactive `y`, or `--yes` when non-interactive.
     Migrate {
         /// Render the exact rewritten candidate plus a change summary without
-        /// writing anything (needs no acknowledgement).
+        /// writing anything (needs no acknowledgement). The candidate is
+        /// byte-exact and unredacted, so it may carry credentials anywhere the
+        /// file does -- e.g. userinfo, query, or fragment in a `base_url`,
+        /// `literal:` key refs, or a secret placed in `header_extras`. Never
+        /// paste it into a bug report, and rotate anything already exposed.
         #[arg(long)]
         dry_run: bool,
         /// Acknowledge the schema break without an interactive prompt
