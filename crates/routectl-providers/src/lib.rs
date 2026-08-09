@@ -2,6 +2,10 @@
 #![warn(missing_docs)]
 //! Provider implementations.
 //!
+//! At least one provider feature (`openai-compat`, `anthropic-api`,
+//! `openai-responses`, `gemini`, `bedrock`) must be enabled; a build with
+//! none is rejected at compile time.
+//!
 //! The default build includes `openai-compat`, `anthropic-api`, and
 //! `bedrock`. To build this providers library without the AWS SDK
 //! dependency tree:
@@ -14,6 +18,25 @@
 //! single declarative table. Only the openai-compat egress reads it
 //! today, so it is gated on that feature to stay dead-code-free in lean
 //! single-feature builds.
+
+// A build with no provider feature is not a supported target: this crate
+// exists to hold provider implementations, and every provider feature is
+// what pulls in `reqwest`. Without this guard the failure surfaces as ten
+// unresolved-import errors in `http_client` / `header_trace` instead of the
+// actual requirement.
+#[cfg(not(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini",
+    feature = "bedrock"
+)))]
+compile_error!(
+    "routectl-providers requires at least one provider feature \
+     (openai-compat, anthropic-api, openai-responses, gemini, bedrock). \
+     For the leanest supported build use: \
+     --no-default-features --features openai-compat,anthropic-api"
+);
 
 #[cfg(feature = "openai-compat")]
 pub(crate) mod model_profile;
@@ -31,6 +54,16 @@ pub(crate) mod model_profile;
 ))]
 pub(crate) mod sampling_drop_guard;
 
+// Reqwest-backed, so gated on "any provider feature" rather than left
+// unconditional: a build with no provider has no `reqwest`, and this gate is
+// what lets the crate-level `compile_error!` above be the only error reported.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini",
+    feature = "bedrock"
+))]
 pub(crate) mod http_client;
 
 // Shared single-shot reachability probe for the HTTP-based egresses
@@ -44,11 +77,11 @@ pub(crate) mod http_client;
 ))]
 pub(crate) mod probe;
 
-// Shared effort-clamping helper for OpenAI-shape egresses. Unconditional
-// (no feature gate) because both openai-compat and openai-responses egresses
-// use it and both pull in reqwest anyway. `pub` so `routectl-router` can
-// import `VALID_EFFORT_TOKENS` (the single source of truth for the valid
-// effort vocabulary).
+// Shared effort-clamping helper for OpenAI-shape egresses. Unconditional (no
+// feature gate) because its ungated surface is dependency-free and is exported
+// to `routectl-router`, which imports `VALID_EFFORT_TOKENS` (the single source
+// of truth for the valid effort vocabulary) regardless of which provider
+// features this crate was built with.
 pub mod effort;
 
 // Shared helpers for the Bedrock mantle lanes. The URL builders and the
@@ -58,10 +91,17 @@ pub mod effort;
 // into the bedrock signer, is gated on `bedrock`.
 pub mod mantle;
 
-// Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Unconditional
-// like `http_client` (both lean on `reqwest`, which any provider feature
-// pulls in); every provider calls into it, so there is no dead code in a
+// Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Gated like
+// `http_client` (both lean on `reqwest`, which any provider feature pulls
+// in); every provider calls into it, so there is no dead code in a
 // feature-gated build.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini",
+    feature = "bedrock"
+))]
 pub(crate) mod header_trace;
 
 // Shared WARN emitter for upstream HTTP failures. Folds the
