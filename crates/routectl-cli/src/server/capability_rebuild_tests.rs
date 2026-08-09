@@ -279,7 +279,7 @@ async fn revision_mismatch_fails_closed_and_writes_a_fresh_tombstone() {
     // but this boot runs at a different overlay revision.
     let tmp = TempDir::new().expect("tempdir");
     let mut router = default_router(&tmp).await;
-    router.note_overlay_revision(99);
+    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(99));
     let cat = i64::from(router.catalog_version());
 
     let ledger = tmp.path().join("usage.db");

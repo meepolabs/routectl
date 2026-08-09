@@ -194,10 +194,24 @@ pub struct Router {
     /// `carry_over_learned_from`: a bump invalidates the learned registry.
     catalog_version: u32,
     /// Catalog-overlay revision this Router was built against. Zero until
-    /// `note_overlay_revision` records the revision the resolved-model
+    /// `install_catalog_overlay` records the revision the resolved-model
     /// table was stamped with. Compared old-vs-new in
     /// `carry_over_learned_from`: a change invalidates the learned registry.
     overlay_revision: u64,
+    /// The catalog overlay this Router's resolved-model table was merged
+    /// against -- the generation the daemon ACCEPTED at the last successful
+    /// boot or reload. Empty (revision 0) until `install_catalog_overlay`
+    /// records one, which is the only writer of it and of
+    /// `overlay_revision`, so the two can never diverge.
+    ///
+    /// Retained (rather than re-read from disk by each reader) so a caller
+    /// asking "what catalog truth is IN EFFECT" gets the accepted
+    /// generation and not whatever currently sits on disk -- an overlay an
+    /// operator edited but the daemon REJECTED is by definition not in
+    /// effect, and a corrupt file on disk must not make the in-effect
+    /// answer unavailable. Costs one refcount: every build path already
+    /// holds the overlay behind an `Arc`.
+    catalog_overlay: Arc<crate::catalog_overlay::CatalogOverlay>,
     /// Lock-free router-side observability counters. Not carried over on
     /// a hot-reload rebuild (a reset is benign for observability, same
     /// rationale as `round_robin`).
@@ -247,14 +261,16 @@ struct RouterMetrics {
     learned_negatives_total: AtomicU64,
     /// Learned negatives that reached the acting state via the F1 wire-token
     /// phase (a droppable capability the provider named directly). The
-    /// per-phase split of [`learned_negatives_total`], so a rising F2 share
-    /// is visible against the well-understood F1 baseline. Bumped by the
-    /// learn path.
+    /// per-phase split of
+    /// [`learned_negatives_total`](Self::learned_negatives_total), so a rising
+    /// F2 share is visible against the well-understood F1 baseline. Bumped by
+    /// the learn path.
     learned_negatives_f1_total: AtomicU64,
     /// Learned negatives that reached the acting state via the F2
     /// feature-naming phase (a capability the provider named in prose). The
-    /// per-phase split of [`learned_negatives_total`]; zero until an F2
-    /// pattern is grounded (the tables ship empty). Bumped by the learn path.
+    /// per-phase split of
+    /// [`learned_negatives_total`](Self::learned_negatives_total); zero until an
+    /// F2 pattern is grounded (the tables ship empty). Bumped by the learn path.
     learned_negatives_f2_total: AtomicU64,
     /// Re-probes admitted after a learned negative's decay window lapsed.
     /// Bumped by the dispatch path when it claims the single probe slot
@@ -307,8 +323,8 @@ struct RouterMetrics {
     /// rising count means a real feature-naming rejection shape is arriving
     /// that the shipped-empty table cannot attribute -- the drift signal that
     /// the F2 table needs a captured-envelope refresh, mirroring
-    /// [`bedrock_validation_unmatched_total`]. Bumped once per request per
-    /// target by the learn path.
+    /// [`bedrock_validation_unmatched_total`](Self::bedrock_validation_unmatched_total).
+    /// Bumped once per request per target by the learn path.
     feature_naming_unmatched_total: AtomicU64,
     /// Response-evidence VerifiedWorking positives that reached the acting
     /// state (a fresh or refreshed positive; structural proof acts on N=1).
@@ -947,8 +963,9 @@ struct DispatchTarget {
     /// Capability keys the feature filter decided to STRIP in place for
     /// this target rather than route away from -- the strip-vs-route
     /// verdict for a learned acting negative whose policy
-    /// ([`capability_strip::action_for`]) is `Strip` and that no operator
-    /// beta floor pins to the wire. Sorted normalized keys
+    /// ([`capability_strip::action_for`](crate::capability_strip::action_for))
+    /// is `Strip` and that no operator beta floor pins to the wire. Sorted
+    /// normalized keys
     /// (`normalize_capability_key`), so the per-session cache prefix an
     /// interceptor derives from them stays stable across requests. Empty
     /// (the default in both constructors) means no capability is stripped
@@ -1122,6 +1139,7 @@ impl Router {
             override_registry,
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
             overlay_revision: 0,
+            catalog_overlay: Arc::default(),
             metrics: RouterMetrics::default(),
             has_forwarded_provider,
             volatile_prefix_warned: Mutex::new(HashSet::new()),
@@ -1268,14 +1286,25 @@ impl Router {
             .import_entries(previous.k_session_store.export_entries());
     }
 
-    /// Record the catalog-overlay revision this Router was stamped
-    /// against. Called by the CLI builder immediately after the resolved
-    /// models are merged with the overlay, so `carry_over_learned_from`
-    /// can detect a revision change across a hot-reload and invalidate the
-    /// learned registry. Left at zero for build paths that apply no
-    /// overlay (which never carry learned state anyway).
-    pub const fn note_overlay_revision(&mut self, revision: u64) {
-        self.overlay_revision = revision;
+    /// Install the catalog overlay this Router's resolved-model table was
+    /// merged against, stamping its revision at the same time. Called by the
+    /// CLI builder immediately after the resolved models are merged with the
+    /// overlay, so `carry_over_learned_from` can detect a revision change
+    /// across a hot-reload and invalidate the learned registry, and so a
+    /// reader asking what catalog truth is in effect reads the ACCEPTED
+    /// generation out of memory instead of re-reading the file.
+    ///
+    /// The single writer of both the overlay and its revision, so the two
+    /// cannot drift. Build paths that apply no overlay leave the empty
+    /// default (revision zero) in place, which preserves the existing
+    /// carry-over semantics: two revision-zero Routers compare equal, so a
+    /// config-only reload between them still carries learned state across.
+    pub fn install_catalog_overlay(
+        &mut self,
+        overlay: Arc<crate::catalog_overlay::CatalogOverlay>,
+    ) {
+        self.overlay_revision = overlay.revision;
+        self.catalog_overlay = overlay;
     }
 
     /// Baked catalog table version this Router was built against. Read at
@@ -1287,10 +1316,18 @@ impl Router {
     }
 
     /// Catalog-overlay revision this Router was built against (zero until
-    /// `note_overlay_revision` records it). Read alongside
+    /// `install_catalog_overlay` records it). Read alongside
     /// [`Router::catalog_version`] at the same boundary.
     pub const fn overlay_revision(&self) -> u64 {
         self.overlay_revision
+    }
+
+    /// The catalog overlay generation this Router was built against -- the
+    /// one the daemon ACCEPTED, never a fresher file on disk. Read by the
+    /// status read side to derive the in-effect config view without a disk
+    /// read; the private field's own doc carries the full rationale.
+    pub fn catalog_overlay(&self) -> &crate::catalog_overlay::CatalogOverlay {
+        &self.catalog_overlay
     }
 
     /// Replay a capability-event ledger slice into the private learned

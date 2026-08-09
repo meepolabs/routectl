@@ -1509,8 +1509,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   forwarded-credential path). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
-  `carry_over_learned_from` reload carries + `note_overlay_revision`, the
-  `catalog_version` / `overlay_revision` getters and
+  `carry_over_learned_from` reload carries + `install_catalog_overlay` (the
+  single writer of the RETAINED accepted overlay and its revision stamp), the
+  `catalog_version` / `overlay_revision` / `catalog_overlay` getters and
   `rebuild_learned_from_ledger` (the boot warm-rebuild seam: delegates to
   `capability_rebuild::rebuild_capabilities_into` over the PRIVATE learned
   registry so it stays encapsulated), `register`, `record_k_sample`,
@@ -2456,7 +2457,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and the `server::` re-exports callers use. Unit tests are paired
   per-concern: the `#[path]`-included hub sidecar `tests.rs` keeps only the
   bind-safety tests, each submodule owns its own `<name>_tests.rs` sidecar,
-  and the shared `#[cfg(test)]` fixture helper lives in `test_support.rs`
+  and the shared `#[cfg(test)]` fixture helpers live in `test_support.rs`
 - `src/server/serve.rs` -- listener bind + serve loop: `serve` (bind then
   serve) / `serve_on_listener` / `serve_on_listener_with_overlay` boot path,
   `build_axum_router` route wiring (every registered path is classified by
@@ -2512,7 +2513,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/router_build.rs` -- Router construction from a parsed config +
   catalog overlay: `build_router_from_config_with_overlay` (the shared build
   path reused by boot and every hot-reload -- runs the full startup validation
-  gauntlet then installs resolved models + overlay revision) and the
+  gauntlet then installs resolved models + the retained overlay via
+  `Router::install_catalog_overlay`, which stamps its revision too) and the
   `#[cfg(test)]` empty-overlay wrapper `build_router_from_config`. Split out
   of `serve` so the `reload` coordinator depends on this builder directly,
   keeping the serve <-> reload edge one-way; both re-exported at `server::`
@@ -2533,7 +2535,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   bind/listener-auth/body-limit, the three `[log]` knobs, `usage.db_path`, and
   `[mitm]` all restart-required since their listeners/state are startup-only)
   or `handle_credentials_reload` -> `rebuild_router_for_seat_change`
-  (seat-set-gated rebuild). `apply_activation` (+ `gather_probes` /
+  (seat-set-gated rebuild off the unchanged config + the coordinator's current
+  overlay, which the replacement Router both merges and retains). `apply_activation` (+ `gather_probes` /
   `emit_activation_delta`, `ActivationTrigger`) recomputes the auto-activation
   inventory at startup and after each reload; `await_reload_tasks` bounds
   graceful-shutdown joins. Unit tests live in the `#[path]`-included sibling
@@ -2829,9 +2832,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
   which exposes ONLY three read methods -- `route_targets(now)`,
-  `learned_capabilities()`, and `effective_view(&overlay)` (runs
-  `derive_effective_view` against the live config INTERNALLY, so panels never
-  touch raw `Config`), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
+  `learned_capabilities()`, and `effective_view()` (runs
+  `derive_effective_view` against the live config AND the overlay retained on
+  the pinned Router, INTERNALLY, so panels never touch raw `Config` and one
+  derivation can never pair mismatched config / overlay generations), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
   pricing facade over one pinned snapshot whose only method costs an `AggRow`
   through `commands::usage::cost_for_row` (so `/status/query` and the CLI usage
   report price a row through one function, and a hot-swap mid-query cannot make
@@ -2891,10 +2895,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   contract token `capability_key`. No dial, no mutation
 - `src/handlers/status/config.rs` -- `/status/config`. Renders the
   provenance-annotated EFFECTIVE (live, in-effect) config view: snapshots the
-  router through the read-only facade, loads a fresh catalog overlay PER
-  REQUEST via `server::load_overlay_default()` inside `guard_panel`'s blocking
-  worker (no overlay retained on the router), and folds them into
-  `view.effective_view(&overlay) -> EffectiveView`. Maps to a purpose-built
+  router through the read-only facade and folds its config together with the
+  catalog overlay RETAINED on that same router (the generation the daemon
+  accepted at the last boot / reload -- read from memory, never re-read from
+  disk per request, so the panel cannot render a rejected file and a corrupt
+  one cannot take it down) via `view.effective_view() -> EffectiveView`. Maps to a purpose-built
   `ConfigPanel` DTO (model cells with `source` token
   baked/import/user/disabled/missing + economics; class-policy cells with
   kebab class + `config`/`baked-default` source + `debits_breaker` read from

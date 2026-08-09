@@ -470,7 +470,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     // revision no longer matches, so warm fails closed to empty and writes a
     // fresh boot tombstone at the new revision (into the same ledger).
     let mut bumped = default_router(&tmp).await;
-    bumped.note_overlay_revision(7);
+    bumped.install_catalog_overlay(crate::server::test_support::overlay_at_revision(7));
     let (h2, w2) = writer_at(&ledger);
     warm_capability_registry_from_ledger(&ledger, &bumped, &h2);
     drop(h2);
@@ -498,7 +498,7 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
     w3.shutdown();
 
     let mut relearned = default_router(&tmp).await;
-    relearned.note_overlay_revision(7);
+    relearned.install_catalog_overlay(crate::server::test_support::overlay_at_revision(7));
     let scratch = tmp.path().join("scratch.db");
     let snap = warm_and_snapshot(&ledger, &relearned, &scratch);
 
@@ -606,7 +606,7 @@ async fn reload_then_restart_replays_only_post_reload_negatives() {
 
     // Act: restart at the post-reload revision.
     let mut router = default_router(&tmp).await;
-    router.note_overlay_revision(1);
+    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(1));
     let scratch = tmp.path().join("scratch.db");
     let snap = warm_and_snapshot(&ledger, &router, &scratch);
 

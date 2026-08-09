@@ -502,8 +502,12 @@ pub(super) async fn handle_credentials_reload(
 /// seat-set change, preserving per-seat runtime state and honoring the
 /// disk-first-keep-old invariant on a build failure. Neither config nor
 /// overlay is re-read (both are unchanged); re-running the startup
-/// validators on them is harmless. Split out of `handle_credentials_reload`
-/// to keep that function under the size ceiling.
+/// validators on them is harmless. Passing `current_overlay` through is
+/// load-bearing twice over: the builder both merges it into the resolved
+/// models and RETAINS it on the replacement Router, so a credentials-only
+/// reload can neither un-apply nor un-report the operator's overlay. Split
+/// out of `handle_credentials_reload` to keep that function under the size
+/// ceiling.
 async fn rebuild_router_for_seat_change(
     current_config: &Arc<Config>,
     current_overlay: &Arc<CatalogOverlay>,
