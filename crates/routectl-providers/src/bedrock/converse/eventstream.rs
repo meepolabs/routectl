@@ -44,6 +44,7 @@ use super::response_types::{
     StreamContentBlockStartPayload, StreamContentBlockStop, StreamDelta, StreamMessageStart,
     StreamMessageStop, StreamMetadata,
 };
+use super::tools::HISTORY_COMPAT_TOOL_NAME;
 use crate::anthropic_api::response::map_stop_reason;
 
 /// Format tag matching the Anthropic-API egress so chained downstreams
@@ -105,6 +106,11 @@ pub struct ConverseStreamState {
     /// non-streaming `extract_matched_stop_sequence` gate so streaming
     /// canonical chunks carry the same `matched_stop_sequence` shape.
     pending_stop_sequence: Option<String>,
+    /// Set once the reserved history-compat dummy tool has been observed
+    /// in a `contentBlockStart` on this stream. `handle_block_start` runs
+    /// per block, so without this flag two dummy blocks in one response
+    /// would emit two WARNs.
+    history_compat_selection_warned: bool,
 }
 
 /// Per-frame handler for the ConverseStream. Holds the cross-frame
@@ -289,6 +295,16 @@ fn handle_block_start(
 ) {
     let kind = match ev.start {
         Some(StreamContentBlockStartPayload::ToolUse { tool_use }) => {
+            // DIAGNOSTIC: remove once a live Bedrock probe confirms
+            // whether the model ever selects the reserved dummy tool.
+            if tool_use.name == HISTORY_COMPAT_TOOL_NAME && !state.history_compat_selection_warned {
+                state.history_compat_selection_warned = true;
+                tracing::warn!(
+                    provider = provider_id,
+                    reserved_tool_name = HISTORY_COMPAT_TOOL_NAME,
+                    "converse: model selected the reserved history-compat dummy tool"
+                );
+            }
             let call_index = state.next_call_index;
             state.next_call_index += 1;
             BlockState::ToolUse {

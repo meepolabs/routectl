@@ -975,3 +975,5 @@ async fn matched_stop_sequence_lifts_on_eof_flush_path() {
         Some("STOP")
     );
 }
+
+include!("eventstream_history_compat_tests.rs");
