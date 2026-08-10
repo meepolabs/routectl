@@ -36,6 +36,14 @@
 //! Normalization is fail-fast, so a malformed image anywhere fails the
 //! whole request and nothing dispatches upstream -- returning 200 after
 //! silently dropping content is the failure mode this policy replaces.
+//!
+//! The malformed class above is scoped to the plain image and `image_url`
+//! carriers, which have no way to preserve a source they cannot read. The
+//! tool-result carrier classifies more narrowly on purpose: an unreadable
+//! source there takes the JSON fallback, so the model still receives the
+//! payload rather than the caller receiving a 400. Only a source that
+//! positively declares base64 and then names no bytes is malformed on that
+//! path. See `image_source_to_tool_result`.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
@@ -1244,8 +1252,9 @@ fn build_tool_message(
 /// and Claude 3+ on Converse rejects the malformed shape -- the model
 /// gets the canonical schema instead of the AWS image/document block.
 ///
-/// A base64 image source that names no bytes fails the request; every
-/// other source this egress cannot represent takes the JSON fallback.
+/// A base64 source that names no bytes -- an absent, empty, or non-string
+/// `data` or `media_type` -- fails the request; every other source this
+/// egress cannot represent takes the JSON fallback.
 fn translate_part_for_tool_result(
     id: &str,
     p: &ContentPart,
@@ -1292,9 +1301,10 @@ fn content_part_to_json_fallback(p: &ContentPart) -> ConverseToolResultContent {
 /// `ConverseToolResultContent::Json`, so the model still receives the
 /// payload. The plain image path has no such fallback, which is why a
 /// source naming no bytes must fail the request there. Here, only a source
-/// that positively declares base64 and then names no bytes is malformed --
-/// anything else takes the JSON fallback rather than converting a working
-/// request into a 400.
+/// that positively declares base64 and then names no bytes -- an absent,
+/// empty, or non-string `data` or `media_type` -- is malformed; anything
+/// else takes the JSON fallback rather than converting a working request
+/// into a 400.
 fn image_source_to_tool_result(
     id: &str,
     source: &Value,
