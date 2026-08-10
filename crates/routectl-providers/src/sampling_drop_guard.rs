@@ -18,6 +18,16 @@
 //! the dropped fields the request carried (names only, never values). The
 //! honored list stays with the code that builds the wire body, so the
 //! guard never learns any dialect's wire shape.
+//!
+//! Why anthropic-api (and bedrock-invoke, which reaches the same wire
+//! shape by delegation) honors none of the seven: none of them appears in
+//! the Anthropic Messages API request surface, verified 2026-08-10 against
+//! Anthropic's published parameter reference and corroborated against
+//! `anthropic-sdk-python`'s `message_create_params`. That is an absence
+//! from the documented request contract, not a demonstration that the
+//! service rejects them -- the point is that there is no counterpart to
+//! translate onto, so the honest answer is to drop and say so.
+//! `docs/WIRE-GOTCHAS.md` carries the full parameter list.
 
 use routectl_core::ChatRequest;
 

@@ -70,6 +70,25 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 ## Anthropic API surface
 
+- **Seven canonical sampling knobs have no counterpart here.** `n`,
+  `seed`, `logprobs`, `top_logprobs`, `logit_bias`, `presence_penalty`
+  and `frequency_penalty` do not appear in the Anthropic Messages API
+  request surface, verified 2026-08-10 against Anthropic's published
+  parameter reference and corroborated against `anthropic-sdk-python`'s
+  `message_create_params`. The documented request params are
+  `max_tokens`, `messages`, `model`, `cache_control`, `container`,
+  `inference_geo`, `metadata`, `output_config`, `service_tier`,
+  `stop_sequences`, `stream`, `system`, `temperature`, `thinking`,
+  `tool_choice`, `tools`, `top_k` and `top_p`. This is an absence from
+  the documented request contract, NOT a demonstration that the service
+  rejects the seven -- routectl drops them at the egress rather than
+  inventing a mapping, with one structured WARN naming the dropped
+  fields (see `crates/routectl-providers/src/sampling_drop_guard.rs`).
+  `top_k` IS documented by Anthropic but is not one of the seven and is
+  not carried by the canonical schema, so it is a deliberate
+  non-inclusion rather than a gap. Applies to bedrock-invoke too, which
+  reaches this wire shape by delegation.
+
 - **The OAuth seat 400s `temperature` and `top_p`.** A `/v1/messages`
   body carrying EITHER sampling param is rejected when the credential
   is a Claude Code OAuth bearer against `api.anthropic.com` (both
