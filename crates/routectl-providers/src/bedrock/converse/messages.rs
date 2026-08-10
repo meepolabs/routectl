@@ -23,7 +23,7 @@ use routectl_core::{
 };
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
-use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
+use crate::bounded_diagnostics::BoundedLogSample;
 
 use super::types::{
     CachePoint, ConverseCitationsConfig, ConverseContentBlock, ConverseDocument,
@@ -48,13 +48,17 @@ use super::types::{
 /// A `CitationsDropTally` threads through every document-bearing path so
 /// malformed `citations` values across the whole request collapse into one
 /// aggregated WARN instead of one per document (see
-/// `translate_document_citations`).
+/// `translate_document_citations`). A `ReasoningSkipTally` threads through
+/// the assistant path for the same reason, collapsing unsigned-reasoning
+/// skips across every turn into one WARN.
 pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<ConverseMessage>> {
     let mut tally = CitationsDropTally::new(id);
-    let translated = translate_messages(id, messages, &mut tally);
+    let mut reasoning = ReasoningSkipTally::new(id);
+    let translated = translate_messages(id, messages, &mut tally, &mut reasoning);
     // Flush on both arms: a request that records a drop and only then
     // hits a translation error still owes the operator its aggregate WARN.
     tally.flush();
+    reasoning.flush();
     translated
 }
 
@@ -62,9 +66,10 @@ fn translate_messages(
     id: &str,
     messages: &[Message],
     tally: &mut CitationsDropTally<'_>,
+    reasoning: &mut ReasoningSkipTally<'_>,
 ) -> Result<Vec<ConverseMessage>> {
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
-    for msg in messages {
+    for (i, msg) in messages.iter().enumerate() {
         match msg.role {
             Role::System => {
                 // System lives in the top-level `system` array. Drop here
@@ -86,7 +91,7 @@ fn translate_messages(
                 push_or_coalesce(&mut out, "user", blocks);
             }
             Role::Assistant => {
-                let blocks = build_assistant_content_blocks(id, msg, tally)?;
+                let blocks = build_assistant_content_blocks(id, i, msg, tally, reasoning)?;
                 if blocks.is_empty() {
                     tracing::debug!(
                         provider = id,
@@ -190,11 +195,14 @@ fn build_user_content_blocks(
 /// toolResult.
 fn build_assistant_content_blocks(
     id: &str,
+    message_index: usize,
     msg: &Message,
     tally: &mut CitationsDropTally<'_>,
+    reasoning: &mut ReasoningSkipTally<'_>,
 ) -> Result<Vec<ConverseContentBlock>> {
     let mut blocks = if !msg.reasoning_details.is_empty() {
-        let mut blocks = emit_reasoning_blocks_converse(id, &msg.reasoning_details)?;
+        let mut blocks =
+            emit_reasoning_blocks_converse(message_index, &msg.reasoning_details, reasoning)?;
         append_converse_content_blocks(id, &msg.content, &mut blocks, tally)?;
         blocks
     } else if let MessageContent::Parts(parts) = &msg.content {
@@ -260,25 +268,19 @@ fn message_content_has_tool_use(content: &MessageContent) -> bool {
 /// are emitted; others (e.g. OpenAI-format) are skipped -- they have no
 /// Converse wire equivalent. Bedrock validates the signature on multi-turn
 /// replay identical to direct Anthropic; a missing signature 400s with
-/// "invalid reasoning content". Unsigned blocks are skipped and the count
-/// is aggregated into a single WARN so the operator can correlate without
-/// per-detail log spam.
+/// "invalid reasoning content". Unsigned blocks are skipped and recorded on
+/// the `ReasoningSkipTally`, which aggregates every turn's skips into a
+/// single per-request WARN so the operator can correlate without per-detail
+/// log spam. The provider id rides on the tally, which owns the WARN.
 fn emit_reasoning_blocks_converse(
-    id: &str,
+    message_index: usize,
     details: &[ReasoningDetail],
+    reasoning: &mut ReasoningSkipTally<'_>,
 ) -> Result<Vec<ConverseContentBlock>> {
     let mut sorted = details.to_vec();
     sorted.sort_by_key(|d| d.index.unwrap_or(0));
 
     let mut blocks: Vec<ConverseContentBlock> = Vec::with_capacity(sorted.len());
-    // Exact drop count for the operator, plus a sample of the dropped
-    // indices capped at collection time. Mirrors
-    // `anthropic_api::messages::emit_reasoning_blocks`. `None` in the
-    // sample preserves an index the upstream did not supply, kept as
-    // `None` rather than flattened to a plausible integer so a missing
-    // index stays distinguishable from index 0.
-    let mut skipped_unsigned_count: usize = 0;
-    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_DIAGNOSTIC_ITEMS);
     for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
@@ -301,10 +303,7 @@ fn emit_reasoning_blocks_converse(
                     // replay and 400s without it. Skip the block so replay
                     // doesn't fail on a guaranteed-bad echo; aggregate the
                     // WARN to avoid per-detail log spam.
-                    skipped_unsigned_count = skipped_unsigned_count.saturating_add(1);
-                    if skipped_unsigned.len() < MAX_LOGGED_DIAGNOSTIC_ITEMS {
-                        skipped_unsigned.push(detail.index);
-                    }
+                    reasoning.record_unsigned(message_index, detail.index);
                     continue;
                 }
                 blocks.push(ConverseContentBlock::ReasoningContent {
@@ -337,17 +336,72 @@ fn emit_reasoning_blocks_converse(
             }
         }
     }
-    if skipped_unsigned_count > 0 {
-        tracing::warn!(
-            provider = id,
-            skipped_count = skipped_unsigned_count,
-            skipped_indices = ?skipped_unsigned,
-            indices_truncated = skipped_unsigned_count > skipped_unsigned.len(),
-            "skipping Thinking blocks on Converse replay: signature missing or empty; \
-             Bedrock Converse requires a signature on replayed reasoningContent blocks"
-        );
-    }
     Ok(blocks)
+}
+
+/// Per-request tally of reasoning details skipped on the Converse egress
+/// because their signature was missing or empty. Threaded through the
+/// assistant path from `build_messages` so a history with several unsigned
+/// turns emits ONE WARN instead of one per turn. Mirrors
+/// `anthropic_api::messages::ReasoningSkipTally`, minus its foreign-format
+/// category: a non-`anthropic-claude-v1` detail has no Converse wire
+/// equivalent and drops silently here.
+///
+/// `skipped_count` and `turns_affected` are exact; `skipped_locations` is a
+/// bounded SAMPLE and its `truncated()` flag -- never a count comparison --
+/// says whether anything was dropped from it. Each location is
+/// `(message_index, detail_index)`: every message's `reasoning_details`
+/// carries its own index space, so a bare detail index pooled across turns
+/// would render identically for two unrelated details and the operator
+/// could not tell a contiguous tail from a scattered set. The detail slot
+/// stays `Option<u32>` so an index the upstream never supplied reads as
+/// `None` rather than as a plausible 0.
+struct ReasoningSkipTally<'a> {
+    provider: &'a str,
+    skipped_count: usize,
+    turns_affected: usize,
+    last_turn: Option<usize>,
+    skipped_locations: BoundedLogSample<(usize, Option<u32>)>,
+}
+
+impl<'a> ReasoningSkipTally<'a> {
+    fn new(provider: &'a str) -> Self {
+        Self {
+            provider,
+            skipped_count: 0,
+            turns_affected: 0,
+            last_turn: None,
+            skipped_locations: BoundedLogSample::new(),
+        }
+    }
+
+    /// Record one unsigned skip at `message_index`. Turns are visited in
+    /// order and every skip within a turn arrives consecutively, so a
+    /// change of `message_index` is a new affected turn.
+    fn record_unsigned(&mut self, message_index: usize, detail_index: Option<u32>) {
+        self.skipped_count = self.skipped_count.saturating_add(1);
+        if self.last_turn != Some(message_index) {
+            self.turns_affected = self.turns_affected.saturating_add(1);
+            self.last_turn = Some(message_index);
+        }
+        self.skipped_locations.push((message_index, detail_index));
+    }
+
+    /// Emit the aggregated WARN, if anything was skipped. Called once per
+    /// request from `build_messages`, on both the Ok and the Err arm.
+    fn flush(&self) {
+        if self.skipped_count > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                skipped_count = self.skipped_count,
+                turns_affected = self.turns_affected,
+                skipped_locations = ?self.skipped_locations.items(),
+                skipped_locations_truncated = self.skipped_locations.truncated(),
+                "skipping Thinking blocks on Converse replay: signature missing or empty; \
+                 Bedrock Converse requires a signature on replayed reasoningContent blocks"
+            );
+        }
+    }
 }
 
 /// Append the assistant message's text/parts content AFTER the reasoning

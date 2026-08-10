@@ -568,9 +568,13 @@ listed at the bottom of each crate.
   shared with `emit_reasoning_blocks` so the keep-decision and the emit gate
   cannot drift, with an aggregated WARN on any dropped turns);
   `build_assistant_content` carries an empty-content backstop that inserts one
-  empty text block so an assembled-empty turn never ships `content: []`; both
-  `redacted_thinking` construction sites here (content parts and the
-  `reasoning_details` replay channel) route their data through the
+  empty text block so an assembled-empty turn never ships `content: []`; the
+  three reasoning-skip WARNs (unsigned signature, foreign format, and that
+  backstop) are aggregated per outbound provider attempt by the private
+  `ReasoningSkipTally`, which `translate_messages` owns and flushes around the
+  threaded walk in `translate_messages_threaded` so no `?` can return past the
+  flush; both `redacted_thinking` construction sites here (content parts and
+  the `reasoning_details` replay channel) route their data through the
   `envelope_policy` tally threaded in from `request::normalize`
 - `src/anthropic_api/extras.rs` -- thinking-budget composition
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body

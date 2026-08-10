@@ -1,8 +1,9 @@
-// The aggregated unsigned-reasoning WARN emitted by
-// `emit_reasoning_blocks`: exact count, capped index sample, truncation
-// flag. Mirrored by the Converse translator's own sidecar fragment,
-// `bedrock/converse/messages_reasoning_warn_tests.rs`. Imports live in
-// the host `messages_tests.rs` -- do not add `use` lines here.
+// The aggregated reasoning-skip WARNs emitted once per outbound provider
+// attempt by `translate_messages`: exact counts, capped samples,
+// truncation flags, and the per-attempt (not per-turn) aggregation across
+// every assistant turn. Mirrored by the Converse translator's own sidecar
+// fragment, `bedrock/converse/messages_reasoning_warn_tests.rs`. Imports
+// live in the host `messages_tests.rs` -- do not add `use` lines here.
 
 /// A Text reasoning detail in the anthropic format whose signature is
 /// empty -- exactly the shape the unsigned-skip branch aggregates.
@@ -16,9 +17,65 @@ fn unsigned_detail(index: Option<u32>) -> ReasoningDetail {
     }
 }
 
-/// Split a `Debug`-rendered `Vec<Option<u32>>` field value into its
-/// element strings so the sample's length and its `None` entries can be
-/// asserted without pinning the whole rendering byte-for-byte.
+/// An assistant turn carrying `details` plus non-empty text content, so
+/// its wire block list is never empty and the empty-content backstop
+/// stays out of the WARN set under test.
+fn assistant_turn(details: Vec<ReasoningDetail>) -> Message {
+    Message {
+        refusal: None,
+        role: Role::Assistant,
+        content: MessageContent::Text("ok".to_string()),
+        reasoning: None,
+        reasoning_details: details,
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+/// An assistant turn whose content is `Null`, so a non-emittable-only
+/// detail set leaves the block list empty and reaches the backstop.
+fn null_assistant_turn(details: Vec<ReasoningDetail>) -> Message {
+    Message {
+        content: MessageContent::Null,
+        ..assistant_turn(details)
+    }
+}
+
+/// A System turn. It is dropped from the wire output, so a transcript
+/// that opens with one makes every assistant turn's CANONICAL index
+/// differ from its output-array position -- the sampled locations must
+/// name the canonical one.
+fn system_turn() -> Message {
+    Message {
+        refusal: None,
+        role: Role::System,
+        content: MessageContent::Text("be brief".to_string()),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+/// Run the full per-role walk over `messages` and capture what it logged.
+/// Driving the WARNs through `translate_messages` (rather than a single
+/// turn's helper) is the point: the aggregation is per outbound attempt.
+fn warns_for(messages: &[Message]) -> Vec<CapturedEvent> {
+    let events = capture_events(|| {
+        translate_messages("prov-test", messages, &mut passthrough_tally())
+            .expect("translation ok");
+    });
+    events
+        .into_iter()
+        .filter(|e| e.level == tracing::Level::WARN)
+        .collect()
+}
+
+/// Split a `Debug`-rendered `Vec<String>` field value into its element
+/// strings so the sample's length and contents can be asserted without
+/// pinning the whole rendering byte-for-byte.
 fn debug_list_entries(rendered: &str) -> Vec<String> {
     let inner = rendered
         .trim()
@@ -29,6 +86,56 @@ fn debug_list_entries(rendered: &str) -> Vec<String> {
         return Vec::new();
     }
     inner.split(", ").map(|e| e.trim().to_string()).collect()
+}
+
+/// Split a `Debug`-rendered `Vec<(usize, Option<u32>)>` into its tuple
+/// entries. Splitting at top-level parens rather than on ", " keeps the
+/// nested `Some(n)` intact.
+fn location_entries(rendered: &str) -> Vec<String> {
+    let inner = rendered
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let mut entries: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    entries.push(inner[start..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    entries
+}
+
+/// The distinct message indices a rendered location sample names, in
+/// first-seen order.
+fn sampled_message_indices(rendered: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for entry in location_entries(rendered) {
+        let index = entry
+            .trim_start_matches('(')
+            .split(',')
+            .next()
+            .expect("tuple has a first element")
+            .trim()
+            .to_string();
+        if !seen.contains(&index) {
+            seen.push(index);
+        }
+    }
+    seen
 }
 
 fn find_unsigned_warn(events: &[CapturedEvent]) -> &CapturedEvent {
@@ -49,91 +156,281 @@ fn find_unsigned_warn(events: &[CapturedEvent]) -> &CapturedEvent {
     warn
 }
 
+fn unsigned_warn_for(messages: &[Message]) -> CapturedEvent {
+    let events = warns_for(messages);
+    find_unsigned_warn(&events).clone()
+}
+
 /// More unsigned details than the log cap must still produce ONE WARN
-/// whose `skipped_count` is exact while `skipped_indices` carries only a
-/// capped sample flagged by `indices_truncated`. A sampled `None` index
-/// (one the upstream did not supply) must survive as `None` rather than
-/// being flattened to a plausible integer, so a missing index stays
-/// distinguishable from index 0.
+/// whose `skipped_count` is exact while `skipped_locations` carries only a
+/// capped sample flagged by `skipped_locations_truncated`. A sampled
+/// `None` detail index (one the upstream did not supply) must survive as
+/// `None` rather than being flattened to a plausible integer, so a
+/// missing index stays distinguishable from index 0.
 #[test]
 fn unsigned_reasoning_warn_caps_logged_indices_and_flags_truncation() {
-    // Arrange: 11 unsigned details, the first with no index at all.
-    // `None` sorts as 0, so it lands inside the sampled prefix.
+    // Arrange: 11 unsigned details on one turn, the first with no index
+    // at all. `None` sorts as 0, so it lands inside the sampled prefix.
     let mut details = vec![unsigned_detail(None)];
     details.extend((1..=10u32).map(|i| unsigned_detail(Some(i))));
     assert!(details.len() > MAX_LOGGED_DIAGNOSTIC_ITEMS);
 
     // Act
-    let mut blocks_out = None;
-    let events = capture_events(|| {
-        blocks_out = Some(
-            emit_reasoning_blocks("prov-test", &details, &mut passthrough_tally())
-                .expect("translation ok"),
-        );
-    });
+    let warn = unsigned_warn_for(&[assistant_turn(details)]);
 
     // Assert
-    assert!(
-        blocks_out.expect("translator ran").is_empty(),
-        "every unsigned detail must be skipped"
-    );
-    let warn = find_unsigned_warn(&events);
     assert_eq!(
         warn.field("skipped_count"),
         Some("11"),
         "skipped_count must stay exact, uncapped"
     );
     assert_eq!(
-        warn.field("indices_truncated"),
+        warn.field("turns_affected"),
+        Some("1"),
+        "one turn carried every skip"
+    );
+    assert_eq!(
+        warn.field("skipped_locations_truncated"),
         Some("true"),
         "a capped sample must be flagged as truncated"
     );
-    let entries = debug_list_entries(
-        warn.field("skipped_indices")
-            .expect("indices field present"),
-    );
+    let rendered = warn
+        .field("skipped_locations")
+        .expect("locations field present");
+    let entries = location_entries(rendered);
     assert_eq!(
         entries.len(),
         MAX_LOGGED_DIAGNOSTIC_ITEMS,
         "sample must be capped at {MAX_LOGGED_DIAGNOSTIC_ITEMS}; got: {entries:?}"
     );
     assert!(
-        entries.iter().any(|e| e == "None"),
-        "a sampled None index must not be flattened away; got: {entries:?}"
+        entries.contains(&"(0, None)".to_string()),
+        "a sampled None detail index must not be flattened away; got: {entries:?}"
     );
 }
 
 /// At or below the cap, the sample is the complete list and
-/// `indices_truncated` must read `false` -- so the flag distinguishes a
-/// sample from a whole list in BOTH directions.
+/// `skipped_locations_truncated` must read `false` -- so the flag
+/// distinguishes a sample from a whole list in BOTH directions.
 #[test]
 fn unsigned_reasoning_warn_keeps_full_index_list_when_within_cap() {
-    // Arrange: 3 unsigned details, well under the cap.
+    // Arrange: 3 unsigned details on one turn, well under the cap.
     let details: Vec<_> = (0..3u32).map(|i| unsigned_detail(Some(i))).collect();
 
     // Act
-    let events = capture_events(|| {
-        emit_reasoning_blocks("prov-test", &details, &mut passthrough_tally())
-            .expect("translation ok");
-    });
+    let warn = unsigned_warn_for(&[assistant_turn(details)]);
 
     // Assert
-    let warn = find_unsigned_warn(&events);
     assert_eq!(warn.field("skipped_count"), Some("3"));
+    assert_eq!(warn.field("turns_affected"), Some("1"));
     assert_eq!(
-        warn.field("indices_truncated"),
+        warn.field("skipped_locations_truncated"),
         Some("false"),
         "an uncapped sample must not be flagged as truncated"
     );
-    let entries = debug_list_entries(
-        warn.field("skipped_indices")
-            .expect("indices field present"),
+    let entries = location_entries(
+        warn.field("skipped_locations")
+            .expect("locations field present"),
     );
     assert_eq!(
         entries,
-        vec!["Some(0)", "Some(1)", "Some(2)"],
-        "every index must be present when under the cap"
+        vec!["(0, Some(0))", "(0, Some(1))", "(0, Some(2))"],
+        "every location must be present when under the cap"
     );
+}
+
+/// The aggregation unit is the outbound provider ATTEMPT, not the
+/// assistant turn: three skipping turns must produce ONE WARN whose
+/// `skipped_count` is the pooled total and whose `turns_affected` is
+/// exact. A per-turn implementation emits three lines each reading
+/// `turns_affected=1`, so this cannot pass by accident.
+#[test]
+fn unsigned_reasoning_warn_pools_every_turn_into_one_line() {
+    // Arrange: 3 assistant turns x 4 unsigned details = 12 skips.
+    let messages: Vec<Message> = std::iter::once(system_turn())
+        .chain(
+            (0..3).map(|_| assistant_turn((0..4u32).map(|i| unsigned_detail(Some(i))).collect())),
+        )
+        .collect();
+
+    // Act
+    let events = warns_for(&messages);
+
+    // Assert -- one line, exact magnitudes.
+    let warn = find_unsigned_warn(&events);
+    assert_eq!(
+        warn.field("skipped_count"),
+        Some("12"),
+        "skipped_count pools every turn's skips"
+    );
+    assert_eq!(
+        warn.field("turns_affected"),
+        Some("3"),
+        "turns_affected counts turns, not details"
+    );
+    assert_eq!(
+        warn.field("skipped_locations_truncated"),
+        Some("true"),
+        "12 locations exceed the cap"
+    );
+    let rendered = warn
+        .field("skipped_locations")
+        .expect("locations field present");
+    let entries = location_entries(rendered);
+    assert_eq!(
+        entries.len(),
+        MAX_LOGGED_DIAGNOSTIC_ITEMS,
+        "sample stays capped however many turns skip; got: {entries:?}"
+    );
+    // The sample fills in walk order, so the cap is exhausted by the
+    // first two turns' 8 details. `turns_affected` above -- not the
+    // sample -- is what reports that a third turn was affected.
+    assert_eq!(
+        sampled_message_indices(rendered),
+        vec!["1", "2"],
+        "the capped sample names the turns it had room for; got: {entries:?}"
+    );
+}
+
+/// A pooled sample must name the TURN each skip came from, not just a
+/// detail index: every message's `reasoning_details` has its own index
+/// space, so `Some(0)` from two turns is two distinct locations. The
+/// message index is the CANONICAL request index -- the leading System
+/// turn is dropped from the wire output, so an implementation reading the
+/// output array's position would report 0/1/2 here.
+#[test]
+fn unsigned_reasoning_warn_locations_name_the_canonical_turn_index() {
+    // Arrange: System + 3 assistant turns x 2 unsigned details = 6
+    // locations, under the cap so every turn reaches the sample.
+    let messages: Vec<Message> = std::iter::once(system_turn())
+        .chain(
+            (0..3).map(|_| assistant_turn((0..2u32).map(|i| unsigned_detail(Some(i))).collect())),
+        )
+        .collect();
+
+    // Act
+    let warn = unsigned_warn_for(&messages);
+
+    // Assert
+    assert_eq!(warn.field("skipped_count"), Some("6"));
+    assert_eq!(warn.field("turns_affected"), Some("3"));
+    assert_eq!(warn.field("skipped_locations_truncated"), Some("false"));
+    let entries = location_entries(
+        warn.field("skipped_locations")
+            .expect("locations field present"),
+    );
+    assert_eq!(
+        entries,
+        vec![
+            "(1, Some(0))",
+            "(1, Some(1))",
+            "(2, Some(0))",
+            "(2, Some(1))",
+            "(3, Some(0))",
+            "(3, Some(1))",
+        ],
+        "each location pairs the canonical message index with the \
+         per-message detail index; got: {entries:?}"
+    );
+}
+
+/// The empty-content backstop is folded into the same per-attempt tally,
+/// so a transcript of Null-content unsigned-only turns emits a WARN count
+/// that does not grow with the turn count. Left per-message, the backstop
+/// alone would make the reasoning path O(turns) again.
+#[test]
+fn null_content_turns_keep_the_warn_count_independent_of_turn_count() {
+    // Arrange: the same shape at two lengths.
+    let three: Vec<Message> = (0..3)
+        .map(|_| null_assistant_turn(vec![unsigned_detail(Some(0))]))
+        .collect();
+    let seven: Vec<Message> = (0..7)
+        .map(|_| null_assistant_turn(vec![unsigned_detail(Some(0))]))
+        .collect();
+
+    // Act
+    let three_warns = warns_for(&three);
+    let seven_warns = warns_for(&seven);
+
+    // Assert -- one unsigned line plus one backstop line, either length.
+    assert_eq!(
+        three_warns.len(),
+        seven_warns.len(),
+        "WARN count must not grow with turn count; 3 turns: {three_warns:?}, \
+         7 turns: {seven_warns:?}"
+    );
+    assert_eq!(
+        three_warns.len(),
+        2,
+        "one unsigned line plus one backstop line; got: {three_warns:?}"
+    );
+    let backstop = three_warns
+        .iter()
+        .find(|e| e.field("event") == Some("empty_content_backstop"))
+        .expect("the aggregated backstop WARN must fire");
+    assert_eq!(
+        backstop.field("backstop_count"),
+        Some("3"),
+        "the backstop count stays exact even though the line is one"
+    );
+    assert_eq!(
+        find_unsigned_warn(&seven_warns).field("skipped_count"),
+        Some("7")
+    );
+}
+
+/// The flush must be conditional per category: a transcript where nothing
+/// is skipped emits nothing at all. A flush that always fires would turn
+/// every healthy request into WARN noise.
+#[test]
+fn a_transcript_with_nothing_skipped_emits_no_warns() {
+    // Arrange: a signed anthropic detail is emittable, so no category
+    // records anything.
+    let signed = ReasoningDetail {
+        kind: ReasoningDetailKind::Text,
+        id: None,
+        format: Some(ANTHROPIC_FORMAT.to_string()),
+        index: Some(0),
+        payload: json!({"text": "thinking", "signature": "sig"}),
+    };
+
+    // Act
+    let warns = warns_for(&[assistant_turn(vec![signed])]);
+
+    // Assert
+    assert!(
+        warns.is_empty(),
+        "nothing was skipped, so no WARN may fire; got: {warns:?}"
+    );
+}
+
+/// The two anthropic skip causes have different remediations (an upstream
+/// signature defect versus a cross-provider replay), so they stay
+/// SEPARATE lines: an attempt carrying both emits exactly two, never one
+/// per message.
+#[test]
+fn both_skip_categories_emit_exactly_one_line_each() {
+    // Arrange: 3 turns, each carrying one detail of each category.
+    let messages: Vec<Message> = (0..3)
+        .map(|_| {
+            assistant_turn(vec![
+                unsigned_detail(Some(0)),
+                foreign_format_detail(Some("openai-o-format")),
+            ])
+        })
+        .collect();
+
+    // Act
+    let warns = warns_for(&messages);
+
+    // Assert
+    assert_eq!(
+        warns.len(),
+        2,
+        "one line per category, never one per message; got: {warns:?}"
+    );
+    assert_eq!(find_unsigned_warn(&warns).field("skipped_count"), Some("3"));
+    assert_eq!(find_format_warn(&warns).field("skipped_count"), Some("3"));
 }
 
 /// A reasoning detail whose `format` is foreign to the Anthropic
@@ -168,11 +465,8 @@ fn find_format_warn(events: &[CapturedEvent]) -> &CapturedEvent {
     warn
 }
 
-fn format_warn_for(details: &[ReasoningDetail]) -> CapturedEvent {
-    let events = capture_events(|| {
-        emit_reasoning_blocks("prov-test", details, &mut passthrough_tally())
-            .expect("translation ok");
-    });
+fn format_warn_for(details: Vec<ReasoningDetail>) -> CapturedEvent {
+    let events = warns_for(&[assistant_turn(details)]);
     find_format_warn(&events).clone()
 }
 
@@ -190,7 +484,7 @@ fn format_skip_warn_caps_distinct_formats_and_flags_truncation() {
     assert_eq!(details.len(), 12);
 
     // Act
-    let warn = format_warn_for(&details);
+    let warn = format_warn_for(details);
 
     // Assert
     assert_eq!(
@@ -226,7 +520,7 @@ fn format_skip_warn_reports_no_truncation_when_one_format_repeats() {
         .collect();
 
     // Act
-    let warn = format_warn_for(&details);
+    let warn = format_warn_for(details);
 
     // Assert
     assert_eq!(warn.field("skipped_count"), Some("10"));
@@ -257,7 +551,7 @@ fn format_skip_warn_flags_truncation_when_a_new_format_exceeds_the_cap() {
     details.push(foreign_format_detail(Some("brand-new-format")));
 
     // Act
-    let warn = format_warn_for(&details);
+    let warn = format_warn_for(details);
 
     // Assert
     assert_eq!(
@@ -290,7 +584,7 @@ fn format_skip_warn_sanitizes_and_caps_caller_supplied_tags() {
     ];
 
     // Act
-    let warn = format_warn_for(&details);
+    let warn = format_warn_for(details);
 
     // Assert
     let rendered = warn
@@ -327,7 +621,7 @@ fn format_skip_warn_renders_an_absent_format_as_a_placeholder() {
     let details = vec![foreign_format_detail(None)];
 
     // Act
-    let warn = format_warn_for(&details);
+    let warn = format_warn_for(details);
 
     // Assert
     assert_eq!(warn.field("skipped_count"), Some("1"));

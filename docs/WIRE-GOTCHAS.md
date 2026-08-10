@@ -198,14 +198,38 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
   Operators triaging "why is the model losing context?" should grep
   for the WARN line `skipping Thinking blocks on replay: signature
-  missing or empty` to correlate (one WARN per assistant turn that
-  drops unsigned reasoning, carrying `skipped_count=N` and
-  `skipped_indices=[...]`, NOT one per detail -- a request with several
-  such turns emits one line each).
-  `skipped_count` is exact; `skipped_indices` is a sample capped at 8
-  entries, with `indices_truncated=true` when the list was cut.
-  Mirrored in `bedrock/converse/messages.rs` (`emit_reasoning_blocks_converse`) for the Converse
-  stream path.
+  missing or empty`. The reasoning-skip WARNs are aggregated per
+  OUTBOUND PROVIDER ATTEMPT, not per turn and not per detail: one
+  `translate_messages` call pools every assistant turn in the request,
+  so a transcript with several skipping turns emits at most ONE such
+  line carrying `skipped_count=N` (exact total), `turns_affected=M`
+  (exact turn count), and `skipped_locations=[(message_index,
+  detail_index), ...]`. A router retry or a fallback to another
+  provider builds a fresh request and so emits its own set of lines --
+  the honest unit is the attempt, not the request.
+  `skipped_count` and `turns_affected` are exact; `skipped_locations`
+  is a sample capped at 8 `(message_index, detail_index)` pairs, with
+  `skipped_locations_truncated=true` when pairs were omitted. The pair
+  (not a bare index) is required because each message's
+  `reasoning_details` has its own index space, so a detail index pooled
+  across turns cannot be located without the message index beside it; a
+  detail index the upstream did not supply stays `None`.
+  The foreign-format skip is a SEPARATE category on its own WARN line
+  (`skipping reasoning blocks on replay: format is not
+  anthropic-claude-v1`), because a missing signature and a
+  non-Anthropic format have different remediations -- so an attempt
+  that hits both causes emits TWO lines, never one merged line and
+  never one per message. The empty-content backstop
+  (`event=empty_content_backstop`) is folded into the same per-attempt
+  tally with a `backstop_count`, so a Null-content transcript's WARN
+  count stays independent of turn count.
+  The Converse egress
+  (`bedrock/converse/messages.rs`, `emit_reasoning_blocks_converse`)
+  mirrors ONLY the unsigned aggregation, under its own distinct message
+  string (`skipping Thinking blocks on Converse replay: signature
+  missing or empty`). It has NO foreign-format signal at all: a
+  reasoning detail whose format is not `anthropic-claude-v1` is dropped
+  silently on that seam, with no counter and no WARN.
 
 - **Forward-compat for unknown Anthropic SSE block types.**
   Anthropic ships new `content_block.type` values whenever the
