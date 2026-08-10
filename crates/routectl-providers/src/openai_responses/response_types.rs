@@ -86,15 +86,29 @@ pub struct IncompleteDetails {
 ///   translator can lift the `type` tag into `ContentPart::Other.type_tag`
 ///   and the remaining fields into `extras`.
 ///
-/// `#[allow(dead_code)]` on the wire-only fields (id, role, status)
-/// because they're deserialized for forward-compat round-trip but
-/// the translator doesn't consume them today.
+/// Several wire-only fields carry a field-level `#[allow(dead_code)]`:
+/// the translator does not consume them today, but each one's declared
+/// type is an active parse check on a KNOWN item type. Deserialization
+/// of `message` / `reasoning` / `function_call` goes through the typed
+/// payload structs below, where a type mismatch on any modeled field is
+/// an error rather than a fall-through to `Other`. Dropping such a
+/// field would silently widen the accepted wire shape (e.g. `"id": 3`
+/// would begin to parse), so the fields stay and only the lint is
+/// scoped down. `Serialize` is derived nowhere in this file, so no
+/// field is retained for re-emission -- retention buys strictness, not
+/// round-tripping.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum ResponseOutputItem {
     Message {
+        /// Type-checks `id` as a string on a `message` item.
+        #[allow(dead_code)]
         id: String,
+        /// Type-checks `role` as a string. Read by this module's tests
+        /// but not by the translator, so the lib target sees it dead.
+        #[allow(dead_code)]
         role: String,
+        /// Type-checks `status` as a string-or-null.
+        #[allow(dead_code)]
         status: Option<String>,
         content: Vec<ResponsesOutputContent>,
     },
@@ -106,13 +120,21 @@ pub enum ResponseOutputItem {
         /// client to echo back verbatim on the next turn (mirrors
         /// codex `arc_monitor.rs:325-336`).
         encrypted_content: Option<String>,
+        /// Type-checks `status` as a string-or-null on a `reasoning`
+        /// item.
+        #[allow(dead_code)]
         status: Option<String>,
     },
     FunctionCall {
+        /// Type-checks `id` as a string on a `function_call` item.
+        #[allow(dead_code)]
         id: String,
         call_id: String,
         name: String,
         arguments: String,
+        /// Type-checks `status` as a string-or-null on a
+        /// `function_call` item.
+        #[allow(dead_code)]
         status: Option<String>,
     },
     /// Forward-compat catchall. Preserves the original `{type, ...}`
@@ -233,14 +255,16 @@ struct FunctionCallItemPayload {
 ///   - `Other(Value)` -- forward compat
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum ResponsesOutputContent {
     OutputText {
         #[serde(default)]
         text: String,
-        /// Annotations array (citations etc.) -- preserved for forward
-        /// compat but not consumed by the translator.
+        /// Annotations array (citations etc.) -- not consumed by the
+        /// translator, but `Vec<Value>` still type-checks "is an
+        /// array", so dropping the field would let
+        /// `"annotations": 3` start parsing.
         #[serde(default)]
+        #[allow(dead_code)]
         annotations: Vec<Value>,
     },
     Refusal {
@@ -332,41 +356,56 @@ pub struct ResponsesUsage {
 /// future kinds (forward-compat regression). The flat shape parses
 /// every event the same way; unknown `type` values land in `sse.rs`'s
 /// default arm and log at debug.
+///
+/// The unconsumed fields below keep field-level `#[allow(dead_code)]`
+/// rather than being removed: each declared type is an active check
+/// that the wire value has the right primitive shape, and this struct
+/// deserializes EVERY event on the stream. Removing one would let a
+/// wrong-typed value for that key (e.g. `"item_id": 7`) parse where it
+/// currently errors. Deserialize-only -- nothing here is re-emitted.
 #[derive(Debug, Default, Deserialize)]
-#[allow(dead_code)]
 pub struct ResponsesStreamEvent {
     #[serde(rename = "type", default)]
     pub(crate) kind: String,
     #[serde(default)]
     pub(crate) item: Option<Value>,
     /// Item id correlated with this event (some events carry it
-    /// alongside `output_index`). Preserved for forward compat.
+    /// alongside `output_index`). Type-checks the key as a
+    /// string-or-null.
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) item_id: Option<String>,
     #[serde(default)]
     pub(crate) output_index: Option<u32>,
     /// content_index on reasoning_text deltas (codex models it; we
-    /// route via `output_index` alone today).
+    /// route via `output_index` alone today). Type-checks the key as a
+    /// u32-or-null.
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) content_index: Option<u32>,
-    /// summary_index on reasoning_summary_text deltas. Same forward-
-    /// compat reason as `content_index`.
+    /// summary_index on reasoning_summary_text deltas. Same
+    /// type-checking reason as `content_index`.
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) summary_index: Option<u32>,
     /// call_id on function_call.* deltas (alternative dispatch key for
-    /// future event kinds that don't carry output_index).
+    /// future event kinds that don't carry output_index). Type-checks
+    /// the key as a string-or-null.
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) call_id: Option<String>,
     #[serde(default)]
     pub(crate) delta: Option<String>,
-    /// Final text on `*.done` events. Today the state machine doesn't
-    /// rely on this -- accumulated deltas suffice -- but the field is
-    /// here for completeness and future use.
+    /// Final text on `*.done` events. The state machine relies on
+    /// accumulated deltas instead, but the field type-checks the key as
+    /// a string-or-null.
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) text: Option<String>,
     /// Finalized arguments on function_call_arguments.done. Same
     /// rationale as `text`.
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) arguments: Option<String>,
     #[serde(default)]
     pub(crate) response: Option<Value>,
