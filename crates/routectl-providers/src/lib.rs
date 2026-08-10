@@ -41,11 +41,12 @@ compile_error!(
 #[cfg(feature = "openai-compat")]
 pub(crate) mod model_profile;
 
-// Shared leak-guard: WARN once per request when an egress that cannot
-// honor the canonical sampling knobs (`n`, `seed`, `logprobs`,
-// `top_logprobs`, `logit_bias`, `presence_penalty`, `frequency_penalty`)
-// receives one. Gated on those egresses; openai-compat forwards them
-// verbatim and never calls in.
+// Shared leak-guard: WARN once per request naming which of the canonical
+// sampling knobs (`n`, `seed`, `logprobs`, `top_logprobs`, `logit_bias`,
+// `presence_penalty`, `frequency_penalty`) an egress received but cannot
+// translate; each caller passes the subset it does honor. Gated on the
+// egresses that call in; openai-compat forwards them under their canonical
+// names and never calls in.
 #[cfg(any(
     feature = "anthropic-api",
     feature = "bedrock",

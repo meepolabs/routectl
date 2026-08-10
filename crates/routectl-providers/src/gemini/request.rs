@@ -31,10 +31,15 @@ use super::types::{
 /// The config's `id` is used only for error attribution.
 pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
     warn_dropped_cache_control(provider_id, req);
-    // The canonical sampling knobs are not translated onto
-    // `generationConfig` and are gated out of the provider_extras merge as
-    // canonical keys; WARN once so the loss isn't silent.
-    crate::sampling_drop_guard::warn_dropped_sampling_fields(provider_id, req);
+    // `seed`, `presence_penalty` and `frequency_penalty` are translated onto
+    // `generationConfig`; the remaining canonical sampling knobs have no
+    // usable home here and are gated out of the provider_extras merge as
+    // canonical keys, so WARN once naming those so the loss isn't silent.
+    crate::sampling_drop_guard::warn_dropped_sampling_fields(
+        provider_id,
+        req,
+        HONORED_SAMPLING_FIELDS,
+    );
     let system_instruction = build_system_instruction(req);
     let contents = build_contents(provider_id, req)?;
     let (tools, tool_config) = build_tools_and_config(provider_id, req);
@@ -773,6 +778,22 @@ fn build_tool_config(
 // GenerationConfig
 // ---------------------------------------------------------------------------
 
+/// Canonical sampling knobs this egress translates onto `generationConfig`
+/// (see [`build_generation_config`]), so the shared drop guard must not name
+/// them. Canonical names, not their camelCase wire spellings -- the guard
+/// speaks only canonical schema names and never learns a dialect's wire
+/// shape.
+///
+/// The other four canonical knobs stay dropped. `logit_bias` has no
+/// counterpart in Gemini's documented `generationConfig` field list. `n`,
+/// `logprobs` and `top_logprobs` DO have counterparts (`candidateCount`,
+/// `responseLogprobs`, `logprobs`) and are still declined, because
+/// routectl's own response side cannot deliver them: response translation
+/// keeps only the first candidate and emits no logprobs, so requesting
+/// either would bill the caller for output routectl discards. They become
+/// candidates only once the response side carries them.
+const HONORED_SAMPLING_FIELDS: &[&str] = &["seed", "presence_penalty", "frequency_penalty"];
+
 fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
     let thinking_config = build_thinking_config(req);
     let (response_mime_type, response_schema) = build_response_format(req);
@@ -781,6 +802,9 @@ fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
         || req.top_p.is_some()
         || req.max_tokens.is_some()
         || req.stop.is_some()
+        || req.seed.is_some()
+        || req.presence_penalty.is_some()
+        || req.frequency_penalty.is_some()
         || thinking_config.is_some()
         || response_mime_type.is_some();
 
@@ -789,12 +813,19 @@ fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
     }
 
     // top_k is not in the canonical schema; only emit via provider_extras.
+    // seed / penalties are forwarded exactly as the caller set them:
+    // Gemini's own reference publishes no range for them on this endpoint,
+    // so a local clamp would invent a bound and silently change the
+    // caller's sampling. Upstream's rejection is the truthful error.
     Some(GenerationConfig {
         temperature: req.temperature,
         top_p: req.top_p,
         top_k: None,
         max_output_tokens: req.max_tokens,
         stop_sequences: req.stop.clone(),
+        seed: req.seed,
+        presence_penalty: req.presence_penalty,
+        frequency_penalty: req.frequency_penalty,
         response_mime_type,
         response_schema,
         thinking_config,
@@ -2613,15 +2644,112 @@ mod tests {
 
     #[test]
     #[traced_test]
-    fn sampling_fields_warn_once_naming_dropped_fields() {
+    fn all_seven_sampling_knobs_split_between_wire_and_one_warn() {
         let mut req = base_req();
         req.n = Some(3);
         req.seed = Some(42);
+        req.logprobs = Some(true);
+        req.top_logprobs = Some(2);
+        req.logit_bias = Some(json!({"1": -100}));
+        req.presence_penalty = Some(1.75);
+        req.frequency_penalty = Some(-0.5);
+
+        let r = translate("gemini:test", &req).expect("translate");
+        let body = serde_json::to_value(&r).unwrap();
+        let gc = body
+            .get("generationConfig")
+            .and_then(Value::as_object)
+            .expect("generationConfig emitted");
+
+        // The three translated knobs ride the wire under their documented
+        // camelCase keys, with the caller's values unclamped.
+        assert_eq!(gc.get("seed"), Some(&json!(42)));
+        assert_eq!(gc.get("presencePenalty"), Some(&json!(1.75)));
+        assert_eq!(gc.get("frequencyPenalty"), Some(&json!(-0.5)));
+
+        // The four declined knobs reach the wire under no spelling.
+        for key in [
+            "n",
+            "candidateCount",
+            "logprobs",
+            "responseLogprobs",
+            "topLogprobs",
+            "logit_bias",
+            "logitBias",
+        ] {
+            assert!(
+                gc.get(key).is_none(),
+                "generationConfig must not carry {key}"
+            );
+            assert!(body.get(key).is_none(), "body must not carry {key}");
+        }
+
+        // One WARN, naming exactly the four dropped knobs and no value.
+        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
+        assert!(logs_contain("\"n\""));
+        assert!(logs_contain("logprobs"));
+        assert!(logs_contain("top_logprobs"));
+        assert!(logs_contain("logit_bias"));
+        assert!(!logs_contain("\"seed\""));
+        assert!(!logs_contain("presence_penalty"));
+        assert!(!logs_contain("frequency_penalty"));
+        assert!(!logs_contain("-100"));
+    }
+
+    #[test]
+    fn seed_alone_still_emits_generation_config() {
+        let mut req = base_req();
+        req.seed = Some(9);
+
+        let r = translate("gemini:test", &req).expect("translate");
+        let body = serde_json::to_value(&r).unwrap();
+
+        assert_eq!(
+            body.pointer("/generationConfig/seed"),
+            Some(&json!(9)),
+            "a request whose only config knob is seed must still emit generationConfig"
+        );
+    }
+
+    #[test]
+    fn presence_penalty_alone_still_emits_generation_config() {
+        let mut req = base_req();
+        req.presence_penalty = Some(0.25);
+
+        let r = translate("gemini:test", &req).expect("translate");
+        let body = serde_json::to_value(&r).unwrap();
+
+        assert_eq!(
+            body.pointer("/generationConfig/presencePenalty"),
+            Some(&json!(0.25))
+        );
+    }
+
+    #[test]
+    fn frequency_penalty_alone_still_emits_generation_config() {
+        let mut req = base_req();
+        req.frequency_penalty = Some(-1.5);
+
+        let r = translate("gemini:test", &req).expect("translate");
+        let body = serde_json::to_value(&r).unwrap();
+
+        assert_eq!(
+            body.pointer("/generationConfig/frequencyPenalty"),
+            Some(&json!(-1.5))
+        );
+    }
+
+    #[test]
+    #[traced_test]
+    fn no_sampling_warn_when_only_translated_knobs_set() {
+        let mut req = base_req();
+        req.seed = Some(42);
+        req.presence_penalty = Some(0.5);
+        req.frequency_penalty = Some(0.5);
 
         let _ = translate("gemini:test", &req).expect("translate");
 
-        assert!(logs_contain("seed"));
-        logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
+        assert!(!logs_contain("sampling fields dropped"));
     }
 
     #[test]

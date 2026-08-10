@@ -392,6 +392,11 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
     // Arrange
     let mut req = req_with(vec![user_text("hi")]);
     req.n = Some(3);
+    req.seed = Some(42);
+    req.logprobs = Some(true);
+    req.top_logprobs = Some(5);
+    req.logit_bias = Some(json!({"1": -100}));
+    req.presence_penalty = Some(0.5);
     req.frequency_penalty = Some(0.7);
 
     // Act
@@ -399,7 +404,19 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
 
     // Assert
     logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
-    assert!(logs_contain("frequency_penalty"));
+    // This egress honors none of the seven, so the WARN names all of them --
+    // unaffected by any other egress gaining a translation.
+    for name in [
+        "\"n\"",
+        "\"seed\"",
+        "logprobs",
+        "top_logprobs",
+        "logit_bias",
+        "presence_penalty",
+        "frequency_penalty",
+    ] {
+        assert!(logs_contain(name), "WARN must name {name}");
+    }
     assert!(wire.get("n").is_none(), "got: {wire}");
     assert!(wire.get("frequency_penalty").is_none(), "got: {wire}");
 }
