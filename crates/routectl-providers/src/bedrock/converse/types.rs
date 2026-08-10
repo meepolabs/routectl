@@ -280,10 +280,26 @@ pub struct ConverseToolResult {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum ConverseToolResultContent {
-    Text { text: String },
-    Json { json: Value },
-    Image { image: ConverseImage },
-    Document { document: Value },
+    Text {
+        text: String,
+    },
+    Json {
+        json: Value,
+    },
+    Image {
+        image: ConverseImage,
+    },
+    /// `document` stays an opaque `Value` deliberately. Both tool_result
+    /// document paths route through one constructor that builds the
+    /// object from scalar locals and merges no caller-supplied keys, so
+    /// the emitted member set is closed in fact and a struct would add
+    /// no guarantee (a test pins the member set instead). Typing it
+    /// would also change the wire bytes: `Value::Object` is a
+    /// `BTreeMap`, so it serializes keys alphabetically, while a struct
+    /// serializes in declaration order.
+    Document {
+        document: Value,
+    },
 }
 
 // ---------------------------------------------------------------------------

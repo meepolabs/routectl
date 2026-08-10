@@ -267,8 +267,11 @@ pub struct PromptFeedback {
 pub struct Candidate {
     pub(crate) content: Option<ResponseContent>,
     pub(crate) finish_reason: Option<String>,
-    /// Candidate index. Consumed by the streaming path (slice 2); kept
-    /// for wire fidelity on the non-stream path.
+    /// Candidate index. Not read on either the streaming or the
+    /// non-stream path -- both select a candidate positionally. Kept
+    /// because the `u32` type-checks the value when the key IS present, so
+    /// a non-integer `index` fails to parse; `serde(default)` means an
+    /// absent key is accepted and reads as 0.
     #[serde(default)]
     #[allow(dead_code)]
     pub(crate) index: u32,

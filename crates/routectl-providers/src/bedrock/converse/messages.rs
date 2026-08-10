@@ -3155,6 +3155,50 @@ mod tests {
         );
     }
 
+    /// The emitted document object is closed: exactly `format`, `name` and
+    /// `source`, plus `citations` only when citations are enabled. The
+    /// single shared constructor merges no caller-supplied keys, and this
+    /// assertion is what pins that -- the variant carries an opaque `Value`,
+    /// so no type would catch a stray member leaking onto the wire.
+    #[test]
+    fn tool_result_document_member_set_is_closed() {
+        // Arrange
+        let expected_base = ["format", "name", "source"];
+
+        // Act
+        let without = raw_element_document_json(None);
+        let disabled = raw_element_document_json(Some(json!({"enabled": false})));
+        let enabled = raw_element_document_json(Some(json!({"enabled": true})));
+
+        // Assert. Keys are sorted before comparing so this pins the member
+        // SET, not the map's iteration order -- the invariant is which
+        // members reach the wire.
+        let sorted_members = |label: &str, document: &Value| -> Vec<String> {
+            let mut members: Vec<String> = document
+                .as_object()
+                .unwrap_or_else(|| panic!("{label} document must be an object: {document}"))
+                .keys()
+                .cloned()
+                .collect();
+            members.sort_unstable();
+            members
+        };
+
+        for (label, document) in [("absent", &without), ("disabled", &disabled)] {
+            assert_eq!(
+                sorted_members(label, document),
+                expected_base,
+                "{label} citations must emit exactly {expected_base:?}: {document}"
+            );
+        }
+
+        assert_eq!(
+            sorted_members("enabled", &enabled),
+            ["citations", "format", "name", "source"],
+            "enabled citations add exactly one member: {enabled}"
+        );
+    }
+
     /// A malformed citations value on the raw path gets no guessed
     /// interpretation: the member is omitted and the loss is logged, via the
     /// same shared helper the canonical paths use.
