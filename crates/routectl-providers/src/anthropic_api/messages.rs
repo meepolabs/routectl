@@ -29,7 +29,7 @@ use routectl_core::{
     MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role,
 };
 
-use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
+use crate::bounded_diagnostics::{BoundedLogSample, MAX_LOGGED_DIAGNOSTIC_ITEMS};
 
 use super::envelope_policy::EnvelopeUnwrapTally;
 #[cfg(test)]
@@ -76,10 +76,11 @@ use super::types::{AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlo
 ///   this drop path does not run under Preserve.
 ///
 /// One structured WARN fires per request when stripping occurs,
-/// carrying the provider id, the count of dropped blocks, and the
-/// affected message indices. Block content is never logged (could be
-/// reasoning over sensitive data). Preserve strips nothing, so the WARN
-/// does not fire under Preserve.
+/// carrying the provider id, the exact count of dropped blocks, the
+/// exact count of affected messages, and a bounded sample of the
+/// affected message indices flagged when it is only a sample. Block
+/// content is never logged (could be reasoning over sensitive data).
+/// Preserve strips nothing, so the WARN does not fire under Preserve.
 ///
 /// Returns `Cow::Borrowed(&req.messages)` on the no-strip path (Preserve,
 /// or Strip/Auto with nothing to strip) so unmodified requests don't pay
@@ -131,8 +132,13 @@ pub(super) fn normalize_replay_invariants<'a>(
     // nothing the wire can serialize.
     let mut out: Vec<Message> = Vec::with_capacity(req.messages.len());
     let mut dropped_blocks: usize = 0;
-    let mut affected_messages: Vec<usize> = Vec::new();
-    let mut dropped_turn_indices: Vec<usize> = Vec::new();
+    // The samples bound what reaches the log record; the counters beside
+    // them stay exact. A sample's stored length is NOT the magnitude once
+    // it caps, so no logged count is ever read back off a sample.
+    let mut affected_message_count: usize = 0;
+    let mut affected_messages: BoundedLogSample<usize> = BoundedLogSample::new();
+    let mut dropped_turn_count: usize = 0;
+    let mut dropped_turn_indices: BoundedLogSample<usize> = BoundedLogSample::new();
     for (i, msg) in req.messages.iter().enumerate() {
         let MessageContent::Parts(parts) = &msg.content else {
             // Text / Null content cannot carry a Thinking block.
@@ -148,6 +154,7 @@ pub(super) fn normalize_replay_invariants<'a>(
         let stripped_here = original_len.saturating_sub(kept.len());
         if stripped_here > 0 {
             dropped_blocks += stripped_here;
+            affected_message_count += 1;
             affected_messages.push(i);
         }
         let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
@@ -162,6 +169,7 @@ pub(super) fn normalize_replay_invariants<'a>(
             // an empty-array 400 in `build_assistant_content`. A message
             // with tool_calls is NEVER dropped -- that would orphan the
             // next tool_result turn.
+            dropped_turn_count += 1;
             dropped_turn_indices.push(i);
             continue;
         }
@@ -184,7 +192,9 @@ pub(super) fn normalize_replay_invariants<'a>(
     tracing::warn!(
         provider = id,
         dropped_blocks,
-        affected_messages = ?affected_messages,
+        affected_messages_count = affected_message_count,
+        affected_messages = ?affected_messages.items(),
+        affected_messages_truncated = affected_messages.truncated(),
         "stripping unsigned thinking blocks from outgoing request: \
          Anthropic requires a signature on replayed Thinking blocks. \
          Cross-provider fallback or SDKs that fail to round-trip the \
@@ -197,11 +207,12 @@ pub(super) fn normalize_replay_invariants<'a>(
     // turn (the per-block WARN above only covers individual dropped
     // blocks). Distinct field/message so operators can tell "some blocks
     // stripped" from "an entire turn omitted". No content is logged.
-    if !dropped_turn_indices.is_empty() {
+    if dropped_turn_count > 0 {
         tracing::warn!(
             provider = id,
-            dropped_turns = dropped_turn_indices.len(),
-            dropped_message_indices = ?dropped_turn_indices,
+            dropped_turns = dropped_turn_count,
+            dropped_message_indices = ?dropped_turn_indices.items(),
+            dropped_message_indices_truncated = dropped_turn_indices.truncated(),
             "dropping assistant turn(s) from outgoing request: stripping \
              left no wire-serializable content (no Anthropic-emittable \
              reasoning and no tool_calls). Emitting content: [] would 400 \
