@@ -47,6 +47,13 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         // Bedrock does not emulate context_management beta; no cache.
         false,
         None,
+        // Bedrock Invoke is never the genuine Anthropic host: this lane
+        // egresses to a Bedrock endpoint, so a routectl reasoning
+        // envelope in a `redacted_thinking` block rides through
+        // byte-for-byte. Stated EXPLICITLY here rather than inherited, so
+        // the passthrough cannot be flipped by a default changing
+        // elsewhere.
+        false,
     )?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(
@@ -1543,5 +1550,66 @@ mod tests {
         let _ = normalize_request(&cfg, &req).unwrap();
 
         assert!(!logs_contain("sampling fields dropped"));
+    }
+
+    /// This lane egresses to a Bedrock endpoint, never to the genuine
+    /// Anthropic host, so a routectl reasoning envelope inside a
+    /// `redacted_thinking` block rides through byte-for-byte. Pins the
+    /// EXPLICIT passthrough this call site selects, so a later edit that
+    /// flips the shared normalizer's terminal-host argument here shows up
+    /// as a failing test rather than as a silent wire change.
+    #[test]
+    fn reasoning_envelope_passes_through_verbatim_on_bedrock_invoke() {
+        // Arrange
+        use routectl_core::{ContentPart, KnownContentPart, reasoning_envelope};
+        let envelope = reasoning_envelope::wrap(
+            routectl_core::OPENAI_RESPONSES_V1,
+            Some("rs_42"),
+            "rsn_abc123-payload",
+        );
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.messages = vec![
+            req.messages[0].clone(),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::RedactedThinking {
+                        data: envelope.clone(),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "answer".into(),
+                        citations: None,
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ]
+        .into();
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        let data: Vec<&str> = body["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .filter(|b| b["type"] == "redacted_thinking")
+            .filter_map(|b| b["data"].as_str())
+            .collect();
+        assert_eq!(
+            data,
+            vec![envelope.as_str()],
+            "Bedrock Invoke must keep the envelope verbatim: {body}"
+        );
     }
 }

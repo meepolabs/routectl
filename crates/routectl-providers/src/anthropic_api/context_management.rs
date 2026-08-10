@@ -296,11 +296,19 @@ enum KeepPolicy {
 ///   blocks; omitting is better than a hard fail.
 /// - `Encrypted` kind with wrong format: same safety posture.
 ///
-/// Guards mirror `emit_reasoning_blocks` in `request.rs` so both the
+/// Guards mirror `emit_reasoning_blocks` in `messages.rs` so both the
 /// on-request replay path and the context-management inject path apply
 /// the same validation. Keep them in sync when either function changes.
+///
+/// `envelopes` carries the request's reasoning-envelope policy, shared
+/// with the message-translation channel: a cached `Encrypted` detail's
+/// `data` is client-origin bytes (the cache stores what a client-supplied
+/// or upstream-observed detail carried), so a wrapped envelope can reach
+/// the wire through this path too, and both paths must feed one tally so
+/// the aggregated WARN stays at one line per request.
 fn reasoning_detail_to_thinking_block(
     rd: &routectl_core::ReasoningDetail,
+    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
 ) -> std::option::Option<crate::anthropic_api::types::ContentBlock> {
     use crate::anthropic_api::types::ContentBlock;
     use routectl_core::ReasoningDetailKind;
@@ -324,7 +332,7 @@ fn reasoning_detail_to_thinking_block(
                 return None;
             }
             Some(ContentBlock::RedactedThinking {
-                data: rd.payload["data"].as_str().unwrap_or("").to_string(),
+                data: envelopes.wire_data(rd.payload["data"].as_str().unwrap_or("")),
                 cache_control: std::option::Option::None,
             })
         }
@@ -351,6 +359,7 @@ pub fn apply_clear_thinking_edit(
     extras: std::option::Option<&serde_json::Value>,
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
+    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
 ) -> ApplyResult {
     use crate::anthropic_api::types::AnthropicContent;
 
@@ -375,7 +384,7 @@ pub fn apply_clear_thinking_edit(
             AnthropicContent::Blocks(b) => b,
             AnthropicContent::Text(_) => continue,
         };
-        inject_thinking_into_message(blocks, cache, provider_id, &mut missed_tool_ids);
+        inject_thinking_into_message(blocks, cache, provider_id, &mut missed_tool_ids, envelopes);
     }
 
     ApplyResult { missed_tool_ids }
@@ -510,6 +519,7 @@ fn inject_thinking_into_message(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     missed_tool_ids: &mut Vec<String>,
+    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
 ) {
     use crate::anthropic_api::types::ContentBlock;
 
@@ -536,8 +546,15 @@ fn inject_thinking_into_message(
         {
             continue;
         }
-        offset +=
-            try_inject_thinking_at(blocks, current_j, id, cache, provider_id, missed_tool_ids);
+        offset += try_inject_thinking_at(
+            blocks,
+            current_j,
+            id,
+            cache,
+            provider_id,
+            missed_tool_ids,
+            envelopes,
+        );
     }
 }
 
@@ -561,6 +578,7 @@ fn try_inject_thinking_at(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     missed_tool_ids: &mut Vec<String>,
+    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
 ) -> usize {
     use crate::anthropic_api::types::ContentBlock;
 
@@ -573,7 +591,7 @@ fn try_inject_thinking_at(
         }
         let new_blocks: Vec<ContentBlock> = details
             .iter()
-            .filter_map(reasoning_detail_to_thinking_block)
+            .filter_map(|rd| reasoning_detail_to_thinking_block(rd, envelopes))
             .collect();
         if new_blocks.is_empty() {
             // All details were filtered (wrong format, empty

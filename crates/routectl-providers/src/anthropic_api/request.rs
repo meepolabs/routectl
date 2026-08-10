@@ -322,6 +322,16 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// `adaptive` now controls ONLY the thinking wire shape via `build_thinking`;
 /// it no longer drives `output_config.effort` reconciliation, which the late
 /// enforcer `reconcile_output_config_effort` derives from the assembled body.
+///
+/// `terminal_anthropic_host` states whether this body egresses to the
+/// GENUINE Anthropic host. It is the resolved value of
+/// `routectl_core::identity::anthropic::is_anthropic_api_host` on the
+/// egress base_url -- resolved once by the caller that owns the base_url,
+/// never re-derived here or below. It gates exactly one wire-byte
+/// difference: a routectl reasoning envelope inside a `redacted_thinking`
+/// block ships as its unwrapped inner blob on the terminal host and
+/// byte-for-byte everywhere else. Callers with no Anthropic host in play
+/// (the Bedrock Invoke lane) pass `false`.
 pub(crate) fn normalize(
     id: &str,
     req: &ChatRequest,
@@ -331,6 +341,7 @@ pub(crate) fn normalize(
     thinking_cache: Option<
         &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
     >,
+    terminal_anthropic_host: bool,
 ) -> Result<Value> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; WARN once so
@@ -414,7 +425,11 @@ pub(crate) fn normalize(
         lifted_content.as_ref().map(translate_system)
     });
 
-    let mut anthropic_messages = translate_messages(id, &messages)?;
+    let mut envelopes = crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally::new(
+        id,
+        terminal_anthropic_host,
+    );
+    let mut anthropic_messages = translate_messages(id, &messages, &mut envelopes)?;
 
     // When context_management emulation is active, re-inject cached
     // thinking blocks before ToolUse blocks per the clear_thinking_20251015
@@ -426,6 +441,7 @@ pub(crate) fn normalize(
                 req.provider_extras.as_ref(),
                 tc,
                 id,
+                &mut envelopes,
             );
             apply_result.missed_tool_ids
         } else {
@@ -434,6 +450,10 @@ pub(crate) fn normalize(
     } else {
         vec![]
     };
+    // Both channels that can construct a `redacted_thinking` block have
+    // run, so the tally is complete: one WARN per request, never one per
+    // channel.
+    envelopes.flush();
 
     // tool_choice="none" forbids tool use; Anthropic has no native
     // equivalent for the bare-string OpenAI form, so strip BOTH the
@@ -620,7 +640,7 @@ mod reasoning_leak_guard_tests {
         let mut req = user_req();
         req.provider_extras = Some(json!({"reasoning": {"context": "all_turns", "mode": "pro"}}));
 
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
 
         assert!(body.get("reasoning").is_none());
         assert!(body.get("context").is_none());
@@ -665,7 +685,7 @@ mod sampling_leak_guard_tests {
         req.presence_penalty = Some(0.5);
         req.frequency_penalty = Some(0.25);
 
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
 
         assert!(body.get("n").is_none());
         assert!(body.get("logprobs").is_none());
@@ -690,7 +710,7 @@ mod sampling_leak_guard_tests {
     fn no_sampling_warn_when_no_sampling_field_set() {
         let req = user_req();
 
-        let _ = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let _ = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
 
         assert!(!logs_contain("sampling fields dropped"));
     }
@@ -732,7 +752,7 @@ mod response_format_tests {
                 "strict": true
             }
         })));
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         let fmt = &body["output_config"]["format"];
         assert_eq!(fmt["type"], "json_schema", "got: {body}");
         assert_eq!(fmt["schema"]["required"][0], "x", "got: {body}");
@@ -743,7 +763,7 @@ mod response_format_tests {
     #[test]
     fn json_object_response_format_maps_to_output_config_format() {
         let req = user_req(Some(json!({"type": "json_object"})));
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "got: {body}"
@@ -754,14 +774,14 @@ mod response_format_tests {
     fn text_response_format_emits_no_output_config() {
         // A plain-text directive is not structured output; nothing maps.
         let req = user_req(Some(json!({"type": "text"})));
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         assert!(body.get("output_config").is_none(), "got: {body}");
     }
 
     #[test]
     fn absent_response_format_emits_no_output_config() {
         let req = user_req(None);
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         assert!(body.get("output_config").is_none(), "got: {body}");
     }
 
@@ -773,7 +793,7 @@ mod response_format_tests {
         req.provider_extras = Some(json!({
             "output_config": {"format": {"type": "json_schema", "schema": {"type": "string"}}}
         }));
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_schema",
             "provider_extras format must win: {body}"
@@ -788,7 +808,7 @@ mod response_format_tests {
         // replacing the non-object value, not silently no-op.
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": null}));
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive a null provider_extras output_config: {body}"
@@ -799,7 +819,7 @@ mod response_format_tests {
     fn scalar_provider_extras_output_config_does_not_drop_response_format() {
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": 7}));
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive a scalar provider_extras output_config: {body}"
@@ -810,7 +830,7 @@ mod response_format_tests {
     fn array_provider_extras_output_config_does_not_drop_response_format() {
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": [1, 2, 3]}));
-        let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive an array provider_extras output_config: {body}"
@@ -924,7 +944,7 @@ mod parallel_tool_calls_tests {
     }
 
     fn run(req: &ChatRequest) -> Value {
-        normalize("anthropic:test", req, false, &[], false, None).unwrap()
+        normalize("anthropic:test", req, false, &[], false, None, false).unwrap()
     }
 
     #[test]

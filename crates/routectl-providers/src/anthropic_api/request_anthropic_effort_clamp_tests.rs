@@ -40,7 +40,8 @@ fn adaptive_clamps_effort_to_operator_cap() {
     ]);
 
     // Act
-    let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, true, &[], false, None, false).expect("normalize must succeed");
 
     // Assert: effort clamped from "max" down to "high" (operator cap).
     let oc = body
@@ -74,7 +75,8 @@ fn adaptive_passthrough_when_effort_levels_empty() {
     req.routectl_internal.effort_levels = std::sync::Arc::from(Vec::<String>::new());
 
     // Act
-    let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, true, &[], false, None, false).expect("normalize must succeed");
 
     // Assert: effort passes through unchanged.
     let oc = body
@@ -115,7 +117,8 @@ fn legacy_clamps_effort_to_operator_cost_cap() {
         std::sync::Arc::from(vec!["low".to_string(), "medium".to_string()]);
 
     // Act
-    let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, &[], false, None, false).expect("normalize must succeed");
 
     // Assert: "medium" table budget 8192 window-clamped to 4095.
     let thinking = body.get("thinking").expect("thinking field present");
@@ -176,7 +179,8 @@ fn adaptive_clamps_effort_to_operator_cap_even_when_provider_extras_carries_raw(
     ]);
 
     // Act
-    let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, true, &[], false, None, false).expect("normalize must succeed");
 
     // Assert: effort clamped to "high" even though raw "max" was
     // layered back in by merge_provider_extras.
@@ -218,7 +222,8 @@ fn adaptive_passes_through_provider_extras_effort_when_levels_empty() {
     req.routectl_internal.effort_levels = std::sync::Arc::from(Vec::<String>::new());
 
     // Act
-    let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, true, &[], false, None, false).expect("normalize must succeed");
 
     // Assert
     let oc = body
@@ -267,7 +272,8 @@ fn adaptive_reclamp_preserves_sibling_output_config_keys() {
     ]);
 
     // Act
-    let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, true, &[], false, None, false).expect("normalize must succeed");
 
     // Assert: effort clamped, format preserved verbatim.
     let oc = body
@@ -305,7 +311,8 @@ fn adaptive_provider_extras_none_effort_omits_effort_and_disables_thinking() {
     };
 
     // Act
-    let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, true, &[], false, None, false).expect("normalize must succeed");
 
     // Assert: no effort survives, and thinking is the explicit disable form.
     assert!(

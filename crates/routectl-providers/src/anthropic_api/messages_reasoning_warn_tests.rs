@@ -66,7 +66,7 @@ fn unsigned_reasoning_warn_caps_logged_indices_and_flags_truncation() {
     // Act
     let mut blocks_out = None;
     let events = capture_events(|| {
-        blocks_out = Some(emit_reasoning_blocks("prov-test", &details).expect("translation ok"));
+        blocks_out = Some(emit_reasoning_blocks("prov-test", &details, &mut passthrough_tally()).expect("translation ok"));
     });
 
     // Assert
@@ -110,7 +110,7 @@ fn unsigned_reasoning_warn_keeps_full_index_list_when_within_cap() {
 
     // Act
     let events = capture_events(|| {
-        emit_reasoning_blocks("prov-test", &details).expect("translation ok");
+        emit_reasoning_blocks("prov-test", &details, &mut passthrough_tally()).expect("translation ok");
     });
 
     // Assert

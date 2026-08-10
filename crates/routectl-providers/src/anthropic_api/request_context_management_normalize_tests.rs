@@ -123,7 +123,8 @@ fn req_with_tool_use_history_and_cm_adaptive() -> ChatRequest {
 #[test]
 fn normalize_strips_context_management_body_key_when_flag_true() {
     let req = req_with_cm_extras();
-    let body = normalize("test", &req, false, &[], true, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, &[], true, None, false).expect("normalize must succeed");
     assert!(
         body.get("context_management").is_none(),
         "context_management body key must be stripped when flag=true; got: {body}"
@@ -135,7 +136,8 @@ fn normalize_strips_context_management_body_key_when_flag_true() {
 #[test]
 fn normalize_keeps_context_management_body_key_when_flag_false() {
     let req = req_with_cm_extras();
-    let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, &[], false, None, false).expect("normalize must succeed");
     assert!(
         body.get("context_management").is_some(),
         "context_management body key must survive when flag=false; got: {body}"
@@ -166,7 +168,8 @@ fn normalize_strips_billing_system_block() {
             citations: None,
         },
     ]));
-    let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, &[], false, None, false).expect("normalize must succeed");
     let sys = body["system"].as_array().expect("system survives as array");
     assert_eq!(
         sys.len(),
@@ -185,7 +188,8 @@ fn normalize_drops_pure_billing_text_system() {
     req.system = Some(SystemContent::Text(
         "x-anthropic-billing-header: v=1; fp=secret".into(),
     ));
-    let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, &[], false, None, false).expect("normalize must succeed");
     assert!(
         body.get("system").is_none() || body["system"].is_null(),
         "pure-billing Text system must collapse to absent; got: {body}"
@@ -237,7 +241,8 @@ fn normalize_strips_billing_from_legacy_system_message() {
         },
     ]
     .into();
-    let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, &[], false, None, false).expect("normalize must succeed");
     let sys = body
         .get("system")
         .and_then(|s| s.as_str())
@@ -283,7 +288,8 @@ fn normalize_drops_pure_billing_legacy_system_message() {
         },
     ]
     .into();
-    let body = normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, &[], false, None, false).expect("normalize must succeed");
     assert!(
         body.get("system").is_none() || body["system"].is_null(),
         "a pure-billing legacy system must collapse to absent; got: {body}"
@@ -298,7 +304,7 @@ fn normalize_drops_pure_billing_legacy_system_message() {
 fn normalize_soft_fail_strips_thinking_on_cache_miss() {
     let req = req_with_tool_use_history_and_cm();
     let cache = Arc::new(small_cache(8)); // nothing seeded
-    let body = normalize("test", &req, false, &[], true, Some(&cache))
+    let body = normalize("test", &req, false, &[], true, Some(&cache), false)
         .expect("normalize must succeed even on cache miss");
     assert!(
         body.get("thinking").is_none(),
@@ -317,7 +323,7 @@ fn normalize_soft_fail_strips_thinking_on_cache_miss() {
 fn normalize_soft_fail_drops_orphan_output_config_effort_on_cache_miss() {
     let req = req_with_tool_use_history_and_cm_adaptive();
     let cache = Arc::new(small_cache(8)); // nothing seeded -> cache miss
-    let body = normalize("test", &req, true, &[], true, Some(&cache))
+    let body = normalize("test", &req, true, &[], true, Some(&cache), false)
         .expect("normalize must succeed even on cache miss");
     assert!(
         body.get("thinking").is_none(),
@@ -344,7 +350,7 @@ fn normalize_recomputes_sampling_after_cache_miss_thinking_strip() {
     req.temperature = Some(0.2);
     req.top_p = Some(0.9); // caller sent both; temperature wins per else-branch
     let cache = Arc::new(small_cache(8)); // nothing seeded -> cache miss
-    let body = normalize("test", &req, false, &[], true, Some(&cache))
+    let body = normalize("test", &req, false, &[], true, Some(&cache), false)
         .expect("normalize must succeed even on cache miss");
     assert!(
         body.get("thinking").is_none(),
@@ -382,7 +388,7 @@ fn normalize_no_soft_fail_when_cache_hits() {
         super::super::context_management::THINKING_CACHE_TTL,
         "test",
     );
-    let body = normalize("test", &req, false, &[], true, Some(&cache))
+    let body = normalize("test", &req, false, &[], true, Some(&cache), false)
         .expect("normalize must succeed with cache hit");
     assert!(
         body.get("thinking").is_some(),

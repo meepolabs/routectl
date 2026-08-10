@@ -64,7 +64,7 @@ fn empty_canonical_system_text_emits_no_system_field() {
     );
 
     // Act
-    let body = normalize("p", &req, false, &[], false, None).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
 
     // Assert
     assert!(
@@ -82,7 +82,7 @@ fn whitespace_only_canonical_system_text_emits_no_system_field() {
     );
 
     // Act
-    let body = normalize("p", &req, false, &[], false, None).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
 
     // Assert
     assert!(body.get("system").is_none(), "{body}");
@@ -100,7 +100,7 @@ fn all_blank_canonical_system_blocks_emit_no_system_field() {
     );
 
     // Act
-    let body = normalize("p", &req, false, &[], false, None).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
 
     // Assert
     assert!(body.get("system").is_none(), "{body}");
@@ -116,7 +116,7 @@ fn blank_canonical_system_falls_through_to_the_system_message_lift() {
     );
 
     // Act
-    let body = normalize("p", &req, false, &[], false, None).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
 
     // Assert
     assert_eq!(
@@ -137,7 +137,7 @@ fn blank_block_beside_real_block_keeps_only_the_real_block() {
     );
 
     // Act
-    let body = normalize("p", &req, false, &[], false, None).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
 
     // Assert: a partially-blank Blocks system is NOT blank, so it is
     // forwarded verbatim (per-block cache_control/citations preservation is
@@ -156,7 +156,7 @@ fn non_blank_canonical_system_still_reaches_the_wire() {
     );
 
     // Act
-    let body = normalize("p", &req, false, &[], false, None).unwrap();
+    let body = normalize("p", &req, false, &[], false, None, false).unwrap();
 
     // Assert
     assert_eq!(body["system"], "you are helpful");
