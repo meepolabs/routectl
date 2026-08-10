@@ -29,7 +29,7 @@ use routectl_core::{
     MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role, sanitize_for_log,
 };
 
-use crate::bounded_diagnostics::{BoundedLogSample, MAX_LOGGED_DIAGNOSTIC_ITEMS};
+use crate::bounded_diagnostics::BoundedLogSample;
 
 use super::envelope_policy::EnvelopeUnwrapTally;
 #[cfg(test)]
@@ -490,13 +490,139 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
     }
 }
 
+/// Aggregated reasoning-skip diagnostics for ONE outbound provider
+/// attempt: every assistant turn in the request pools into these
+/// counters, and `flush` emits at most one WARN per category. Without
+/// the pooling a long transcript emitted O(turns) WARN lines for one
+/// upstream defect.
+///
+/// The three categories stay SEPARATE lines because their remediations
+/// differ (a missing signature is an upstream streaming defect; a
+/// foreign format tag is a cross-provider replay; the backstop is a
+/// predicate-drift alarm), so one attempt legitimately emits more than
+/// one line. Retries and fallback attempts each build their own tally.
+struct ReasoningSkipTally<'a> {
+    provider: &'a str,
+    unsigned_count: usize,
+    unsigned_turns: usize,
+    /// Index of the turn the most recent unsigned skip came from, so
+    /// `unsigned_turns` counts turns rather than details. Correct because
+    /// `translate_messages_threaded` walks the messages in index order --
+    /// a turn is never revisited after a later one has been recorded.
+    unsigned_last_turn: Option<usize>,
+    unsigned_locations: BoundedLogSample<(usize, Option<u32>)>,
+    format_count: usize,
+    format_values: BoundedLogSample<String>,
+    backstop_count: usize,
+}
+
+impl<'a> ReasoningSkipTally<'a> {
+    fn new(provider: &'a str) -> Self {
+        Self {
+            provider,
+            unsigned_count: 0,
+            unsigned_turns: 0,
+            unsigned_last_turn: None,
+            unsigned_locations: BoundedLogSample::new(),
+            format_count: 0,
+            format_values: BoundedLogSample::new(),
+            backstop_count: 0,
+        }
+    }
+
+    /// Record one reasoning detail skipped for a missing or empty
+    /// signature. `message_index` is the canonical request index and
+    /// `detail_index` the upstream-supplied index WITHIN that message --
+    /// each message's `reasoning_details` has its own index space, so a
+    /// bare detail index pooled across turns cannot be located. A `None`
+    /// detail index stays `None` rather than being flattened to a
+    /// plausible integer.
+    fn record_unsigned(&mut self, message_index: usize, detail_index: Option<u32>) {
+        self.unsigned_count = self.unsigned_count.saturating_add(1);
+        if self.unsigned_last_turn != Some(message_index) {
+            self.unsigned_turns = self.unsigned_turns.saturating_add(1);
+            self.unsigned_last_turn = Some(message_index);
+        }
+        self.unsigned_locations.push((message_index, detail_index));
+    }
+
+    /// Record one reasoning detail skipped because its format tag is not
+    /// `anthropic-claude-v1`. The tag is caller-supplied, so it is
+    /// sanitized BEFORE the distinctness test: that bounds each entry's
+    /// length as it is collected and collapses tags differing only in
+    /// control characters into one slot instead of letting them each
+    /// claim one.
+    fn record_format(&mut self, format: Option<&str>) {
+        self.format_count = self.format_count.saturating_add(1);
+        self.format_values
+            .push_distinct(sanitize_for_log(format.unwrap_or("<none>")));
+    }
+
+    /// Record one assistant turn whose wire content assembled empty and
+    /// needed the empty-text backstop.
+    const fn record_backstop(&mut self) {
+        self.backstop_count = self.backstop_count.saturating_add(1);
+    }
+
+    /// Emit one WARN per non-empty category. Called exactly once, by
+    /// `translate_messages`, after the threaded walk returns -- never
+    /// from `Drop`, so the emission is explicit and testable.
+    ///
+    /// No reasoning payload reaches a log field (it could be reasoning
+    /// over sensitive data); only counts, canonical indices, and
+    /// sanitized format tags do. Every count is its own exact counter --
+    /// never a sample's stored length, which caps.
+    fn flush(&self) {
+        if self.unsigned_count > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                skipped_count = self.unsigned_count,
+                turns_affected = self.unsigned_turns,
+                skipped_locations = ?self.unsigned_locations.items(),
+                skipped_locations_truncated = self.unsigned_locations.truncated(),
+                "skipping Thinking blocks on replay: signature missing or empty \
+                 (multi-block thinking history is now partially echoed; \
+                 see CLAUDE.md \"Anthropic streaming reasoning replay\" residual)"
+            );
+        }
+        if self.format_count > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                skipped_count = self.format_count,
+                skipped_formats = ?self.format_values.items(),
+                formats_truncated = self.format_values.truncated(),
+                "skipping reasoning blocks on replay: format is not anthropic-claude-v1 \
+                 (non-Anthropic format details cannot be echoed as Anthropic Thinking blocks)"
+            );
+        }
+        if self.backstop_count > 0 {
+            tracing::warn!(
+                provider = self.provider,
+                event = "empty_content_backstop",
+                backstop_count = self.backstop_count,
+                "assistant content assembled empty after reasoning/tool_call \
+                 emission; inserting one empty text block so an invalid \
+                 content: [] never reaches the wire (last-resort backstop)."
+            );
+        }
+    }
+}
+
 /// Reconstruct an Anthropic content array for an assistant message that
 /// carries reasoning_details (tool-use continuity). thinking blocks with
 /// signatures must be passed back verbatim.
+///
+/// `message_index` is this turn's index in the canonical request array,
+/// threaded in so the aggregated diagnostics can name the turn a skipped
+/// detail came from. It is never inferred from the output array: system
+/// removal and tool-run folding make output positions a different
+/// coordinate system.
 fn build_assistant_content(
     id: &str,
+    message_index: usize,
     msg: &Message,
     envelopes: &mut EnvelopeUnwrapTally,
+    skips: &mut ReasoningSkipTally<'_>,
 ) -> Result<AnthropicContent> {
     let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
     if msg.reasoning_details.is_empty() && !has_tool_calls {
@@ -507,7 +633,8 @@ fn build_assistant_content(
         return Ok(translate_assistant_simple_content(&msg.content, envelopes));
     }
 
-    let mut blocks = emit_reasoning_blocks(id, &msg.reasoning_details, envelopes)?;
+    let mut blocks =
+        emit_reasoning_blocks(message_index, &msg.reasoning_details, envelopes, skips)?;
     let emitted_tool_ids = append_assistant_message_blocks(&mut blocks, &msg.content, envelopes);
     if let Some(tool_calls) = msg.tool_calls.as_ref() {
         emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks, &emitted_tool_ids)?;
@@ -520,14 +647,10 @@ fn build_assistant_content(
         // only unsigned reasoning_details reaches here with an empty
         // block list. Anthropic 400s on content: [], so insert one empty
         // text block. Should be rare: frequent firing means the
-        // emittability predicate drifted from the emit behavior.
-        tracing::warn!(
-            provider = id,
-            event = "empty_content_backstop",
-            "assistant content assembled empty after reasoning/tool_call \
-             emission; inserting one empty text block so an invalid \
-             content: [] never reaches the wire (last-resort backstop)."
-        );
+        // emittability predicate drifted from the emit behavior. The WARN
+        // is aggregated per attempt via the tally rather than emitted
+        // per turn.
+        skips.record_backstop();
         blocks.push(ContentBlock::Text {
             text: String::new(),
             citations: None,
@@ -634,32 +757,21 @@ fn emit_tool_use_blocks_from_calls(
 /// channel exactly as it does to the content-part walk;
 /// `is_anthropic_emittable_detail` decides emittability only and is not a
 /// barrier here.
+///
+/// Skips are recorded into `skips` rather than logged here: the WARNs are
+/// aggregated across every assistant turn of one outbound attempt and
+/// emitted once, by `translate_messages`. `message_index` labels which
+/// canonical turn each skip came from.
 fn emit_reasoning_blocks(
-    id: &str,
+    message_index: usize,
     details: &[ReasoningDetail],
     envelopes: &mut EnvelopeUnwrapTally,
+    skips: &mut ReasoningSkipTally<'_>,
 ) -> Result<Vec<ContentBlock>> {
     let mut sorted = details.to_vec();
     sorted.sort_by_key(|d| d.index.unwrap_or(0));
 
     let mut blocks: Vec<ContentBlock> = Vec::with_capacity(sorted.len());
-    // Exact drop count for the operator, plus a sample of the dropped
-    // indices capped at collection time. `None` in the sample preserves
-    // an index the upstream did not supply, kept as `None` rather than
-    // flattened to a plausible integer so a missing index stays
-    // distinguishable from index 0.
-    let mut skipped_unsigned_count: usize = 0;
-    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_DIAGNOSTIC_ITEMS);
-    // Track reasoning details dropped because their format is not
-    // `anthropic-claude-v1`. These cannot be replayed as Anthropic blocks
-    // regardless of signature presence; a separate WARN aggregates them so
-    // operators can distinguish format-mismatch drops from unsigned drops.
-    let mut skipped_format_count: usize = 0;
-    // The format tag is caller-supplied, so it is sanitized BEFORE the
-    // distinctness test: that bounds each entry's length as it is
-    // collected and collapses tags differing only in control characters
-    // into one slot instead of letting them each claim one.
-    let mut skipped_format_values: BoundedLogSample<String> = BoundedLogSample::new();
     for detail in &sorted {
         if !is_anthropic_emittable_detail(detail) {
             // Not emittable: categorize for the aggregated WARNs so
@@ -672,16 +784,10 @@ fn emit_reasoning_blocks(
                 ReasoningDetailKind::Text | ReasoningDetailKind::Encrypted
                     if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) =>
                 {
-                    skipped_format_count = skipped_format_count.saturating_add(1);
-                    skipped_format_values.push_distinct(sanitize_for_log(
-                        detail.format.as_deref().unwrap_or("<none>"),
-                    ));
+                    skips.record_format(detail.format.as_deref());
                 }
                 ReasoningDetailKind::Text => {
-                    skipped_unsigned_count = skipped_unsigned_count.saturating_add(1);
-                    if skipped_unsigned.len() < MAX_LOGGED_DIAGNOSTIC_ITEMS {
-                        skipped_unsigned.push(detail.index);
-                    }
+                    skips.record_unsigned(message_index, detail.index);
                 }
                 ReasoningDetailKind::Encrypted | ReasoningDetailKind::Summary => {}
             }
@@ -719,27 +825,6 @@ fn emit_reasoning_blocks(
             }
             ReasoningDetailKind::Summary => {}
         }
-    }
-    if skipped_unsigned_count > 0 {
-        tracing::warn!(
-            provider = id,
-            skipped_count = skipped_unsigned_count,
-            skipped_indices = ?skipped_unsigned,
-            indices_truncated = skipped_unsigned_count > skipped_unsigned.len(),
-            "skipping Thinking blocks on replay: signature missing or empty \
-             (multi-block thinking history is now partially echoed; \
-             see CLAUDE.md \"Anthropic streaming reasoning replay\" residual)"
-        );
-    }
-    if skipped_format_count > 0 {
-        tracing::warn!(
-            provider = id,
-            skipped_count = skipped_format_count,
-            skipped_formats = ?skipped_format_values.items(),
-            formats_truncated = skipped_format_values.truncated(),
-            "skipping reasoning blocks on replay: format is not anthropic-claude-v1 \
-             (non-Anthropic format details cannot be echoed as Anthropic Thinking blocks)"
-        );
     }
     Ok(blocks)
 }
@@ -955,10 +1040,32 @@ fn ensure_min_tool_result_content(content: Value) -> Value {
 /// context-management reinjection path constructs `redacted_thinking`
 /// blocks too, after this returns, and both channels must share one tally
 /// so the aggregated WARN stays at one line per request.
+///
+/// The reasoning-skip tally, by contrast, is owned HERE: this walk is its
+/// only feeder, so a wider owner would spread the flush over call sites
+/// that never fill it. Every fallible step lives in
+/// `translate_messages_threaded`, so no `?` can return past the flush --
+/// the single-emission guarantee is structural rather than a discipline
+/// each early return has to remember.
 pub(super) fn translate_messages(
     id: &str,
     messages: &[Message],
     envelopes: &mut EnvelopeUnwrapTally,
+) -> Result<Vec<AnthropicMessage>> {
+    let mut skips = ReasoningSkipTally::new(id);
+    let out = translate_messages_threaded(id, messages, envelopes, &mut skips);
+    skips.flush();
+    out
+}
+
+/// The per-role walk itself, threading the reasoning-skip tally through
+/// every assistant turn. Holds every `?` in the translation so its caller
+/// can flush the tally unconditionally.
+fn translate_messages_threaded(
+    id: &str,
+    messages: &[Message],
+    envelopes: &mut EnvelopeUnwrapTally,
+    skips: &mut ReasoningSkipTally<'_>,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut out: Vec<AnthropicMessage> = Vec::with_capacity(messages.len());
     let mut i = 0usize;
@@ -980,7 +1087,7 @@ pub(super) fn translate_messages(
             Role::Assistant => {
                 out.push(AnthropicMessage {
                     role: AnthropicRole::Assistant,
-                    content: build_assistant_content(id, msg, envelopes)?,
+                    content: build_assistant_content(id, i, msg, envelopes, skips)?,
                 });
                 i += 1;
             }
@@ -1602,7 +1709,8 @@ mod tool_id_correlation_tests {
 #[cfg(test)]
 mod empty_content_backstop_tests {
     use super::{
-        build_assistant_content, normalize_replay_invariants, passthrough_tally, translate_messages,
+        ReasoningSkipTally, build_assistant_content, normalize_replay_invariants,
+        passthrough_tally, translate_messages,
     };
     use crate::anthropic_api::ANTHROPIC_FORMAT;
     use crate::anthropic_api::types::{AnthropicContent, ContentBlock};
@@ -1774,7 +1882,8 @@ mod empty_content_backstop_tests {
     /// The backstop path: a Null-content turn carrying only unsigned
     /// reasoning_details never passes through the strip rebuild (Null is
     /// skipped there), so `build_assistant_content` assembles zero blocks.
-    /// The backstop inserts one empty text block and WARNs.
+    /// The backstop inserts one empty text block and records itself in the
+    /// per-attempt tally; the WARN fires on the tally's flush, not here.
     #[test]
     fn build_assistant_content_backstops_empty_blocks_with_warn() {
         // Arrange
@@ -1786,11 +1895,13 @@ mod empty_content_backstop_tests {
 
         // Act
         let mut captured = None;
+        let mut skips = ReasoningSkipTally::new("anthropic");
         let events = routectl_testkit::capture_events(|| {
             captured = Some(
-                build_assistant_content("anthropic", &msg, &mut passthrough_tally())
+                build_assistant_content("anthropic", 0, &msg, &mut passthrough_tally(), &mut skips)
                     .expect("build must not error"),
             );
+            skips.flush();
         });
 
         // Assert -- exactly one empty text block, never content: [].
@@ -1803,7 +1914,7 @@ mod empty_content_backstop_tests {
             "backstop block is an empty text block"
         );
 
-        // Assert -- the backstop WARN fired.
+        // Assert -- the aggregated backstop WARN fired on flush.
         let backstop_warn = events.iter().find(|e| {
             e.level == tracing::Level::WARN && e.field("event") == Some("empty_content_backstop")
         });
@@ -1814,12 +1925,22 @@ mod empty_content_backstop_tests {
 #[cfg(test)]
 mod tool_use_dedup_tests {
     use super::{
-        ContentBlock, build_assistant_content, build_tool_message, passthrough_tally,
-        translate_messages,
+        AnthropicContent, ContentBlock, ReasoningSkipTally, build_assistant_content,
+        build_tool_message, passthrough_tally, translate_messages,
     };
-    use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
+    use crate::anthropic_api::types::AnthropicMessage;
     use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
     use serde_json::{Value, json};
+
+    /// `build_assistant_content` with the diagnostics plumbing these
+    /// tool_use tests do not exercise: turn index 0 and a throwaway
+    /// per-attempt tally that is never flushed (no skip category is
+    /// reachable from a tool_use-only message).
+    fn assistant_content_of(msg: &Message) -> AnthropicContent {
+        let mut skips = ReasoningSkipTally::new("anthropic");
+        build_assistant_content("anthropic", 0, msg, &mut passthrough_tally(), &mut skips)
+            .expect("build must not error")
+    }
 
     fn tool_use_part(id: &str) -> ContentPart {
         ContentPart::Known(KnownContentPart::ToolUse {
@@ -1876,8 +1997,7 @@ mod tool_use_dedup_tests {
         );
 
         // Act
-        let content = build_assistant_content("anthropic", &msg, &mut passthrough_tally())
-            .expect("build must not error");
+        let content = assistant_content_of(&msg);
 
         // Assert
         let uses = tool_use_blocks(&content);
@@ -1898,8 +2018,7 @@ mod tool_use_dedup_tests {
         );
 
         // Act
-        let content = build_assistant_content("anthropic", &msg, &mut passthrough_tally())
-            .expect("build must not error");
+        let content = assistant_content_of(&msg);
 
         // Assert
         let uses = tool_use_blocks(&content);
@@ -1919,8 +2038,7 @@ mod tool_use_dedup_tests {
         );
 
         // Act
-        let content = build_assistant_content("anthropic", &msg, &mut passthrough_tally())
-            .expect("build must not error");
+        let content = assistant_content_of(&msg);
 
         // Assert
         let uses = tool_use_blocks(&content);
@@ -1939,8 +2057,7 @@ mod tool_use_dedup_tests {
         );
 
         // Act
-        let content = build_assistant_content("anthropic", &msg, &mut passthrough_tally())
-            .expect("build must not error");
+        let content = assistant_content_of(&msg);
 
         // Assert
         let uses = tool_use_blocks(&content);
@@ -2008,8 +2125,7 @@ mod tool_use_dedup_tests {
         );
 
         // Act
-        let content = build_assistant_content("anthropic", &msg, &mut passthrough_tally())
-            .expect("build must not error");
+        let content = assistant_content_of(&msg);
 
         // Assert: both survive, under ids that do not collide.
         let uses = tool_use_blocks(&content);

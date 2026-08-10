@@ -6,6 +6,7 @@
 use super::*;
 use crate::anthropic_api::ANTHROPIC_FORMAT;
 use crate::anthropic_api::envelope_policy::passthrough_tally;
+use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
 use routectl_testkit::{CapturedEvent, capture_events};
 
 include!("messages_reasoning_warn_tests.rs");

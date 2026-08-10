@@ -26,12 +26,6 @@ pub const MAX_LOGGED_DIAGNOSTIC_ITEMS: usize = 8;
 /// operators and the wire-behavior docs reference separately. Unifying
 /// them would require passing the message text in as a constructor
 /// argument and carrying fields most call sites never set.
-///
-/// The allowance below is scoped to this type and is temporary: the lib
-/// target sees these methods unused until the aggregated-WARN sites
-/// collect through them. Delete it once they do -- a file-wide allowance
-/// would also hide a site that kept its unbounded vector by mistake.
-#[allow(dead_code)]
 pub struct BoundedLogSample<T> {
     items: Vec<T>,
     truncated: bool,
@@ -46,7 +40,6 @@ impl<T> Default for BoundedLogSample<T> {
     }
 }
 
-#[allow(dead_code)]
 impl<T> BoundedLogSample<T> {
     /// An empty sample, pre-sized to the cap.
     pub fn new() -> Self {
@@ -71,11 +64,21 @@ impl<T> BoundedLogSample<T> {
 
     /// How many items are stored -- NOT how many were offered. Callers
     /// that need the exact magnitude keep their own count.
+    ///
+    /// No collection site reads this: an exact count is always its own
+    /// counter, which is the whole point of the type. It exists for the
+    /// unit tests that pin the bounding behavior, so the lib target sees
+    /// it (and its `is_empty` pair, which clippy requires alongside it)
+    /// unused. This allowance is scoped to the two accessors rather than
+    /// the impl block so a collection method that lost its last caller
+    /// still surfaces.
+    #[allow(dead_code)]
     pub const fn len(&self) -> usize {
         self.items.len()
     }
 
     /// Whether the sample has stored nothing at all.
+    #[allow(dead_code)]
     pub const fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -92,7 +95,6 @@ impl<T> BoundedLogSample<T> {
     }
 }
 
-#[allow(dead_code)]
 impl<T: PartialEq> BoundedLogSample<T> {
     /// Store `value` unless an equal value is already stored. A linear
     /// scan over at most `MAX_LOGGED_DIAGNOSTIC_ITEMS` entries is cheaper
