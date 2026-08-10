@@ -960,7 +960,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `tests/contract_egress_bedrock_converse.rs` -- canonical -> Bedrock-Converse
   vendor-neutral body snapshots
 - `tests/contract_egress_openai_responses.rs` -- canonical -> OpenAI Responses
-  body snapshots; pins flat tool/tool_choice shapes
+  body snapshots; pins flat tool/tool_choice shapes, the api-key
+  `max_output_tokens` passthrough, and the bedrock-mantle store lock
 - `tests/contract_response_egress.rs` -- canned upstream body -> canonical
   `ChatResponse` (Anthropic + openai-compat)
 - `tests/contract_stream_egress.rs` -- canned SSE bodies through `stream()`
