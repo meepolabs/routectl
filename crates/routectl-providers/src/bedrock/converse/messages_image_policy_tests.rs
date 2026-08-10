@@ -131,6 +131,25 @@ fn assert_warn_dropped(messages: &[Message], needle: &str) {
     );
 }
 
+/// Assert the single translated message is a toolResult whose first content
+/// element took the JSON fallback rather than failing the request.
+fn assert_tool_result_json_fallback(messages: &[Message]) {
+    let blocks = only_message_blocks(messages);
+    let ConverseContentBlock::ToolResult { tool_result } =
+        blocks.first().expect("a toolResult block")
+    else {
+        panic!("expected a toolResult block, got: {blocks:?}");
+    };
+    assert!(
+        matches!(
+            tool_result.content.first(),
+            Some(ConverseToolResultContent::Json { .. })
+        ),
+        "the source must fall back to the JSON wrap, got: {:?}",
+        tool_result.content
+    );
+}
+
 // ---------------------------------------------------------------------------
 // MALFORMED -- the regression probe: an image that names no bytes
 // ---------------------------------------------------------------------------
@@ -365,6 +384,66 @@ fn empty_data_outranks_an_unmapped_media_type() {
     assert_malformed_naming(&messages, "source.data");
 }
 
+/// A non-string field is neither absent nor a usable value; the policy
+/// treats it as the absent case, and each malformed carrier must say so by
+/// naming its own field. Table-driven because the classification is one
+/// rule applied across three shapes, not three separate behaviors.
+#[test]
+fn non_string_required_fields_fail_the_request_naming_the_field() {
+    // Arrange
+    let cases: Vec<(Vec<Message>, &str)> = vec![
+        (
+            vec![user_turn(vec![image_part(json!({
+                "type": 7,
+                "media_type": "image/png",
+                "data": "AAAA",
+            }))])],
+            "source.type",
+        ),
+        (
+            vec![user_turn(vec![image_part(json!({
+                "type": "base64",
+                "media_type": 7,
+                "data": "AAAA",
+            }))])],
+            "source.media_type",
+        ),
+        (
+            vec![user_turn(vec![image_part(json!({
+                "type": "base64",
+                "media_type": "image/png",
+                "data": 42,
+            }))])],
+            "source.data",
+        ),
+        (
+            vec![user_turn(vec![image_url_part(json!({"url": 42}))])],
+            "image_url.url",
+        ),
+        (
+            vec![tool_turn(vec![image_part(json!({
+                "type": "base64",
+                "media_type": 7,
+                "data": "AAAA",
+            }))])],
+            "source.media_type",
+        ),
+        (
+            vec![tool_turn(vec![image_part(json!({
+                "type": "base64",
+                "media_type": "image/png",
+                "data": 42,
+            }))])],
+            "source.data",
+        ),
+    ];
+
+    // Act / Assert
+    for (messages, field) in cases {
+        assert_malformed_naming(&messages, field);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UNREPRESENTABLE -- the warn-drops that must NOT become errors
 // ---------------------------------------------------------------------------
@@ -482,6 +561,40 @@ fn raw_tool_result_url_shape_image_source_keeps_the_json_fallback() {
         "a url-shape source must fall back to the JSON wrap, got: {:?}",
         tool_result.content
     );
+}
+
+// ---------------------------------------------------------------------------
+// TOOL-RESULT CARRIER -- the JSON fallback the plain image path does not have
+// ---------------------------------------------------------------------------
+
+/// The tool-result carrier is not the plain image path: an `Ok(None)` here
+/// still delivers the payload to the model as a JSON-wrapped tool result,
+/// so a source this egress cannot read is unrepresentable rather than
+/// malformed. Erroring instead converts a working 200 into a 400. Each
+/// shape is exercised through BOTH tool-result carriers -- the raw
+/// Anthropic-shape array element and the canonical `Role::Tool` part --
+/// because they translate one source shape and must agree on it.
+#[test]
+fn unreadable_tool_result_image_sources_keep_the_json_fallback() {
+    // Arrange: sources naming no base64 bytes, none of them provably a
+    // broken base64 source.
+    let sources = vec![
+        json!("future-provider-shape"),
+        json!({"media_type": "image/png", "data": "AAAA"}),
+        json!({"type": "", "media_type": "image/png", "data": "AAAA"}),
+        json!({"type": 7, "media_type": "image/png", "data": "AAAA"}),
+        json!({"type": "url", "url": ""}),
+        json!({"type": "url", "url": "https://example.com/x.png"}),
+    ];
+
+    // Act / Assert
+    for source in sources {
+        assert_tool_result_json_fallback(&[raw_tool_result_turn(json!([{
+            "type": "image",
+            "source": source.clone(),
+        }]))]);
+        assert_tool_result_json_fallback(&[tool_turn(vec![image_part(source)])]);
+    }
 }
 
 // ---------------------------------------------------------------------------
