@@ -932,7 +932,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   enforcement point and `translate_document_citations` the single citations
   bool lift, and all three paths route through them so they cannot drift.
   A `CitationsDropTally` threads through all three so a request carrying N
-  malformed citations values emits one aggregated WARN, not N
+  malformed citations values emits one aggregated WARN, not N. A separate
+  private `ReasoningSkipTally` (unsigned category only -- the Converse seam has
+  no foreign-format signal) aggregates the per-message unsigned-signature skips
+  into one WARN per outbound provider attempt; `build_messages` owns it and
+  flushes both tallies on the ok and err arms.
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
   when the translated transcript references tool blocks but no tools survive
