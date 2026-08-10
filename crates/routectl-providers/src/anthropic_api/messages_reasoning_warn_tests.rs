@@ -61,7 +61,7 @@ fn unsigned_reasoning_warn_caps_logged_indices_and_flags_truncation() {
     // `None` sorts as 0, so it lands inside the sampled prefix.
     let mut details = vec![unsigned_detail(None)];
     details.extend((1..=10u32).map(|i| unsigned_detail(Some(i))));
-    assert!(details.len() > MAX_LOGGED_SKIPPED_INDICES);
+    assert!(details.len() > MAX_LOGGED_DIAGNOSTIC_ITEMS);
 
     // Act
     let mut blocks_out = None;
@@ -91,8 +91,8 @@ fn unsigned_reasoning_warn_caps_logged_indices_and_flags_truncation() {
     );
     assert_eq!(
         entries.len(),
-        MAX_LOGGED_SKIPPED_INDICES,
-        "sample must be capped at {MAX_LOGGED_SKIPPED_INDICES}; got: {entries:?}"
+        MAX_LOGGED_DIAGNOSTIC_ITEMS,
+        "sample must be capped at {MAX_LOGGED_DIAGNOSTIC_ITEMS}; got: {entries:?}"
     );
     assert!(
         entries.iter().any(|e| e == "None"),

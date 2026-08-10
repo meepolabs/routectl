@@ -29,18 +29,13 @@ use routectl_core::{
     MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role,
 };
 
+use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
+
 use super::envelope_policy::EnvelopeUnwrapTally;
 #[cfg(test)]
 use super::envelope_policy::passthrough_tally;
 use super::parts::{parse_file_document_source, parse_image_url_source, strip_text_after_tool_use};
 use super::types::{AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlock};
-
-/// Cap on how many skipped reasoning indices reach the aggregated WARN.
-/// A reply can carry arbitrarily many unsigned reasoning details, so an
-/// uncapped index list turns one WARN into an unbounded log record. The
-/// sample is capped as it is COLLECTED, not at format time, so the
-/// diagnostic path never allocates the full list either.
-const MAX_LOGGED_SKIPPED_INDICES: usize = 8;
 
 /// Walk the canonical `ChatRequest` messages and apply two outgoing
 /// replay invariants. `history_reasoning` gates ONLY the second
@@ -643,7 +638,7 @@ fn emit_reasoning_blocks(
     // flattened to a plausible integer so a missing index stays
     // distinguishable from index 0.
     let mut skipped_unsigned_count: usize = 0;
-    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_SKIPPED_INDICES);
+    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_DIAGNOSTIC_ITEMS);
     // Track reasoning details dropped because their format is not
     // `anthropic-claude-v1`. These cannot be replayed as Anthropic blocks
     // regardless of signature presence; a separate WARN aggregates them so
@@ -668,7 +663,7 @@ fn emit_reasoning_blocks(
                 }
                 ReasoningDetailKind::Text => {
                     skipped_unsigned_count = skipped_unsigned_count.saturating_add(1);
-                    if skipped_unsigned.len() < MAX_LOGGED_SKIPPED_INDICES {
+                    if skipped_unsigned.len() < MAX_LOGGED_DIAGNOSTIC_ITEMS {
                         skipped_unsigned.push(detail.index);
                     }
                 }
