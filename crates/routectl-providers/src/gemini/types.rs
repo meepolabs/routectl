@@ -159,6 +159,25 @@ pub struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stop_sequences: Option<Vec<String>>,
 
+    /// Sampler seed for reproducible output (canonical `seed`). Documented
+    /// as a plain integer with no published width, so the canonical `i64`
+    /// is forwarded as-is and an out-of-range value is upstream's to
+    /// reject.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) seed: Option<i64>,
+
+    /// Penalty applied to tokens already present in the response
+    /// (canonical `presence_penalty`). The reference publishes no range for
+    /// this endpoint, so the caller's value is forwarded unclamped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) presence_penalty: Option<f64>,
+
+    /// Penalty scaled by how often a token has already appeared
+    /// (canonical `frequency_penalty`). Forwarded unclamped for the same
+    /// reason as `presence_penalty`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) frequency_penalty: Option<f64>,
+
     /// Output MIME type. Set to `application/json` to request structured
     /// output (canonical `response_format`).
     #[serde(skip_serializing_if = "Option::is_none")]

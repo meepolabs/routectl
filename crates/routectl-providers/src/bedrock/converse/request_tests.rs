@@ -1255,7 +1255,12 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
         messages: vec![user_msg("hi")].into(),
         max_tokens: Some(256),
         n: Some(3),
+        seed: Some(42),
+        logprobs: Some(true),
+        top_logprobs: Some(5),
+        logit_bias: Some(serde_json::json!({"1": -100})),
         presence_penalty: Some(0.5),
+        frequency_penalty: Some(0.25),
         ..Default::default()
     };
 
@@ -1265,7 +1270,19 @@ fn sampling_fields_warn_once_naming_dropped_fields() {
     // Assert
     assert!(body.get("n").is_none(), "got {body}");
     logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
-    assert!(logs_contain("presence_penalty"));
+    // This egress honors none of the seven, so the WARN names all of them --
+    // unaffected by any other egress gaining a translation.
+    for name in [
+        "\"n\"",
+        "\"seed\"",
+        "logprobs",
+        "top_logprobs",
+        "logit_bias",
+        "presence_penalty",
+        "frequency_penalty",
+    ] {
+        assert!(logs_contain(name), "WARN must name {name}");
+    }
 }
 
 /// The sampling WARN stays silent when the request carries none of the

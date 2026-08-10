@@ -362,10 +362,14 @@ listed at the bottom of each crate.
   (`warn_dropped_sampling_fields`): one WARN per
   request naming which of the canonical sampling knobs (`n`, `seed`,
   `logprobs`, `top_logprobs`, `logit_bias`, `presence_penalty`,
-  `frequency_penalty`) an egress that cannot honor them received -- names
-  only, never values. Called by anthropic-api (which covers bedrock-invoke
-  via delegation), bedrock-converse, gemini and openai-responses;
-  openai-compat forwards the fields verbatim and never calls in
+  `frequency_penalty`) an egress received but cannot translate -- names
+  only, never values. Each caller passes the canonical names it DOES honor
+  and the guard reports the remainder. Called by anthropic-api (which covers
+  bedrock-invoke via delegation), bedrock-converse, gemini and
+  openai-responses; the gemini egress honors `seed` / `presence_penalty` /
+  `frequency_penalty` on `generationConfig` and the other three callers
+  honor none. openai-compat forwards all seven under their canonical names
+  and never calls in
 - `src/claude_signing.rs` -- byte-level re-signer for the billing-header
   checksum; re-signs an existing billing block in place after egress body
   mutations

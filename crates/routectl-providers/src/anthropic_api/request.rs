@@ -336,7 +336,7 @@ pub(crate) fn normalize(
     // gated out of the provider_extras merge as canonical keys; WARN once so
     // the loss isn't silent. Bedrock-Invoke delegates body construction here,
     // so this single call also covers that lane (with its own provider id).
-    crate::sampling_drop_guard::warn_dropped_sampling_fields(id, req);
+    crate::sampling_drop_guard::warn_dropped_sampling_fields(id, req, &[]);
 
     // Anthropic's wire requires every tool_result carry the
     // `tool_use_id` of the tool_use it answers; missing ids are
@@ -658,14 +658,31 @@ mod sampling_leak_guard_tests {
     fn sampling_fields_warn_once_naming_dropped_fields() {
         let mut req = user_req();
         req.n = Some(3);
+        req.seed = Some(42);
         req.logprobs = Some(true);
+        req.top_logprobs = Some(5);
+        req.logit_bias = Some(serde_json::json!({"1": -100}));
+        req.presence_penalty = Some(0.5);
+        req.frequency_penalty = Some(0.25);
 
         let body = normalize("anthropic:test", &req, false, &[], false, None).unwrap();
 
         assert!(body.get("n").is_none());
         assert!(body.get("logprobs").is_none());
         logs_assert(crate::sampling_drop_guard::test_support::exactly_one_sampling_warn);
-        assert!(logs_contain("logprobs"));
+        // This egress honors none of the seven, so the WARN names all of
+        // them -- unaffected by any other egress gaining a translation.
+        for name in [
+            "\"n\"",
+            "\"seed\"",
+            "logprobs",
+            "top_logprobs",
+            "logit_bias",
+            "presence_penalty",
+            "frequency_penalty",
+        ] {
+            assert!(logs_contain(name), "WARN must name {name}");
+        }
     }
 
     #[test]
