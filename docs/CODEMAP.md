@@ -964,6 +964,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   for the overage-flip log: a flip into overage emits one WARN with the
   non-secret quota fields, steady state is silent, recovery emits one INFO;
   isolated binary so the thread-local capture subscriber does not leak
+- `tests/anthropic_reasoning_format_redaction.rs` -- single-test binary
+  pinning that the foreign-format WARN's `skipped_formats` field still names
+  the caller-supplied format tag when `ROUTECTL_LOG_REDACT_PROMPTS=1`;
+  isolated because the redaction knob freezes on first read per process
 - `tests/context_management.rs` -- wiremock-driven complete() + streaming
   end-to-end for context-management emulation; asserts beta-header strip,
   context_management body-key strip, and thinking-block injection; gated on
