@@ -65,6 +65,21 @@ fn openai_responses_provider_api_key() -> OpenAiResponsesProvider {
     OpenAiResponsesProvider::new(cfg)
 }
 
+/// The bedrock-mantle lane. It shares this egress with the two lanes above
+/// and diverges only through auth-kind conditionals, so its own recorded
+/// wire body is the only WHOLE-BODY contract snapshot for the lane -- unit
+/// and runtime tests cover the individual conditionals, but nothing else
+/// pins the complete shape against a conditional written correctly for
+/// ApiKey and wrongly for Mantle.
+///
+/// No `cfg` gate: `AuthKind::BedrockMantle` is feature-unconditional and
+/// `translate()` never reads the (bedrock-gated) `cfg.mantle` field.
+fn openai_responses_provider_bedrock_mantle() -> OpenAiResponsesProvider {
+    let mut cfg = OpenAiResponsesConfig::new("openai-responses-test", "test-key");
+    cfg.auth_kind = AuthKind::BedrockMantle;
+    OpenAiResponsesProvider::new(cfg)
+}
+
 // =====================================================================
 // Scenario 1: system_handling
 // =====================================================================
@@ -263,5 +278,78 @@ mod scenario_6_max_output_tokens_api_key_lane {
         insta::with_settings!({snapshot_path => "snapshots/openai_responses"}, {
             insta::assert_json_snapshot!("request_body", body);
         });
+    }
+}
+
+// =====================================================================
+// Scenario 7: store_lock_bedrock_mantle_lane
+// =====================================================================
+//
+// The mantle Responses lane must never persist: `store` is forced false
+// regardless of an operator- or model-supplied override, and because
+// `store` stays false the encrypted-reasoning `include` carrier is forced
+// on so a later reasoning replay has a blob to send. (The carrier is
+// forced only when the caller supplies no explicit `include`; an explicit
+// one is honored verbatim. This fixture supplies none.)
+//
+// The fixture requests `store: true` deliberately. Over a bare scenario-1
+// request nothing in this body would depend on the auth kind at all, so
+// the recording could not fail for a Mantle-specific reason. The override
+// puts both lane conditionals in play: dropping the lane from the store
+// lock flips `store` to true and drops `include`, and excluding the lane
+// from the token passthrough drops `max_output_tokens` -- each a snapshot
+// diff.
+//
+// The recorded body is byte-identical to the api-key scenario above, and
+// that is the point rather than a defect: the api-key fixture carries no
+// override, so its honored-`store` path and this lane's forced-`store`
+// path coincide. The bytes match; the reasons do not, and only this
+// recording pins the forced one.
+
+mod scenario_7_store_lock_bedrock_mantle_lane {
+    use super::*;
+
+    #[test]
+    fn openai_responses_egress() {
+        let mut req = scenarios::scenario_1_system_handling();
+        req.provider_extras = Some(serde_json::json!({"store": true}));
+
+        let body = openai_responses_provider_bedrock_mantle()
+            .normalize_request(&req)
+            .expect("openai_responses normalize");
+
+        insta::with_settings!({snapshot_path => "snapshots/openai_responses"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+
+        // Pins run AFTER the snapshot so a perturbation of the lane
+        // conditionals proves the recorded body fails, not merely a
+        // neighbouring assertion. They also still fail if a wrong
+        // snapshot is ever accepted.
+
+        // Pin: the caller's ceiling survives to the mantle wire body.
+        assert_eq!(
+            body.get("max_output_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(1024),
+            "mantle lane must retain max_output_tokens; body: {body}"
+        );
+
+        // Pin: the requested store override is inert on this lane.
+        assert_eq!(
+            body.get("store").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "mantle lane must force store=false despite provider_extras.store=true; body: {body}"
+        );
+
+        // Pin: store=false keeps the encrypted-reasoning carrier on the wire.
+        assert!(
+            body.get("include")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|a| a
+                    .iter()
+                    .any(|v| v.as_str() == Some("reasoning.encrypted_content"))),
+            "mantle lane must include the encrypted-reasoning carrier; body: {body}"
+        );
     }
 }
