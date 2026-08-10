@@ -151,9 +151,6 @@ pub struct GenerationConfig {
     pub(crate) top_p: Option<f64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) top_k: Option<f64>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_tokens: Option<u32>,
 
     #[serde(skip_serializing_if = "Option::is_none")]

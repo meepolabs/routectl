@@ -23,7 +23,7 @@ matching per-model section.
 | **Anthropic + 1M-context beta** | `[providers.X] header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }` |
 | **OAuth bearer to Anthropic** | `[providers.X] auth_kind = "oauth-bearer"` + the matching beta header |
 | **DeepSeek /anthropic endpoint + claude-code context-management** | `[providers.X] context_management = true` |
-| **Google Gemini (native)** | `[providers.X] kind = "gemini"` + `api_key_ref = "env://GEMINI_API_KEY"`; safetySettings / topK flow through `payload_extras` |
+| **Google Gemini (native)** | `[providers.X] kind = "gemini"` + `api_key_ref = "env://GEMINI_API_KEY"`; `safetySettings` flows through `payload_extras` (`generationConfig` does not -- it is routectl-managed and dropped with a WARN) |
 
 ## Per-model config
 
@@ -463,8 +463,17 @@ multi-turn thinking continuity is preserved.
 
 **payload_extras / safetySettings:** knobs the canonical schema does
 not carry natively flow through `[providers.X] payload_extras` (merged
-into the outbound body). The two common ones are `safetySettings` (the
-per-category harm-block thresholds) and `generationConfig.topK`.
+into the outbound body). The merge is TOP-LEVEL and shallow, and it
+skips any key routectl assembles itself. The common usable one is
+`safetySettings` (the per-category harm-block thresholds).
+
+`generationConfig` is NOT reachable this way: routectl builds that
+object (temperature, top_p, seed, penalties, response schema, thinking
+config), so a `payload_extras.generationConfig` entry -- including
+`generationConfig.topK` -- is dropped in full with a WARN naming the
+key, and never reaches the wire. There is no nested merge, so no
+individual field inside `generationConfig` can be set or overridden
+from `payload_extras`.
 
 ```toml
 [providers.gemini]
@@ -472,7 +481,7 @@ kind        = "gemini"
 api_key_ref = "env://GEMINI_API_KEY"
 payload_extras = { safetySettings = [
   { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_NONE" },
-], generationConfig = { topK = 40 } }
+] }
 ```
 
 **usageMetadata token accounting:** the Gemini `usageMetadata` block

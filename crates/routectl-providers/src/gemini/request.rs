@@ -812,7 +812,11 @@ fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
         return None;
     }
 
-    // top_k is not in the canonical schema; only emit via provider_extras.
+    // topK is unreachable on this egress: it is not in the canonical
+    // schema, and `payload_extras` cannot supply it either because the
+    // merge is top-level only and drops the whole managed
+    // `generationConfig` object (see `is_gemini_managed_key`). Emitting
+    // it would require a field here.
     // seed / penalties are forwarded exactly as the caller set them:
     // Gemini's own reference publishes no range for them on this endpoint,
     // so a local clamp would invent a bound and silently change the
@@ -820,7 +824,6 @@ fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
     Some(GenerationConfig {
         temperature: req.temperature,
         top_p: req.top_p,
-        top_k: None,
         max_output_tokens: req.max_tokens,
         stop_sequences: req.stop.clone(),
         seed: req.seed,
@@ -2814,6 +2817,81 @@ mod tests {
             "smuggled systemInstruction must be dropped"
         );
         assert!(body.get("toolConfig").is_none());
+    }
+
+    /// Mirror `GeminiProvider::normalize_request`'s body pipeline
+    /// (translate -> serialize -> merge extras) so the merge runs against
+    /// the exact assembled body an operator's `payload_extras` would hit.
+    fn normalize_body(provider_id: &str, req: &ChatRequest, extras: &Value) -> Value {
+        let translated = translate(provider_id, req).expect("translate");
+        let mut body = serde_json::to_value(&translated).expect("serialize");
+        merge_payload_extras(provider_id, &mut body, extras);
+        body
+    }
+
+    #[test]
+    #[traced_test]
+    fn payload_extras_generation_config_topk_never_reaches_wire() {
+        // An operator setting `payload_extras.generationConfig.topK` gets a
+        // silent no-op today: the whole managed `generationConfig` object is
+        // dropped. This pins that -- a comment cannot be gated, a test can.
+        let mut req = base_req();
+        // Force a real generationConfig into the body so the assertion below
+        // lands on a present object rather than an absent one.
+        req.max_tokens = Some(256);
+        let extras = json!({ "generationConfig": { "topK": 40 } });
+
+        let body = normalize_body("gemini:test", &req, &extras);
+
+        let rendered = serde_json::to_string(&body).expect("render");
+        assert!(
+            !rendered.contains("topK"),
+            "topK must not reach the wire by any path; got {rendered}"
+        );
+        assert!(
+            body["generationConfig"].is_object(),
+            "precondition: the body must carry an assembled generationConfig"
+        );
+        assert!(
+            body["generationConfig"].get("topK").is_none(),
+            "the assembled generationConfig must not gain topK"
+        );
+        logs_assert(|lines: &[&str]| {
+            let hits = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("WARN")
+                        && l.contains("payload_extras attempted to override")
+                        && l.contains("generationConfig")
+                })
+                .count();
+            if hits == 1 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected exactly one managed-key WARN naming generationConfig, got {hits}"
+                ))
+            }
+        });
+    }
+
+    #[test]
+    fn payload_extras_safety_settings_still_reaches_wire() {
+        // The correction must not over-claim in the other direction: a
+        // top-level `safetySettings` extra is NOT managed and must merge in.
+        let req = base_req();
+        let extras = json!({
+            "safetySettings": [
+                { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE" }
+            ]
+        });
+
+        let body = normalize_body("gemini:test", &req, &extras);
+
+        assert_eq!(
+            body["safetySettings"][0]["category"], "HARM_CATEGORY_HARASSMENT",
+            "top-level safetySettings must reach the body"
+        );
     }
 
     // ---------------------------------------------------------------------------
