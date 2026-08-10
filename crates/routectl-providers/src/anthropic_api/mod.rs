@@ -27,6 +27,7 @@ use routectl_core::{
 mod client;
 mod cloak;
 pub(crate) mod context_management;
+pub(crate) mod envelope_policy;
 mod extras;
 mod messages;
 pub(crate) mod parts;
@@ -75,6 +76,12 @@ impl Provider for AnthropicApiProvider {
             } else {
                 None
             },
+            // The client boundary owns the base_url, so the terminal-host
+            // question is answered ONCE here and threaded down as a
+            // resolved bool. An anthropic-api provider can be pointed at
+            // any Anthropic-compatible host (another routectl hop
+            // included), and only the genuine host is terminal.
+            is_anthropic_api_host(&self.cfg.base_url),
         )
     }
 
@@ -972,3 +979,8 @@ fn build_count_tokens_body(normalized: &Value) -> Value {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+// Host-gated reasoning-envelope unwrap on the redacted_thinking egress.
+#[cfg(test)]
+#[path = "mod_envelope_unwrap_tests.rs"]
+mod envelope_unwrap_tests;

@@ -5,6 +5,7 @@
 //! private items via `use super::*`.
 
 use super::*;
+use crate::anthropic_api::envelope_policy::passthrough_tally;
 use crate::anthropic_api::types::{
     AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlock,
 };
@@ -362,7 +363,13 @@ fn apply_edit_keep_all_injects_thinking() {
     let extras = extras_keep_all();
     let mut messages = vec![assistant_with_tool("t1")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(result.missed_tool_ids.is_empty(), "no misses expected");
     let blocks = blocks_of(&messages[0]);
@@ -384,7 +391,13 @@ fn apply_edit_keep_last_1_of_2_only_last_injected() {
     let extras = extras_keep_last_n(1);
     let mut messages = vec![assistant_with_tool("t1"), assistant_with_tool("t2")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(result.missed_tool_ids.is_empty());
     // messages[0] (t1) must be untouched -- still just [ToolUse].
@@ -409,7 +422,13 @@ fn apply_edit_keep_0_no_injection() {
     let extras = extras_keep_last_n(0);
     let mut messages = vec![assistant_with_tool("t1")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(
         result.missed_tool_ids.is_empty(),
@@ -427,7 +446,13 @@ fn apply_edit_unknown_keep_defaults_to_all() {
     let extras = extras_unknown_keep();
     let mut messages = vec![assistant_with_tool("t1")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(
         result.missed_tool_ids.is_empty(),
@@ -445,7 +470,13 @@ fn apply_edit_cache_miss_returned_in_result() {
     let extras = extras_keep_all();
     let mut messages = vec![assistant_with_tool("t99")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert_eq!(result.missed_tool_ids, vec!["t99".to_string()]);
     let blocks = blocks_of(&messages[0]);
@@ -470,7 +501,13 @@ fn apply_edit_skips_when_thinking_already_precedes_tool_use() {
         ]),
     }];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     // The guard prevented injection (thinking already precedes tool_use).
     // Because the guard fires before the cache lookup the miss vec is also
@@ -499,7 +536,13 @@ fn apply_edit_no_clear_thinking_edit_is_noop() {
     });
     let mut messages = vec![assistant_with_tool("t1")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(result.missed_tool_ids.is_empty());
     let blocks = blocks_of(&messages[0]);
@@ -513,7 +556,13 @@ fn apply_edit_empty_messages_is_noop() {
     let extras = extras_keep_all();
     let mut messages: Vec<AnthropicMessage> = vec![];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(result.missed_tool_ids.is_empty());
     assert!(messages.is_empty());
@@ -551,7 +600,13 @@ fn inject_skips_text_with_empty_signature() {
     let extras = extras_keep_all();
     let mut messages = vec![assistant_with_tool("t-empty-sig")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     // Cache hit but filtered out; no injection -> treated as a miss.
     assert_eq!(
@@ -580,7 +635,13 @@ fn inject_skips_text_with_wrong_format() {
     let extras = extras_keep_all();
     let mut messages = vec![assistant_with_tool("t-wrong-fmt")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert_eq!(
         result.missed_tool_ids,
@@ -599,7 +660,7 @@ fn reasoning_detail_to_thinking_block_skips_summary() {
         Some(super::super::ANTHROPIC_FORMAT),
         serde_json::json!({"text": "summary text"}),
     );
-    let result = reasoning_detail_to_thinking_block(&detail);
+    let result = reasoning_detail_to_thinking_block(&detail, &mut passthrough_tally());
     assert!(
         result.is_none(),
         "Summary kind must map to None; got: {result:?}"
@@ -655,7 +716,13 @@ fn apply_edit_two_tool_uses_no_duplicate_thinking() {
         content: AnthropicContent::Blocks(vec![tool_use_block("tu1"), tool_use_block("tu2")]),
     }];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(result.missed_tool_ids.is_empty(), "no misses expected");
     let blocks = blocks_of(&messages[0]);
@@ -697,7 +764,13 @@ fn apply_edit_some_empty_not_treated_as_miss() {
         content: AnthropicContent::Blocks(vec![tool_use_block("tA"), tool_use_block("tB")]),
     }];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(
         result.missed_tool_ids.is_empty(),
@@ -733,7 +806,13 @@ fn apply_edit_cold_cache_idempotency() {
         ]),
     }];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     // Guard fired before cache lookup -> no miss, block count unchanged.
     assert!(
@@ -771,7 +850,13 @@ fn apply_edit_keep_bare_number_handled_as_lastn() {
     let extras = extras_bare_number_keep(2);
     let mut messages = vec![assistant_with_tool("t1"), assistant_with_tool("t2")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(result.missed_tool_ids.is_empty());
     // Both messages must have [Thinking, ToolUse].
@@ -787,7 +872,13 @@ fn apply_edit_keep_bare_zero_handled_as_none() {
     let extras = extras_bare_number_keep(0);
     let mut messages = vec![assistant_with_tool("t1")];
 
-    let result = apply_clear_thinking_edit(&mut messages, Some(&extras), &cache, "prov");
+    let result = apply_clear_thinking_edit(
+        &mut messages,
+        Some(&extras),
+        &cache,
+        "prov",
+        &mut passthrough_tally(),
+    );
 
     assert!(
         result.missed_tool_ids.is_empty(),

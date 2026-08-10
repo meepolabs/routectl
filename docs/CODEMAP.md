@@ -522,12 +522,23 @@ listed at the bottom of each crate.
   `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA`,
   `CLEAR_THINKING_EDIT_TYPE`, `THINKING_CACHE_CAP`, `THINKING_CACHE_TTL`,
   `snapshot_to_cache`, `lookup_thinking`, `extract_tool_thinking`,
-  `apply_clear_thinking_edit`
+  `apply_clear_thinking_edit` (the reinjection path routes its
+  `redacted_thinking` data through the shared `EnvelopeUnwrapTally`)
+- `src/anthropic_api/envelope_policy.rs` -- host-gated reasoning-envelope
+  policy for the `redacted_thinking` egress: `EnvelopeUnwrapTally` owns the
+  resolved terminal-host bool, `wire_data` (unwrap to the inner blob on the
+  genuine Anthropic host, verbatim everywhere else), and one aggregated WARN
+  per request carrying only a constant event name, the provider id, and a
+  count. Owned by `request::normalize` and threaded into every construction
+  site of a `redacted_thinking` block (content parts, the
+  `reasoning_details` replay channel, context-management reinjection)
 - `src/anthropic_api/types.rs` -- Anthropic Messages wire types
   (`AnthropicRequest`, content blocks, system, thinking config, usage)
 - `src/anthropic_api/request.rs` -- orchestrator: builds the Anthropic wire
   body from `ChatRequest` via the system/messages/tools/extras submodules;
-  owns `normalize` (entry point), top-level body assembly, and cache_control
+  owns `normalize` (entry point), top-level body assembly, the per-request
+  `EnvelopeUnwrapTally` (threaded into message translation and cache
+  reinjection, flushed once after both), and cache_control
   breakpoint validation (`validate_breakpoints`); re-exports `build_thinking`,
   `filter_anthropic_betas`, `translate_tool`, `translate_system`,
   `lift_legacy_system` for the Bedrock egress and `mod.rs`
@@ -548,7 +559,10 @@ listed at the bottom of each crate.
   shared with `emit_reasoning_blocks` so the keep-decision and the emit gate
   cannot drift, with an aggregated WARN on any dropped turns);
   `build_assistant_content` carries an empty-content backstop that inserts one
-  empty text block so an assembled-empty turn never ships `content: []`
+  empty text block so an assembled-empty turn never ships `content: []`; both
+  `redacted_thinking` construction sites here (content parts and the
+  `reasoning_details` replay channel) route their data through the
+  `envelope_policy` tally threaded in from `request::normalize`
 - `src/anthropic_api/extras.rs` -- thinking-budget composition
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
   reconciliation (`merge_provider_extras`, `filter_anthropic_betas`,
@@ -865,7 +879,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   interpreter (base64-unwrap of Anthropic SSE per frame); delegates the
   framing byte loop and DoS cap to `frame.rs`
 - `src/bedrock/invoke.rs` -- InvokeModel adapter: reuses
-  `anthropic_api::request::normalize`, patches `anthropic_version:
+  `anthropic_api::request::normalize` (selecting reasoning-envelope
+  passthrough EXPLICITLY -- this lane is never the genuine Anthropic host),
+  patches `anthropic_version:
   "bedrock-2023-05-31"`, and applies the structured-outputs body-beta union
   LAST (after both allowlist filters) so a body shipping
   `output_config.format` never egresses without its gating flag
