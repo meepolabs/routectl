@@ -42,8 +42,9 @@
 //! tool-result carrier classifies more narrowly on purpose: an unreadable
 //! source there takes the JSON fallback, so the model still receives the
 //! payload rather than the caller receiving a 400. Only a source that
-//! positively declares base64 and then names no bytes is malformed on that
-//! path. See `image_source_to_tool_result`.
+//! positively declares base64 and then names no bytes or no format -- an
+//! absent, empty, or non-string `data` or `media_type` -- is malformed on
+//! that path. See `image_source_to_tool_result`.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
@@ -1252,9 +1253,11 @@ fn build_tool_message(
 /// and Claude 3+ on Converse rejects the malformed shape -- the model
 /// gets the canonical schema instead of the AWS image/document block.
 ///
-/// A base64 source that names no bytes -- an absent, empty, or non-string
-/// `data` or `media_type` -- fails the request; every other source this
-/// egress cannot represent takes the JSON fallback.
+/// For IMAGE parts: a base64 source that names no bytes -- an absent,
+/// empty, or non-string `data` or `media_type` -- fails the request; every
+/// other image source this egress cannot represent takes the JSON
+/// fallback. Document parts are not held to that rule here and still ship
+/// an empty payload for an empty base64 source.
 fn translate_part_for_tool_result(
     id: &str,
     p: &ContentPart,
