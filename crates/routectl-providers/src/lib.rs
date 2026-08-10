@@ -38,6 +38,12 @@ compile_error!(
      --no-default-features --features openai-compat,anthropic-api"
 );
 
+// Collection-time bounding for the diagnostic samples the egresses attach to
+// aggregated WARN records. Dependency-free, so it stays unconditional: every
+// provider lane reaches the same cap and the same truncation semantics without
+// any module depending on another provider's feature gate.
+pub(crate) mod bounded_diagnostics;
+
 #[cfg(feature = "openai-compat")]
 pub(crate) mod model_profile;
 

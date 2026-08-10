@@ -23,6 +23,7 @@ use routectl_core::{
 };
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
+use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
 
 use super::types::{
     CachePoint, ConverseCitationsConfig, ConverseContentBlock, ConverseDocument,
@@ -30,14 +31,6 @@ use super::types::{
     ConverseRequestReasoningBlock, ConverseRequestReasoningText, ConverseToolResult,
     ConverseToolResultContent, ConverseToolUse,
 };
-
-/// Cap on how many skipped reasoning indices reach the aggregated WARN.
-/// Mirrors `anthropic_api::messages::MAX_LOGGED_SKIPPED_INDICES`. A reply
-/// can carry arbitrarily many unsigned reasoning details, so an uncapped
-/// index list turns one WARN into an unbounded log record. The sample is
-/// capped as it is COLLECTED, not at format time, so the diagnostic path
-/// never allocates the full list either.
-const MAX_LOGGED_SKIPPED_INDICES: usize = 8;
 
 /// Translate every message in `req.messages` into a `ConverseMessage`,
 /// dropping Role::System (handled by the top-level `system` array) and
@@ -285,7 +278,7 @@ fn emit_reasoning_blocks_converse(
     // `None` rather than flattened to a plausible integer so a missing
     // index stays distinguishable from index 0.
     let mut skipped_unsigned_count: usize = 0;
-    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_SKIPPED_INDICES);
+    let mut skipped_unsigned: Vec<Option<u32>> = Vec::with_capacity(MAX_LOGGED_DIAGNOSTIC_ITEMS);
     for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
@@ -309,7 +302,7 @@ fn emit_reasoning_blocks_converse(
                     // doesn't fail on a guaranteed-bad echo; aggregate the
                     // WARN to avoid per-detail log spam.
                     skipped_unsigned_count = skipped_unsigned_count.saturating_add(1);
-                    if skipped_unsigned.len() < MAX_LOGGED_SKIPPED_INDICES {
+                    if skipped_unsigned.len() < MAX_LOGGED_DIAGNOSTIC_ITEMS {
                         skipped_unsigned.push(detail.index);
                     }
                     continue;
