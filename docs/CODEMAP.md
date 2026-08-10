@@ -741,7 +741,11 @@ listed at the bottom of each crate.
   `function_call` and `function_call_output` sites) through `tool_id` so one
   logical id keeps one wire id and a tool result still correlates; an empty
   correlating id fails the request on BOTH output shapes (a tool-role
-  message's `tool_call_id` and a `tool_result` part's `tool_use_id`)
+  message's `tool_call_id` and a `tool_result` part's `tool_use_id`); content
+  parts split into two classes -- a MALFORMED part (names no bytes: absent or
+  empty image url, empty base64 data, a file part with neither carrier) fails
+  the request, while an UNREPRESENTABLE but well-formed part (no Responses slot,
+  forward-compat, unknown image-source kind) drops with a WARN
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses
   `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key

@@ -106,15 +106,17 @@ fn user_file_id_only_translates_to_input_file_with_file_id() {
 }
 
 #[test]
-fn user_file_with_no_carrier_is_dropped() {
-    // Arrange: a file part with neither file_data nor file_id.
+fn user_file_with_no_carrier_fails_the_request() {
+    // Arrange: a file part with neither file_data nor file_id -- it names
+    // no bytes, so it is malformed rather than unrepresentable.
     let req = req_with(vec![user_file(json!({"filename": "empty.pdf"}))]);
 
     // Act
-    let v = translate_to_json(&cfg(), &req);
+    let msg = translate_err(&cfg(), &req);
 
-    // Assert: nothing to forward; the user message is skipped entirely.
-    assert_eq!(v["input"], json!([]));
+    // Assert: the error names the missing carriers.
+    assert!(msg.contains("file_data"), "message was: {msg}");
+    assert!(msg.contains("file_id"), "message was: {msg}");
 }
 
 #[test]
@@ -147,6 +149,229 @@ fn user_document_anthropic_shape_still_drops() {
 
     // Assert: Document is dropped; no content -> message skipped.
     assert_eq!(v["input"], json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// malformed parts fail the request (a part that names no bytes)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn user_image_url_part_with_empty_url_fails_the_request() {
+    // Arrange: OpenAI-shape image_url block whose url is present but
+    // empty. This once took the success branch and shipped an empty
+    // image_url upstream with no warning and no drop.
+    let req = req_with(vec![user_parts(vec![image_url_part(json!({"url": ""}))])]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("image_url.url"), "message was: {msg}");
+}
+
+#[test]
+fn tool_result_image_url_part_with_empty_url_fails_the_request() {
+    // Arrange: the same empty-url shape on the tool-result path.
+    let req = req_with(vec![
+        user_text("shot"),
+        tool_message_parts("call_1", vec![image_url_part(json!({"url": ""}))]),
+    ]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("tool result"), "message was: {msg}");
+    assert!(msg.contains("image_url.url"), "message was: {msg}");
+}
+
+#[test]
+fn user_image_url_part_with_missing_url_fails_the_request() {
+    // Arrange: no url field at all.
+    let req = req_with(vec![user_parts(vec![image_url_part(
+        json!({"detail": "high"}),
+    )])]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("image_url.url"), "message was: {msg}");
+}
+
+#[test]
+fn tool_result_image_url_part_with_missing_url_fails_the_request() {
+    // Arrange
+    let req = req_with(vec![
+        user_text("shot"),
+        tool_message_parts("call_1", vec![image_url_part(json!({"detail": "low"}))]),
+    ]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("image_url.url"), "message was: {msg}");
+}
+
+#[test]
+fn user_image_source_with_empty_base64_data_fails_the_request() {
+    // Arrange: a base64 source whose data is empty names no bytes.
+    let req = req_with(vec![user_parts(vec![image_part(json!({
+        "type": "base64",
+        "media_type": "image/png",
+        "data": ""
+    }))])]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert: the field is named and no raw content value is echoed.
+    assert!(msg.contains("source.data"), "message was: {msg}");
+    assert!(!msg.contains("image/png"), "message was: {msg}");
+}
+
+#[test]
+fn user_image_source_with_empty_url_fails_the_request() {
+    // Arrange
+    let req = req_with(vec![user_parts(vec![image_part(
+        json!({"type": "url", "url": ""}),
+    )])]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("source.url"), "message was: {msg}");
+}
+
+#[test]
+fn tool_result_image_source_with_empty_base64_data_fails_the_request() {
+    // Arrange
+    let req = req_with(vec![
+        user_text("shot"),
+        tool_message_parts(
+            "call_1",
+            vec![image_part(json!({
+                "type": "base64",
+                "media_type": "image/png",
+                "data": ""
+            }))],
+        ),
+    ]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("source.data"), "message was: {msg}");
+    assert!(msg.contains("tool result"), "message was: {msg}");
+}
+
+#[test]
+fn tool_result_image_source_with_empty_url_fails_the_request() {
+    // Arrange
+    let req = req_with(vec![
+        user_text("shot"),
+        tool_message_parts(
+            "call_1",
+            vec![image_part(json!({"type": "url", "url": ""}))],
+        ),
+    ]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("source.url"), "message was: {msg}");
+    assert!(msg.contains("tool result"), "message was: {msg}");
+}
+
+#[test]
+fn valid_content_beside_a_malformed_part_is_never_reached() {
+    // Arrange: valid text ahead of a malformed image part. The whole
+    // request fails rather than shipping a partial turn.
+    let req = req_with(vec![user_parts(vec![
+        text_part("look at this"),
+        image_url_part(json!({"url": ""})),
+    ])]);
+
+    // Act
+    let msg = translate_err(&cfg(), &req);
+
+    // Assert
+    assert!(msg.contains("image_url.url"), "message was: {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// unrepresentable parts still warn-drop, and their neighbours still ship
+// ---------------------------------------------------------------------------
+
+#[test]
+fn user_forward_compat_part_drops_and_neighbouring_text_still_ships() {
+    // Arrange: an unknown part type beside valid text. The part is
+    // well-formed, just unrepresentable here, so the turn still ships.
+    let req = req_with(vec![user_parts(vec![
+        text_part("hello"),
+        ContentPart::Other {
+            type_tag: "video_url".into(),
+            cache_control: None,
+            extras: serde_json::Map::new(),
+        },
+    ])]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: the text survives; the unknown part is gone.
+    assert_eq!(
+        v["input"][0]["content"],
+        json!([{"type": "input_text", "text": "hello"}])
+    );
+}
+
+#[test]
+fn tool_result_unrepresentable_part_drops_and_image_still_ships() {
+    // Arrange: a Document part (no Responses slot) beside a valid image
+    // inside a tool result.
+    let parts = vec![
+        ContentPart::Known(KnownContentPart::Document {
+            source: json!({"type": "base64", "media_type": "application/pdf", "data": "JVBER"}),
+            title: None,
+            citations: None,
+            cache_control: None,
+        }),
+        image_part(json!({"type": "url", "url": "https://example.com/shot.png"})),
+    ];
+    let req = req_with(vec![user_text("shot"), tool_message_parts("call_3", parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: only the image survives; the request was not rejected.
+    assert_eq!(
+        v["input"][1]["output"],
+        json!([{"type": "input_image", "image_url": "https://example.com/shot.png"}])
+    );
+}
+
+#[test]
+fn tool_result_unknown_image_source_kind_drops_and_text_still_ships() {
+    // Arrange: an unknown source kind is forward-compat, not malformed.
+    let parts = vec![
+        text_part("here"),
+        image_part(json!({"type": "s3", "bucket": "b", "key": "k.png"})),
+    ];
+    let req = req_with(vec![user_text("shot"), tool_message_parts("call_4", parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(
+        v["input"][1]["output"],
+        json!([{"type": "input_text", "text": "here"}])
+    );
 }
 
 // ---------------------------------------------------------------------------
