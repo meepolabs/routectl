@@ -240,8 +240,12 @@ impl Provider for GeminiProvider {
         let mut body = serde_json::to_value(&r)
             .map_err(|e| Error::normalize_request(&self.cfg.id, e.to_string()))?;
         // Merge dispatch-time provider + model `payload_extras` (carried
-        // on `req.provider_extras`) so operator knobs like safetySettings
-        // / topK reach the wire.
+        // on `req.provider_extras`) so top-level operator knobs like
+        // safetySettings reach the wire. The merge is shallow: an entry
+        // colliding with a routectl-managed key -- including the whole
+        // `generationConfig` object -- is dropped with a WARN, so no
+        // field nested inside one is reachable. See
+        // `request::is_gemini_managed_key`.
         if let Some(extras) = req.provider_extras.as_ref() {
             request::merge_payload_extras(&self.cfg.id, &mut body, extras);
         }

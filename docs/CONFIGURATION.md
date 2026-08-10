@@ -816,8 +816,10 @@ Fields:
   merged per the [header_extras merge](#header_extras-merge) rules.
 - `payload_extras` (optional) -- provider-level JSON merged into the
   outbound request body. This is the flow-through path for knobs the
-  canonical schema does not carry natively -- notably `safetySettings`
-  and `generationConfig.topK`. Merged per the
+  canonical schema does not carry natively -- notably `safetySettings`.
+  The merge is top-level and shallow, so `generationConfig` (which
+  routectl assembles itself) is dropped with a WARN rather than merged,
+  and no field inside it can be set this way. Merged per the
   [payload_extras merge](#payload_extras-merge) rules.
 - `user_agent` (optional) -- override the outbound `User-Agent`.
 - `auth_mode` (optional, default `"api-key"`) -- selects how the
