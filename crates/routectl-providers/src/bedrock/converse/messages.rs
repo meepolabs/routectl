@@ -12,6 +12,30 @@
 //! a URL-shape image the JSON wire can't carry) drop with a tracing
 //! diagnostic; the caller sees a partial body rather than a translation
 //! failure. Cache breakpoints survive as sibling `{cachePoint}` entries.
+//!
+//! Image parts follow the two-class policy the Responses egress also
+//! implements, on the malformed-vs-unrepresentable axis:
+//!
+//! - MALFORMED: the caller asked to send image bytes and named none -- an
+//!   absent, empty, or non-string `source.data`, `source.media_type`,
+//!   `source.type`, `source.url`, or `image_url.url`. There is no valid
+//!   interpretation at any egress, so the request FAILS with a
+//!   `normalize_request` error naming the field. Required-field structure
+//!   is checked BEFORE representability, so a part that is both broken and
+//!   unrepresentable reports the break. The error never echoes a
+//!   caller-controlled value: it reaches the client as a redacted 400 and
+//!   the detail stays server-side.
+//! - UNREPRESENTABLE: the image is well-formed but this JSON wire has no
+//!   slot for it -- a nonempty url ref, an unmapped media type, an
+//!   unrecognized-but-nonempty source kind. The part drops with a WARN and
+//!   the rest of the turn ships. An ambiguous shape defaults HERE, never to
+//!   malformed: an unknown source kind may be a valid vendor extension a
+//!   later build learns, and erroring on it would 400 working traffic the
+//!   day one ships.
+//!
+//! Normalization is fail-fast, so a malformed image anywhere fails the
+//! whole request and nothing dispatches upstream -- returning 200 after
+//! silently dropping content is the failure mode this policy replaces.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
@@ -103,7 +127,7 @@ fn translate_messages(
                 push_or_coalesce(&mut out, "assistant", blocks);
             }
             Role::Tool => {
-                let tool_msg = build_tool_message(msg, tally)?;
+                let tool_msg = build_tool_message(id, msg, tally)?;
                 push_or_coalesce(&mut out, "user", tool_msg.content);
             }
         }
@@ -514,8 +538,8 @@ fn translate_known_part(
         KnownContentPart::Text { text, .. } => {
             Ok(Some(ConverseContentBlock::Text { text: text.clone() }))
         }
-        KnownContentPart::Image { source, .. } => Ok(translate_image_source(id, source)),
-        KnownContentPart::ImageUrl { image_url, .. } => Ok(translate_image_url(id, image_url)),
+        KnownContentPart::Image { source, .. } => translate_image_source(id, source),
+        KnownContentPart::ImageUrl { image_url, .. } => translate_image_url(id, image_url),
         KnownContentPart::Document {
             source,
             title,
@@ -571,7 +595,7 @@ fn translate_known_part(
             is_error,
             ..
         } => {
-            let mut result_content = translate_tool_result_content(content, tally);
+            let mut result_content = translate_tool_result_content(id, content, tally)?;
             ensure_min_tool_result_content(&mut result_content);
             Ok(Some(ConverseContentBlock::ToolResult {
                 tool_result: ConverseToolResult {
@@ -625,74 +649,151 @@ fn translate_known_part(
 }
 
 /// Convert a canonical Anthropic-shape image `source` (`{type: "base64",
-/// media_type, data}`) into a `ConverseContentBlock::Image`. Returns
-/// None for URL-shape sources or unknown formats.
-fn translate_image_source(id: &str, source: &Value) -> Option<ConverseContentBlock> {
+/// media_type, data}`) into a `ConverseContentBlock::Image`.
+///
+/// Two classes, on the malformed-vs-unrepresentable axis. A source that
+/// asked to send bytes and named none -- a non-object source, an absent or
+/// empty `type`, an absent or empty base64 `data` or `media_type`, an empty
+/// url -- is MALFORMED at every egress and fails the request naming the
+/// field. A well-formed source this JSON wire cannot carry (a nonempty url
+/// ref, an unmapped media type, an unrecognized source kind) is
+/// UNREPRESENTABLE: it yields `Ok(None)` and a WARN, and the rest of the
+/// turn still ships.
+///
+/// Required-field structure is checked BEFORE representability, so an
+/// empty-`data` part whose `media_type` is also unmapped reports the broken
+/// field rather than hiding behind the unsupported-media drop.
+fn translate_image_source(id: &str, source: &Value) -> Result<Option<ConverseContentBlock>> {
     let Some(obj) = source.as_object() else {
-        tracing::warn!(
-            provider = id,
-            "dropping image with non-object source on Converse egress"
-        );
-        return None;
+        return Err(Error::normalize_request(
+            id,
+            "image content part on a Converse message has a malformed source: \
+             source is not an object",
+        ));
     };
-    let Some(kind) = obj.get("type").and_then(|v| v.as_str()) else {
-        tracing::warn!(
-            provider = id,
-            "dropping image source missing `type` on Converse egress"
-        );
-        return None;
+    let Some(kind) = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image content part on a Converse message names no source shape: \
+             source.type is absent, empty, or not a string",
+        ));
     };
+    if kind == "url" {
+        // Structure first: an empty url names no location, which is broken
+        // regardless of the wire's inability to carry a nonempty one.
+        if obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .is_none_or(str::is_empty)
+        {
+            return Err(Error::normalize_request(
+                id,
+                "image content part on a Converse message has no usable url: \
+                 source.url is absent, empty, or not a string",
+            ));
+        }
+    }
     if kind != "base64" {
+        // Forward-compat: an unknown but nonempty source shape may be a
+        // valid vendor extension a later build learns. Erroring here would
+        // 400 traffic that works the day one ships.
         tracing::warn!(
             provider = id,
             source_type = %kind,
             "dropping non-base64 image source on Converse egress"
         );
-        return None;
+        return Ok(None);
     }
-    let media_type = obj.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
-    let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(media_type) = obj
+        .get("media_type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image content part on a Converse message names no image format: \
+             source.media_type is absent, empty, or not a string",
+        ));
+    };
+    let Some(data) = obj
+        .get("data")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image content part on a Converse message has an empty base64 payload: \
+             source.data is absent, empty, or not a string",
+        ));
+    };
     let Some(format) = media_type_to_image_format(media_type) else {
         tracing::warn!(
             provider = id,
             media_type = %media_type,
             "dropping image with unmapped media_type on Converse egress"
         );
-        return None;
+        return Ok(None);
     };
-    Some(ConverseContentBlock::Image {
+    Ok(Some(ConverseContentBlock::Image {
         image: ConverseImage {
             format,
             source: ConverseImageSource {
                 bytes: data.to_string(),
             },
         },
-    })
+    }))
 }
 
 /// Convert an OpenAI-shape `image_url.url` data URI into a Converse
-/// Image block. Non-data-URI image refs (https://...) cannot ride the
-/// JSON Converse wire; drop with a WARN.
-fn translate_image_url(id: &str, image_url: &Value) -> Option<ConverseContentBlock> {
-    let url = image_url.get("url").and_then(|v| v.as_str()).unwrap_or("");
+/// Image block.
+///
+/// An absent or empty `url` names no image and fails the request. A
+/// well-formed non-data-URI ref (`https://...`) cannot ride the JSON
+/// Converse wire, so it drops with a WARN. A `data:` URI declaring base64
+/// with an empty payload is the same "asked to send bytes, named none"
+/// shape as an empty `source.data` and fails alongside it.
+fn translate_image_url(id: &str, image_url: &Value) -> Result<Option<ConverseContentBlock>> {
+    let Some(url) = image_url
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image_url content part on a Converse message has no usable url: \
+             image_url.url is absent, empty, or not a string",
+        ));
+    };
     if let Some(rest) = url.strip_prefix("data:")
         && let Some((mt, b64)) = rest.split_once(";base64,")
-        && let Some(format) = media_type_to_image_format(mt)
     {
-        return Some(ConverseContentBlock::Image {
-            image: ConverseImage {
-                format,
-                source: ConverseImageSource {
-                    bytes: b64.to_string(),
+        if b64.is_empty() {
+            return Err(Error::normalize_request(
+                id,
+                "image_url content part on a Converse message has an empty base64 payload: \
+                 image_url.url declares base64 and carries no bytes",
+            ));
+        }
+        if let Some(format) = media_type_to_image_format(mt) {
+            return Ok(Some(ConverseContentBlock::Image {
+                image: ConverseImage {
+                    format,
+                    source: ConverseImageSource {
+                        bytes: b64.to_string(),
+                    },
                 },
-            },
-        });
+            }));
+        }
     }
     tracing::warn!(
         provider = id,
         "dropping image_url on Converse egress; only base64 data URIs are supported"
     );
-    None
+    Ok(None)
 }
 
 /// Rewrite an OpenAI-shape `file` part (`{filename, file_data}`) into the
@@ -981,19 +1082,20 @@ fn normalize_document_source_bytes(kind: &str, data: &str) -> Option<String> {
 }
 
 fn translate_tool_result_content(
+    id: &str,
     content: &Value,
     tally: &mut CitationsDropTally<'_>,
-) -> Vec<ConverseToolResultContent> {
+) -> Result<Vec<ConverseToolResultContent>> {
     match content {
-        Value::String(s) => vec![ConverseToolResultContent::Text { text: s.clone() }],
+        Value::String(s) => Ok(vec![ConverseToolResultContent::Text { text: s.clone() }]),
         Value::Array(arr) => arr
             .iter()
-            .map(|v| translate_tool_result_array_element(v, tally))
+            .map(|v| translate_tool_result_array_element(id, v, tally))
             .collect(),
-        Value::Null => Vec::new(),
-        other => vec![ConverseToolResultContent::Json {
+        Value::Null => Ok(Vec::new()),
+        other => Ok(vec![ConverseToolResultContent::Json {
             json: other.clone(),
-        }],
+        }]),
     }
 }
 
@@ -1018,14 +1120,15 @@ fn ensure_min_tool_result_content(content: &mut Vec<ConverseToolResultContent>) 
 /// correct AWS variant; bare strings stay as Text; unknown shapes fall
 /// to Json.
 fn translate_tool_result_array_element(
+    id: &str,
     v: &Value,
     tally: &mut CitationsDropTally<'_>,
-) -> ConverseToolResultContent {
+) -> Result<ConverseToolResultContent> {
     if let Value::String(s) = v {
-        return ConverseToolResultContent::Text { text: s.clone() };
+        return Ok(ConverseToolResultContent::Text { text: s.clone() });
     }
     let Some(obj) = v.as_object() else {
-        return ConverseToolResultContent::Json { json: v.clone() };
+        return Ok(ConverseToolResultContent::Json { json: v.clone() });
     };
     let kind = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match kind {
@@ -1035,36 +1138,21 @@ fn translate_tool_result_array_element(
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
                 .to_string();
-            ConverseToolResultContent::Text { text }
+            Ok(ConverseToolResultContent::Text { text })
         }
         "image" => {
             let Some(source) = obj.get("source") else {
-                return ConverseToolResultContent::Json { json: v.clone() };
+                return Ok(ConverseToolResultContent::Json { json: v.clone() });
             };
-            let s_obj = source.as_object();
-            let media_type = s_obj
-                .and_then(|m| m.get("media_type"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("");
-            let data = s_obj
-                .and_then(|m| m.get("data"))
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            let Some(format) = media_type_to_image_format(media_type) else {
-                return ConverseToolResultContent::Json { json: v.clone() };
-            };
-            ConverseToolResultContent::Image {
-                image: ConverseImage {
-                    format,
-                    source: ConverseImageSource {
-                        bytes: data.to_string(),
-                    },
-                },
-            }
+            // Same two-class policy as the canonical Parts path: reuse its
+            // translator so one image source shape cannot mean two things
+            // depending on which tool_result carrier it arrived in.
+            Ok(image_source_to_tool_result(id, source)?
+                .unwrap_or_else(|| ConverseToolResultContent::Json { json: v.clone() }))
         }
         "document" => {
             let Some(source) = obj.get("source") else {
-                return ConverseToolResultContent::Json { json: v.clone() };
+                return Ok(ConverseToolResultContent::Json { json: v.clone() });
             };
             let s_obj = source.as_object();
             let kind = s_obj
@@ -1080,16 +1168,16 @@ fn translate_tool_result_array_element(
                 .and_then(|d| d.as_str())
                 .unwrap_or("");
             let Some(format) = media_type_to_document_format(media_type) else {
-                return ConverseToolResultContent::Json { json: v.clone() };
+                return Ok(ConverseToolResultContent::Json { json: v.clone() });
             };
             // AWS Converse's JSON wire only accepts base64 source bytes;
             // a text source must be encoded (shared with translate_document
             // and document_to_tool_result via normalize_document_source_bytes).
             let Some(bytes) = normalize_document_source_bytes(kind, data) else {
-                return ConverseToolResultContent::Json { json: v.clone() };
+                return Ok(ConverseToolResultContent::Json { json: v.clone() });
             };
             let title = obj.get("title").and_then(|t| t.as_str());
-            ConverseToolResultContent::Document {
+            Ok(ConverseToolResultContent::Document {
                 document: tool_result_document_value(
                     format,
                     title,
@@ -1097,9 +1185,9 @@ fn translate_tool_result_array_element(
                     obj.get("citations"),
                     tally,
                 ),
-            }
+            })
         }
-        _ => ConverseToolResultContent::Json { json: v.clone() },
+        _ => Ok(ConverseToolResultContent::Json { json: v.clone() }),
     }
 }
 
@@ -1108,6 +1196,7 @@ fn translate_tool_result_array_element(
 /// `toolResult.toolUseId == ""` and the silent fallback that produced
 /// an empty string upstream-failed with a vague 400.
 fn build_tool_message(
+    id: &str,
     msg: &Message,
     tally: &mut CitationsDropTally<'_>,
 ) -> Result<ConverseMessage> {
@@ -1127,8 +1216,8 @@ fn build_tool_message(
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
         MessageContent::Parts(parts) => parts
             .iter()
-            .map(|p| translate_part_for_tool_result(p, tally))
-            .collect(),
+            .map(|p| translate_part_for_tool_result(id, p, tally))
+            .collect::<Result<Vec<_>>>()?,
         MessageContent::Null => Vec::new(),
     };
     // AWS Converse requires at least 1 element in toolResult.content.
@@ -1154,30 +1243,37 @@ fn build_tool_message(
 /// parts (image / document) wrap as `{"json": {"type":"tool_use",...}}`
 /// and Claude 3+ on Converse rejects the malformed shape -- the model
 /// gets the canonical schema instead of the AWS image/document block.
+///
+/// A malformed image source fails the request; a well-formed one this
+/// egress cannot represent takes the JSON fallback.
 fn translate_part_for_tool_result(
+    id: &str,
     p: &ContentPart,
     tally: &mut CitationsDropTally<'_>,
-) -> ConverseToolResultContent {
+) -> Result<ConverseToolResultContent> {
     match p {
         ContentPart::Known(KnownContentPart::Text { text, .. }) => {
-            ConverseToolResultContent::Text { text: text.clone() }
+            Ok(ConverseToolResultContent::Text { text: text.clone() })
         }
         ContentPart::Known(KnownContentPart::Image { source, .. }) => {
-            image_source_to_tool_result(source).unwrap_or_else(|| content_part_to_json_fallback(p))
+            Ok(image_source_to_tool_result(id, source)?
+                .unwrap_or_else(|| content_part_to_json_fallback(p)))
         }
         ContentPart::Known(KnownContentPart::Document {
             source,
             title,
             citations,
             ..
-        }) => document_to_tool_result(source, title.as_deref(), citations.as_ref(), tally)
-            .unwrap_or_else(|| content_part_to_json_fallback(p)),
+        }) => Ok(
+            document_to_tool_result(source, title.as_deref(), citations.as_ref(), tally)
+                .unwrap_or_else(|| content_part_to_json_fallback(p)),
+        ),
         _ => {
             tracing::debug!(
                 "tool_result Parts element falls back to Json wrap; \
                  canonical part type has no AWS toolResult variant"
             );
-            content_part_to_json_fallback(p)
+            Ok(content_part_to_json_fallback(p))
         }
     }
 }
@@ -1189,26 +1285,82 @@ fn content_part_to_json_fallback(p: &ContentPart) -> ConverseToolResultContent {
 }
 
 /// Translate a canonical Anthropic-shape image source into the AWS
-/// toolResult `Image` variant. Returns None when the source isn't
-/// base64-shape or the media type isn't AWS-validated; caller falls
-/// back to the JSON wrap.
-fn image_source_to_tool_result(source: &Value) -> Option<ConverseToolResultContent> {
-    let obj = source.as_object()?;
-    let kind = obj.get("type").and_then(|v| v.as_str())?;
-    if kind != "base64" {
-        return None;
+/// toolResult `Image` variant.
+///
+/// Same two-class policy as `translate_image_source`, which this mirrors
+/// field for field: a source that names no bytes is malformed and fails
+/// the request; a well-formed source with no AWS carrier yields `Ok(None)`
+/// and the caller falls back to the JSON wrap.
+fn image_source_to_tool_result(
+    id: &str,
+    source: &Value,
+) -> Result<Option<ConverseToolResultContent>> {
+    let Some(obj) = source.as_object() else {
+        return Err(Error::normalize_request(
+            id,
+            "image block in a Converse tool result has a malformed source: \
+             source is not an object",
+        ));
+    };
+    let Some(kind) = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image block in a Converse tool result names no source shape: \
+             source.type is absent, empty, or not a string",
+        ));
+    };
+    if kind == "url"
+        && obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .is_none_or(str::is_empty)
+    {
+        return Err(Error::normalize_request(
+            id,
+            "image block in a Converse tool result has no usable url: \
+             source.url is absent, empty, or not a string",
+        ));
     }
-    let media_type = obj.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
-    let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
-    let format = media_type_to_image_format(media_type)?;
-    Some(ConverseToolResultContent::Image {
+    if kind != "base64" {
+        return Ok(None);
+    }
+    let Some(media_type) = obj
+        .get("media_type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image block in a Converse tool result names no image format: \
+             source.media_type is absent, empty, or not a string",
+        ));
+    };
+    let Some(data) = obj
+        .get("data")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "image block in a Converse tool result has an empty base64 payload: \
+             source.data is absent, empty, or not a string",
+        ));
+    };
+    let Some(format) = media_type_to_image_format(media_type) else {
+        return Ok(None);
+    };
+    Ok(Some(ConverseToolResultContent::Image {
         image: ConverseImage {
             format,
             source: ConverseImageSource {
                 bytes: data.to_string(),
             },
         },
-    })
+    }))
 }
 
 /// Translate a canonical Document part (source + title + citations) into
@@ -2318,7 +2470,7 @@ mod tests {
         };
 
         // Act
-        let result = build_tool_message(&msg, &mut CitationsDropTally::new("test"))
+        let result = build_tool_message(TEST_ID, &msg, &mut CitationsDropTally::new("test"))
             .expect("Null-content tool message must translate");
 
         // Assert
@@ -2446,8 +2598,12 @@ mod tests {
             "source": {"type": "text", "media_type": "text/plain", "data": "hello"},
             "title": "notes",
         });
-        let out =
-            translate_tool_result_array_element(&element, &mut CitationsDropTally::new("test"));
+        let out = translate_tool_result_array_element(
+            TEST_ID,
+            &element,
+            &mut CitationsDropTally::new("test"),
+        )
+        .expect("a well-formed document element must translate");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
         };
@@ -2492,8 +2648,12 @@ mod tests {
             "source": {"type": "base64", "media_type": "text/plain", "data": already},
             "title": "notes",
         });
-        let out =
-            translate_tool_result_array_element(&element, &mut CitationsDropTally::new("test"));
+        let out = translate_tool_result_array_element(
+            TEST_ID,
+            &element,
+            &mut CitationsDropTally::new("test"),
+        )
+        .expect("a base64 document element must translate");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("array path: expected Document variant, got: {out:?}");
         };
@@ -3126,9 +3286,11 @@ mod tests {
     /// assertions see the exact wire shape.
     fn raw_element_document_json(citations: Option<Value>) -> Value {
         let out = translate_tool_result_array_element(
+            TEST_ID,
             &raw_document_element(citations),
             &mut CitationsDropTally::new("test"),
-        );
+        )
+        .expect("a well-formed document element must translate");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
         };

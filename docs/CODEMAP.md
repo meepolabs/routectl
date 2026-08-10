@@ -937,6 +937,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   no foreign-format signal) aggregates the per-message unsigned-signature skips
   into one WARN per outbound provider attempt; `build_messages` owns it and
   flushes both tallies on the ok and err arms.
+  Image content follows a two-class policy on the malformed-vs-unrepresentable
+  axis, shared by all four image-carrying paths (`translate_image_source`,
+  `translate_image_url`, `image_source_to_tool_result`, and the image arm of
+  `translate_tool_result_array_element`, which delegates to the same
+  translator): a source that names no bytes fails the request with a
+  field-naming `normalize_request` error, while a well-formed image this JSON
+  wire cannot carry keeps its WARN-drop. Required-field structure is validated
+  before representability, and an unrecognized-but-nonempty source shape
+  defaults to the drop so a future vendor shape does not 400 working traffic.
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
   when the translated transcript references tool blocks but no tools survive

@@ -7,4 +7,9 @@ use super::*;
 use crate::anthropic_api::ANTHROPIC_FORMAT;
 use routectl_testkit::{CapturedEvent, capture_events};
 
+/// Provider id passed to the translators under test; only reaches log
+/// fields and the `provider` slot of a `NormalizeRequest` error.
+const TEST_ID: &str = "prov-test";
+
 include!("messages_reasoning_warn_tests.rs");
+include!("messages_image_policy_tests.rs");
