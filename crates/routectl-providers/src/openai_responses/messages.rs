@@ -75,8 +75,10 @@ use serde_json::Value;
 
 use routectl_core::{
     ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability, Result, Role,
-    is_replayable, is_responses_family, reasoning_envelope, scheme_of,
+    is_replayable, is_responses_family, reasoning_envelope, sanitize_for_log, scheme_of,
 };
+
+use crate::bounded_diagnostics::BoundedLogSample;
 
 use super::types::{
     FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
@@ -406,7 +408,10 @@ fn lift_reasoning_details(
     let mut groups: std::collections::HashMap<Option<String>, ReasoningGroup> =
         std::collections::HashMap::new();
     let mut skipped_count: u32 = 0;
-    let mut skipped_formats: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Sanitized before the distinctness test so each entry is
+    // length-bounded at collection time and tags differing only in
+    // control characters share one slot.
+    let mut skipped_formats: BoundedLogSample<String> = BoundedLogSample::new();
     let mut stripped_count: u32 = 0;
     let lane = lane_scheme(auth_kind);
 
@@ -414,7 +419,7 @@ fn lift_reasoning_details(
         let format = d.format.as_deref();
         if !is_responses_family(format) {
             skipped_count += 1;
-            skipped_formats.insert(format.unwrap_or("<none>").to_string());
+            skipped_formats.push_distinct(sanitize_for_log(format.unwrap_or("<none>")));
             continue;
         }
         if is_replayable(scheme_of(format), lane) == Replayability::Strip {
@@ -491,10 +496,10 @@ fn lift_reasoning_details(
     }
 
     if skipped_count > 0 {
-        let formats: Vec<&str> = skipped_formats.iter().map(String::as_str).collect();
         tracing::debug!(
             skipped = skipped_count,
-            formats = ?formats,
+            formats = ?skipped_formats.items(),
+            formats_truncated = skipped_formats.truncated(),
             "openai-responses: skipped reasoning_details entries with a non-Responses-family format"
         );
     }
@@ -1062,6 +1067,7 @@ mod messages_tests {
     use super::super::types::ResponseInputItem;
     use super::super::{AuthKind, OPENAI_RESPONSES_FORMAT};
     use super::{lift_reasoning_details, translate_thinking_part};
+    use crate::bounded_diagnostics::MAX_LOGGED_DIAGNOSTIC_ITEMS;
 
     fn make_detail(
         format: Option<&str>,
@@ -1265,6 +1271,142 @@ mod messages_tests {
             out.len(),
             1,
             "expected exactly one item (the openai-responses-v1 detail)"
+        );
+    }
+
+    /// Split a `Debug`-rendered slice-of-String field value into its
+    /// element strings so the sample's length and contents can be
+    /// asserted without pinning the whole rendering byte-for-byte.
+    fn debug_list_entries(rendered: &str) -> Vec<String> {
+        let inner = rendered
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim();
+        if inner.is_empty() {
+            return Vec::new();
+        }
+        inner.split(", ").map(|e| e.trim().to_string()).collect()
+    }
+
+    /// Run the lift over `details` and return the aggregated
+    /// foreign-format DEBUG record.
+    fn format_skip_event(details: &[ReasoningDetail]) -> routectl_testkit::CapturedEvent {
+        let events = routectl_testkit::capture_events(|| {
+            let mut out = Vec::new();
+            lift_reasoning_details(details, AuthKind::ChatgptOauth, &mut out);
+        });
+        let matches: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.message.contains(
+                    "openai-responses: skipped reasoning_details entries with a non-Responses-family format",
+                )
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "exactly one aggregated format record expected; got events: {events:?}"
+        );
+        matches[0].clone()
+    }
+
+    fn foreign_format_detail(format: Option<&str>) -> ReasoningDetail {
+        make_detail(
+            format,
+            ReasoningDetailKind::Text,
+            json!({"text": "some reasoning"}),
+        )
+    }
+
+    /// More DISTINCT foreign formats than the log cap must leave the
+    /// rendered sample at the cap with `formats_truncated` set, while
+    /// `skipped` stays the exact total.
+    #[test]
+    fn lift_caps_distinct_skipped_formats_and_flags_truncation() {
+        // Arrange: 12 details over 9 distinct foreign formats.
+        let mut details: Vec<_> = (0..9)
+            .map(|i| foreign_format_detail(Some(&format!("foreign-format-{i}"))))
+            .collect();
+        details.extend((0..3).map(|i| foreign_format_detail(Some(&format!("foreign-format-{i}")))));
+
+        // Act
+        let event = format_skip_event(&details);
+
+        // Assert
+        assert_eq!(event.field("skipped"), Some("12"));
+        assert_eq!(
+            event.field("formats_truncated"),
+            Some("true"),
+            "a rejected distinct format must flag the sample as truncated"
+        );
+        let entries = debug_list_entries(event.field("formats").expect("formats field present"));
+        assert_eq!(entries.len(), MAX_LOGGED_DIAGNOSTIC_ITEMS);
+    }
+
+    /// The defect this guards: deriving the truncation flag from
+    /// offered-vs-stored counts. Many details sharing one format store a
+    /// single entry that represents them all, so nothing was dropped.
+    #[test]
+    fn lift_reports_no_truncation_when_one_skipped_format_repeats() {
+        // Arrange
+        let details: Vec<_> = (0..10)
+            .map(|_| foreign_format_detail(Some("anthropic-claude-v1")))
+            .collect();
+
+        // Act
+        let event = format_skip_event(&details);
+
+        // Assert
+        assert_eq!(event.field("skipped"), Some("10"));
+        assert_eq!(
+            event.field("formats_truncated"),
+            Some("false"),
+            "repeats of a stored format drop nothing, so the sample is whole"
+        );
+        let entries = debug_list_entries(event.field("formats").expect("formats field present"));
+        assert_eq!(entries, vec!["\"anthropic-claude-v1\""]);
+    }
+
+    /// A caller-supplied tag reaches the record sanitized: no raw control
+    /// character, length-capped, and tags differing only in control
+    /// characters share one slot. An absent tag keeps its placeholder.
+    #[test]
+    fn lift_sanitizes_skipped_format_tags_and_keeps_the_absent_placeholder() {
+        // Arrange
+        let long_tag = "z".repeat(1000);
+        let details = vec![
+            foreign_format_detail(Some("evil\nformat\r\0tag")),
+            foreign_format_detail(Some("evil\rformat\n\0tag")),
+            foreign_format_detail(Some(&long_tag)),
+            foreign_format_detail(None),
+        ];
+
+        // Act
+        let event = format_skip_event(&details);
+
+        // Assert
+        let rendered = event.field("formats").expect("formats field present");
+        for raw in ['\n', '\r', '\0'] {
+            assert!(
+                !rendered.contains(raw),
+                "a raw control character reached the log field: {rendered:?}"
+            );
+        }
+        assert!(
+            !rendered.contains(&long_tag),
+            "an oversized tag must be length-capped; got: {rendered}"
+        );
+        let entries = debug_list_entries(rendered);
+        assert_eq!(
+            entries.len(),
+            3,
+            "tags differing only in control chars must share one slot; got: {entries:?}"
+        );
+        assert!(
+            entries.contains(&"\"<none>\"".to_string()),
+            "an absent format must render as a placeholder; got: {entries:?}"
         );
     }
 

@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use routectl_core::{
     ChatRequest, ContentPart, CoreHistoryReasoning, Error, KnownContentPart, Message,
-    MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role,
+    MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role, sanitize_for_log,
 };
 
 use crate::bounded_diagnostics::{BoundedLogSample, MAX_LOGGED_DIAGNOSTIC_ITEMS};
@@ -655,7 +655,11 @@ fn emit_reasoning_blocks(
     // regardless of signature presence; a separate WARN aggregates them so
     // operators can distinguish format-mismatch drops from unsigned drops.
     let mut skipped_format_count: usize = 0;
-    let mut skipped_format_values: Vec<String> = Vec::new();
+    // The format tag is caller-supplied, so it is sanitized BEFORE the
+    // distinctness test: that bounds each entry's length as it is
+    // collected and collapses tags differing only in control characters
+    // into one slot instead of letting them each claim one.
+    let mut skipped_format_values: BoundedLogSample<String> = BoundedLogSample::new();
     for detail in &sorted {
         if !is_anthropic_emittable_detail(detail) {
             // Not emittable: categorize for the aggregated WARNs so
@@ -669,8 +673,9 @@ fn emit_reasoning_blocks(
                     if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) =>
                 {
                     skipped_format_count = skipped_format_count.saturating_add(1);
-                    skipped_format_values
-                        .push(detail.format.as_deref().unwrap_or("<none>").to_string());
+                    skipped_format_values.push_distinct(sanitize_for_log(
+                        detail.format.as_deref().unwrap_or("<none>"),
+                    ));
                 }
                 ReasoningDetailKind::Text => {
                     skipped_unsigned_count = skipped_unsigned_count.saturating_add(1);
@@ -727,14 +732,11 @@ fn emit_reasoning_blocks(
         );
     }
     if skipped_format_count > 0 {
-        // Deduplicate format strings for a compact log field; order is
-        // not meaningful so sort-then-dedup is fine.
-        skipped_format_values.sort_unstable();
-        skipped_format_values.dedup();
         tracing::warn!(
             provider = id,
             skipped_count = skipped_format_count,
-            skipped_formats = ?skipped_format_values,
+            skipped_formats = ?skipped_format_values.items(),
+            formats_truncated = skipped_format_values.truncated(),
             "skipping reasoning blocks on replay: format is not anthropic-claude-v1 \
              (non-Anthropic format details cannot be echoed as Anthropic Thinking blocks)"
         );
