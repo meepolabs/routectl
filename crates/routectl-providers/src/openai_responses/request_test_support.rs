@@ -82,6 +82,18 @@ fn translate_to_json(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Value {
     serde_json::to_value(&r).expect("serialize")
 }
 
+/// The rendered error a rejected request produces. Panics when the
+/// request translates, so a negative assertion can never go vacuous.
+fn translate_err(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> String {
+    match translate(cfg, req) {
+        Ok(r) => panic!(
+            "expected translation to fail, got: {}",
+            serde_json::to_value(&r).expect("serialize")
+        ),
+        Err(e) => e.to_string(),
+    }
+}
+
 /// A non-chatgpt-oauth config (api-key path) where store stays false by
 /// default. Used to exercise the store override + include-forcing logic.
 fn cfg_api_key() -> OpenAiResponsesConfig {
@@ -151,6 +163,41 @@ fn user_file(file: Value) -> Message {
         tool_call_id: None,
         tool_calls: None,
     }
+}
+
+fn user_parts(parts: Vec<ContentPart>) -> Message {
+    Message {
+        refusal: None,
+        role: Role::User,
+        content: MessageContent::Parts(parts),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn image_part(source: Value) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Image {
+        source,
+        cache_control: None,
+    })
+}
+
+fn image_url_part(image_url: Value) -> ContentPart {
+    ContentPart::Known(KnownContentPart::ImageUrl {
+        image_url,
+        cache_control: None,
+    })
+}
+
+fn text_part(text: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Text {
+        text: text.into(),
+        citations: None,
+        cache_control: None,
+    })
 }
 
 fn tool_message_parts(call_id: &str, parts: Vec<ContentPart>) -> Message {

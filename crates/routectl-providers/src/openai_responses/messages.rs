@@ -13,6 +13,30 @@
 //! instead of ToolUse content parts) are re-emitted the same way so a
 //! following `function_call_output` is never dangling.
 //!
+//! Content-part policy -- TWO classes, deliberately NOT unified:
+//!
+//! - MALFORMED: the caller asked to send bytes and named none (an
+//!   `image_url` with no url or an empty one, an image source whose
+//!   base64 `data` or `url` is empty, a file part carrying neither
+//!   `file_data` nor `file_id`). There is no valid interpretation at any
+//!   egress, so the request FAILS with a `normalize_request` error that
+//!   names the offending field and content location. The error never
+//!   echoes a caller-controlled type tag or any raw content value.
+//! - UNREPRESENTABLE: the part is well-formed but this egress has no slot
+//!   for it (a canonical part kind the Responses API does not model, a
+//!   forward-compat part, an unknown image-source kind, a non-text part
+//!   inside a tool result). The request is legitimate and serviceable, so
+//!   the part DROPS with a WARN and the rest of the turn still ships;
+//!   hard-failing here would turn working cross-dialect routes into 400s
+//!   and make every new canonical part kind a breaking change at every
+//!   egress that cannot emit it. The audience for that WARN is the
+//!   operator, who can act on "this route cannot carry PDFs"; the caller
+//!   is not told, because nothing was wrong with the request.
+//!
+//! The governing axis is malformed-vs-unrepresentable, NOT
+//! recognized-vs-unrecognized: a recognized part with no carrier fails,
+//! and an unrecognized but well-formed part drops.
+//!
 //! Reasoning replay: a reasoning item is emitted only when it carries a
 //! non-empty `encrypted_content` this lane can validly replay. An item
 //! with an empty signature has nothing to re-inject and its upstream id
@@ -503,15 +527,16 @@ fn translate_tool_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
     let Some(raw_call_id) = msg.tool_call_id.as_deref().filter(|s| !s.is_empty()) else {
         return Err(Error::normalize_request(
             id,
-            "tool message missing tool_call_id (Role::Tool requires a \
-             non-empty tool_call_id for the Responses API function_call_output item)",
+            "tool message has no usable tool_call_id: the field is absent or empty \
+             (Role::Tool requires a non-empty tool_call_id for the Responses API \
+             function_call_output item)",
         ));
     };
     let call_id = crate::tool_id::sanitize_tool_id(raw_call_id).into_owned();
     let output = match &msg.content {
         MessageContent::Text(t) => FunctionCallOutputBody::Text(t.clone()),
         MessageContent::Null => FunctionCallOutputBody::Text(String::new()),
-        MessageContent::Parts(parts) => build_tool_output_body(id, parts),
+        MessageContent::Parts(parts) => build_tool_output_body(id, parts)?,
     };
     out.push(ResponseInputItem::FunctionCallOutput { call_id, output });
     Ok(())
@@ -536,39 +561,43 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
                         }
                     }
                     ContentPart::Known(KnownContentPart::Image { source, .. }) => {
-                        if let Some(item) = translate_image_source(id, source) {
+                        if let Some(item) = translate_image_source(id, source)? {
                             out.push(item);
                         }
                     }
                     ContentPart::Known(KnownContentPart::ImageUrl { image_url, .. }) => {
                         // OpenAI-shape image_url block: extract the url
                         // field and emit an InputImage. detail, if present
-                        // on the nested object, is forwarded.
-                        if let Some(url) = image_url.get("url").and_then(|u| u.as_str()) {
-                            let detail = image_url
-                                .get("detail")
-                                .and_then(|d| d.as_str())
-                                .map(str::to_string);
-                            out.push(ResponsesContentItem::InputImage {
-                                image_url: url.to_string(),
-                                detail,
-                            });
-                        } else {
-                            tracing::warn!(
-                                provider = id,
-                                role = "user",
-                                "dropping image_url part with missing url field on Responses egress"
-                            );
-                        }
+                        // on the nested object, is forwarded. A url that is
+                        // absent OR present-but-empty is malformed: an
+                        // empty `image_url` names no bytes, so it fails
+                        // rather than shipping upstream.
+                        let Some(url) = image_url
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .filter(|s| !s.is_empty())
+                        else {
+                            return Err(Error::normalize_request(
+                                id,
+                                "image_url content part on a user message has no usable url: \
+                                 image_url.url is absent or empty",
+                            ));
+                        };
+                        let detail = image_url
+                            .get("detail")
+                            .and_then(|d| d.as_str())
+                            .map(str::to_string);
+                        out.push(ResponsesContentItem::InputImage {
+                            image_url: url.to_string(),
+                            detail,
+                        });
                     }
                     ContentPart::Known(KnownContentPart::ToolResult { .. }) => {
                         // Lifted to FunctionCallOutput in
                         // `extract_tool_results`; skip silently here.
                     }
                     ContentPart::Known(KnownContentPart::File { file, .. }) => {
-                        if let Some(item) = translate_file_part(id, file) {
-                            out.push(item);
-                        }
+                        out.push(translate_file_part(id, file)?);
                     }
                     ContentPart::Known(other) => {
                         tracing::warn!(
@@ -793,9 +822,9 @@ pub(super) fn translate_thinking_part(
 /// `ResponsesContentItem::InputFile`. The nested object carries either
 /// `file_data` (a `data:<mime>;base64,<...>` URI for an inline upload)
 /// or `file_id` (a reference to a previously-uploaded file), plus an
-/// optional `filename`. Returns `None` and WARNs when neither carrier is
-/// present (an empty file part has nothing the upstream can act on).
-fn translate_file_part(id: &str, file: &serde_json::Value) -> Option<ResponsesContentItem> {
+/// optional `filename`. A part carrying neither is malformed -- it names
+/// no bytes the upstream can act on -- so it fails the request.
+fn translate_file_part(id: &str, file: &serde_json::Value) -> Result<ResponsesContentItem> {
     let file_data = file
         .get("file_data")
         .and_then(|v| v.as_str())
@@ -813,15 +842,14 @@ fn translate_file_part(id: &str, file: &serde_json::Value) -> Option<ResponsesCo
         .map(str::to_string);
 
     if file_data.is_none() && file_id.is_none() {
-        tracing::warn!(
-            provider = id,
-            role = "user",
-            "dropping file part with no file_data or file_id on Responses egress"
-        );
-        return None;
+        return Err(Error::normalize_request(
+            id,
+            "file content part on a user message has no usable carrier: \
+             file.file_data and file.file_id are both absent or empty",
+        ));
     }
 
-    Some(ResponsesContentItem::InputFile {
+    Ok(ResponsesContentItem::InputFile {
         file_data,
         file_id,
         filename,
@@ -829,9 +857,15 @@ fn translate_file_part(id: &str, file: &serde_json::Value) -> Option<ResponsesCo
 }
 
 /// Translate a canonical `Image` source block to a
-/// `ResponsesContentItem::InputImage`. Returns `None` and emits a WARN
-/// when the source shape is unrecognized (forward-compat unknown kind).
-fn translate_image_source(id: &str, source: &serde_json::Value) -> Option<ResponsesContentItem> {
+/// `ResponsesContentItem::InputImage`.
+///
+/// An empty base64 `data` or an empty `url` is malformed and fails the
+/// request. An unrecognized source shape is a forward-compat extension
+/// this egress cannot represent, so it yields `Ok(None)` and a WARN.
+fn translate_image_source(
+    id: &str,
+    source: &serde_json::Value,
+) -> Result<Option<ResponsesContentItem>> {
     let kind = source.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match kind {
         "base64" => {
@@ -841,32 +875,30 @@ fn translate_image_source(id: &str, source: &serde_json::Value) -> Option<Respon
                 .unwrap_or("application/octet-stream");
             let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
             if data.is_empty() {
-                tracing::warn!(
-                    provider = id,
-                    role = "user",
-                    "dropping image part with empty base64 data on Responses egress"
-                );
-                return None;
+                return Err(Error::normalize_request(
+                    id,
+                    "image content part on a user message has empty base64 payload: \
+                     source.data is absent or empty",
+                ));
             }
-            Some(ResponsesContentItem::InputImage {
+            Ok(Some(ResponsesContentItem::InputImage {
                 image_url: format!("data:{media_type};base64,{data}"),
                 detail: None,
-            })
+            }))
         }
         "url" => {
             let url = source.get("url").and_then(|u| u.as_str()).unwrap_or("");
             if url.is_empty() {
-                tracing::warn!(
-                    provider = id,
-                    role = "user",
-                    "dropping image part with empty url on Responses egress"
-                );
-                return None;
+                return Err(Error::normalize_request(
+                    id,
+                    "image content part on a user message has no usable url: \
+                     source.url is absent or empty",
+                ));
             }
-            Some(ResponsesContentItem::InputImage {
+            Ok(Some(ResponsesContentItem::InputImage {
                 image_url: url.to_string(),
                 detail: None,
-            })
+            }))
         }
         other => {
             tracing::warn!(
@@ -875,7 +907,7 @@ fn translate_image_source(id: &str, source: &serde_json::Value) -> Option<Respon
                 role = "user",
                 "dropping image part with unknown source kind on Responses egress"
             );
-            None
+            Ok(None)
         }
     }
 }
@@ -883,9 +915,10 @@ fn translate_image_source(id: &str, source: &serde_json::Value) -> Option<Respon
 /// Build a `FunctionCallOutputBody` from a parts slice. When all parts
 /// are plain text the result collapses to a flat string (codex parity,
 /// most-common path). When any part is non-text (e.g. an image returned
-/// by a visual tool) the result is an Items array. Unknown parts are
-/// WARN-dropped; the remaining known parts are still forwarded.
-fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> FunctionCallOutputBody {
+/// by a visual tool) the result is an Items array. Parts this egress
+/// cannot represent are WARN-dropped and the remaining known parts are
+/// still forwarded; a malformed image part fails the request.
+fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> Result<FunctionCallOutputBody> {
     let has_non_text = parts.iter().any(|p| {
         matches!(
             p,
@@ -911,7 +944,7 @@ fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> FunctionCallOutput
                 );
             }
         }
-        return FunctionCallOutputBody::Text(buf);
+        return Ok(FunctionCallOutputBody::Text(buf));
     }
 
     // Mixed path: build typed items array.
@@ -922,27 +955,32 @@ fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> FunctionCallOutput
                 items.push(FunctionCallOutputContentItem::InputText { text: text.clone() });
             }
             ContentPart::Known(KnownContentPart::Image { source, .. }) => {
-                if let Some(item) = translate_tool_image_source(id, source) {
+                if let Some(item) = translate_tool_image_source(id, source)? {
                     items.push(item);
                 }
             }
             ContentPart::Known(KnownContentPart::ImageUrl { image_url, .. }) => {
-                if let Some(url) = image_url.get("url").and_then(|u| u.as_str()) {
-                    let detail = image_url
-                        .get("detail")
-                        .and_then(|d| d.as_str())
-                        .map(str::to_string);
-                    items.push(FunctionCallOutputContentItem::InputImage {
-                        image_url: url.to_string(),
-                        detail,
-                    });
-                } else {
-                    tracing::warn!(
-                        provider = id,
-                        role = "tool",
-                        "dropping image_url part with missing url in tool result on Responses egress"
-                    );
-                }
+                // A url that is absent OR present-but-empty names no
+                // bytes; failing keeps an empty `image_url` off the wire.
+                let Some(url) = image_url
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Err(Error::normalize_request(
+                        id,
+                        "image_url content part in a tool result has no usable url: \
+                         image_url.url is absent or empty",
+                    ));
+                };
+                let detail = image_url
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string);
+                items.push(FunctionCallOutputContentItem::InputImage {
+                    image_url: url.to_string(),
+                    detail,
+                });
             }
             other => {
                 tracing::warn!(
@@ -954,16 +992,18 @@ fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> FunctionCallOutput
             }
         }
     }
-    FunctionCallOutputBody::Items(items)
+    Ok(FunctionCallOutputBody::Items(items))
 }
 
 /// Translate an Anthropic-shape image source inside a tool result to a
-/// `FunctionCallOutputContentItem::InputImage`. Returns `None` on
-/// unrecognized source kinds.
+/// `FunctionCallOutputContentItem::InputImage`.
+///
+/// An empty base64 `data` or an empty `url` is malformed and fails the
+/// request; an unrecognized source kind yields `Ok(None)` and a WARN.
 fn translate_tool_image_source(
     id: &str,
     source: &serde_json::Value,
-) -> Option<FunctionCallOutputContentItem> {
+) -> Result<Option<FunctionCallOutputContentItem>> {
     let kind = source.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match kind {
         "base64" => {
@@ -973,32 +1013,30 @@ fn translate_tool_image_source(
                 .unwrap_or("application/octet-stream");
             let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
             if data.is_empty() {
-                tracing::warn!(
-                    provider = id,
-                    role = "tool",
-                    "dropping image part with empty base64 data in tool result on Responses egress"
-                );
-                return None;
+                return Err(Error::normalize_request(
+                    id,
+                    "image content part in a tool result has empty base64 payload: \
+                     source.data is absent or empty",
+                ));
             }
-            Some(FunctionCallOutputContentItem::InputImage {
+            Ok(Some(FunctionCallOutputContentItem::InputImage {
                 image_url: format!("data:{media_type};base64,{data}"),
                 detail: None,
-            })
+            }))
         }
         "url" => {
             let url = source.get("url").and_then(|u| u.as_str()).unwrap_or("");
             if url.is_empty() {
-                tracing::warn!(
-                    provider = id,
-                    role = "tool",
-                    "dropping image part with empty url in tool result on Responses egress"
-                );
-                return None;
+                return Err(Error::normalize_request(
+                    id,
+                    "image content part in a tool result has no usable url: \
+                     source.url is absent or empty",
+                ));
             }
-            Some(FunctionCallOutputContentItem::InputImage {
+            Ok(Some(FunctionCallOutputContentItem::InputImage {
                 image_url: url.to_string(),
                 detail: None,
-            })
+            }))
         }
         other => {
             tracing::warn!(
@@ -1007,7 +1045,7 @@ fn translate_tool_image_source(
                 role = "tool",
                 "dropping image part with unknown source kind in tool result on Responses egress"
             );
-            None
+            Ok(None)
         }
     }
 }
