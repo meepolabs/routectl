@@ -7,11 +7,6 @@
 //! primitive without any module depending on another provider's gate.
 //! Nothing here carries provider vocabulary or wire-translation logic.
 
-// The sample type is exercised by this module's own tests; the lib target
-// sees its methods unused until the aggregated-WARN sites collect through
-// it. Only the cap constant has call sites today.
-#![allow(dead_code)]
-
 /// Cap on how many items of any one diagnostic sample reach a log
 /// record. A single reply can carry arbitrarily many skipped reasoning
 /// details, foreign format tags, or affected message indices, so an
@@ -31,6 +26,12 @@ pub const MAX_LOGGED_DIAGNOSTIC_ITEMS: usize = 8;
 /// operators and the wire-behavior docs reference separately. Unifying
 /// them would require passing the message text in as a constructor
 /// argument and carrying fields most call sites never set.
+///
+/// The allowance below is scoped to this type and is temporary: the lib
+/// target sees these methods unused until the aggregated-WARN sites
+/// collect through them. Delete it once they do -- a file-wide allowance
+/// would also hide a site that kept its unbounded vector by mistake.
+#[allow(dead_code)]
 pub struct BoundedLogSample<T> {
     items: Vec<T>,
     truncated: bool,
@@ -45,6 +46,7 @@ impl<T> Default for BoundedLogSample<T> {
     }
 }
 
+#[allow(dead_code)]
 impl<T> BoundedLogSample<T> {
     /// An empty sample, pre-sized to the cap.
     pub fn new() -> Self {
@@ -90,6 +92,7 @@ impl<T> BoundedLogSample<T> {
     }
 }
 
+#[allow(dead_code)]
 impl<T: PartialEq> BoundedLogSample<T> {
     /// Store `value` unless an equal value is already stored. A linear
     /// scan over at most `MAX_LOGGED_DIAGNOSTIC_ITEMS` entries is cheaper
