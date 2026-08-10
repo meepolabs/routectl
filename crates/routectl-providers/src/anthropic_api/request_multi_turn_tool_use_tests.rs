@@ -357,7 +357,8 @@ fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
 fn emits_warn_when_stripping_occurs() {
     // Capture the WARN log emitted during normalize and assert:
     // - structured fields `provider`, `dropped_blocks`,
-    //   `affected_messages` are present
+    //   `affected_messages_count`, `affected_messages`,
+    //   `affected_messages_truncated` are present
     // - block content (the `thinking` text) is NEVER logged --
     //   could be reasoning over sensitive data.
     use routectl_core::{ContentPart, KnownContentPart};
@@ -402,7 +403,13 @@ fn emits_warn_when_stripping_occurs() {
 
     // Structured fields present.
     let field_keys: Vec<&str> = strip_event.fields.iter().map(|(k, _)| k.as_str()).collect();
-    for key in &["provider", "dropped_blocks", "affected_messages"] {
+    for key in &[
+        "provider",
+        "dropped_blocks",
+        "affected_messages_count",
+        "affected_messages",
+        "affected_messages_truncated",
+    ] {
         assert!(
             field_keys.contains(key),
             "expected field `{key}` in WARN, got fields: {:?}",
