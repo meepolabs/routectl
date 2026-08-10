@@ -1244,8 +1244,8 @@ fn build_tool_message(
 /// and Claude 3+ on Converse rejects the malformed shape -- the model
 /// gets the canonical schema instead of the AWS image/document block.
 ///
-/// A malformed image source fails the request; a well-formed one this
-/// egress cannot represent takes the JSON fallback.
+/// A base64 image source that names no bytes fails the request; every
+/// other source this egress cannot represent takes the JSON fallback.
 fn translate_part_for_tool_result(
     id: &str,
     p: &ContentPart,
@@ -1287,44 +1287,28 @@ fn content_part_to_json_fallback(p: &ContentPart) -> ConverseToolResultContent {
 /// Translate a canonical Anthropic-shape image source into the AWS
 /// toolResult `Image` variant.
 ///
-/// Same two-class policy as `translate_image_source`, which this mirrors
-/// field for field: a source that names no bytes is malformed and fails
-/// the request; a well-formed source with no AWS carrier yields `Ok(None)`
-/// and the caller falls back to the JSON wrap.
+/// This carrier classifies DIFFERENTLY from `translate_image_source`, and
+/// deliberately so: every caller of this helper wraps an `Ok(None)` as a
+/// `ConverseToolResultContent::Json`, so the model still receives the
+/// payload. The plain image path has no such fallback, which is why a
+/// source naming no bytes must fail the request there. Here, only a source
+/// that positively declares base64 and then names no bytes is malformed --
+/// anything else takes the JSON fallback rather than converting a working
+/// request into a 400.
 fn image_source_to_tool_result(
     id: &str,
     source: &Value,
 ) -> Result<Option<ConverseToolResultContent>> {
     let Some(obj) = source.as_object() else {
-        return Err(Error::normalize_request(
-            id,
-            "image block in a Converse tool result has a malformed source: \
-             source is not an object",
-        ));
+        return Ok(None);
     };
     let Some(kind) = obj
         .get("type")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     else {
-        return Err(Error::normalize_request(
-            id,
-            "image block in a Converse tool result names no source shape: \
-             source.type is absent, empty, or not a string",
-        ));
+        return Ok(None);
     };
-    if kind == "url"
-        && obj
-            .get("url")
-            .and_then(|v| v.as_str())
-            .is_none_or(str::is_empty)
-    {
-        return Err(Error::normalize_request(
-            id,
-            "image block in a Converse tool result has no usable url: \
-             source.url is absent, empty, or not a string",
-        ));
-    }
     if kind != "base64" {
         return Ok(None);
     }
