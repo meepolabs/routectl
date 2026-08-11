@@ -38,10 +38,12 @@ pub(super) const HISTORY_COMPAT_TOOL_NAME: &str = "routectl__history_compat_noop
 /// adjacent to their owning tool spec.
 ///
 /// `messages` is the already-translated Converse transcript. When it
-/// references tool blocks on the wire (`toolUse` AND `toolResult`) but no
-/// usable tool defs survive, a single reserved dummy `toolSpec` is
-/// injected: Bedrock rejects a request whose transcript carries tool
-/// blocks unless `toolConfig` offers at least one tool.
+/// carries a `toolResult` block but no usable tool defs survive, a single
+/// reserved dummy `toolSpec` is injected: Bedrock rejects a request whose
+/// transcript carries tool blocks unless `toolConfig` offers at least one
+/// tool. The injection stops routectl from omitting a `toolConfig` the
+/// wire requires; it does not promise the request then succeeds (an
+/// unpaired `toolResult` can still be rejected for pairing reasons).
 pub(super) fn build_tool_config(
     id: &str,
     req: &ChatRequest,
@@ -74,10 +76,11 @@ pub(super) fn build_tool_config(
     if tools.is_empty() {
         // No usable tool defs survived (none supplied, an empty list, or
         // every entry was an Anthropic builtin that dropped). If the
-        // translated transcript still references tool blocks on the wire,
-        // backfill exactly one reserved dummy so Bedrock accepts the
-        // history; otherwise absence is the cleaner wire shape.
-        if has_wire_tool_history(messages) {
+        // translated transcript still carries a `toolResult`, backfill
+        // exactly one reserved dummy so routectl stops omitting a
+        // `toolConfig` the wire requires; otherwise absence is the
+        // cleaner wire shape.
+        if transcript_requires_tool_config(messages) {
             tracing::warn!(
                 provider = id,
                 "injecting reserved dummy toolSpec: Converse transcript references \
@@ -91,27 +94,25 @@ pub(super) fn build_tool_config(
     Ok(Some(ToolConfig { tools, tool_choice }))
 }
 
-/// True when the translated Converse transcript references tool blocks on
-/// the wire: BOTH a `toolUse` (assistant asked to call) AND a
-/// `toolResult` (result echoed back) must be present. Requiring both
-/// keeps the trigger tight -- a lone stray block does not fire the
-/// model-visible dummy backfill.
-fn has_wire_tool_history(messages: &[ConverseMessage]) -> bool {
-    let mut saw_use = false;
-    let mut saw_result = false;
-    for msg in messages {
-        for block in &msg.content {
-            match block {
-                ConverseContentBlock::ToolUse { .. } => saw_use = true,
-                ConverseContentBlock::ToolResult { .. } => saw_result = true,
-                _ => {}
-            }
-        }
-        if saw_use && saw_result {
-            return true;
-        }
-    }
-    false
+/// True when the translated Converse transcript carries at least one
+/// `toolResult` block, which is what makes AWS demand a `toolConfig`.
+///
+/// Deliberately asymmetric: a lone `toolUse` does NOT qualify. The two
+/// rejections are different classes. A `toolResult` without `toolConfig`
+/// trips a Converse-API-level missing-required-FIELD check, which
+/// supplying a dummy tool repairs. A `toolUse` without its following
+/// `toolResult` trips a model-level message-PAIRING check ("The model
+/// returned the following errors: ... tool_use ids were found without
+/// tool_result blocks"), which no `toolConfig` can repair -- injecting
+/// there would be a model-visible mutation with no possible benefit.
+/// If AWS ever merges those two validators, this predicate needs
+/// revisiting.
+fn transcript_requires_tool_config(messages: &[ConverseMessage]) -> bool {
+    messages.iter().any(|msg| {
+        msg.content
+            .iter()
+            .any(|block| matches!(block, ConverseContentBlock::ToolResult { .. }))
+    })
 }
 
 /// The reserved dummy tool config: one `toolSpec` with a do-not-call
@@ -519,7 +520,10 @@ mod tests {
     #[test]
     fn no_dummy_when_only_tool_use_present() {
         // Arrange: a lone toolUse with no matching toolResult must not fire
-        // the model-visible backfill -- the trigger requires both.
+        // the model-visible backfill. That shape is rejected by a
+        // model-level pairing check ("tool_use ids were found without
+        // tool_result blocks"), which a dummy toolConfig cannot repair, so
+        // injecting one would mutate the request for no benefit.
         let messages = vec![tool_use_msg(), plain_msg()];
 
         // Act
@@ -530,10 +534,40 @@ mod tests {
     }
 
     #[test]
-    fn no_dummy_when_only_tool_result_present() {
+    fn injects_dummy_when_only_tool_result_present() {
+        // Arrange: a lone toolResult is what makes AWS demand a toolConfig
+        // (a Converse-level missing-required-field rejection), so routectl
+        // must stop omitting one.
         let messages = vec![plain_msg(), tool_result_msg()];
-        let cfg = build_tool_config(ID, &req(None), &messages).unwrap();
-        assert!(cfg.is_none());
+
+        // Act
+        let cfg = build_tool_config(ID, &req(None), &messages)
+            .unwrap()
+            .unwrap();
+
+        // Assert
+        assert_eq!(cfg.tools.len(), 1);
+        assert!(cfg.tool_choice.is_none(), "dummy must not force tool use");
+        let ConverseToolDef::Spec { tool_spec } = &cfg.tools[0] else {
+            panic!("expected a toolSpec entry");
+        };
+        assert_eq!(tool_spec.name, HISTORY_COMPAT_TOOL_NAME);
+    }
+
+    #[test]
+    fn no_dummy_when_tool_result_and_tool_choice_none() {
+        // KNOWN UNREPAIRED SHAPE. A toolResult with `tool_choice: "none"`
+        // still gets no toolConfig, so AWS still rejects it. Repairing it
+        // would mean shipping a tool the caller explicitly forbade --
+        // Converse has no native "none" mode, so a present `tools` array
+        // defaults to auto-selection. Violating stated caller intent is
+        // worse than the rejection.
+        let messages = vec![plain_msg(), tool_result_msg()];
+
+        for choice in [json!("none"), json!({"type": "none"})] {
+            let cfg = build_tool_config(ID, &req(Some(choice)), &messages).unwrap();
+            assert!(cfg.is_none(), "none must keep the shape unrepaired");
+        }
     }
 
     #[traced_test]
@@ -543,6 +577,17 @@ mod tests {
         let _ = build_tool_config(ID, &req(None), &wire_history()).unwrap();
 
         // Assert: a WARN fires, carrying the provider id and no tool args.
+        assert!(logs_contain("injecting reserved dummy toolSpec"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn warns_on_dummy_injection_for_lone_tool_result() {
+        // Act
+        let messages = vec![plain_msg(), tool_result_msg()];
+        let _ = build_tool_config(ID, &req(None), &messages).unwrap();
+
+        // Assert: the newly-covered path is never a silent mutation.
         assert!(logs_contain("injecting reserved dummy toolSpec"));
     }
 }
