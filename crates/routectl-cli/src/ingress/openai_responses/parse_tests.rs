@@ -1565,14 +1565,13 @@ fn stamped_ingress_tag_is_recognized_by_the_family_predicate() {
 }
 
 // ---------------------------------------------------------------------------
-// stub surfaces (SLICE 3 not yet implemented)
+// render surfaces
 // ---------------------------------------------------------------------------
 
 #[test]
 fn render_response_emits_response_envelope() {
-    // SLICE 2 implements the non-stream renderer: a default
-    // ChatResponse renders a well-formed Responses `response` object
-    // (object/status/output present) rather than erroring.
+    // A default ChatResponse renders a well-formed Responses `response`
+    // object (object/status/output present) rather than erroring.
     // Arrange
     let resp = ChatResponse::default();
 
@@ -1587,9 +1586,9 @@ fn render_response_emits_response_envelope() {
 
 #[test]
 fn render_chunk_emits_response_created_on_first_chunk() {
-    // SLICE 3 implements the streaming render path: the first chunk opens
-    // the stream with a response.created event rather than erroring. Full
-    // lifecycle coverage lives in stream_tests.rs.
+    // The first chunk opens the stream with a response.created event
+    // rather than erroring. Full lifecycle coverage lives in
+    // stream_tests.rs.
     // Arrange
     let chunk = ChatChunk::default();
     let mut state = ResponsesIngress.new_stream_state(&StreamRequestContext::default());

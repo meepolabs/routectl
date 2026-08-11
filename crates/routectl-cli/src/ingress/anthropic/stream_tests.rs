@@ -1068,7 +1068,7 @@ fn opaque_event_delta_without_prior_start_warns_and_skips() {
 // "non-UTF-8 raw bytes get skipped" too is overspecification of an
 // internal defensive guard. Skipped intentionally.
 
-/// LOW-2 fix: an opaque content block opened via an opaque
+/// An opaque content block opened via an opaque
 /// ContentBlockStart but never closed (the upstream stream ended cleanly
 /// before its ContentBlockStop arrived) must be closed at EOS. Before the
 /// fix, `render_eos` closed only the canonical `state.open` block and left
@@ -1654,7 +1654,7 @@ fn render_error_eos_after_normal_finish_emits_nothing() {
     );
 }
 
-/// LOW-1 fix: closing `message_delta` must carry `output_tokens` even when
+/// Closing `message_delta` must carry `output_tokens` even when
 /// the upstream `UsageDelta` omits `completion_tokens`. Symmetric with the
 /// existing `input_tokens` always-emit behavior -- Anthropic spec requires
 /// both fields; when absent, default to 0.

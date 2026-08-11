@@ -473,7 +473,7 @@ fn thinking_no_observation_when_not_requested() {
     assert!(detect(&DetectorContext::default(), &resp).is_empty());
 }
 
-// --- R4 degraded suite: every case yields zero observations -------------
+// --- Clean-stop gate: every degraded case yields zero observations ------
 
 #[test]
 fn degraded_gate_failing_cases_yield_zero_under_maximal_intent() {

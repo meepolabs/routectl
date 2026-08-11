@@ -12,9 +12,9 @@
 //!   VerifiedWorking positive (the settled recency rule).
 //! - D: a resident VerifiedWorking positive masks a `Some(false)` catalog
 //!   prior, lifting its target above a prior-demoted sibling.
-//! - E (R4): length-truncated, refused, and content-filtered successes each
+//! - E: length-truncated, refused, and content-filtered successes each
 //!   produce no verdict end to end.
-//! - F (R2): identical observation sequences plus identical `now` values
+//! - F: identical observation sequences plus identical `now` values
 //!   yield identical registry state -- the stage-two admission determinism
 //!   a later warm-rebuild equivalence test extends.
 //!
@@ -433,7 +433,7 @@ fn scenario_d_verified_positive_masks_catalog_prior() {
     );
 }
 
-// --- Scenario E (R4): degraded successes produce no verdict ------------
+// --- Scenario E: degraded successes produce no verdict ------------------
 
 #[test]
 fn scenario_e_degraded_successes_produce_no_verdict() {
@@ -465,7 +465,7 @@ fn scenario_e_degraded_successes_produce_no_verdict() {
     assert_eq!(router.metrics.f3_suspect_total(), 0);
 }
 
-// --- Scenario F (R2): identical sequence + now -> identical state ------
+// --- Scenario F: identical sequence + now -> identical state ------------
 
 #[test]
 fn scenario_f_identical_observations_and_now_yield_identical_registry() {

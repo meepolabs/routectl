@@ -36,7 +36,7 @@ const LOAD_CODE_ASSIST_PATH: &str = "/v1internal:loadCodeAssist";
 const ONBOARD_USER_PATH: &str = "/v1internal:onboardUser";
 
 /// Short User-Agent sent on generate / stream / loadCodeAssist. Pinned to
-/// the reference client's fallback version for this slice; routectl does
+/// the reference client's fallback version; routectl does
 /// not run a live version-fetcher.
 pub const SHORT_USER_AGENT: &str =
     "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";

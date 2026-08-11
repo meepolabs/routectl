@@ -1,5 +1,5 @@
 {
-  "note": "PROVISIONAL SYNTHETIC degraded response bodies for the clean-stop gate (R4) suite. Each case is a canonical ChatResponse that must yield zero capability observations. No value here is a real captured response.",
+  "note": "PROVISIONAL SYNTHETIC degraded response bodies for the clean-stop gate suite. Each case is a canonical ChatResponse that must yield zero capability observations. No value here is a real captured response.",
   "cases": {
     "finish_length_plausible_body": {
       "id": "synthetic",

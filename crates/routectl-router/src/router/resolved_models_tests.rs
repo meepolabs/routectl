@@ -1462,7 +1462,7 @@ fn dispatch_target_carries_catalog_capability_prior() {
         .expect("one target");
 
     // Present key returns the prior; an absent key is NO PRIOR (None),
-    // distinct from Some(false). No filter consumes it in this increment.
+    // distinct from Some(false). No filter consumes it yet.
     assert_eq!(target.capability_prior("web_search"), Some(false));
     assert_eq!(target.capability_prior("computer_use"), None);
 }

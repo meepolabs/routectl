@@ -586,7 +586,7 @@ fn usage_on_completed_renders_cached_and_reasoning_subdetails() {
     let _ = render(&mut state, finish_chunk("stop", Some(usage)));
     let events = render_eos_internal(&mut state);
 
-    // Assert: usage object matches the slice-2 render_usage shape.
+    // Assert: usage object matches the non-stream render_usage shape.
     let completed = data_of(&events, "response.completed");
     let u = &completed["response"]["usage"];
     assert_eq!(u["input_tokens"], 12);

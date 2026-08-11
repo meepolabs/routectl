@@ -7,7 +7,7 @@
 //! (`config.capability.enabled`), per-request dedupe, the registry, and the
 //! WARN/counter observability floor, reusing the shipped pattern.
 //!
-//! Two-stage (R2) contract: live-only detection (stage one) is the pure
+//! Two-stage contract: live-only detection (stage one) is the pure
 //! [`crate::capability_detect`] slice; admission (stage two, `now`-
 //! parameterized, `EvidenceSource::Live`) happens here and is EXACTLY what a
 //! later warm-rebuild replays. No ledger write -- acting observations ride out

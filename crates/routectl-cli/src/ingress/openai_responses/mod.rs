@@ -20,10 +20,9 @@
 //! carrying `store: true` is accepted -- the current turn is
 //! self-contained -- but the persistence is ignored with a WARN.
 //!
-//! Slices: this module is built in stages. SLICE 1 (this file) delivers
-//! the module foundation, `parse_request`, and the statefulness
-//! contract. The non-streaming renderer (SLICE 2) and the SSE stream
-//! state machine (SLICE 3) replace the temporary stubs below.
+//! Layout: this file holds the adapter surface, request parsing, and the
+//! statefulness contract. `render.rs` holds the non-streaming renderer
+//! and `stream.rs` the SSE stream state machine.
 
 use std::any::Any;
 
@@ -138,7 +137,8 @@ enum OpenOutputItem {
     /// `output_text.done` / `content_part.done` carry the right indices.
     Text { output_index: u64 },
     /// A `reasoning` item streaming summary / text deltas. `detail_id`
-    /// groups emitted details (matches slice 2's id-grouping); the
+    /// groups emitted details (matching the non-stream renderer's
+    /// id-grouping); the
     /// summary/text detail payloads accumulate so the closing
     /// `output_item.done` carries the full reasoning item. `summary_index`
     /// / `content_index` are per-item part counters: they advance once per

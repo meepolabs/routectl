@@ -11,7 +11,8 @@
 //!
 //! The module carries no clock, no I/O, and no config or registry access:
 //! `now` and admission belong to stage two (the caller), so this stage is
-//! never replayed. See the feature decision doc's two-stage (R2) contract.
+//! never replayed. The two-stage contract is described on
+//! [`crate::router::capability_observe`].
 //!
 //! Detectors emit only well-known capability keys and the pinned
 //! evidence-class tokens from `routectl_core::capability`; token literals
@@ -85,8 +86,8 @@ pub enum ObservationDirection {
 }
 
 /// A single positive-detection observation. Carries only what stage-two
-/// admission may consult; `source` and `ts` are added at admission (R2),
-/// never here.
+/// admission may consult; `source` and `ts` are added at stage-two
+/// admission, never here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityObservation {
     /// Canonical capability key (a well-known key const).

@@ -808,7 +808,7 @@ mod tests {
         );
     }
 
-    /// LOW-4: a frame that splits at the 12-byte prelude boundary and then
+    /// A frame that splits at the 12-byte prelude boundary and then
     /// delivers corrupt continuation bytes drives smithy's `decode_frame`
     /// into its `Err` arm while we have already drained the prelude
     /// (`smithy_has_prelude_buffered == true`). In that state `buffer[0..4]`

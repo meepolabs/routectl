@@ -322,7 +322,7 @@ fn match_inferred(
 }
 
 /// The inferred phrase table for a provider `kind`, or `None` when the
-/// provider has no inferred matcher in this slice.
+/// provider has no inferred matcher.
 fn inferred_table_for(provider_kind: &str) -> Option<&'static [InferredPhrase]> {
     match provider_kind {
         "anthropic-api" => Some(ANTHROPIC_INFERRED),
@@ -1186,8 +1186,8 @@ mod tests {
 
     #[test]
     fn matching_phrase_on_non_anthropic_kind_yields_none() {
-        // The inferred table is keyed by provider_kind; only anthropic-api
-        // has one in this slice.
+        // The inferred table is keyed by provider_kind; of these kinds only
+        // anthropic-api has one.
         for kind in ["openai-compat", "bedrock", "gemini", "future-vendor"] {
             let got = resolve_requested_capability(
                 kind,
