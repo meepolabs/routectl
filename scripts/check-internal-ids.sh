@@ -91,16 +91,27 @@ is_excluded() {
 # planning commentary, and standalone `D<nn>` decision shorthand (the
 # token boundary keeps `d17_tail`-style identifiers and hex bytes clear).
 #
-# `slice[- ]<n>` matches BOTH separators on purpose: a hyphen-only core
-# misses the "matches slice 2's grouping" prose form. The core spells its
-# own character classes rather than relying on `grep -i`, because
-# `scan_text` runs one case-SENSITIVE pattern for every tier.
-# Parenthesized `(R<n>)` catches the bare contract-id form that the
-# `R2-` core above cannot: that core requires a trailing `-`.
-# MEASURED: both cores return zero lines across all tracked files minus
-# `EXCLUDE_PATHS`. Rust's `&[T]` slice vocabulary never collides -- it is
-# never written `slice 2` -- and `(R<n>)` does not appear in vendor model
-# ids, which spell theirs `-R1` without parentheses.
+# The stage-label cores are NARROWED to the spellings that actually occurred,
+# because this scanner BLOCKS commits and a false positive on legitimate prose
+# is a developer-facing outage. Measured against the labels the 2026-08-11
+# sweep removed, which were `SLICE 1`, `SLICE 2`, `SLICE 3`, `Slice-2`, and
+# `slice 2's`:
+#
+#   - `SLICE <n>` all-caps with a space: a label, never prose.
+#   - `[Ss]lice-<n>` hyphenated: a label; prose says "slice 2", not "slice-2".
+#   - `[Ss]lice <n>'s` possessive: the "matches slice 2's grouping" form.
+#
+# DELIBERATELY NOT matched: lowercase `slice <n>` with a plain space. It
+# collides with legitimate technical prose ("copy the second buffer into slice
+# 2 of the ring"), and blocking that is worse than missing a label a reviewer
+# can catch. Same reason `(R<n>)` is gone entirely: "conformance with external
+# requirement (R2)" is a legitimate sentence, and the `R2-` core above still
+# catches the prefixed form this repo actually used in identifiers.
+#
+# The cores spell their own character classes rather than relying on `grep -i`,
+# because `scan_text` runs one case-SENSITIVE pattern per tier.
+# MEASURED: all cores return zero lines across all tracked files minus
+# `EXCLUDE_PATHS`.
 PATTERNS=(
     'R2-[A-Za-z0-9][A-Za-z0-9_-]*'
     'RV-[0-9]+'
@@ -111,8 +122,10 @@ PATTERNS=(
     'f[0-9]+\.[0-9]{2}'
     '(pre-|post-)f[0-9]+'
     'D[0-9]{2}'
-    '[Ss][Ll][Ii][Cc][Ee][- ][0-9]{1,3}'
-    '\(R[0-9]{1,2}\)'
+    'SLICE [0-9]{1,3}'
+    'SLICE-[0-9]{1,3}'
+    '[Ss]lice-[0-9]{1,3}'
+    "[Ss]lice [0-9]{1,3}'s"
 )
 
 # Second tier: same whole-token wrapping, but the LEFT boundary also

@@ -218,7 +218,7 @@ pub(crate) fn set_output_config_format(obj: &mut serde_json::Map<String, Value>,
 
 /// Structured event name for the `output_config.format` key drop, so an
 /// operator can filter the diagnostic without matching on message text.
-const OUTPUT_FORMAT_KEY_DROP_EVENT: &str = "output_config_format_keys_dropped";
+pub(crate) const OUTPUT_FORMAT_KEY_DROP_EVENT: &str = "output_config_format_keys_dropped";
 
 /// Which `output_config.format` keys a normalization omitted, accumulated
 /// across the two paths that can carry them (the `response_format` converter
@@ -444,7 +444,18 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// block ships as its unwrapped inner blob on the terminal host and
 /// byte-for-byte everywhere else. Callers with no Anthropic host in play
 /// (the Bedrock Invoke lane) pass `false`.
-pub(crate) fn normalize(
+/// Assemble the body and RETURN the omitted-key record instead of emitting
+/// it, for callers that keep writing to `output_config` after this returns.
+///
+/// Bedrock Invoke is the only such caller: it merges
+/// `additional_model_request_fields` AFTER normalization, a post-normalize
+/// write path `is_bedrock_invoke_managed_key` does not cover for
+/// `output_config`, so an operator-supplied object can reintroduce the keys
+/// this pass just removed. It scrubs again and emits ONE WARN covering both
+/// sources. Emitting here as well would double-warn for a single request.
+///
+/// Every other caller wants [`normalize`], which emits before returning.
+pub(crate) fn normalize_deferring_format_key_warn(
     id: &str,
     req: &ChatRequest,
     adaptive: bool,
@@ -454,7 +465,7 @@ pub(crate) fn normalize(
         &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
     >,
     terminal_anthropic_host: bool,
-) -> Result<Value> {
+) -> Result<(Value, DroppedFormatKeys)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; WARN once so
     // the loss isn't silent. Bedrock-Invoke delegates body construction here,
@@ -649,12 +660,13 @@ pub(crate) fn normalize(
     // on the assembled body: the converter above no longer emits them, but a
     // caller-supplied output_config rides through provider_extras verbatim and
     // wins over the converter, so this is the only pass that sees that path.
-    // One WARN for the request, from whichever path supplied the keys.
+    // The record is RETURNED, not emitted: the emitting wrapper owns the one
+    // WARN per request, so a caller that writes to `output_config` after this
+    // returns can fold its own scrub in rather than warning twice.
     if let Some(obj) = body.as_object_mut() {
         dropped_format_keys =
             dropped_format_keys.merged(drop_unrepresentable_output_format_keys(obj));
     }
-    dropped_format_keys.warn(id);
 
     // When context_management emulation is active we have already applied
     // the edits above. Strip the `context_management` body key so it is
@@ -695,6 +707,36 @@ pub(crate) fn normalize(
     // the caller's sampling from the source request when no thinking survives,
     // so a stripped-thinking body never ships the forced 1.0.
     reconcile_sampling_params(id, req, &mut body);
+    Ok((body, dropped_format_keys))
+}
+
+/// Assemble the Anthropic Messages body and emit the omitted-key WARN.
+///
+/// The emitting wrapper over [`normalize_deferring_format_key_warn`]: it owns
+/// the ONE `output_config.format` warning for the request. Callers that keep
+/// writing to `output_config` after assembly must use the deferring variant
+/// and emit once themselves, or the request warns twice.
+pub(crate) fn normalize(
+    id: &str,
+    req: &ChatRequest,
+    adaptive: bool,
+    allowed_betas: &[String],
+    context_management: bool,
+    thinking_cache: Option<
+        &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
+    >,
+    terminal_anthropic_host: bool,
+) -> Result<Value> {
+    let (body, dropped_format_keys) = normalize_deferring_format_key_warn(
+        id,
+        req,
+        adaptive,
+        allowed_betas,
+        context_management,
+        thinking_cache,
+        terminal_anthropic_host,
+    )?;
+    dropped_format_keys.warn(id);
     Ok(body)
 }
 

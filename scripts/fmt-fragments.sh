@@ -49,16 +49,29 @@ collect_fragments() {
         dir="$(dirname "$src")"
         printf '%s\n' "$dir/$rel"
     done < <(
-        grep -rn --include='*.rs' -oE 'include!\("[^"]+\.rs"\)' crates \
-            | sed -E 's/^([^:]+):[0-9]+:include!\("(.+)"\)$/\1:\2/'
+        # Drop lines whose `include!` sits inside a `//` comment: that target
+        # does not exist, and a missing target is a hard failure below, so a
+        # dead comment would block every commit. `grep -v` on the
+        # comment-prefix form is enough -- a real `include!` with a trailing
+        # `//` comment after it still matches, which is correct.
+        grep -rn --include='*.rs' -E 'include!\("[^"]+\.rs"\)' crates \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*)' \
+            | grep -oE '^[^:]+:[0-9]+:.*include!\("[^"]+\.rs"\)' \
+            | sed -E 's/^([^:]+):[0-9]+:.*include!\("(.+)"\)$/\1:\2/'
     ) | sort -u
 }
 
 mapfile -t fragments < <(collect_fragments)
 
 if (( ${#fragments[@]} == 0 )); then
-    echo "fmt-fragments: no include!d fragments found"
-    exit 0
+    # FAIL CLOSED. This repo has 25 `include!`d fragments; zero can only mean
+    # discovery broke (a moved `crates/`, a grep behaviour change, a new
+    # `include!` spelling). Exiting 0 here would report success while checking
+    # nothing -- reproducing the vacuous-pass class this gate exists to close.
+    echo "fmt-fragments: no include!d fragments found, which cannot be right" >&2
+    echo "in this repo -- fragment discovery is broken. Refusing to pass" >&2
+    echo "vacuously; fix discovery in scripts/fmt-fragments.sh." >&2
+    exit 1
 fi
 
 failed=()
@@ -88,7 +101,11 @@ if (( ${#failed[@]} )); then
     printf '  %s\n' "${failed[@]}"
     echo
     echo "Fix with:"
-    printf '  rustfmt --edition %s %s\n' "$EDITION" "${failed[*]}"
+    # One quoted command per path: `${failed[*]}` would flatten every path
+    # into a single unquoted string, which breaks on a path with a space.
+    for frag in "${failed[@]}"; do
+        printf '  rustfmt --edition %s %q\n' "$EDITION" "$frag"
+    done
     exit 1
 fi
 
