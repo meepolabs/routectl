@@ -90,21 +90,28 @@ assert_caught "(pre-)f<n> planning commentary" "adjust pre-f2 before merge"
 assert_caught "(post-)f<n> planning commentary" "post-f3 cleanup pass"
 assert_caught "D<nn> decision shorthand" "recorded under D42 rationale"
 
-# POSITIVE (slice / contract-id class): both separators of the slice label
-# and the bare parenthesized contract id are caught.
+# POSITIVE (stage-label class): the three spellings that actually occurred in
+# this repo -- all-caps with a space, hyphenated, and the possessive form.
 assert_caught "hyphenated slice label" "mirrors the slice-2 renderer"
-assert_caught "spaced slice label" "matches slice 2's id-grouping"
-assert_caught "uppercase slice label" "the SLICE-3 state machine"
-assert_caught "bare parenthesized contract id" "the two-stage (R2) contract"
-assert_caught "bare parenthesized contract id R4" "clean-stop gate (R4) suite"
+assert_caught "possessive slice label" "matches slice 2's id-grouping"
+assert_caught "uppercase slice label" "the SLICE 3 state machine"
+assert_caught "uppercase hyphenated slice label" "the SLICE-3 state machine"
 
-# NEGATIVE (slice / contract-id class): Rust's own slice vocabulary and
-# vendor model ids carrying an `R<n>` tail must NOT trip.
+# NEGATIVE (stage-label class): Rust's own slice vocabulary, vendor model ids
+# carrying an `R<n>` tail, and -- the two that matter most -- legitimate
+# technical prose that a wider core would have blocked. This scanner BLOCKS
+# commits, so a false positive is a developer-facing outage; lowercase
+# `slice <n>` with a plain space and bare `(R<n>)` are deliberately NOT
+# matched for exactly that reason.
 assert_clean "Rust slice prose" "lift_all iterates this slice in order"
 assert_clean "slice word before non-digit" "the LIFT_STEPS slice defines order"
 assert_clean "slice inside identifier" "the slice2_helper function"
 assert_clean "vendor model DeepSeek-R1" "route to deepseek-ai/DeepSeek-R1 here"
 assert_clean "R<n> without parens in model id" "id is MAI-DS-R1 upstream"
+assert_clean "legitimate lowercase slice N prose" \
+    "copy the second buffer into slice 2 of the ring"
+assert_clean "legitimate parenthesized external requirement" \
+    "conformance with external requirement (R2)"
 
 # POSITIVE (hyphen-excluding tier): the bare-label class is caught when it
 # stands alone as a token.
