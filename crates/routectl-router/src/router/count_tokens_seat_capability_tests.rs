@@ -148,11 +148,11 @@ async fn bedrock_seat_on_an_inference_profile_arn_yields_a_clean_501() {
 #[tokio::test]
 async fn bedrock_capability_error_advances_the_walk_without_debiting_the_breaker() {
     // Arrange: chain [bedrock-on-claude(capability error), anthropic-api].
-    // A model or region that does not offer the token-count operation
-    // surfaces as a capability error from the seat, which is health-
-    // neutral: the walk must advance AND the seat's failure count must
-    // stay untouched. The breaker threshold is 1, so a single debit would
-    // trip it to Open -- Closed proves the count never incremented.
+    // A seat whose upstream cannot count surfaces a capability error,
+    // which is health-neutral: the walk must advance AND the seat's
+    // failure count must stay untouched. The breaker threshold is 1, so a
+    // single debit would trip it to Open -- Closed proves the count never
+    // incremented.
     let (router, counters) = build_router(vec![
         Leg {
             nickname: "bedrock-claude",
@@ -189,5 +189,49 @@ async fn bedrock_capability_error_advances_the_walk_without_debiting_the_breaker
         crate::runtime_state::CircuitPhase::Closed,
         "a capability error must not debit the seat's breaker (threshold 1 \
          would have tripped it to Open on a single debit)",
+    );
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn a_bedrock_404_terminates_the_walk_instead_of_visiting_the_next_seat() {
+    // Arrange: chain [bedrock-on-claude(404), anthropic-api(ok)]. A
+    // Bedrock CountTokens 404 means the model resource was not found (an
+    // end-of-life model id), returned by a region that serves the
+    // operation for other models. It is NOT a capability signal, so the
+    // 404 must reach the caller carrying AWS's own actionable message
+    // rather than being swallowed by a walk past a capable seat.
+    let (router, counters) = build_router(vec![
+        Leg {
+            nickname: "bedrock-claude",
+            provider_name: "bedrock-prov",
+            entry: bedrock_entry(),
+            behavior: CountBehavior::UpstreamError(404),
+            upstream: Some(ANTHROPIC_BEDROCK_MODEL),
+        },
+        Leg {
+            nickname: "anthropic-haiku",
+            provider_name: "anthropic-prov",
+            entry: anthropic_api_entry(),
+            behavior: CountBehavior::Ok(42),
+            upstream: None,
+        },
+    ]);
+
+    // Act
+    let err = router.count_tokens(count_req()).await.unwrap_err();
+
+    // Assert
+    assert!(
+        matches!(err, Error::Upstream { status: 404, .. }),
+        "the 404 must surface verbatim; got {err:?}",
+    );
+    assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+    assert_eq!(
+        counters[1].load(Ordering::SeqCst),
+        0,
+        "a 404 must not be treated as a capability miss -- walking on to \
+         the next seat would hide an end-of-life model id behind a count \
+         served by a different seat",
     );
 }

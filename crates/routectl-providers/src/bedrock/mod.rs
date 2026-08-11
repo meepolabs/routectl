@@ -595,9 +595,31 @@ impl Provider for BedrockProvider {
     /// one that would actually ship, then wraps it per lane: the Invoke
     /// body rides verbatim (base64) in the `invokeModel` union member,
     /// while the Converse body is copied through the allowlist AWS's
-    /// `converse` member accepts. Signing, error-body reading, and header
-    /// tracing are the exact path `complete()` uses; the only divergence is
-    /// the capability lift on a 404.
+    /// `converse` member accepts. Signing, error-body reading, header
+    /// tracing, and error propagation are the exact path `complete()`
+    /// uses -- no status on this lane is reinterpreted.
+    ///
+    /// No status is treated as a capability signal, and both halves of
+    /// that are measured against live bedrock-runtime rather than assumed:
+    ///
+    /// - **404** means the model RESOURCE was not found -- observed only
+    ///   as an end-of-life model id (`This model version has reached the
+    ///   end of its life.`), and returned by a region that served other
+    ///   models in the same session. It is not an operation-availability
+    ///   signal, so lifting it to a capability error would step a
+    ///   fallback chain past a fully capable region and discard AWS's own
+    ///   actionable message. No region genuinely lacking the operation
+    ///   has ever been observed: reachable regions answer 4xx (the
+    ///   operation is present) and unreachable ones fail at auth with
+    ///   403.
+    /// - **400** is overloaded across three distinct measured causes --
+    ///   invalid model id (`The provided model identifier is invalid.`),
+    ///   a valid model that cannot count (`The provided model doesn't
+    ///   support counting tokens.`), and a malformed request body
+    ///   (SerializationException, `NUMBER_VALUE cannot be converted to
+    ///   String`). Only the middle one is a capability fact, and nothing
+    ///   in the status distinguishes it, so treating 400 as capability
+    ///   would hide a body-assembly defect behind a silent walk-past.
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
         let normalized = self.normalize_request(&req)?;
@@ -648,11 +670,7 @@ impl Provider for BedrockProvider {
                 upstream_code,
             )
             .with_upstream_request_id(upstream_request_id);
-            return Err(count_tokens::map_capability_status(
-                &self.cfg.id,
-                status,
-                client_error,
-            ));
+            return Err(client_error);
         }
 
         crate::header_trace::upstream(
