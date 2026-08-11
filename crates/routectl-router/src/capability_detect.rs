@@ -11,8 +11,11 @@
 //!
 //! The module carries no clock, no I/O, and no config or registry access:
 //! `now` and admission belong to stage two (the caller), so this stage is
-//! never replayed. The two-stage contract is described on
-//! [`crate::router::capability_observe`].
+//! never replayed. The two-stage contract is described on the private
+//! `router::capability_observe` module -- a plain code span, not an
+//! intra-doc link: that module is private, so a link cannot resolve and
+//! `rustdoc::broken_intra_doc_links` (denied at this crate root) turns it
+//! into a hard error under `cargo doc --document-private-items`.
 //!
 //! Detectors emit only well-known capability keys and the pinned
 //! evidence-class tokens from `routectl_core::capability`; token literals
