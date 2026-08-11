@@ -1,5 +1,8 @@
-//! Bedrock CountTokens lane -- request-body assembly, response parse, and
-//! the capability mapping for a missing operation.
+//! Bedrock CountTokens lane -- request-body assembly and response parse.
+//!
+//! No status on this lane is mapped to a capability signal: every error
+//! status propagates as the client error the shared error path built. See
+//! the status posture recorded at the call site in `bedrock/mod.rs`.
 //!
 //! AWS reference: `POST /model/{modelId}/count-tokens` with a body of
 //! `{"input": {...}}`, where `input` is a union of EXACTLY ONE of
@@ -40,11 +43,6 @@ const CONVERSE_TOKENS_KEYS: [&str; 4] = [
     "toolConfig",
     "additionalModelRequestFields",
 ];
-
-/// Reason string carried on the capability error a missing CountTokens
-/// operation produces.
-const COUNT_TOKENS_UNAVAILABLE: &str =
-    "count_tokens: CountTokens is unavailable for this model or region";
 
 /// Wrap an assembled InvokeModel body as a CountTokens `invokeModel`
 /// input. The body is carried verbatim, base64-encoded -- no field
@@ -92,27 +90,6 @@ pub(super) fn parse_token_count(provider_id: &str, raw: &Value) -> Result<TokenC
         input_tokens,
         extras: Map::new(),
     })
-}
-
-/// Lift a 404 on the count-tokens path to a capability signal, leaving
-/// every other status as the client error the shared error path built.
-///
-/// A model or region that does not offer the operation answers 404, whose
-/// documented meaning ("the specified resource was not found") is the only
-/// listed CountTokens error that fits a missing operation. As a capability
-/// error it lets the caller step past this seat instead of failing the
-/// request.
-///
-/// Deliberately NOT extended to 400: a malformed body assembled here also
-/// answers 400, and treating that as capability would hide the defect
-/// behind a silent walk-past. This is routectl's mapping choice; AWS ties
-/// neither status to availability.
-pub(super) fn map_capability_status(provider_id: &str, status: u16, err: Error) -> Error {
-    if status == 404 {
-        Error::NotImplemented(provider_id.to_string(), COUNT_TOKENS_UNAVAILABLE.into())
-    } else {
-        err
-    }
 }
 
 #[cfg(test)]
@@ -240,35 +217,36 @@ mod tests {
         assert!(matches!(err, Error::NormalizeResponse(..)), "got {err:?}");
     }
 
-    /// Asserts routectl's own status mapping, not AWS behavior: a 404
-    /// becomes a capability signal so the caller can step past the seat.
+    /// Structural guard on routectl's own status posture, not on AWS
+    /// behavior: no Bedrock seam may convert an upstream status into a
+    /// capability signal. A 404 here means the model resource was not
+    /// found (measured: an end-of-life model id, from a region that
+    /// served other models in the same session), so lifting it would
+    /// walk a fallback chain past a capable region. Any reintroduction
+    /// has to construct `Error::NotImplemented`, which is what this
+    /// scans for -- a rename of the helper cannot evade it.
     #[test]
-    fn capability_mapping_lifts_404_to_not_implemented() {
-        let client_err = Error::upstream("prov", 404, "ResourceNotFoundException");
-
-        let mapped = map_capability_status("prov", 404, client_err);
-
-        match mapped {
-            Error::NotImplemented(provider, op) => {
-                assert_eq!(provider, "prov");
-                assert!(op.contains("count_tokens"), "got {op}");
-            }
-            other => panic!("expected NotImplemented, got {other:?}"),
-        }
-    }
-
-    /// The other half of routectl's mapping: a 400 stays a loud client
-    /// error, because a malformed body assembled here answers 400 and must
-    /// not be mistaken for a missing operation.
-    #[test]
-    fn capability_mapping_leaves_400_as_a_client_error() {
-        let client_err = Error::upstream("prov", 400, "ValidationException");
-
-        let mapped = map_capability_status("prov", 400, client_err);
-
-        match mapped {
-            Error::Upstream { status, .. } => assert_eq!(status, 400),
-            other => panic!("expected Error::Upstream, got {other:?}"),
+    fn no_bedrock_seam_lifts_an_upstream_status_to_a_capability_signal() {
+        // The needles are assembled from fragments so this test's own
+        // source lines are not counted as matches.
+        let opener = concat!("mod ", "tests {");
+        let lift = concat!("Error::", "NotImplemented");
+        for (name, src) in [
+            ("count_tokens.rs", include_str!("count_tokens.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+        ] {
+            let occurrences = src.matches(opener).count();
+            assert_eq!(
+                occurrences, 1,
+                "{name}: the production cut is ambiguous with {occurrences} \
+                 test-module openers; decide explicitly what this guard covers"
+            );
+            let production = &src[..src.find(opener).expect("an inline test module")];
+            assert!(
+                !production.contains(lift),
+                "{name}: the count-tokens lane must propagate the upstream \
+                 status, never lift it to a capability error"
+            );
         }
     }
 }
