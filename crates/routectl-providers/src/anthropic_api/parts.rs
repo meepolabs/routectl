@@ -15,7 +15,7 @@
 
 use serde_json::{Value, json};
 
-use routectl_core::{ContentPart, KnownContentPart};
+use routectl_core::{ContentPart, KnownContentPart, sanitize_for_log};
 
 /// Anthropic + Bedrock accept these MIME types as image sources today.
 /// We allowlist them defensively so a malicious / typo'd `media_type`
@@ -104,7 +104,7 @@ pub fn parse_image_url_source(url: &str) -> Value {
             });
         }
         tracing::warn!(
-            media_type = %media_type_lc,
+            media_type = %sanitize_for_log(&media_type_lc),
             "data: URI with non-allowlisted media_type -- falling back to URL form (upstream will reject)",
         );
     }
@@ -339,6 +339,49 @@ mod parse_image_url_source_tests {
                 got["media_type"], expected_lc,
                 "media_type for {url} must be lowercased"
             );
+        }
+    }
+
+    /// The non-allowlisted branch renders the caller-supplied media type into
+    /// a `media_type` tracing field. A `data:` URI can carry arbitrary bytes
+    /// there, so a raw `\n` would forge a log line and a raw ANSI CSI
+    /// sequence would scroll an operator's terminal. The field must emit only
+    /// printable ASCII.
+    #[test]
+    fn non_allowlisted_media_type_is_control_char_free_in_logs() {
+        // Arrange: a rejected media type carrying a newline, a carriage
+        // return, and an ANSI CSI erase-display sequence.
+        let url = "data:text/html\nforged=1\r\x1b[2Jgone;base64,PGltZz4=";
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            let got = parse_image_url_source(url);
+            assert_eq!(
+                got["type"], "url",
+                "a rejected media type falls back to URL"
+            );
+        });
+
+        // Assert
+        let rendered: Vec<&str> = events
+            .iter()
+            .filter_map(|e| e.field("media_type"))
+            .collect();
+        assert!(
+            !rendered.is_empty(),
+            "the non-allowlisted branch must emit a media_type field"
+        );
+        for value in rendered {
+            assert!(
+                !value.chars().any(char::is_control),
+                "media_type must carry no raw control char; got {value:?}"
+            );
+            for forbidden in ['\n', '\r', '\u{1b}'] {
+                assert!(
+                    !value.contains(forbidden),
+                    "media_type must not carry {forbidden:?}; got {value:?}"
+                );
+            }
         }
     }
 }

@@ -615,7 +615,7 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
                     ContentPart::Other { type_tag, .. } => {
                         tracing::warn!(
                             provider = id,
-                            part_type = %type_tag,
+                            part_type = %sanitize_for_log(type_tag),
                             role = "user",
                             "dropping forward-compat user content part on Responses egress"
                         );
@@ -726,7 +726,7 @@ fn walk_assistant_part(
         ContentPart::Other { type_tag, .. } => {
             tracing::warn!(
                 provider = id,
-                part_type = %type_tag,
+                part_type = %sanitize_for_log(type_tag),
                 role = "assistant",
                 "dropping forward-compat assistant content part on Responses egress"
             );
@@ -2181,5 +2181,100 @@ mod empty_tool_id_policy_tests {
 
         // Assert
         assert_eq!(output_call_ids(&out), vec!["call_1"]);
+    }
+}
+
+/// `ContentPart::Other.type_tag` is the verbatim wire `type` string with no
+/// charset validation on the ingress path, and both drop-warn arms render it
+/// into a `part_type` tracing field. A raw `\n` there would forge a whole log
+/// line; a raw ANSI CSI sequence would let a caller scroll an operator's
+/// terminal. Both arms must therefore emit only printable ASCII.
+#[cfg(test)]
+mod part_type_log_injection_tests {
+    use routectl_core::{ContentPart, Message, MessageContent, Role};
+
+    use super::super::AuthKind;
+    use super::build_input;
+
+    /// A `type_tag` carrying every injection primitive at once: a newline
+    /// (forges a log line), a carriage return (rewrites the current one), and
+    /// an ANSI CSI erase-display sequence (scrolls prior output away).
+    const HOSTILE_TYPE_TAG: &str = "video_url\nforged=1\r\x1b[2Jgone";
+
+    fn hostile_part() -> ContentPart {
+        ContentPart::Other {
+            type_tag: HOSTILE_TYPE_TAG.into(),
+            cache_control: None,
+            extras: serde_json::Map::new(),
+        }
+    }
+
+    fn msg_with_hostile_part(role: Role) -> Message {
+        Message {
+            refusal: None,
+            role,
+            content: MessageContent::Parts(vec![hostile_part()]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Every `part_type` field emitted while normalizing `role`'s hostile
+    /// part, as rendered by the subscriber.
+    fn rendered_part_types(role: Role) -> Vec<String> {
+        let messages = vec![msg_with_hostile_part(role)];
+        let events = routectl_testkit::capture_events(|| {
+            build_input("test", AuthKind::ChatgptOauth, &messages)
+                .expect("a forward-compat part warn-drops rather than failing");
+        });
+        events
+            .iter()
+            .filter_map(|e| e.field("part_type"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn assert_no_raw_control_chars(rendered: &[String], role: &str) {
+        assert!(
+            !rendered.is_empty(),
+            "the {role} forward-compat arm must emit a part_type field"
+        );
+        for value in rendered {
+            assert!(
+                !value.chars().any(|c| c.is_control()),
+                "{role} part_type must carry no raw control char; got {value:?}"
+            );
+            for forbidden in ['\n', '\r', '\u{1b}'] {
+                assert!(
+                    !value.contains(forbidden),
+                    "{role} part_type must not carry {forbidden:?}; got {value:?}"
+                );
+            }
+            assert!(
+                value.starts_with("video_url"),
+                "{role} part_type must keep its printable prefix; got {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_forward_compat_part_type_is_control_char_free_in_logs() {
+        // Arrange + Act
+        let rendered = rendered_part_types(Role::User);
+
+        // Assert
+        assert_no_raw_control_chars(&rendered, "user");
+    }
+
+    #[test]
+    fn assistant_forward_compat_part_type_is_control_char_free_in_logs() {
+        // Arrange + Act
+        let rendered = rendered_part_types(Role::Assistant);
+
+        // Assert
+        assert_no_raw_control_chars(&rendered, "assistant");
     }
 }
