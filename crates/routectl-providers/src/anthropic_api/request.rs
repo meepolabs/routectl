@@ -120,13 +120,26 @@ pub(crate) const fn clamp_sampling_for_thinking(
 /// wire-lift (`openai_compat::wire_lift::response_format`):
 ///
 ///   `{type:json_schema, json_schema:{schema, name?, strict?}}`
-///       -> `{type:json_schema, schema, name?, strict?}`
+///       -> `{type:json_schema, schema}`
 ///   `{type:json_object}` -> `{type:json_object}`
 ///
-/// Returns `None` for an absent or unrecognized shape so the caller emits
-/// nothing. Shared with the Bedrock-Converse bag builder so both Claude
-/// seams map the directive the same way.
-pub(crate) fn response_format_to_anthropic_format(response_format: &Value) -> Option<Value> {
+/// `name` and `strict` are NOT carried across: Anthropic's
+/// `output_config.format` accepts only `type` and `schema`, and a body
+/// carrying either key is rejected outright (measured 2026-08-11: HTTP 400
+/// `output_config.format.name: Extra inputs are not permitted`, same for
+/// `.strict`). The caller's `json_schema.schema` rides through untouched.
+/// See `drop_unrepresentable_output_format_keys`, which closes the same gap
+/// for a caller-supplied `output_config.format` that never passes through
+/// here.
+///
+/// Returns the mapped format plus which unrepresentable keys the source
+/// carried, so the caller can fold them into the single per-request
+/// diagnostic. Returns `None` for an absent or unrecognized shape so the
+/// caller emits nothing. Shared with the Bedrock-Converse bag builder so both
+/// Claude seams map the directive the same way.
+pub(crate) fn response_format_to_anthropic_format(
+    response_format: &Value,
+) -> Option<(Value, DroppedFormatKeys)> {
     let Some(obj) = response_format.as_object() else {
         tracing::warn!(
             "response_format is not an object; dropping structured-output \
@@ -160,17 +173,16 @@ pub(crate) fn response_format_to_anthropic_format(response_format: &Value) -> Op
             let mut format = serde_json::Map::new();
             format.insert("type".into(), Value::from("json_schema"));
             format.insert("schema".into(), schema);
-            if let Some(name) = js.get("name").and_then(Value::as_str) {
-                format.insert("name".into(), Value::from(name));
-            }
-            // Emit strict only when explicitly requested; absent beats an
-            // explicit false, matching the wire-lift direction.
-            if js.get("strict").and_then(Value::as_bool) == Some(true) {
-                format.insert("strict".into(), Value::Bool(true));
-            }
-            Some(Value::Object(format))
+            let dropped = DroppedFormatKeys {
+                name: js.contains_key("name"),
+                strict: js.contains_key("strict"),
+            };
+            Some((Value::Object(format), dropped))
         }
-        "json_object" => Some(serde_json::json!({"type": "json_object"})),
+        "json_object" => Some((
+            serde_json::json!({"type": "json_object"}),
+            DroppedFormatKeys::default(),
+        )),
         other => {
             tracing::warn!(
                 response_format_type = other,
@@ -201,6 +213,106 @@ pub(crate) fn set_output_config_format(obj: &mut serde_json::Map<String, Value>,
     }
     if let Some(oc_obj) = oc.as_object_mut() {
         oc_obj.entry("format").or_insert(format);
+    }
+}
+
+/// Structured event name for the `output_config.format` key drop, so an
+/// operator can filter the diagnostic without matching on message text.
+const OUTPUT_FORMAT_KEY_DROP_EVENT: &str = "output_config_format_keys_dropped";
+
+/// Which `output_config.format` keys a normalization omitted, accumulated
+/// across the two paths that can carry them (the `response_format` converter
+/// and the assembled-body scrub) so a request yields ONE diagnostic rather
+/// than one per path.
+///
+/// A fixed pair of static field names, so no sampling: `BoundedLogSample`
+/// exists to cap arbitrarily-large diagnostic collections and would be
+/// cargo-culting here.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DroppedFormatKeys {
+    name: bool,
+    strict: bool,
+}
+
+impl DroppedFormatKeys {
+    /// Union of two paths' omissions.
+    pub(crate) const fn merged(self, other: Self) -> Self {
+        Self {
+            name: self.name || other.name,
+            strict: self.strict || other.strict,
+        }
+    }
+
+    /// Emit the aggregated WARN, if either key was omitted. Called exactly
+    /// once per normalization, after every path that can carry the keys has
+    /// run.
+    ///
+    /// The text states only what is certain: the keys are not representable
+    /// in Anthropic's `output_config.format`, so they were omitted. It must
+    /// NOT claim that output validation was weakened -- Anthropic's format
+    /// object has no `strict` member to honor in the first place, so what the
+    /// omission changes upstream is not something routectl can assert.
+    pub(crate) fn warn(self, provider: &str) {
+        if !self.name && !self.strict {
+            return;
+        }
+        // Never log the caller's `name` VALUE -- it is caller-controlled.
+        tracing::warn!(
+            provider = provider,
+            event = OUTPUT_FORMAT_KEY_DROP_EVENT,
+            dropped_name = self.name,
+            dropped_strict = self.strict,
+            "output_config.format keys omitted: Anthropic's structured-output \
+             format object cannot represent them (it accepts `type` and \
+             `schema`) and rejects a body carrying either. The caller's schema \
+             ships unchanged."
+        );
+    }
+}
+
+/// Remove `name` and `strict` from `output_config.format` on an ASSEMBLED
+/// body (or Converse bag), whatever path put them there. Reports what it
+/// removed; the caller aggregates and emits the single WARN.
+///
+/// Anthropic's `output_config.format` accepts only `type` and `schema`;
+/// measured 2026-08-11 against the live wire, a body carrying either key is
+/// rejected with HTTP 400 (`output_config.format.name: Extra inputs are not
+/// permitted`, same for `.strict`) while the bare `{type, schema}` shape is
+/// accepted. `{name, schema, strict}` is the conventional OpenAI-shape
+/// structured-output request, so this is the common path, not an edge case.
+///
+/// Reading the assembled object is load-bearing rather than belt-and-braces:
+/// `output_config` is deliberately not a routectl-managed key (see
+/// `extras::is_routectl_managed_key`), so `merge_provider_extras` forwards a
+/// caller's whole `output_config` verbatim and
+/// `set_output_config_format`'s `or_insert` leaves it untouched -- a
+/// caller-supplied `output_config.format` never passes through
+/// `response_format_to_anthropic_format` at all. Same posture as
+/// `extras::body_has_output_config_format` and
+/// `reconcile_output_config_effort`, and for the same reason.
+///
+/// Applies uniformly to all three Claude seams (Anthropic egress,
+/// Bedrock-Converse bag, Bedrock-Invoke via the shared normalizer). Bedrock
+/// acceptance of the two keys is UNMEASURED -- the drop is uniform because
+/// AWS forwards the field verbatim to an Anthropic validator that has been
+/// measured to reject them, and because the Bedrock body-field filter exists
+/// for the same "Extra inputs are not permitted" rejection. A filed probe
+/// item covers measuring Bedrock directly; if it turns out to accept them,
+/// re-splitting is a change to this one function and its three call sites.
+pub(crate) fn drop_unrepresentable_output_format_keys(
+    obj: &mut serde_json::Map<String, Value>,
+) -> DroppedFormatKeys {
+    let Some(format) = obj
+        .get_mut("output_config")
+        .and_then(Value::as_object_mut)
+        .and_then(|oc| oc.get_mut("format"))
+        .and_then(Value::as_object_mut)
+    else {
+        return DroppedFormatKeys::default();
+    };
+    DroppedFormatKeys {
+        name: format.remove("name").is_some(),
+        strict: format.remove("strict").is_some(),
     }
 }
 
@@ -524,12 +636,25 @@ pub(crate) fn normalize(
     // (OpenAI-shape) onto Anthropic's output_config.format. Runs after the
     // provider_extras merge so an Anthropic-ingress round-trip that already
     // carried output_config.format keeps its value (caller wins).
+    let mut dropped_format_keys = DroppedFormatKeys::default();
     if let Some(rf) = req.response_format.as_ref()
-        && let Some(format) = response_format_to_anthropic_format(rf)
+        && let Some((format, dropped)) = response_format_to_anthropic_format(rf)
         && let Some(obj) = body.as_object_mut()
     {
+        dropped_format_keys = dropped;
         set_output_config_format(obj, format);
     }
+
+    // Scrub the two keys Anthropic's output_config.format cannot represent,
+    // on the assembled body: the converter above no longer emits them, but a
+    // caller-supplied output_config rides through provider_extras verbatim and
+    // wins over the converter, so this is the only pass that sees that path.
+    // One WARN for the request, from whichever path supplied the keys.
+    if let Some(obj) = body.as_object_mut() {
+        dropped_format_keys =
+            dropped_format_keys.merged(drop_unrepresentable_output_format_keys(obj));
+    }
+    dropped_format_keys.warn(id);
 
     // When context_management emulation is active we have already applied
     // the edits above. Strip the `context_management` body key so it is
@@ -721,6 +846,30 @@ mod response_format_tests {
     use super::normalize;
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
     use serde_json::json;
+    use tracing_test::traced_test;
+
+    /// The exact member set Anthropic's `output_config.format` accepts for a
+    /// json_schema directive. Asserted as a SET rather than snapshotted: an
+    /// absent-key assertion is what catches a re-added `name`/`strict`, while
+    /// a snapshot merely records whatever shape ships.
+    fn assert_json_schema_format_members(fmt: &serde_json::Value) {
+        let obj = fmt.as_object().expect("format must be an object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["schema", "type"],
+            "output_config.format must carry exactly {{type, schema}}; got: {fmt}"
+        );
+        assert!(
+            obj.get("name").is_none(),
+            "`name` is rejected by Anthropic and must be absent; got: {fmt}"
+        );
+        assert!(
+            obj.get("strict").is_none(),
+            "`strict` is rejected by Anthropic and must be absent; got: {fmt}"
+        );
+    }
 
     fn user_req(response_format: Option<serde_json::Value>) -> ChatRequest {
         ChatRequest {
@@ -742,6 +891,10 @@ mod response_format_tests {
         }
     }
 
+    /// The conventional OpenAI-shape structured-output request: `name` and
+    /// `strict` alongside the schema. Anthropic 400s on either key
+    /// (`Extra inputs are not permitted`), so the emitted format carries the
+    /// schema and nothing else.
     #[test]
     fn json_schema_response_format_maps_to_output_config_format() {
         let req = user_req(Some(json!({
@@ -756,8 +909,107 @@ mod response_format_tests {
         let fmt = &body["output_config"]["format"];
         assert_eq!(fmt["type"], "json_schema", "got: {body}");
         assert_eq!(fmt["schema"]["required"][0], "x", "got: {body}");
-        assert_eq!(fmt["name"], "widget", "got: {body}");
-        assert_eq!(fmt["strict"], true, "got: {body}");
+        assert_json_schema_format_members(fmt);
+    }
+
+    /// The caller's schema is forwarded intact -- only the two unrepresentable
+    /// sibling keys are omitted. Discarding a caller's JSON-schema keyword
+    /// would be silent constraint loss and is deliberately NOT done.
+    #[test]
+    fn caller_schema_keywords_survive_the_key_drop() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"n": {"type": "integer", "minimum": 3}},
+            "required": ["n"]
+        });
+        let req = user_req(Some(json!({
+            "type": "json_schema",
+            "json_schema": {"name": "widget", "schema": schema.clone(), "strict": true}
+        })));
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        assert_eq!(
+            body["output_config"]["format"]["schema"], schema,
+            "the caller's schema must ship byte-identical: {body}"
+        );
+    }
+
+    /// The `provider_extras` bypass: a caller-supplied `output_config.format`
+    /// wins over the canonical `response_format` and so never passes through
+    /// `response_format_to_anthropic_format`. The assembled-body scrub is the
+    /// only pass that closes this path.
+    #[test]
+    fn caller_supplied_output_config_format_loses_name_and_strict() {
+        let mut req = user_req(None);
+        req.provider_extras = Some(json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "caller-widget",
+                    "schema": {"type": "object"},
+                    "strict": true
+                }
+            }
+        }));
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let fmt = &body["output_config"]["format"];
+        assert_json_schema_format_members(fmt);
+        assert!(
+            !body.to_string().contains("caller-widget"),
+            "the caller's schema name must not reach the wire: {body}"
+        );
+    }
+
+    #[test]
+    #[traced_test]
+    fn one_warn_per_normalization_names_no_caller_value() {
+        let req = user_req(Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "secret-widget-name",
+                "schema": {"type": "object"},
+                "strict": true
+            }
+        })));
+
+        let _ = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+
+        logs_assert(|lines: &[&str]| {
+            let matches: Vec<&&str> = lines
+                .iter()
+                .filter(|l| l.contains(super::OUTPUT_FORMAT_KEY_DROP_EVENT))
+                .collect();
+            let warns = matches.iter().filter(|l| l.contains("WARN")).count();
+            if matches.len() == 1 && warns == 1 {
+                return Ok(());
+            }
+            Err(format!(
+                "expected exactly one WARN for the dropped format keys; got \
+                 {} line(s), {warns} at WARN: {matches:?}",
+                matches.len()
+            ))
+        });
+        assert!(logs_contain("dropped_name=true"));
+        assert!(logs_contain("dropped_strict=true"));
+        assert!(
+            !logs_contain("secret-widget-name"),
+            "the caller-controlled schema name must never be logged"
+        );
+    }
+
+    /// The drop diagnostic is feature-triggered: a conforming directive that
+    /// carries neither key produces no WARN.
+    #[test]
+    #[traced_test]
+    fn no_warn_when_neither_key_present() {
+        let req = user_req(Some(json!({
+            "type": "json_schema",
+            "json_schema": {"schema": {"type": "object"}}
+        })));
+
+        let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+
+        assert_json_schema_format_members(&body["output_config"]["format"]);
+        assert!(!logs_contain(super::OUTPUT_FORMAT_KEY_DROP_EVENT));
     }
 
     #[test]

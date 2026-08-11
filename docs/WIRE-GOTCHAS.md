@@ -131,10 +131,35 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   legacy field into `output_config.format` (preserving any existing
   `output_config.effort`); when both shapes arrive on one request it
   prefers the nested form and WARNs, mirroring claude-code's own
-  deprecation message. The egresses need no extra translation:
-  Bedrock-Invoke for Claude is Anthropic-shape passthrough, and the
-  Anthropic-API egress already merges `provider_extras["output_config"]`
-  into the body.
+  deprecation message. The egresses need no extra translation for the
+  legacy-vs-nested question: Bedrock-Invoke for Claude is Anthropic-shape
+  passthrough, and the Anthropic-API egress already merges
+  `provider_extras["output_config"]` into the body. The format object's
+  MEMBER SET is a separate constraint -- see the next entry.
+
+- **Anthropic `output_config.format` accepts ONLY `type` and `schema`.**
+  Measured against the live wire 2026-08-11: `{"type":"json_schema",
+  "schema":{...}}` is accepted (HTTP 200), while adding `name` or
+  `strict` is rejected with HTTP 400 `output_config.format.name: Extra
+  inputs are not permitted` (same for `.strict`). `{name, schema,
+  strict}` is the CONVENTIONAL OpenAI structured-output shape every
+  OpenAI-compatible client emits, so this hit the common path, not an
+  edge case. `drop_unrepresentable_output_format_keys` in
+  `crates/routectl-providers/src/anthropic_api/request.rs` omits both
+  keys with one structured WARN (`dropped_name` / `dropped_strict`
+  booleans; never the caller's `name` VALUE, which is
+  caller-controlled). The caller's `schema` ships unchanged -- routectl
+  does NOT strip JSON-schema keywords Anthropic rejects per-type
+  (`minimum` on an integer, etc.); those get a truthful upstream 400
+  naming the field rather than a silent constraint loss.
+  Applied on ALL THREE Claude seams (Anthropic egress, Bedrock-Converse
+  bag, Bedrock-Invoke) because AWS forwards the field verbatim to an
+  Anthropic validator; Bedrock acceptance itself is unmeasured and a
+  probe item is filed. The drop reads the ASSEMBLED body, not just the
+  `response_format` converter: `output_config` is deliberately not a
+  routectl-managed key, so a caller-supplied `output_config.format`
+  rides through `provider_extras` and WINS over the converter, and
+  would otherwise never be reshaped.
 
 - **Forward-compat sweep on the Anthropic ingress.** Anthropic adds
   new top-level body fields on a quarterly cadence (e.g. recent

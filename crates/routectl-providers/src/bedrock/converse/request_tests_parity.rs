@@ -170,7 +170,9 @@ fn non_thinking_passes_top_p_through_when_no_temperature() {
 #[test]
 fn response_format_maps_to_output_config_format_bag() {
     // Arrange: a canonical json_schema response_format directive must land
-    // on additionalModelRequestFields.output_config.format for Claude.
+    // on additionalModelRequestFields.output_config.format for Claude,
+    // carrying exactly {type, schema}. AWS forwards the bag verbatim to
+    // Anthropic, whose format object rejects `name` and `strict`.
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-sonnet-4-5".into(),
@@ -194,8 +196,48 @@ fn response_format_maps_to_output_config_format_bag() {
     let fmt = &body["additionalModelRequestFields"]["output_config"]["format"];
     assert_eq!(fmt["type"], "json_schema", "got: {body}");
     assert_eq!(fmt["schema"]["required"][0], "x", "got: {body}");
-    assert_eq!(fmt["name"], "widget", "got: {body}");
-    assert_eq!(fmt["strict"], true, "got: {body}");
+    let members = fmt.as_object().expect("format must be an object");
+    let mut keys: Vec<&str> = members.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["schema", "type"],
+        "Converse output_config.format must carry exactly {{type, schema}}; got: {body}"
+    );
+}
+
+/// The Converse bag shields `output_config` from BOTH extras paths
+/// (`is_converse_managed_key` covers it), so an operator- or caller-supplied
+/// object never reaches the bag and the shared converter is the only writer.
+/// Pinned here because that is what makes the Converse seam's exposure
+/// narrower than the Invoke seam's, where `output_config` is NOT a managed
+/// key.
+#[test]
+fn operator_supplied_output_config_never_reaches_the_bag() {
+    let mut cfg = fake_cfg();
+    cfg.additional_model_request_fields = Some(json!({
+        "output_config": {
+            "format": {
+                "type": "json_schema",
+                "name": "operator-widget",
+                "schema": {"type": "object"},
+                "strict": true
+            }
+        }
+    }));
+    let req = ChatRequest {
+        model: "anthropic.claude-sonnet-4-5".into(),
+        messages: vec![user_msg("hi")].into(),
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    assert!(
+        !body.to_string().contains("operator-widget"),
+        "the operator's schema name must not reach the wire: {body}"
+    );
 }
 
 #[test]

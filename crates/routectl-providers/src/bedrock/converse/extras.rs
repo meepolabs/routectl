@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, is_canonical_request_key};
 
+use crate::anthropic_api::request::DroppedFormatKeys;
 use crate::anthropic_api::request::build_thinking;
 use crate::anthropic_api::types::ThinkingConfig;
 use crate::effort::clamp_effort_to_supported;
@@ -58,7 +59,7 @@ pub(super) fn build_additional_fields(
     // silently shadowed. Do not reorder these calls or relax the
     // `or_insert_with` semantics.
     insert_thinking(cfg, req, &mut bag);
-    insert_response_format(req, &mut bag);
+    let dropped_format_keys = insert_response_format(req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
     insert_provider_extras(cfg, req, &mut bag);
@@ -118,6 +119,14 @@ pub(super) fn build_additional_fields(
     // + filtered for managed keys + body-field allowlist), matching
     // the wire body the request will actually carry.
     strip_thinking_when_tool_choice_forces_use(cfg, &mut bag, tool_choice);
+
+    // Scrub the `output_config.format` keys Anthropic cannot represent from
+    // the fully composed bag, so every path that can write the field is
+    // covered rather than just the shared converter. One WARN for the request,
+    // from whichever path supplied the keys.
+    dropped_format_keys
+        .merged(crate::anthropic_api::request::drop_unrepresentable_output_format_keys(&mut bag))
+        .warn(&cfg.id);
 
     if bag.is_empty() {
         return None;
@@ -205,15 +214,17 @@ fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<
 /// admission-time capability gate (an operator `unsupported_features`
 /// declaration) is what routes those away -- forwarding the inert bag key
 /// here is harmless (AWS ignores unknown bag fields for such models).
-fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) {
+fn insert_response_format(req: &ChatRequest, bag: &mut Map<String, Value>) -> DroppedFormatKeys {
     let Some(rf) = req.response_format.as_ref() else {
-        return;
+        return DroppedFormatKeys::default();
     };
-    let Some(format) = crate::anthropic_api::request::response_format_to_anthropic_format(rf)
+    let Some((format, dropped)) =
+        crate::anthropic_api::request::response_format_to_anthropic_format(rf)
     else {
-        return;
+        return DroppedFormatKeys::default();
     };
     crate::anthropic_api::request::set_output_config_format(bag, format);
+    dropped
 }
 
 /// Reuse build_thinking from the Anthropic egress so the legacy vs
@@ -856,6 +867,57 @@ mod tests {
         assert!(
             !carries_flag,
             "no structured-output format must yield no structured-outputs beta; got: {bag:?}"
+        );
+    }
+
+    /// The Converse seam emits the SAME single drop diagnostic as the
+    /// Anthropic egress -- one WARN per bag assembly, naming which keys were
+    /// omitted and never the caller's schema name.
+    #[test]
+    #[traced_test]
+    fn bag_assembly_warns_once_for_the_dropped_format_keys() {
+        use serde_json::json;
+
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.response_format = Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "secret-widget-name",
+                "schema": {"type": "object"},
+                "strict": true
+            }
+        }));
+
+        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+
+        let fmt = bag["output_config"]["format"]
+            .as_object()
+            .expect("format must be an object");
+        assert!(
+            fmt.get("name").is_none() && fmt.get("strict").is_none(),
+            "neither key may reach the Converse bag; got: {bag}"
+        );
+        logs_assert(|lines: &[&str]| {
+            let matches: Vec<&&str> = lines
+                .iter()
+                .filter(|l| l.contains("output_config_format_keys_dropped"))
+                .collect();
+            let warns = matches.iter().filter(|l| l.contains("WARN")).count();
+            if matches.len() == 1 && warns == 1 {
+                return Ok(());
+            }
+            Err(format!(
+                "expected exactly one WARN for the dropped format keys; got \
+                 {} line(s), {warns} at WARN: {matches:?}",
+                matches.len()
+            ))
+        });
+        assert!(logs_contain("dropped_name=true"));
+        assert!(logs_contain("dropped_strict=true"));
+        assert!(
+            !logs_contain("secret-widget-name"),
+            "the caller-controlled schema name must never be logged"
         );
     }
 }

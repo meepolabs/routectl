@@ -550,7 +550,10 @@ listed at the bottom of each crate.
   reinjection, flushed once after both), and cache_control
   breakpoint validation (`validate_breakpoints`); re-exports `build_thinking`,
   `filter_anthropic_betas`, `translate_tool`, `translate_system`,
-  `lift_legacy_system` for the Bedrock egress and `mod.rs`
+  `lift_legacy_system` for the Bedrock egress and `mod.rs`; also owns
+  `drop_unrepresentable_output_format_keys`, the assembled-body scrub of the
+  `output_config.format` keys Anthropic rejects (`name`, `strict`), shared by
+  all three Claude seams
 - `src/anthropic_api/system.rs` -- system-prompt translation:
   `translate_system` (typed `SystemContent` -> wire) + `lift_legacy_system`
   (Role::System fallback for direct callers) + `lift_legacy_system_stripped`

@@ -595,3 +595,73 @@ mod forward_compat_pins {
         );
     }
 }
+
+// =====================================================================
+// Structured-output format shape (request side)
+// =====================================================================
+
+mod structured_output_format_shape {
+    use super::*;
+    use routectl_core::ChatRequest;
+    use serde_json::json;
+
+    /// Pin: the CONVENTIONAL OpenAI-shape structured-output request --
+    /// `{name, schema, strict: true}`, which every OpenAI-compatible client
+    /// emits -- reaches the Anthropic wire as `{type, schema}` only.
+    /// Anthropic's `output_config.format` accepts no other members and 400s a
+    /// body carrying either sibling key, so this is the request shape the
+    /// egress must reshape rather than forward.
+    ///
+    /// Member-set assertion, deliberately not a snapshot: an absent-key check
+    /// fails when the keys come back, whereas a snapshot would simply record
+    /// whatever ships and be re-accepted through review.
+    #[test]
+    fn conventional_json_schema_response_format_emits_type_and_schema_only() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"]
+        });
+
+        let req = ChatRequest {
+            model: "claude-3-opus".into(),
+            messages: vec![common::user_msg("hi")].into(),
+            max_tokens: Some(1024),
+            response_format: Some(json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer_schema",
+                    "schema": schema.clone(),
+                    "strict": true
+                }
+            })),
+            ..Default::default()
+        };
+
+        let body = anthropic_api_provider()
+            .normalize_request(&req)
+            .expect("anthropic_api normalize");
+
+        let format = body
+            .pointer("/output_config/format")
+            .and_then(serde_json::Value::as_object)
+            .expect("output_config.format must be present on the wire body");
+
+        let mut keys: Vec<&str> = format.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["schema", "type"],
+            "output_config.format must carry exactly {{type, schema}}; got body: {body}"
+        );
+        assert_eq!(
+            format.get("schema"),
+            Some(&schema),
+            "the caller's schema must ship unchanged; got body: {body}"
+        );
+        assert!(
+            !body.to_string().contains("answer_schema"),
+            "the caller's schema name must not appear anywhere on the wire body: {body}"
+        );
+    }
+}

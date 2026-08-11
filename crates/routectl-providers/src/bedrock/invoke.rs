@@ -187,6 +187,13 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         super::body_fields::FilterContext::InvokeBody,
     );
 
+    // Scrub the `output_config.format` keys Anthropic cannot represent. The
+    // shared normalizer already ran this pass on the body it built, but the
+    // `additional_model_request_fields` merge above is a post-normalize write
+    // path that `is_bedrock_invoke_managed_key` does not cover for
+    // `output_config`, so an operator-supplied object could reintroduce them.
+    crate::anthropic_api::request::drop_unrepresentable_output_format_keys(obj).warn(&cfg.id);
+
     // Capability union, LAST so it reads the body that actually ships: a
     // body carrying `output_config.format` is rejected by AWS unless the
     // structured-outputs beta rides along in `anthropic_beta`. Deliberately
@@ -1489,6 +1496,9 @@ mod tests {
         // normalizer, so honoring req.response_format there means the
         // output_config.format field rides through onto the Invoke body
         // (it survives the anthropic_beta + body-field allowlist passes).
+        // `name` is NOT carried: Anthropic's format object accepts only
+        // `type` and `schema`, and AWS forwards the bag verbatim to the same
+        // validator.
         let cfg = fake_cfg();
         let req = ChatRequest {
             model: "anthropic.claude-haiku-4-5".into(),
@@ -1517,9 +1527,50 @@ mod tests {
             body["output_config"]["format"]["type"], "json_schema",
             "response_format must reach the Invoke body: {body}"
         );
+        let fmt = body["output_config"]["format"]
+            .as_object()
+            .expect("format must be an object");
+        let mut keys: Vec<&str> = fmt.keys().map(String::as_str).collect();
+        keys.sort_unstable();
         assert_eq!(
-            body["output_config"]["format"]["name"], "widget",
-            "got: {body}"
+            keys,
+            vec!["schema", "type"],
+            "Invoke output_config.format must carry exactly {{type, schema}}; got: {body}"
+        );
+    }
+
+    /// An operator `additional_model_request_fields` entry is merged onto the
+    /// assembled Invoke body AFTER the shared normalizer ran, and
+    /// `output_config` is not on `is_bedrock_invoke_managed_key`, so that
+    /// merge is a second write path for the rejected keys. The Invoke-side
+    /// scrub closes it.
+    #[test]
+    fn operator_supplied_output_config_format_loses_name_and_strict() {
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "operator-widget",
+                    "schema": {"type": "object"},
+                    "strict": true
+                }
+            }
+        }));
+        let req = user_req();
+
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        let fmt = body["output_config"]["format"]
+            .as_object()
+            .expect("format must be an object");
+        assert!(
+            fmt.get("name").is_none() && fmt.get("strict").is_none(),
+            "operator-supplied name/strict must not reach the Invoke wire: {body}"
+        );
+        assert!(
+            !body.to_string().contains("operator-widget"),
+            "the operator's schema name must not reach the wire: {body}"
         );
     }
 
