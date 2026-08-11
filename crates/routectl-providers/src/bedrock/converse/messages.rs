@@ -8,15 +8,15 @@
 //! Forward-compat catchalls: `ContentPart::Other` re-wraps as the AWS
 //! single-key union and passes through, so an unmodeled block preserved
 //! on a prior response turn replays losslessly. Unsupported known parts
-//! (e.g. `Document` when the canonical title/source can't be mapped, or
-//! a URL-shape image the JSON wire can't carry) drop with a tracing
-//! diagnostic; the caller sees a partial body rather than a translation
-//! failure. Cache breakpoints survive as sibling `{cachePoint}` entries.
+//! (e.g. a document whose media type AWS does not model, or a URL-shape
+//! image the JSON wire can't carry) drop with a tracing diagnostic; the
+//! caller sees a partial body rather than a translation failure. Cache
+//! breakpoints survive as sibling `{cachePoint}` entries.
 //!
-//! Image parts follow the two-class policy the Responses egress also
-//! implements, on the malformed-vs-unrepresentable axis:
+//! Image AND document parts follow the two-class policy the Responses
+//! egress also implements, on the malformed-vs-unrepresentable axis:
 //!
-//! - MALFORMED: the caller asked to send image bytes and named none -- an
+//! - MALFORMED: the caller asked to send content bytes and named none -- an
 //!   absent, empty, or non-string `source.data`, `source.media_type`,
 //!   `source.type`, `source.url`, or `image_url.url`. There is no valid
 //!   interpretation at any egress, so the request FAILS with a
@@ -25,7 +25,7 @@
 //!   unrepresentable reports the break. The error never echoes a
 //!   caller-controlled value: it reaches the client as a redacted 400 and
 //!   the detail stays server-side.
-//! - UNREPRESENTABLE: the image is well-formed but this JSON wire has no
+//! - UNREPRESENTABLE: the content is well-formed but this JSON wire has no
 //!   slot for it -- a nonempty url ref, an unmapped media type, an
 //!   unrecognized-but-nonempty source kind. The part drops with a WARN and
 //!   the rest of the turn ships. An ambiguous shape defaults HERE, never to
@@ -33,18 +33,20 @@
 //!   later build learns, and erroring on it would 400 working traffic the
 //!   day one ships.
 //!
-//! Normalization is fail-fast, so a malformed image anywhere fails the
+//! Normalization is fail-fast, so a malformed part anywhere fails the
 //! whole request and nothing dispatches upstream -- returning 200 after
 //! silently dropping content is the failure mode this policy replaces.
 //!
-//! The malformed class above is scoped to the plain image and `image_url`
-//! carriers, which have no way to preserve a source they cannot read. The
-//! tool-result carrier classifies more narrowly on purpose: an unreadable
-//! source there takes the JSON fallback, so the model still receives the
-//! payload rather than the caller receiving a 400. Only a source that
-//! positively declares base64 and then names no bytes or no format -- an
-//! absent, empty, or non-string `data` or `media_type` -- is malformed on
-//! that path. See `image_source_to_tool_result`.
+//! The malformed class above is scoped to the plain image, `image_url`, and
+//! plain document carriers, which have no way to preserve a source they
+//! cannot read. The tool-result carriers classify more narrowly on purpose:
+//! an unreadable source there takes the JSON fallback, so the model still
+//! receives the payload rather than the caller receiving a 400. Only a
+//! source that names a wire-carryable kind and then names no bytes or no
+//! format -- an absent, empty, or non-string `data` or `media_type` -- is
+//! malformed on those paths, because the JSON wrap of such a source would
+//! deliver no content either way. See `image_source_to_tool_result` and
+//! `document_to_tool_result`.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
@@ -560,7 +562,7 @@ fn translate_known_part(
             title.as_deref(),
             citations.as_ref(),
             tally,
-        )),
+        )?),
         // OpenAI-shape file part. Reuse the document translator by first
         // rewriting the base64 `file_data` data URI into the canonical
         // Anthropic document source shape. Non-translatable shapes
@@ -571,13 +573,7 @@ fn translate_known_part(
         KnownContentPart::File { file, .. } => {
             if let Some((source, title)) = file_data_to_document_source(file) {
                 // An OpenAI-shape file part has no citations carrier.
-                Ok(translate_document(
-                    id,
-                    &source,
-                    title.as_deref(),
-                    None,
-                    tally,
-                ))
+                translate_document(id, &source, title.as_deref(), None, tally)
             } else {
                 tracing::warn!(
                     provider = id,
@@ -861,44 +857,82 @@ fn media_type_to_image_format(mt: &str) -> Option<String> {
 ///     text body; AWS doesn't require base64 for text formats but we
 ///     normalize to base64 for one-shape simplicity).
 ///
-/// Returns None when the source shape is unrecognized (URL refs aren't
-/// supported on the JSON Converse wire) or the media type doesn't map
-/// to an AWS-validated `format` value.
+/// Two classes, the same malformed-vs-unrepresentable axis the image
+/// carriers use. A source that asked to send a document and named none --
+/// a non-object source, an absent or empty `type`, `media_type`, or
+/// `data` -- is MALFORMED at every egress and fails the request naming the
+/// field. A well-formed source this JSON wire cannot carry (an
+/// unrecognized source kind such as a URL ref, or a media type outside
+/// AWS's format table) is UNREPRESENTABLE: `Ok(None)` plus a WARN, and
+/// the rest of the turn still ships.
+///
+/// The source KIND is classified before its required fields, because an
+/// unrecognized kind gives no basis for saying which fields it requires.
+/// Within a recognized kind, required-field structure is checked BEFORE
+/// representability, so an empty-`data` document whose `media_type` is
+/// also unmapped reports the broken field rather than hiding behind the
+/// unsupported-media drop.
 fn translate_document(
     id: &str,
     source: &Value,
     title: Option<&str>,
     citations: Option<&Value>,
     tally: &mut CitationsDropTally<'_>,
-) -> Option<ConverseContentBlock> {
+) -> Result<Option<ConverseContentBlock>> {
     let Some(obj) = source.as_object() else {
-        tracing::warn!(
-            provider = id,
-            "dropping document with non-object source on Converse egress"
-        );
-        return None;
+        return Err(Error::normalize_request(
+            id,
+            "document content part on a Converse message has a malformed source: \
+             source is not an object",
+        ));
     };
-    let Some(kind) = obj.get("type").and_then(|v| v.as_str()) else {
-        tracing::warn!(
-            provider = id,
-            "dropping document source missing `type` on Converse egress"
-        );
-        return None;
+    let Some(kind) = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "document content part on a Converse message names no source shape: \
+             source.type is absent, empty, or not a string",
+        ));
     };
-    let media_type = obj.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
-    let raw_data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
-    // AWS Converse's JSON wire only accepts base64-encoded source bytes.
-    // A canonical text-source document carries a plain UTF-8 body, so we
-    // base64-encode it here -- a valid Anthropic shape would otherwise be
-    // dropped rather than forwarded to the model.
-    let Some(bytes) = normalize_document_source_bytes(kind, raw_data) else {
+    let Some(kind) = document_source_kind(kind) else {
+        // Forward-compat: an unknown but nonempty source kind (a URL ref,
+        // or a shape a later build learns) may be legitimate. Erroring
+        // here would 400 traffic that works the day one ships.
         tracing::warn!(
             provider = id,
             source_type = %kind,
             "dropping unsupported document source type on Converse egress; \
              AWS Converse JSON wire accepts only base64 or text sources"
         );
-        return None;
+        return Ok(None);
+    };
+    let Some(media_type) = obj
+        .get("media_type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "document content part on a Converse message names no document format: \
+             source.media_type is absent, empty, or not a string",
+        ));
+    };
+    // Empty `data` is malformed for BOTH recognized kinds: a base64 source
+    // names no bytes, and an empty text body base64-encodes to an equally
+    // empty payload. Either way the model receives no document.
+    let Some(raw_data) = obj
+        .get("data")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "document content part on a Converse message has an empty payload: \
+             source.data is absent, empty, or not a string",
+        ));
     };
     let Some(format) = media_type_to_document_format(media_type) else {
         tracing::warn!(
@@ -906,10 +940,15 @@ fn translate_document(
             media_type = %media_type,
             "dropping document with unmapped media_type on Converse egress"
         );
-        return None;
+        return Ok(None);
     };
+    // AWS Converse's JSON wire only accepts base64-encoded source bytes.
+    // A canonical text-source document carries a plain UTF-8 body, so we
+    // base64-encode it here -- a valid Anthropic shape would otherwise be
+    // dropped rather than forwarded to the model.
+    let bytes = normalize_document_source_bytes(kind, raw_data);
     let name = sanitize_document_name(title);
-    Some(ConverseContentBlock::Document {
+    Ok(Some(ConverseContentBlock::Document {
         document: ConverseDocument {
             format,
             name,
@@ -917,7 +956,7 @@ fn translate_document(
             citations: translate_document_citations(citations, tally)
                 .map(|enabled| ConverseCitationsConfig { enabled }),
         },
-    })
+    }))
 }
 
 /// Lift a canonical document `citations` value onto the AWS
@@ -1075,18 +1114,42 @@ const DOCUMENT_NAME_MAX_LEN: usize = 200;
 /// AWS requires a minimum length of 1.
 const DOCUMENT_NAME_FALLBACK: &str = "document";
 
+/// The canonical document source kinds AWS Converse's JSON wire can carry.
+/// Recognizing the kind as a value rather than a string makes the encoder
+/// total, so no document path can reach byte normalization with a kind it
+/// never classified.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DocumentSourceKind {
+    /// Bytes are already base64 and pass through verbatim.
+    Base64,
+    /// A plain UTF-8 body that must be base64-encoded for the wire.
+    Text,
+}
+
+/// Classify a canonical document source `type` tag. Returns None for every
+/// other kind (a URL ref, or a shape a later build learns) -- those are
+/// unrepresentable on this wire, not malformed.
+fn document_source_kind(kind: &str) -> Option<DocumentSourceKind> {
+    match kind {
+        "base64" => Some(DocumentSourceKind::Base64),
+        "text" => Some(DocumentSourceKind::Text),
+        _ => None,
+    }
+}
+
 /// Normalize a canonical document source's bytes to the base64 form AWS
 /// Converse's JSON wire requires. `base64` sources pass through verbatim;
 /// `text` sources are base64-encoded (a plain UTF-8 body would otherwise
-/// be rejected); any other source type returns None (caller drops the
-/// document or falls back to a JSON wrap). Shared by `translate_document`
-/// (request blocks) and both tool_result document paths so the three
-/// cannot drift on encoding.
-fn normalize_document_source_bytes(kind: &str, data: &str) -> Option<String> {
+/// be rejected). Shared by `translate_document` (request blocks) and both
+/// tool_result document paths so the three cannot drift on encoding.
+///
+/// `data` is expected to be nonempty: every caller rejects or drops an
+/// empty payload before reaching here, because both kinds would otherwise
+/// produce an empty `source.bytes` and ship a document carrying nothing.
+fn normalize_document_source_bytes(kind: DocumentSourceKind, data: &str) -> String {
     match kind {
-        "base64" => Some(data.to_string()),
-        "text" => Some(B64_STANDARD.encode(data.as_bytes())),
-        _ => None,
+        DocumentSourceKind::Base64 => data.to_string(),
+        DocumentSourceKind::Text => B64_STANDARD.encode(data.as_bytes()),
     }
 }
 
@@ -1163,38 +1226,18 @@ fn translate_tool_result_array_element(
             let Some(source) = obj.get("source") else {
                 return Ok(ConverseToolResultContent::Json { json: v.clone() });
             };
-            let s_obj = source.as_object();
-            let kind = s_obj
-                .and_then(|m| m.get("type"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("base64");
-            let media_type = s_obj
-                .and_then(|m| m.get("media_type"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("");
-            let data = s_obj
-                .and_then(|m| m.get("data"))
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            let Some(format) = media_type_to_document_format(media_type) else {
-                return Ok(ConverseToolResultContent::Json { json: v.clone() });
-            };
-            // AWS Converse's JSON wire only accepts base64 source bytes;
-            // a text source must be encoded (shared with translate_document
-            // and document_to_tool_result via normalize_document_source_bytes).
-            let Some(bytes) = normalize_document_source_bytes(kind, data) else {
-                return Ok(ConverseToolResultContent::Json { json: v.clone() });
-            };
-            let title = obj.get("title").and_then(|t| t.as_str());
-            Ok(ConverseToolResultContent::Document {
-                document: tool_result_document_value(
-                    format,
-                    title,
-                    bytes,
-                    obj.get("citations"),
-                    tally,
-                ),
-            })
+            // Same divergence as the image arm: this carrier's fallback
+            // PRESERVES the payload, so an unreadable source wraps as JSON
+            // rather than failing the request. Delegated so one document
+            // source shape cannot mean two things depending on carrier.
+            Ok(document_to_tool_result(
+                id,
+                source,
+                obj.get("title").and_then(|t| t.as_str()),
+                obj.get("citations"),
+                tally,
+            )?
+            .unwrap_or_else(|| ConverseToolResultContent::Json { json: v.clone() }))
         }
         _ => Ok(ConverseToolResultContent::Json { json: v.clone() }),
     }
@@ -1253,11 +1296,11 @@ fn build_tool_message(
 /// and Claude 3+ on Converse rejects the malformed shape -- the model
 /// gets the canonical schema instead of the AWS image/document block.
 ///
-/// For IMAGE parts: a base64 source that names no bytes -- an absent,
-/// empty, or non-string `data` or `media_type` -- fails the request; every
-/// other image source this egress cannot represent takes the JSON
-/// fallback. Document parts are not held to that rule here and still ship
-/// an empty payload for an empty base64 source.
+/// For IMAGE and DOCUMENT parts: a source that names a kind this wire
+/// carries and then names no bytes -- an absent, empty, or non-string
+/// `data` or `media_type` -- fails the request; every other source this
+/// egress cannot represent takes the JSON fallback, which still delivers
+/// the payload to the model.
 fn translate_part_for_tool_result(
     id: &str,
     p: &ContentPart,
@@ -1277,7 +1320,7 @@ fn translate_part_for_tool_result(
             citations,
             ..
         }) => Ok(
-            document_to_tool_result(source, title.as_deref(), citations.as_ref(), tally)
+            document_to_tool_result(id, source, title.as_deref(), citations.as_ref(), tally)?
                 .unwrap_or_else(|| content_part_to_json_fallback(p)),
         ),
         _ => {
@@ -1361,26 +1404,67 @@ fn image_source_to_tool_result(
 }
 
 /// Translate a canonical Document part (source + title + citations) into
-/// the AWS toolResult `Document` variant. Returns None for unmappable
-/// media types or unsupported source types. Text sources are base64-encoded
-/// (shared with `translate_document` and the tool_result array path via
-/// `normalize_document_source_bytes`), and the emitted wire value comes
-/// from `tool_result_document_value` so both tool_result paths agree.
+/// the AWS toolResult `Document` variant. Text sources are base64-encoded
+/// (shared with `translate_document` via `normalize_document_source_bytes`),
+/// and the emitted wire value comes from `tool_result_document_value` so
+/// both tool_result paths agree.
+///
+/// This carrier classifies DIFFERENTLY from `translate_document`, and
+/// deliberately so: every caller of this helper wraps an `Ok(None)` as a
+/// `ConverseToolResultContent::Json`, so the model still receives the
+/// payload. The plain document path has no such fallback, which is why a
+/// source naming no document must fail the request there. Here, only a
+/// source that names a kind this wire carries and THEN names no bytes or no
+/// format -- an absent, empty, or non-string `data` or `media_type` -- is
+/// malformed; a JSON wrap of such a source would deliver a document with no
+/// content either way. Anything else takes the fallback rather than
+/// converting a working request into a 400.
 fn document_to_tool_result(
+    id: &str,
     source: &Value,
     title: Option<&str>,
     citations: Option<&Value>,
     tally: &mut CitationsDropTally<'_>,
-) -> Option<ConverseToolResultContent> {
-    let obj = source.as_object()?;
-    let kind = obj.get("type").and_then(|v| v.as_str())?;
-    let media_type = obj.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
-    let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
-    let format = media_type_to_document_format(media_type)?;
-    let bytes = normalize_document_source_bytes(kind, data)?;
-    Some(ConverseToolResultContent::Document {
+) -> Result<Option<ConverseToolResultContent>> {
+    let Some(obj) = source.as_object() else {
+        return Ok(None);
+    };
+    let Some(kind) = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .and_then(document_source_kind)
+    else {
+        return Ok(None);
+    };
+    let Some(media_type) = obj
+        .get("media_type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "document block in a Converse tool result names no document format: \
+             source.media_type is absent, empty, or not a string",
+        ));
+    };
+    let Some(data) = obj
+        .get("data")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(Error::normalize_request(
+            id,
+            "document block in a Converse tool result has an empty payload: \
+             source.data is absent, empty, or not a string",
+        ));
+    };
+    let Some(format) = media_type_to_document_format(media_type) else {
+        return Ok(None);
+    };
+    let bytes = normalize_document_source_bytes(kind, data);
+    Ok(Some(ConverseToolResultContent::Document {
         document: tool_result_document_value(format, title, bytes, citations, tally),
-    })
+    }))
 }
 
 /// Assemble the `toolResult.content[].document` wire value shared by both
@@ -2618,11 +2702,13 @@ mod tests {
     fn text_source_document_to_tool_result_is_base64_encoded() {
         let source = json!({"type": "text", "media_type": "text/plain", "data": "hello"});
         let out = document_to_tool_result(
+            TEST_ID,
             &source,
             Some("notes"),
             None,
             &mut CitationsDropTally::new("test"),
         )
+        .expect("a well-formed text source must not fail the request")
         .expect("text source must now translate to a Document variant, not None");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("expected a Document toolResult variant, got: {out:?}");
@@ -2661,11 +2747,13 @@ mod tests {
 
         let source = json!({"type": "base64", "media_type": "text/plain", "data": already});
         let out = document_to_tool_result(
+            TEST_ID,
             &source,
             Some("notes"),
             None,
             &mut CitationsDropTally::new("test"),
         )
+        .expect("a well-formed base64 source must not fail the request")
         .expect("base64 source must translate to a Document variant");
         let ConverseToolResultContent::Document { document } = out else {
             panic!("Parts path: expected Document variant, got: {out:?}");
