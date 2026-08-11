@@ -11,7 +11,9 @@
 
 use serde_json::Value;
 
-use routectl_core::{ChatRequest, CustomTool, Result, ToolDef, cache_control::CacheControl};
+use routectl_core::{
+    ChatRequest, CustomTool, Result, ToolDef, cache_control::CacheControl, sanitize_for_log,
+};
 
 use crate::anthropic_api::request::translate_tool;
 use crate::anthropic_api::types::AnthropicTool;
@@ -237,7 +239,7 @@ fn translate_tool_choice_string(id: &str, s: &str) -> Option<ConverseToolChoice>
         other => {
             tracing::warn!(
                 provider = id,
-                tool_choice = %other,
+                tool_choice = %sanitize_for_log(other),
                 "unknown bare-string tool_choice; dropping on Converse egress"
             );
             None
