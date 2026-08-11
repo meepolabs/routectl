@@ -1855,16 +1855,104 @@ mod collect_config_validation_tests {
         "CachePricingOverride.output_cost_per_token",
     ];
 
-    #[test]
-    fn float_leaf_coverage_matches_schema() {
-        use std::collections::BTreeSet;
-
+    fn committed_schema() -> serde_json::Value {
         let committed = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../routectl.schema.json"
         ));
-        let schema: serde_json::Value =
-            serde_json::from_str(committed).expect("committed schema parses");
+        serde_json::from_str(committed).expect("committed schema parses")
+    }
+
+    /// Collects every `anyOf`/`oneOf` branch in the schema that declares a
+    /// `number` type, as `<json-pointer-ish path>` strings. The float-leaf
+    /// coverage walker reads `type` off the property node directly, so any
+    /// such wrapper would drop a float leaf out of its covered-set check
+    /// silently. Empty result = the walker's flat-`type` assumption holds.
+    fn wrapped_number_leaf_paths(schema: &serde_json::Value) -> Vec<String> {
+        fn declares_number(node: &serde_json::Value) -> bool {
+            match node.get("type") {
+                Some(serde_json::Value::String(s)) => s == "number",
+                Some(serde_json::Value::Array(items)) => {
+                    items.iter().any(|v| v.as_str() == Some("number"))
+                }
+                _ => false,
+            }
+        }
+
+        fn walk(node: &serde_json::Value, path: &str, found: &mut Vec<String>) {
+            match node {
+                serde_json::Value::Object(map) => {
+                    for keyword in ["anyOf", "oneOf"] {
+                        let Some(branches) = map.get(keyword).and_then(serde_json::Value::as_array)
+                        else {
+                            continue;
+                        };
+                        for (index, branch) in branches.iter().enumerate() {
+                            if declares_number(branch) {
+                                found.push(format!("{path}/{keyword}/{index}"));
+                            }
+                        }
+                    }
+                    for (key, value) in map {
+                        walk(value, &format!("{path}/{key}"), found);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        walk(item, &format!("{path}/{index}"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(schema, "", &mut found);
+        found
+    }
+
+    /// Drift tripwire for the tripwire: `float_leaf_coverage_matches_schema`
+    /// reads `type` straight off each property node. Today schemars emits
+    /// every float leaf that way (`"number"` or `["number","null"]`), and
+    /// its `anyOf` wrappers only ever hold a `$ref` plus `null`. If a
+    /// schemars upgrade starts wrapping number leaves, the coverage walker
+    /// would go quiet instead of red -- this fails loudly instead, and the
+    /// fix is to teach that walker to recurse.
+    #[test]
+    fn schema_has_no_anyof_wrapped_number_leaves() {
+        let wrapped = wrapped_number_leaf_paths(&committed_schema());
+
+        assert!(
+            wrapped.is_empty(),
+            "schema now wraps number leaves in anyOf/oneOf, which the \
+             float-leaf coverage walker cannot see: {wrapped:?}"
+        );
+    }
+
+    /// Negative control for the guard above: an assertion that only ever
+    /// sees a clean schema proves nothing, so inject the exact shape it
+    /// exists to catch and confirm it is reported.
+    #[test]
+    fn wrapped_number_leaf_detector_reports_an_injected_wrapper() {
+        let mut schema = committed_schema();
+        schema["$defs"]["PricingConfig"]["properties"]["synthetic_rate"] = serde_json::json!({
+            "anyOf": [{ "type": "number", "format": "double" }, { "type": "null" }],
+        });
+
+        let wrapped = wrapped_number_leaf_paths(&schema);
+
+        assert_eq!(
+            wrapped,
+            vec!["/$defs/PricingConfig/properties/synthetic_rate/anyOf/0".to_string()],
+            "an anyOf-wrapped number leaf must be reported"
+        );
+    }
+
+    #[test]
+    fn float_leaf_coverage_matches_schema() {
+        use std::collections::BTreeSet;
+
+        let schema = committed_schema();
 
         fn type_includes_number(field: &serde_json::Value) -> bool {
             match field.get("type") {
