@@ -83,6 +83,18 @@ contributor's local fixture corpus (CI runs them unfiltered). The
 message. Set `ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate
 while iterating; CI enforces the same rules fail-closed regardless.
 
+`cargo fmt` walks the module tree, so it never opens a file pulled in by
+`include!` -- the fmt gate passes vacuously on those fragments, and this
+repo uses them to keep large test modules under the file-size ceiling.
+`scripts/fmt-fragments.sh` closes that hole: it resolves every
+`include!` call site and runs `rustfmt --edition 2024 --check` on each
+target. It runs as its own pre-commit and CI step, and takes no
+arguments:
+
+```bash
+bash scripts/fmt-fragments.sh
+```
+
 ## When the Anthropic ingress breaks (a real client sending a real body)
 
 1. **Reproduce against routectl directly** with a captured request

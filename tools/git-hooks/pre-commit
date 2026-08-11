@@ -47,6 +47,11 @@ bash scripts/check-internal-ids.sh --staged
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 
+# cargo fmt walks the module tree and so never opens an `include!`d fragment;
+# without this leg the fmt gate above passes vacuously on all of them.
+echo "pre-commit: rustfmt --check on include!d fragments"
+bash scripts/fmt-fragments.sh
+
 echo "pre-commit: cargo clippy --workspace --all-targets --all-features -- -D warnings"
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 

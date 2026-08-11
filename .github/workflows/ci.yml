@@ -34,6 +34,11 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      # cargo fmt walks the module tree and so never opens an `include!`d
+      # fragment; without this step the check above passes vacuously on them.
+      - name: rustfmt --check on include!d fragments
+        run: bash scripts/fmt-fragments.sh
+
       - name: cargo clippy (all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 

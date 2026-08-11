@@ -62,9 +62,18 @@ fn render_non_detail_header_has_expected_columns() {
     // The normal view no longer carries reasoning, the context-size peak, or
     // cost -- ctx_peak and cost moved under --detail; reasoning is unrendered.
     for dropped in [
-        "reasoning", "ctx_peak", "cost", "scope", "p95_ms", "max_ms", "wall_ms",
+        "reasoning",
+        "ctx_peak",
+        "cost",
+        "scope",
+        "p95_ms",
+        "max_ms",
+        "wall_ms",
     ] {
-        assert!(!header.contains(dropped), "header should not contain {dropped}");
+        assert!(
+            !header.contains(dropped),
+            "header should not contain {dropped}"
+        );
     }
 }
 
@@ -228,7 +237,17 @@ fn render_humanizes_large_cache_read_and_honors_not_reported() {
     // a large reported volume (4_637_884 -> "4.6M"), a NULL (not reported), and a
     // reported-but-zero (present, sum 0) that must render "0", not "-".
     let (_dir, _path, db) = temp_db();
-    insert_stream_row(&db, "c1", 1000, "big", 100, 600, Some(10), Some(0), Some(4_637_884));
+    insert_stream_row(
+        &db,
+        "c1",
+        1000,
+        "big",
+        100,
+        600,
+        Some(10),
+        Some(0),
+        Some(4_637_884),
+    );
     insert_stream_row(&db, "c2", 1100, "nulls", 100, 600, Some(10), None, None);
     insert_stream_row(&db, "c3", 1200, "zero", 100, 600, Some(10), None, Some(0));
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
@@ -355,8 +374,14 @@ fn cost_prices_summed_cache_read_not_peak() {
     // if cost is ever reverted to pricing the peak.
     let sum_cost = 268_000.0 * rate / 1_000_000.0;
     let peak_cost = 91_000.0 * rate / 1_000_000.0;
-    assert!((cost - sum_cost).abs() < 1e-9, "expected sum-based cost {sum_cost}, got {cost}");
-    assert!(cost > peak_cost, "sum-based cost {cost} must exceed peak-based cost {peak_cost}");
+    assert!(
+        (cost - sum_cost).abs() < 1e-9,
+        "expected sum-based cost {sum_cost}, got {cost}"
+    );
+    assert!(
+        cost > peak_cost,
+        "sum-based cost {cost} must exceed peak-based cost {peak_cost}"
+    );
 }
 
 #[test]
@@ -366,8 +391,28 @@ fn render_total_ctx_peak_is_max_not_sum_and_flows_stay_summed() {
     // PEAK context (91000 -> "91K"), never the sum (179000 -> "179K"), while
     // input/output remain real summed flows.
     let (_dir, _path, db) = temp_db();
-    insert_stream_row(&db, "ft1", 1000, "m", 100, 600, Some(10), None, Some(88_000));
-    insert_stream_row(&db, "ft2", 1100, "m", 100, 600, Some(20), None, Some(91_000));
+    insert_stream_row(
+        &db,
+        "ft1",
+        1000,
+        "m",
+        100,
+        600,
+        Some(10),
+        None,
+        Some(88_000),
+    );
+    insert_stream_row(
+        &db,
+        "ft2",
+        1100,
+        "m",
+        100,
+        600,
+        Some(20),
+        None,
+        Some(91_000),
+    );
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
@@ -469,7 +514,17 @@ fn render_footer_excludes_non_cache_reporting_rows() {
     // 600/600 = 100.0%; if the non-reporting input leaked in it would be
     // 600/1600 = 37.5%.
     let (_dir, _path, db) = temp_db();
-    insert_stream_row(&db, "rep_s", 1000, "rep", 100, 600, Some(5), None, Some(600));
+    insert_stream_row(
+        &db,
+        "rep_s",
+        1000,
+        "rep",
+        100,
+        600,
+        Some(5),
+        None,
+        Some(600),
+    );
     paid_model_row(&db, "norep_i", "norep", "ok", 1000, 0);
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
@@ -505,7 +560,17 @@ fn per_group_cache_hit_matches_footer_in_mixed_provider_group() {
     // Reporting aggregate (model "rep"): a stream row carries the billed
     // cache-read volume (900); a paid row carries the fresh input (100). Both
     // share (provider "paid", upstream "up-paid", alias "al").
-    insert_stream_row(&db, "rep_s", 1000, "rep", 100, 600, Some(5), None, Some(900));
+    insert_stream_row(
+        &db,
+        "rep_s",
+        1000,
+        "rep",
+        100,
+        600,
+        Some(5),
+        None,
+        Some(900),
+    );
     paid_model_row(&db, "rep_i", "rep", "ok", 100, 0);
     // Non-reporting aggregate (model "norep"): input 500, NULL cache_read.
     paid_model_row(&db, "norep_i", "norep", "ok", 500, 0);
@@ -747,7 +812,17 @@ fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
     // non-reporting input: 900 / (100 + 900 + 1000) = 900/2000 = 45.0%. The
     // total must read 90.0%, never 45.0%.
     let (_dir, _path, db) = temp_db();
-    insert_stream_row(&db, "rep_s", 1000, "rep", 100, 600, Some(5), None, Some(900));
+    insert_stream_row(
+        &db,
+        "rep_s",
+        1000,
+        "rep",
+        100,
+        600,
+        Some(5),
+        None,
+        Some(900),
+    );
     paid_model_row(&db, "rep_i", "rep", "ok", 100, 0);
     paid_model_row(&db, "norep_i", "norep", "ok", 1000, 0);
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
@@ -1182,10 +1257,10 @@ fn would_trim_verdict_counts_one_of_each_shape() {
     //   met      : break_even=Some(2.0), k_floor=Some(3.0)  (3 >= 2)
     //   unmet    : break_even=Some(5.0), k_floor=Some(2.0)  (2 < 5)
     let (_dir, _path, db) = temp_db();
-    would_trim_verdict_row(&db, "v-unpriced", 10_000, None,        None);
-    would_trim_verdict_row(&db, "v-cold",     10_000, Some(2.0),   None);
-    would_trim_verdict_row(&db, "v-met",      10_000, Some(2.0),   Some(3.0));
-    would_trim_verdict_row(&db, "v-unmet",    10_000, Some(5.0),   Some(2.0));
+    would_trim_verdict_row(&db, "v-unpriced", 10_000, None, None);
+    would_trim_verdict_row(&db, "v-cold", 10_000, Some(2.0), None);
+    would_trim_verdict_row(&db, "v-met", 10_000, Some(2.0), Some(3.0));
+    would_trim_verdict_row(&db, "v-unmet", 10_000, Some(5.0), Some(2.0));
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
@@ -1193,9 +1268,9 @@ fn would_trim_verdict_counts_one_of_each_shape() {
 
     // Assert: counts partition the 4 candidate rows exactly.
     assert_eq!(wt.candidate_requests, 4);
-    assert_eq!(wt.verdict_met,      1, "met");
-    assert_eq!(wt.verdict_unmet,    1, "unmet");
-    assert_eq!(wt.verdict_cold,     1, "cold");
+    assert_eq!(wt.verdict_met, 1, "met");
+    assert_eq!(wt.verdict_unmet, 1, "unmet");
+    assert_eq!(wt.verdict_cold, 1, "cold");
     assert_eq!(wt.verdict_unpriced, 1, "unpriced");
 }
 
@@ -1363,7 +1438,13 @@ fn insert_calib_row(
              VALUES (?7, ?7, ?1, 'openai', 'req-model', 'al', ?4, 'paid', \
              'up-paid', ?3, ?2, 0, 'ok', 5, 0, 0, 1, 0, 10, 1.0, ?5, ?6)",
             rusqlite::params![
-                request_id, session_id, provider_kind, model, k_floor, cache_read, ts_start
+                request_id,
+                session_id,
+                provider_kind,
+                model,
+                k_floor,
+                cache_read,
+                ts_start
             ],
         )
         .expect("insert calibration row");
