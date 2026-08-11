@@ -332,8 +332,8 @@ mod scenario_11_normalize_response_matched_stop_sequence {
         // marker from content, single stop sequence was configured.
         // Heuristic falls back to the sole stop as the best-guess so
         // the Anthropic ingress emits `stop_reason:"stop_sequence"`
-        // instead of `end_turn`. Captures the deepseek-v4-pro
-        // reviewer-flow failure (2026-05-19).
+        // instead of `end_turn`. Bug class caught: a stripped stop
+        // marker left the sole configured stop sequence unreported.
         let raw = json!({
             "id": "chatcmpl-3",
             "model": "deepseek-v4-pro",

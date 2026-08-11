@@ -334,7 +334,6 @@ pub struct UsageMetadata {
 
     /// Reasoning tokens emitted by thinking-enabled models.
     /// Maps to `reasoning_tokens` in the canonical Usage.
-    /// Slice-2 will surface these on the thinking path.
     #[serde(default)]
     pub(crate) thoughts_token_count: u32,
 

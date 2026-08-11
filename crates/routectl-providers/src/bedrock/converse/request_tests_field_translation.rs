@@ -1,8 +1,9 @@
-//! Additional review-finding tests for `super::request::translate`.
+//! Per-field translation tests for `super::request::translate`.
 //!
 //! Lives in a sibling file so `request_tests.rs` stays under the
 //! project's 800-line ceiling. Imported via `#[path =
-//! "request_tests_round2.rs"] mod tests_round2;` from `request.rs`.
+//! "request_tests_field_translation.rs"] mod tests_field_translation;`
+//! from `request.rs`.
 //!
 //! Coverage:
 //!   - `{"type":"none"}` Anthropic-object tool_choice suppresses
@@ -13,7 +14,7 @@
 //!     {text} sibling when no Text exists in the same message.
 //!   - Role::Tool Parts of type Image / Document dispatch
 //!     through the typed translator (no opaque Json wrap).
-//!   - HIGH 6: anthropic_beta filter applies on the Converse path
+//!   - The anthropic_beta filter applies on the Converse path
 //!     identically to Invoke (allowlist + per-provider floor +
 //!     global override hooks).
 
@@ -83,7 +84,7 @@ fn user_msg(text: &str) -> Message {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH 1: Anthropic-object {"type":"none"} tool_choice
+// Anthropic-object {"type":"none"} tool_choice
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -120,7 +121,7 @@ fn anthropic_object_none_tool_choice_suppresses_tool_config_entirely() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH 2: provider_extras merge into additionalModelRequestFields
+// provider_extras merge into additionalModelRequestFields
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -242,7 +243,7 @@ fn provider_extras_cannot_override_managed_keys_on_converse() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH 3: Document content block prepends sibling Text
+// Document content block prepends sibling Text
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -292,7 +293,7 @@ fn document_with_existing_text_sibling_does_not_prepend_empty_text() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH 4: Role::Tool Image / Document parts dispatch through typed translator
+// Role::Tool Image / Document parts dispatch through typed translator
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -427,7 +428,7 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH 6: anthropic_beta filter on Converse (matches Invoke)
+// anthropic_beta filter on Converse (matches Invoke)
 // ---------------------------------------------------------------------------
 
 #[test]

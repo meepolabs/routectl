@@ -320,7 +320,7 @@ fn errors_by_class_empty_window_returns_no_rows() {
 fn errors_by_class_uses_ts_start_index() {
     // The breakdown must ride idx_requests_ts_start for its window range,
     // not degrade to a full table scan. If this ever fails, add a covering
-    // index rather than accepting the scan (see the decision doc).
+    // index rather than accepting the scan.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
     for i in 0..64 {

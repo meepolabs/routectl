@@ -464,10 +464,9 @@ async fn openai_compat_egress_opt_out_suppresses_stream_options() {
 // must appear on the upstream HTTP request, AND model values must win
 // over provider values on key collision.
 //
-// Bug class caught: round 1 review of 8fb4699 surfaced that the original
-// commit composed the merged map at dispatch but never published it to
-// the egress -- only `anthropic-beta` reached the wire (via the
-// canonical `req.anthropic_beta` lift). All other model-level headers
+// Bug class caught: the merged map was composed at dispatch but never
+// published to the egress -- only `anthropic-beta` reached the wire (via
+// the canonical `req.anthropic_beta` lift). All other model-level headers
 // were silently discarded.
 
 #[tokio::test]

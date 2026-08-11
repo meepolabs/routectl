@@ -36,7 +36,7 @@ pub const REASONING_REPLAY: &str = "reasoning_replay";
 
 /// All well-known capability keys. Not exhaustive: both `derive_feature_keys`
 /// and the catalog's capability map accept arbitrary tool-type strings
-/// beyond this list; this slice documents the ones routectl itself knows
+/// beyond this list, which documents the ones routectl itself knows
 /// about.
 pub const WELL_KNOWN_CAPABILITY_KEYS: &[&str] = &[
     WEB_SEARCH,

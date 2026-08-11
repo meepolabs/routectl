@@ -169,8 +169,8 @@ fn validate_breakpoints(req: &ChatRequest) -> Result<()> {
 mod tests;
 
 #[cfg(test)]
-#[path = "request_tests_round2.rs"]
-mod tests_round2;
+#[path = "request_tests_field_translation.rs"]
+mod tests_field_translation;
 
 #[cfg(test)]
 #[path = "request_tests_parity.rs"]

@@ -12,7 +12,7 @@
 //! which is the baseline the persisted round-trip must reproduce. It feeds a
 //! real registry through the real replay engine.
 //!
-//! The stage-two admission determinism half of R2 -- identical observation
+//! The stage-two admission determinism property -- identical observation
 //! sequences plus identical `now` yield identical registry state -- is pinned
 //! in the router crate (`capability_acceptance_tests::scenario_f_*`); this
 //! module extends it across the persist -> read -> clock-map -> replay
@@ -184,7 +184,8 @@ fn acting_decision(entry: &LearnedRegistryEntry, now: Instant) -> ActingDecision
     }
 }
 
-/// The normalized comparison tuple for R2 equivalence: per (lane, capability),
+/// The normalized comparison tuple for live-vs-rebuild equivalence: per
+/// (lane, capability),
 /// the verdict / phase / source / tier tokens, the observation count, and the
 /// derived acting decision. Instants, in-flight, and backoff are deliberately
 /// excluded -- they legitimately differ between a live registry and a rebuilt
@@ -252,7 +253,7 @@ impl CapabilityLedgerReader for LiveEventReader {
     }
 }
 
-// --- Scenario 1 (R2): live-vs-rebuild equivalence incl. cleared --------
+// --- Scenario 1: live-vs-rebuild equivalence incl. cleared -------------
 
 #[tokio::test]
 async fn live_and_rebuild_registries_match_on_normalized_state() {

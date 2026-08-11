@@ -39,11 +39,11 @@
 //!
 //! Completed-body parity: the renderer accumulates the streamed text,
 //! reasoning details, and tool calls into a canonical `Message`, then
-//! builds the `response.completed` body via the SLICE-2 non-stream
+//! builds the `response.completed` body via the non-stream
 //! renderer (`render::render_responses_response`). That guarantees the
 //! terminal body matches the non-stream render byte-for-byte. The
 //! per-item shapes emitted on `output_item.added` / `.done` reuse the
-//! same SLICE-2 helpers (`output_text_block`, `function_call_item`,
+//! same `render` helpers (`output_text_block`, `function_call_item`,
 //! `reasoning_item`).
 
 use serde_json::{Map, Value, json};
@@ -242,7 +242,8 @@ fn emit_reasoning_detail(
     events: &mut Vec<SseEvent>,
 ) {
     // Every detail rides into the completed body via the accumulator
-    // (slice 2 filters to the Responses format when building it).
+    // (the non-stream renderer filters to the Responses format when
+    // building it).
     state.reasoning_accumulator.push(d.clone());
 
     // Only Responses-family reasoning participates in the streamed
@@ -311,7 +312,7 @@ const fn next_reasoning_content_index(state: &mut ResponsesStreamState) -> u64 {
 
 /// Open a `reasoning` item if one is not already open, closing any
 /// superseded item first. Re-uses the open item when the detail id
-/// matches (slice 2 groups reasoning details by id).
+/// matches (the non-stream renderer groups reasoning details by id).
 fn ensure_reasoning_item(
     detail_id: Option<String>,
     state: &mut ResponsesStreamState,
@@ -431,8 +432,8 @@ fn flush_tool_calls(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
     }
 }
 
-/// Build the canonical OpenAI-shape tool_call value the slice-2
-/// `function_call_item` helper consumes.
+/// Build the canonical OpenAI-shape tool_call value the
+/// `render::function_call_item` helper consumes.
 fn tool_call_value(buf: &ToolCallBuffer) -> Value {
     json!({
         "id": buf.id,
@@ -504,8 +505,8 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
 }
 
 /// Assemble the `reasoning` item body for `output_item.done` from the
-/// accumulated details that share this item's id. Mirrors the slice-2
-/// reasoning grouping (summary -> `summary[]`, text/encrypted ->
+/// accumulated details that share this item's id. Mirrors the non-stream
+/// renderer's reasoning grouping (summary -> `summary[]`, text/encrypted ->
 /// `content[]` + item-level `encrypted_content`).
 fn reasoning_done_item(detail_id: Option<String>, details: &[ReasoningDetail]) -> Value {
     let mut summary: Vec<Value> = Vec::new();
@@ -610,7 +611,7 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
 }
 
 /// Build the `output[]` for the completed body from the accumulated
-/// canonical message, via the SLICE-2 non-stream renderer so the body
+/// canonical message, via the non-stream renderer so the body
 /// matches the non-stream render byte-for-byte.
 fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
     let resp = accumulated_response(state);
@@ -623,7 +624,7 @@ fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
 }
 
 /// Reconstruct a canonical `ChatResponse` from the accumulated stream so
-/// the slice-2 renderer produces the completed body. Tool calls become
+/// the non-stream renderer produces the completed body. Tool calls become
 /// `message.tool_calls`; text becomes the message content; reasoning
 /// details ride on the message.
 fn accumulated_response(state: &ResponsesStreamState) -> ChatResponse {
@@ -754,9 +755,9 @@ fn response_skeleton(
     Value::Object(obj)
 }
 
-/// Lift a streaming `UsageDelta` into the canonical `Usage` the slice-2
-/// `render_usage` helper consumes, so the streamed usage object matches
-/// the non-stream render.
+/// Lift a streaming `UsageDelta` into the canonical `Usage` the
+/// `render::render_usage` helper consumes, so the streamed usage object
+/// matches the non-stream render.
 fn usage_from_delta(u: &UsageDelta) -> Usage {
     Usage {
         prompt_tokens: u.prompt_tokens.unwrap_or(0),

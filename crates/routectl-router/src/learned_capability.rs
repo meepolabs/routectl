@@ -383,7 +383,7 @@ impl LearnedCapabilityRegistry {
     /// lifecycle owns clearing. A VerifiedWorking entry therefore lands only
     /// on keys with no resident negative.
     ///
-    /// R2 stage-2 admission: pure over its arguments plus `now`, consulting
+    /// Stage-two admission: pure over its arguments plus `now`, consulting
     /// only the resident registry state -- no internal clock.
     pub fn observe_positive(
         &self,
@@ -1949,7 +1949,7 @@ mod tests {
 
     #[test]
     fn admission_is_deterministic_over_same_observations_and_now() {
-        // R2 stage-2 purity: the same observation sequence replayed with the
+        // Stage-two admission purity: the same observation sequence replayed with the
         // same `now` timestamps yields an identical registry state. Admission
         // consults only its arguments plus `now` -- no internal clock -- so a
         // shared `t0` drives both replays to a byte-identical snapshot.

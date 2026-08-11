@@ -213,7 +213,7 @@ fn ttl_expiry_returns_none() {
     assert!(result.is_none(), "expected None for expired entry");
 }
 
-/// LOW-3 fix: looking up an expired entry must EVICT it, not merely return
+/// Looking up an expired entry must EVICT it, not merely return
 /// None. Before the fix, `lookup_thinking` used `get_mut` (which promotes
 /// to MRU) and returned None on expiry without removing the entry --
 /// leaving a dead entry occupying an MRU slot. After the fix the expired

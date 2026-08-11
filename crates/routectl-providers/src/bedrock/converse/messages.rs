@@ -2446,7 +2446,7 @@ mod tests {
         }
     }
 
-    /// LOW-5 fix: a `Role::Tool` message with `MessageContent::Null` must
+    /// A `Role::Tool` message with `MessageContent::Null` must
     /// emit a `toolResult.content` carrying exactly ONE empty-string text
     /// block, not an empty array. AWS Converse rejects
     /// `toolResult.content: []` ("Member must have at least 1 element").
