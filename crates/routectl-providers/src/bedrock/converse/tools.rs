@@ -83,8 +83,8 @@ pub(super) fn build_tool_config(
         if transcript_requires_tool_config(messages) {
             tracing::warn!(
                 provider = id,
-                "injecting reserved dummy toolSpec: Converse transcript references \
-                 tool blocks but the request offers no tools"
+                "injecting reserved dummy toolSpec: Converse transcript carries a \
+                 toolResult but the request offers no tools"
             );
             return Ok(Some(dummy_tool_config()));
         }
