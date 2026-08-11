@@ -355,6 +355,46 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   bounded reason-labeled WARN (`missing|invalid|ambiguous|conflict`)
   instead of silently degrading to a non-attributed rejection.
 
+- **Converse demands a `toolConfig` as soon as the transcript carries a
+  `toolResult`.** A request whose `messages` include a `toolResult`
+  content block but whose body omits `toolConfig` is rejected with
+  `The toolConfig field must be defined when using toolUse and
+  toolResult content blocks.` -- a Converse-API-level
+  missing-required-field check, measured with no `toolConfig` sent. So
+  when no caller tool defs survive translation (none supplied, an empty
+  list, or every entry was an Anthropic builtin that dropped),
+  `bedrock/converse/tools.rs` backfills exactly one reserved
+  `toolSpec` named `routectl__history_compat_noop` with an
+  empty-object input schema, and leaves `toolChoice` absent (a forcing
+  choice would compel a nonsensical call; absent means Converse's own
+  `auto`, so the model MAY select the dummy -- the response and stream
+  lanes recognize the reserved name). The injection logs a WARN and is
+  never silent.
+
+  Triggering condition: at least one `toolResult` block, zero surviving
+  tool defs, and `tool_choice` not `"none"`. Two deliberate
+  non-triggers:
+
+  - **A lone `toolUse`** (no following `toolResult`) does NOT trigger
+    it. That shape is rejected by a different, model-level pairing
+    check, whose message carries the `The model returned the following
+    errors:` prefix and names the offending id. No `toolConfig` can
+    repair a pairing error, so injecting there would mutate the request
+    with no possible benefit. The two classes are distinguishable on
+    the wire by that prefix; if AWS ever merges the validators, the
+    predicate needs revisiting.
+  - **`tool_choice: "none"`** leaves the shape KNOWN UNREPAIRED: it
+    still gets no `toolConfig` and AWS still rejects it. Converse has
+    no native "none" mode, so shipping a `tools` array would permit
+    auto-selection of a tool the caller explicitly forbade. Violating
+    stated caller intent is worse than the rejection.
+
+  What the backfill buys is precise: routectl stops omitting a
+  `toolConfig` the wire requires. It does not promise the request then
+  succeeds -- an unpaired `toolResult` carrying a valid `toolConfig` is
+  an unmeasured cell, and the same pairing check that governs a lone
+  `toolUse` may still reject it.
+
 ## OpenAI Responses surface
 
 - **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
