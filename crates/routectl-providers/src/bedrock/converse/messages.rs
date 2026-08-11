@@ -54,7 +54,7 @@ use serde_json::{Value, json};
 
 use routectl_core::{
     ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result, Role,
+    ReasoningDetailKind, Result, Role, sanitize_for_log,
 };
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
@@ -532,7 +532,7 @@ fn translate_content_part(
             wrapper.insert(type_tag.clone(), Value::Object(extras.clone()));
             tracing::debug!(
                 provider = id,
-                type_tag = %type_tag,
+                type_tag = %sanitize_for_log(type_tag),
                 "passing ContentPart::Other through Converse egress as single-key union"
             );
             Ok(Some(ConverseContentBlock::Other(Value::Object(wrapper))))
@@ -708,7 +708,7 @@ fn translate_image_source(id: &str, source: &Value) -> Result<Option<ConverseCon
         // 400 traffic that works the day one ships.
         tracing::warn!(
             provider = id,
-            source_type = %kind,
+            source_type = %sanitize_for_log(kind),
             "dropping non-base64 image source on Converse egress"
         );
         return Ok(None);
@@ -738,7 +738,7 @@ fn translate_image_source(id: &str, source: &Value) -> Result<Option<ConverseCon
     let Some(format) = media_type_to_image_format(media_type) else {
         tracing::warn!(
             provider = id,
-            media_type = %media_type,
+            media_type = %sanitize_for_log(media_type),
             "dropping image with unmapped media_type on Converse egress"
         );
         return Ok(None);
@@ -903,7 +903,7 @@ fn translate_document(
         // here would 400 traffic that works the day one ships.
         tracing::warn!(
             provider = id,
-            source_type = %kind,
+            source_type = %sanitize_for_log(kind),
             "dropping unsupported document source type on Converse egress; \
              AWS Converse JSON wire accepts only base64 or text sources"
         );
@@ -937,7 +937,7 @@ fn translate_document(
     let Some(format) = media_type_to_document_format(media_type) else {
         tracing::warn!(
             provider = id,
-            media_type = %media_type,
+            media_type = %sanitize_for_log(media_type),
             "dropping document with unmapped media_type on Converse egress"
         );
         return Ok(None);
@@ -3511,6 +3511,79 @@ mod tests {
             logs_contain("dropping unrecognized document citations value"),
             "the dropped citations config must be observable in the logs"
         );
+    }
+
+    /// The Converse egress renders three caller-controlled strings into
+    /// tracing fields on its warn-drop arms: an image/document
+    /// `source.type`, an unmapped `source.media_type`, and a forward-compat
+    /// part's wire `type`. All are verbatim client input with no charset
+    /// validation, so a raw `\n` would forge a whole log line and a raw ANSI
+    /// CSI sequence would scroll an operator's terminal. Every one must emit
+    /// through `sanitize_for_log`.
+    #[test]
+    fn converse_warn_drop_fields_carry_no_raw_control_characters() {
+        // Arrange: one hostile string reused for every field, carrying a
+        // newline, a carriage return, and an ANSI erase-display sequence.
+        const HOSTILE: &str = "vendorext\nWARN forged=1\r\x1b[2Jgone";
+        let messages = vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                // Unknown-but-nonempty source shape -> source_type warn-drop.
+                ContentPart::Known(KnownContentPart::Image {
+                    source: json!({"type": HOSTILE, "media_type": "image/png", "data": "aGk="}),
+                    cache_control: None,
+                }),
+                // Mapped kind, unmapped media type -> media_type warn-drop.
+                ContentPart::Known(KnownContentPart::Image {
+                    source: json!({"type": "base64", "media_type": HOSTILE, "data": "aGk="}),
+                    cache_control: None,
+                }),
+                // Forward-compat part -> type_tag drop (DEBUG).
+                ContentPart::Other {
+                    type_tag: HOSTILE.into(),
+                    cache_control: None,
+                    extras: serde_json::Map::new(),
+                },
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            let _ = build_messages(TEST_ID, &messages);
+        });
+
+        // Assert: every rendering of a caller string is control-char free.
+        let rendered: Vec<&str> = events
+            .iter()
+            .filter_map(|e| {
+                e.field("source_type")
+                    .or_else(|| e.field("media_type"))
+                    .or_else(|| e.field("type_tag"))
+            })
+            .collect();
+        assert_eq!(
+            rendered.len(),
+            3,
+            "all three caller-controlled fields must be emitted: {events:?}"
+        );
+        for value in rendered {
+            assert!(
+                !value.chars().any(char::is_control),
+                "field must carry no raw control character; got {value:?}"
+            );
+            for forbidden in ['\n', '\r', '\u{1b}'] {
+                assert!(
+                    !value.contains(forbidden),
+                    "field must not carry {forbidden:?}; got {value:?}"
+                );
+            }
+        }
     }
 }
 
