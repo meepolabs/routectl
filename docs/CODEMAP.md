@@ -937,24 +937,27 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   no foreign-format signal) aggregates the per-message unsigned-signature skips
   into one WARN per outbound provider attempt; `build_messages` owns it and
   flushes both tallies on the ok and err arms.
-  Image content follows a two-class policy on the malformed-vs-unrepresentable
+  Image AND document content follow a two-class policy on the
+  malformed-vs-unrepresentable
   axis: a source that names no bytes fails the request with a field-naming
-  `normalize_request` error, while a well-formed image this JSON wire cannot
+  `normalize_request` error, while well-formed content this JSON wire cannot
   carry keeps its WARN-drop. Required-field structure is validated before
   representability, and an unrecognized-but-nonempty source shape defaults to
   the drop so a future vendor shape does not 400 working traffic. That class
   split applies to the carriers with no way to preserve a source they cannot
-  read -- `translate_image_source` and `translate_image_url`.
-  `image_source_to_tool_result` (reached directly and through the image arm of
-  `translate_tool_result_array_element`) classifies NARROWLY on purpose: its
+  read -- `translate_image_source`, `translate_image_url` and
+  `translate_document`.
+  `image_source_to_tool_result` and `document_to_tool_result` (each reached
+  directly and through the matching arm of
+  `translate_tool_result_array_element`) classify NARROWLY on purpose: their
   callers wrap an unreadable source as `ConverseToolResultContent::Json`, so
-  the model still receives the payload. Only a source that positively declares
-  base64 and then names no bytes -- absent, empty, or non-string `data` or
-  `media_type` -- fails the request there; every other shape takes the JSON
-  fallback silently, with no WARN.
+  the model still receives the payload. Only a source that names a
+  wire-carryable kind and then names no bytes -- absent, empty, or non-string
+  `data` or `media_type` -- fails the request there; every other shape takes
+  the JSON fallback silently, with no WARN.
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
-  when the translated transcript references tool blocks but no tools survive
+  when the translated transcript carries a `toolResult` but no tools survive
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields`
   (thinking, anthropic_beta, cache_control, output_config)
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
