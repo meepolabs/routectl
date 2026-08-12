@@ -19,10 +19,15 @@ use super::*;
 //   cargo test -p routectl-cli --features live-integration,bedrock --release \
 //     --test live_matrix mantle -- --nocapture --test-threads=1
 //
-// The model id is BARE (no `us.`/`anthropic.` inference-profile prefix):
-// the mantle Anthropic lane carries the model verbatim in the request body.
-
-const MANTLE_MODEL: &str = "claude-haiku-4-5-20251001-v1:0";
+// The model id needs the `anthropic.` VENDOR prefix and the PUBLIC name --
+// NOT the Bedrock version-suffixed form. Measured 2026-08-12 direct to AWS:
+// `anthropic.claude-haiku-4-5` in us-east-1 returns 200 (response echoes
+// `model: claude-haiku-4-5-20251001`), while the bare `claude-haiku-4-5`, the
+// version-suffixed `anthropic.claude-haiku-4-5-20251001-v1:0`, and every
+// spelling in us-east-2 all return 404 not_found. An earlier comment here
+// claimed the id is BARE because the lane "carries the model verbatim"; that
+// was never wire-verified and is false.
+const MANTLE_MODEL: &str = "anthropic.claude-haiku-4-5";
 
 async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
     use routectl_providers::anthropic_api::{

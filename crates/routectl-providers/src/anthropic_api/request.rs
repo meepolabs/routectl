@@ -293,12 +293,13 @@ impl DroppedFormatKeys {
 ///
 /// Applies uniformly to all three Claude seams (Anthropic egress,
 /// Bedrock-Converse bag, Bedrock-Invoke via the shared normalizer). Bedrock
-/// acceptance of the two keys is UNMEASURED -- the drop is uniform because
-/// AWS forwards the field verbatim to an Anthropic validator that has been
-/// measured to reject them, and because the Bedrock body-field filter exists
-/// for the same "Extra inputs are not permitted" rejection. A filed probe
-/// item covers measuring Bedrock directly; if it turns out to accept them,
-/// re-splitting is a change to this one function and its three call sites.
+/// acceptance of the two keys was MEASURED (2026-08-12, us-west-2,
+/// claude-haiku-4-5, both lanes direct to AWS): Bedrock rejects both with the
+/// identical "Extra inputs are not permitted" string a valid json_schema
+/// format is otherwise accepted (200) -- because AWS forwards the field
+/// verbatim to the same Anthropic validator. So the uniform drop is correct
+/// and the seams do not diverge; if that ever changes, re-splitting is a
+/// change to this one function and its three call sites.
 pub(crate) fn drop_unrepresentable_output_format_keys(
     obj: &mut serde_json::Map<String, Value>,
 ) -> DroppedFormatKeys {
