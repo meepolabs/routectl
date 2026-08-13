@@ -420,6 +420,48 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   an unmeasured cell, and the same pairing check that governs a lone
   `toolUse` may still reject it.
 
+- **The mantle Anthropic lane's model id is VENDOR-PREFIXED and
+  PUBLIC-NAMED, and the working cell is region-specific.** The mantle
+  lane's id is NOT the Bedrock version-suffixed inference-profile id the
+  native lanes use, and it is NOT bare. Measured 2026-08-12 direct to AWS
+  (SigV4 scope `bedrock-mantle`, Anthropic Messages body):
+  `anthropic.claude-haiku-4-5` in **us-east-1** returns 200 and the
+  response echoes `model: claude-haiku-4-5-20251001`, while the bare
+  `claude-haiku-4-5`, the version-suffixed
+  `anthropic.claude-haiku-4-5-20251001-v1:0`, and every one of those
+  spellings in us-east-2 return 404 `not_found_error`. An earlier comment
+  in the live vehicle claimed the id must be bare because the lane
+  "carries the model verbatim" -- that was inference, never wire-verified,
+  and it is false. Whether us-east-2 offers a differently-named Anthropic
+  model is unswept. Pinned by `MANTLE_MODEL` in
+  `crates/routectl-cli/tests/live_matrix/mantle_anthropic.rs`.
+
+- **The Anthropic `thinking` signature namespace is shared between the
+  mantle Anthropic lane and the bedrock-native `InvokeModel` lane --
+  measured, not assumed.** Same 2026-08-12 capture, on
+  `anthropic.claude-haiku-4-5` / us-east-1: the lane accepts its own
+  thinking signature on multi-turn replay (200), AND it accepts a
+  signature minted on the bedrock-native `InvokeModel` lane in a
+  DIFFERENT region (us-west-2) -- also 200. Two strictness controls prove
+  those 200s are not vacuous "unrecognized field ignored" passes: a
+  garbage base64 signature is rejected (`invalid_request_error`, message
+  `Invalid signature in thinking block`), and a thinking block with the
+  signature removed is rejected (`thinking.signature: Field required`).
+  The signature is mandatory and genuinely validated.
+
+  This does NOT add a scheme. `ReplayScheme` stays `{Codex, Mantle, Gray}`
+  with no Anthropic variant: Anthropic-sourced details carry no
+  Responses-family format tag (see the byte-verbatim carve-out under
+  *OpenAI Responses surface*), so `scheme_of` returns `ReplayScheme::Gray`
+  for them through its `_` fallthrough. That is deliberate:
+  `is_replayable` leaves every Gray pair on the
+  optimistic carry-once path so the learned layer settles it from a real
+  upstream verdict, instead of baking a distinction this evidence does not
+  yet compel into the deterministic rules. Treat the sharing as a DATED
+  OBSERVATION: if AWS later diverges the two lanes' signature validation,
+  that reads as new evidence for the learned layer, not as a contradiction
+  of this note.
+
 ## OpenAI Responses surface
 
 - **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
