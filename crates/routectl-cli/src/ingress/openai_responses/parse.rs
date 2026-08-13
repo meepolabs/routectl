@@ -44,6 +44,7 @@ use routectl_core::{
 };
 
 use crate::ingress::read_alias_header;
+use crate::ingress::session_key::{first_session_header, resolve_session_key};
 use routectl_core::OPENAI_RESPONSES_V1;
 
 /// Top-level Responses request fields handled explicitly below. Anything
@@ -205,6 +206,21 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     }
 
     req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+
+    // Capture the INBOUND per-conversation key: a curated allowlist header
+    // first, else the body's top-level `prompt_cache_key`. Read AFTER the
+    // sweep installs the extras so one read covers the whole body-side
+    // vocabulary. The copy in provider_extras is left untouched, so the
+    // egress still forwards it verbatim.
+    // Owned so the read is finished before the assignment borrows `req`.
+    let body_session_key = req
+        .provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get("prompt_cache_key"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    req.routectl_internal.inbound_session_key =
+        resolve_session_key(first_session_header(headers), body_session_key.as_deref());
 
     Ok(req)
 }

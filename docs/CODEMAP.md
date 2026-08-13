@@ -3380,7 +3380,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `provider_extras["reasoning"]` (closed enums `summary`/`context` validated ->
   local 400 on an out-of-range value, `mode` open passthrough). Statefulness
   contract: `previous_response_id` -> 400; `store:true` (no prior id) accepted
-  with WARN (persistence ignored)
+  with WARN (persistence ignored). Captures the inbound per-conversation key
+  into `routectl_internal.inbound_session_key` via `ingress::session_key`
+  (first curated allowlist header, else the body's top-level
+  `prompt_cache_key`); the lift is a copy, so the swept `prompt_cache_key`
+  still forwards to the Responses egress
 - `src/ingress/openai_responses/render.rs` -- canonical `ChatResponse` ->
   Responses response body (`object:"response"`, `status`, `output[]` of
   message / function_call / reasoning items)

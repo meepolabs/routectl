@@ -1049,6 +1049,12 @@ fn unknown_top_level_field_swept_into_provider_extras() {
     let extras = req.provider_extras.expect("provider_extras present");
     assert_eq!(extras["prompt_cache_key"], "abc123");
     assert_eq!(extras["service_tier"], "flex");
+    // The session lift is a COPY: the forwarded value stays in extras and
+    // the key also lands on routectl_internal.
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("abc123"),
+    );
 }
 
 #[test]
@@ -1601,4 +1607,252 @@ fn render_chunk_emits_response_created_on_first_chunk() {
     // Assert
     assert!(!events.is_empty());
     assert_eq!(events[0].event.as_deref(), Some("response.created"));
+}
+
+// ---------------------------------------------------------------------------
+// inbound session key
+//
+// These pin the HEADER SHAPES the curated allowlist accepts, not
+// end-to-end coverage of the clients those shapes were captured from.
+// ---------------------------------------------------------------------------
+
+fn session_headers(name: &str, value: &str) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(
+        HeaderName::from_bytes(name.as_bytes()).unwrap(),
+        value.parse().unwrap(),
+    );
+    h
+}
+
+fn minimal_body() -> serde_json::Value {
+    json!({ "model": "m", "input": "hi" })
+}
+
+#[test]
+fn lifts_session_key_from_the_x_session_id_header() {
+    // Arrange
+    let headers = session_headers("x-session-id", "sid-x-session-id");
+
+    // Act
+    let req = parse_with_headers(&headers, minimal_body());
+
+    // Assert
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-x-session-id"),
+    );
+}
+
+#[test]
+fn lifts_session_key_from_the_session_id_underscore_header() {
+    // Arrange
+    let headers = session_headers("session_id", "sid-session-underscore");
+
+    // Act
+    let req = parse_with_headers(&headers, minimal_body());
+
+    // Assert
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-session-underscore"),
+    );
+}
+
+#[test]
+fn lifts_session_key_from_the_agent_session_id_header() {
+    // Arrange
+    let headers = session_headers("agent-session-id", "sid-agent-session-id");
+
+    // Act
+    let req = parse_with_headers(&headers, minimal_body());
+
+    // Assert
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-agent-session-id"),
+    );
+}
+
+#[test]
+fn lifts_session_key_from_the_x_task_id_header() {
+    // Arrange
+    let headers = session_headers("x-task-id", "sid-x-task-id");
+
+    // Act
+    let req = parse_with_headers(&headers, minimal_body());
+
+    // Assert
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-x-task-id"),
+    );
+}
+
+#[test]
+fn lifts_session_key_from_the_session_id_hyphen_header() {
+    // The codex shape, and the lane this ingress exists to serve: codex
+    // sends `session-id` on every Responses request.
+    // Arrange
+    let headers = session_headers("session-id", "sid-session-hyphen");
+
+    // Act
+    let req = parse_with_headers(&headers, minimal_body());
+
+    // Assert
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-session-hyphen"),
+    );
+}
+
+#[test]
+fn lifts_session_key_from_prompt_cache_key_when_no_header_is_present() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "prompt_cache_key": "sid-from-body"
+    });
+
+    // Act
+    let req = parse_with_headers(&HeaderMap::new(), body);
+
+    // Assert: the key is lifted and the forwarded copy survives.
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-from-body"),
+    );
+    let extras = req.provider_extras.expect("provider_extras present");
+    assert_eq!(extras["prompt_cache_key"], "sid-from-body");
+}
+
+#[test]
+fn a_nested_provider_extras_prompt_cache_key_is_not_body_session_identity() {
+    // The Responses wire shape has no `provider_extras` field: an
+    // unrecognized top-level key of that name is swept whole, so the cache
+    // key ends up nested one level down and is NOT this dialect's body
+    // vocabulary. Pinned so the top-level-only reach is deliberate.
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "provider_extras": {"prompt_cache_key": "sid-nested"}
+    });
+
+    // Act
+    let req = parse_with_headers(&HeaderMap::new(), body);
+
+    // Assert
+    assert_eq!(req.routectl_internal.inbound_session_key, None);
+    let extras = req.provider_extras.expect("provider_extras present");
+    assert_eq!(extras["provider_extras"]["prompt_cache_key"], "sid-nested");
+}
+
+#[test]
+fn header_wins_over_prompt_cache_key_and_leaves_the_forwarded_copy_intact() {
+    // Arrange
+    let headers = session_headers("session-id", "sid-from-header");
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "prompt_cache_key": "sid-from-body"
+    });
+
+    // Act
+    let req = parse_with_headers(&headers, body);
+
+    // Assert: header-then-body precedence, and the cache-partition value
+    // reaching the egress is a copy this lift never mutates.
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-from-header"),
+    );
+    let extras = req.provider_extras.expect("provider_extras present");
+    assert_eq!(extras["prompt_cache_key"], "sid-from-body");
+}
+
+#[test]
+fn header_body_conflict_emits_boolean_warning_without_raw_keys() {
+    // Arrange
+    let headers = session_headers("session-id", "sid-from-header");
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "prompt_cache_key": "sid-from-body"
+    });
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        let req = parse_with_headers(&headers, body.clone());
+        assert_eq!(
+            req.routectl_internal.inbound_session_key.as_deref(),
+            Some("sid-from-header"),
+        );
+    });
+
+    // Assert
+    let conflict_event = events
+        .iter()
+        .find(|e| e.field("session_key_source_conflict").is_some())
+        .unwrap_or_else(|| panic!("expected mismatch WARN, got events: {events:?}"));
+    assert_eq!(conflict_event.level, tracing::Level::WARN);
+    assert_eq!(
+        conflict_event.field("session_key_source_conflict"),
+        Some("true"),
+    );
+    for event in &events {
+        assert!(
+            !event.message.contains("sid-from-header") && !event.message.contains("sid-from-body"),
+            "raw session key must never be logged: {event:?}",
+        );
+        for (_, v) in &event.fields {
+            assert!(
+                v != "sid-from-header" && v != "sid-from-body",
+                "raw session key must never appear in a structured field: {event:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn agreeing_header_and_prompt_cache_key_emit_no_conflict_warning() {
+    // Arrange
+    let headers = session_headers("session-id", "sid-same");
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "prompt_cache_key": "sid-same"
+    });
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        let req = parse_with_headers(&headers, body.clone());
+        assert_eq!(
+            req.routectl_internal.inbound_session_key.as_deref(),
+            Some("sid-same"),
+        );
+    });
+
+    // Assert
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.field("session_key_source_conflict").is_some()),
+        "agreeing sources must not fire the conflict guardrail: {events:?}",
+    );
+}
+
+#[test]
+fn request_without_recognized_identity_yields_no_session_key() {
+    // An unlisted header and no prompt_cache_key keeps today's keyless
+    // behavior rather than guessing.
+    // Arrange
+    let headers = session_headers("x-session-affinity", "affinity-only");
+
+    // Act
+    let req = parse_with_headers(&headers, minimal_body());
+
+    // Assert
+    assert_eq!(req.routectl_internal.inbound_session_key, None);
 }
