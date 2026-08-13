@@ -38,6 +38,18 @@ pub(super) fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> R
         )));
     }
 
+    // Require a non-empty host. A hostless authority cannot name a real
+    // egress, and this is defense in depth against a malformed authority
+    // entering config at all. The Anthropic host predicate does NOT rely on
+    // this guard (core/provider APIs have direct callers) -- the two are
+    // independent.
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(routectl_core::Error::Config(format!(
+            "provider `{provider_name}`: base_url has no host; \
+             set an explicit http(s) endpoint with a hostname"
+        )));
+    }
+
     // Link-local rejection (regardless of scheme). Covers cloud
     // metadata services. `Ipv4Addr::is_link_local` is stable since
     // 1.0 (covers 169.254.0.0/16). For IPv6 we check the fe80::/10
