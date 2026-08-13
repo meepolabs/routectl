@@ -26,6 +26,7 @@ use serde_json::{Map, Value};
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
     StreamRequestContext, read_alias_header,
+    session_key::{first_session_header, resolve_session_key},
 };
 
 const DONE_SENTINEL: &str = "[DONE]";
@@ -184,6 +185,23 @@ impl IngressAdapter for OpenAiIngress {
         // Stamp ingress provenance so downstream observability can
         // attribute the request to the OpenAI Chat Completions dialect.
         req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+
+        // Capture the INBOUND per-conversation key (allowlisted header
+        // wins, then body `prompt_cache_key`). Read the body candidate from
+        // `provider_extras` AFTER the merge above, so one read covers both
+        // the swept key and a client that sent an explicit
+        // `provider_extras: {prompt_cache_key: ...}` object. The extras copy
+        // is left intact for the egress: this only ADDS the lift. Never
+        // logged raw. Materialized into a local first because the extras
+        // borrow would otherwise collide with assigning `routectl_internal`.
+        let body_session_key = req
+            .provider_extras
+            .as_ref()
+            .and_then(|extras| extras.get("prompt_cache_key"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        req.routectl_internal.inbound_session_key =
+            resolve_session_key(first_session_header(headers), body_session_key.as_deref());
         Ok(req)
     }
 
@@ -2795,5 +2813,197 @@ mod tests {
 
         // Assert: the Anthropic wire keeps the raw stop_reason, unmapped.
         assert_eq!(v["stop_reason"], "refusal");
+    }
+
+    fn keyless_chat_body() -> Value {
+        json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}]
+        })
+    }
+
+    fn headers_from(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    /// One case per allowlisted header SHAPE, including the mixed-case wire
+    /// spelling that `HeaderName` normalizes on parse. These pin the shapes
+    /// the ingress accepts, not a claim that a given client reaches routectl
+    /// by this path.
+    #[test]
+    fn openai_ingress_lifts_session_key_from_each_allowlisted_header_shape() {
+        for name in [
+            "x-session-id",
+            "X-Session-Id",
+            "session_id",
+            "agent-session-id",
+            "x-task-id",
+            "session-id",
+        ] {
+            let req = OpenAiIngress
+                .parse_request_value(&headers_from(&[(name, "sid-1")]), keyless_chat_body())
+                .unwrap();
+            assert_eq!(
+                req.routectl_internal.inbound_session_key.as_deref(),
+                Some("sid-1"),
+                "header {name} must land the key",
+            );
+        }
+    }
+
+    /// The chat side reaches `prompt_cache_key` through the generic
+    /// unknown-field sweep, so this is both the body-path pin and the chat
+    /// ingress's only dedicated pin that the field survives the sweep.
+    #[test]
+    fn openai_ingress_lifts_session_key_from_prompt_cache_key_and_leaves_it_on_the_wire() {
+        // Arrange
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "prompt_cache_key": "sid-from-body"
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        assert_eq!(
+            req.routectl_internal.inbound_session_key.as_deref(),
+            Some("sid-from-body"),
+        );
+        // The lift is a COPY: the swept extras entry is still forwarded.
+        assert_eq!(
+            req.provider_extras
+                .as_ref()
+                .and_then(|v| v.get("prompt_cache_key"))
+                .and_then(Value::as_str),
+            Some("sid-from-body"),
+        );
+    }
+
+    /// The body candidate is read AFTER the extras merge, so an explicitly
+    /// sent `provider_extras` object works through the same single read as
+    /// the swept top-level key.
+    #[test]
+    fn openai_ingress_lifts_session_key_from_explicit_provider_extras_prompt_cache_key() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "provider_extras": {"prompt_cache_key": "sid-explicit-extras"}
+        });
+        let req = OpenAiIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap();
+        assert_eq!(
+            req.routectl_internal.inbound_session_key.as_deref(),
+            Some("sid-explicit-extras"),
+        );
+    }
+
+    #[test]
+    fn openai_ingress_prefers_the_header_over_prompt_cache_key() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "prompt_cache_key": "sid-from-body"
+        });
+        let req = OpenAiIngress
+            .parse_request_value(&headers_from(&[("x-session-id", "sid-from-header")]), body)
+            .unwrap();
+        assert_eq!(
+            req.routectl_internal.inbound_session_key.as_deref(),
+            Some("sid-from-header"),
+        );
+    }
+
+    /// Control: an unrecognized header and no `prompt_cache_key` must yield
+    /// today's keyless behavior, never a guessed key.
+    #[test]
+    fn openai_ingress_yields_no_session_key_without_a_recognized_source() {
+        let req = OpenAiIngress
+            .parse_request_value(
+                &headers_from(&[("x-session-affinity", "unlisted")]),
+                keyless_chat_body(),
+            )
+            .unwrap();
+        assert_eq!(req.routectl_internal.inbound_session_key, None);
+    }
+
+    #[test]
+    fn openai_ingress_header_body_conflict_warns_without_exposing_raw_keys() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "prompt_cache_key": "sid-from-body"
+        });
+
+        let events = routectl_testkit::capture_events(|| {
+            let req = OpenAiIngress
+                .parse_request_value(&headers_from(&[("x-session-id", "sid-from-header")]), body)
+                .unwrap();
+            // The guardrail logs the conflict; it never changes the outcome.
+            assert_eq!(
+                req.routectl_internal.inbound_session_key.as_deref(),
+                Some("sid-from-header"),
+            );
+        });
+
+        let conflict_event = events
+            .iter()
+            .find(|e| e.field("session_key_source_conflict").is_some())
+            .unwrap_or_else(|| panic!("expected mismatch WARN, got events: {events:?}"));
+        assert_eq!(conflict_event.level, tracing::Level::WARN);
+        assert_eq!(
+            conflict_event.field("session_key_source_conflict"),
+            Some("true"),
+        );
+        for event in &events {
+            assert!(
+                !event.message.contains("sid-from-header")
+                    && !event.message.contains("sid-from-body"),
+                "raw session key must never be logged: {event:?}",
+            );
+            for (_, v) in &event.fields {
+                assert!(
+                    v != "sid-from-header" && v != "sid-from-body",
+                    "raw session key must never appear in a structured field: {event:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openai_ingress_agreeing_sources_emit_no_conflict_warning() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "prompt_cache_key": "sid-same"
+        });
+
+        let events = routectl_testkit::capture_events(|| {
+            let req = OpenAiIngress
+                .parse_request_value(&headers_from(&[("x-session-id", "sid-same")]), body)
+                .unwrap();
+            assert_eq!(
+                req.routectl_internal.inbound_session_key.as_deref(),
+                Some("sid-same"),
+            );
+        });
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.field("session_key_source_conflict").is_some()),
+            "agreeing sources must not fire the conflict guardrail: {events:?}",
+        );
     }
 }
