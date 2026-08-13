@@ -353,3 +353,61 @@ mod scenario_7_store_lock_bedrock_mantle_lane {
         );
     }
 }
+
+// =====================================================================
+// Scenario 8: store_honored_api_key_lane
+// =====================================================================
+//
+// The counterpart recording to scenario 7. The api-key lane HONORS an
+// operator- or model-supplied `store` override, and because `store` then
+// becomes true the encrypted-reasoning `include` carrier is NOT forced on
+// (a persisted response can be replayed by item id, so no blob has to
+// travel with the request).
+//
+// Scenario 6 records the same lane with no override, so its body carries
+// `store: false` plus the forced carrier -- byte-identical to the mantle
+// lane's forced-`store` recording. That coincidence is what leaves the
+// honored-versus-forced distinction unobservable at whole-body level:
+// a regression that folded this lane into the store lock would collapse
+// it onto the mantle behavior with every other snapshot still green.
+// This recording is the only one where honoring the override changes the
+// bytes, so it is the one that fails.
+
+mod scenario_8_store_honored_api_key_lane {
+    use super::*;
+
+    #[test]
+    fn openai_responses_egress() {
+        let mut req = scenarios::scenario_1_system_handling();
+        req.provider_extras = Some(serde_json::json!({"store": true}));
+
+        let body = openai_responses_provider_api_key()
+            .normalize_request(&req)
+            .expect("openai_responses normalize");
+
+        insta::with_settings!({snapshot_path => "snapshots/openai_responses"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+
+        // Pins run AFTER the snapshot so a perturbation of the lane
+        // conditionals proves the recorded body fails, not merely a
+        // neighbouring assertion.
+
+        // Pin: the requested store override reaches the wire on this lane.
+        assert_eq!(
+            body.get("store").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "api-key lane must honor provider_extras.store=true; body: {body}"
+        );
+
+        // Pin: store=true suppresses the encrypted-reasoning carrier.
+        assert!(
+            body.get("include")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|a| a
+                    .iter()
+                    .all(|v| v.as_str() != Some("reasoning.encrypted_content"))),
+            "store=true must not force the encrypted-reasoning carrier; body: {body}"
+        );
+    }
+}

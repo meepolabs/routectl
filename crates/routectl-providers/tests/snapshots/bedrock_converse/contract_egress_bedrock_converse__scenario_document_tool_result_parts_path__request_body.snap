@@ -1,0 +1,78 @@
+---
+source: crates/routectl-providers/tests/contract_egress_bedrock_converse.rs
+assertion_line: 336
+expression: body
+---
+{
+  "additionalModelResponseFieldPaths": [
+    "/stop_sequence"
+  ],
+  "inferenceConfig": {
+    "maxTokens": 1024
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "toolUse": {
+            "input": {
+              "quarter": "Q3"
+            },
+            "name": "fetch_report",
+            "toolUseId": "toolu_doc_1"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "document": {
+                  "citations": {
+                    "enabled": true
+                  },
+                  "format": "txt",
+                  "name": "Q3 Report (final)",
+                  "source": {
+                    "bytes": "cXVhcnRlcmx5IHJldmVudWUgc3VtbWFyeQ=="
+                  }
+                }
+              },
+              {
+                "document": {
+                  "format": "pdf",
+                  "name": "appendix-a",
+                  "source": {
+                    "bytes": "JVBERi0xLjQK"
+                  }
+                }
+              }
+            ],
+            "toolUseId": "toolu_doc_1"
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "history compatibility only; do not call",
+          "inputSchema": {
+            "json": {
+              "properties": {},
+              "type": "object"
+            }
+          },
+          "name": "routectl__history_compat_noop"
+        }
+      }
+    ]
+  }
+}

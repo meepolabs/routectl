@@ -236,6 +236,191 @@ mod scenario_5_cache_control_positions {
 }
 
 // =====================================================================
+// Scenario: document tool_result -- canonical Parts path
+// =====================================================================
+//
+// A `Role::Tool` turn whose content is canonical `Parts` reaches
+// `translate_part_for_tool_result` -> `document_to_tool_result`, which
+// emits `toolResult.content[].document` through the shared
+// `tool_result_document_value` assembler.
+//
+// Two documents ride in one turn so the optional `citations` member is
+// pinned present AND absent in the same recording: the first carries
+// `citations: {enabled: true}` and lifts to `{"enabled": true}` on the
+// wire; the second omits citations entirely and the member must be
+// absent from the emitted document (not `false`, not `null`).
+//
+// The first document's source is `text`, so `source.bytes` records the
+// base64 encoding the wire requires; the second is already `base64` and
+// passes through verbatim. `title` maps to `document.name` through
+// `sanitize_document_name`, so the emitted names record that scrub
+// (disallowed characters become `-`) rather than the raw titles.
+//
+// KEY ORDER IS PART OF THE CONTRACT. The document value is assembled
+// with `serde_json::json!` and this workspace builds `serde_json`
+// WITHOUT `preserve_order`, so `Value::Object` is a `BTreeMap` and the
+// members serialize ALPHABETICALLY (`citations`, `format`, `name`,
+// `source`). Recording that order is deliberate: were this value ever
+// replaced by a typed struct, serde would emit declaration order and
+// this snapshot would fail loudly, forcing a deliberate re-review of
+// the bytes rather than an unnoticed reshuffle.
+
+mod scenario_document_tool_result_parts_path {
+    use super::*;
+    use routectl_core::{
+        ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, Role,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn bedrock_converse_egress() {
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            messages: vec![
+                Message {
+                    refusal: None,
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![ContentPart::Known(
+                        KnownContentPart::ToolUse {
+                            id: "toolu_doc_1".into(),
+                            name: "fetch_report".into(),
+                            input: json!({"quarter": "Q3"}),
+                            cache_control: None,
+                        },
+                    )]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                Message {
+                    refusal: None,
+                    role: Role::Tool,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Known(KnownContentPart::Document {
+                            source: json!({
+                                "type": "text",
+                                "media_type": "text/plain",
+                                "data": "quarterly revenue summary",
+                            }),
+                            title: Some("Q3 Report (final)".into()),
+                            citations: Some(json!({"enabled": true})),
+                            cache_control: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::Document {
+                            source: json!({
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": "JVBERi0xLjQK",
+                            }),
+                            title: Some("appendix_a".into()),
+                            citations: None,
+                            cache_control: None,
+                        }),
+                    ]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: Some("toolu_doc_1".into()),
+                    tool_calls: None,
+                },
+            ]
+            .into(),
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
+        let body = bedrock_converse_provider()
+            .normalize_request(&req)
+            .expect("bedrock_converse normalize");
+
+        insta::with_settings!({snapshot_path => "snapshots/bedrock_converse"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+    }
+}
+
+// =====================================================================
+// Scenario: document tool_result -- raw Anthropic-shape array path
+// =====================================================================
+//
+// The OTHER carrier: a canonical `KnownContentPart::ToolResult` whose
+// `content` is an opaque Anthropic-shape array reaches
+// `translate_tool_result_array_element`, whose `"document"` arm
+// delegates to the same `document_to_tool_result`.
+//
+// Pinned independently of the Parts path above because THIS is the path
+// that drifted: it once silently dropped `citations`, which is why the
+// shared `tool_result_document_value` assembler exists. Two recordings
+// of one shared assembler are not redundant -- a re-divergence would
+// change only one of them.
+//
+// Same citations-present / citations-absent pairing as the Parts path,
+// and the same alphabetical member order for the reason stated there.
+
+mod scenario_document_tool_result_raw_anthropic_shape {
+    use super::*;
+    use routectl_core::{
+        ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, Role,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn bedrock_converse_egress() {
+        let req = ChatRequest {
+            model: "anthropic.claude-haiku-4-5".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolResult {
+                        tool_use_id: "toolu_doc_2".into(),
+                        content: json!([
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "text",
+                                    "media_type": "text/markdown",
+                                    "data": "# Notes",
+                                },
+                                "title": "Meeting Notes [2026]",
+                                "citations": {"enabled": true},
+                            },
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "text/csv",
+                                    "data": "YSxiLGMK",
+                                },
+                                "title": "rows.csv",
+                            },
+                        ]),
+                        is_error: None,
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }]
+            .into(),
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
+        let body = bedrock_converse_provider()
+            .normalize_request(&req)
+            .expect("bedrock_converse normalize");
+
+        insta::with_settings!({snapshot_path => "snapshots/bedrock_converse"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+    }
+}
+
+// =====================================================================
 // Scenario: unmodeled-block passthrough round-trip
 // =====================================================================
 //
