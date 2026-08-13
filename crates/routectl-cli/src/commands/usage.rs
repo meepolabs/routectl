@@ -489,7 +489,8 @@ fn is_subscription(config: &Config, provider: &str) -> bool {
 
 /// Convert the router's per-million-token pricing into the usage crate's
 /// leaf-safe `Rates`. `reasoning_per_mtok` starts unset; `cost_for_row`
-/// promotes it to the output rate only for a disjoint-reasoning provider.
+/// promotes it to the output rate only for a row whose PERSISTED provider kind
+/// reports reasoning disjointly from output.
 const fn rates_from_pricing(p: &routectl_router::PricingConfig) -> Rates {
     Rates {
         input_per_mtok: p.input_per_mtok,
@@ -501,19 +502,72 @@ const fn rates_from_pricing(p: &routectl_router::PricingConfig) -> Rates {
     }
 }
 
-/// Whether the named provider is a Gemini kind. Gemini is the only provider
-/// whose reasoning tokens are disjoint from its output count (see
-/// `cost_for_row`), so it alone prices reasoning separately.
-fn provider_kind_is_gemini(config: &Config, provider: &str) -> bool {
-    config
-        .providers
-        .get(provider)
-        .is_some_and(|p| p.kind_str() == "gemini")
+/// The provider kind whose reasoning tokens are DISJOINT from its output count
+/// (Gemini reports `thoughtsTokenCount` separately from
+/// `candidatesTokenCount`), so it alone prices reasoning as its own dimension.
+/// Matches `ProviderEntry::kind_str`, which is also the token the ledger
+/// persists per row.
+const DISJOINT_REASONING_KIND: &str = "gemini";
+
+/// The provider kinds whose reasoning tokens are already INSIDE their output
+/// count, so pricing reasoning again would double-charge.
+///
+/// Enumerated rather than treated as "everything that is not
+/// [`DISJOINT_REASONING_KIND`]", and that distinction is load-bearing: a
+/// catchall would classify a FUTURE provider kind as subsumed and silently drop
+/// its reasoning tokens from the bill. Failing closed instead surfaces the new
+/// kind as `Unpriced`, and adding it to one of these two lists is then the
+/// deliberate act that starts pricing it. Together with
+/// [`DISJOINT_REASONING_KIND`] this must cover every `ProviderEntry::kind_str`
+/// token; the test below pins that it does.
+const SUBSUMED_REASONING_KINDS: [&str; 4] = [
+    "openai-compat",
+    "anthropic-api",
+    "bedrock",
+    "openai-responses",
+];
+
+/// How a row's reasoning tokens relate to its output count, resolved from the
+/// kind PERSISTED with the row rather than from current config -- an operator
+/// who re-kinds a provider under the same name must not retroactively change
+/// what historical rows were.
+enum ReasoningStructure {
+    /// Reasoning is counted separately from output and bills at the output
+    /// rate.
+    Disjoint,
+    /// Reasoning is already inside the output count; pricing it again would
+    /// double-charge.
+    Subsumed,
+    /// The row carries no kind (pre-dispatch, or history written before the
+    /// column was populated), or carries one this build does not recognize, so
+    /// neither answer can be justified.
+    Unknown,
+}
+
+/// Classify a row's reasoning structure from its persisted `provider_kind`.
+///
+/// An unrecognized non-NULL token is `Unknown`, NOT `Subsumed`: a kind this
+/// build has never heard of may well report reasoning disjointly, and guessing
+/// subsumed would drop those tokens from the bill with no signal.
+fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
+    match provider_kind {
+        Some(DISJOINT_REASONING_KIND) => ReasoningStructure::Disjoint,
+        Some(kind) if SUBSUMED_REASONING_KINDS.contains(&kind) => ReasoningStructure::Subsumed,
+        None | Some(_) => ReasoningStructure::Unknown,
+    }
 }
 
 /// Classify and cost one fine-grained row. Subscription detection runs
 /// first (it overrides pricing); then a priced API-key row prices its
 /// summed tokens; everything else is unpriced.
+///
+/// Reasoning is priced from the row's PERSISTED `provider_kind`, so a provider
+/// whose kind an operator later changed keeps each era priced by what it was.
+/// A row with NO persisted kind and NONZERO reasoning tokens fails CLOSED as
+/// `Unpriced`: both answers (charge or do not charge reasoning) are wrong for
+/// one of the two possible structures, and guessing from current config is the
+/// defect this avoids. A kindless row with ZERO reasoning tokens still prices,
+/// since its structure cannot affect the result.
 ///
 /// Returns the usage crate's `RowCost` verdict, which is also what the grouped
 /// query layer's pricing closure must yield -- so the CLI report and the
@@ -532,13 +586,14 @@ pub(crate) fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
         return RowCost::Unpriced;
     };
     let mut rates = rates_from_pricing(pricing);
-    // Gemini reports thinking tokens (`thoughtsTokenCount`) DISJOINT from its
-    // output count and bills them at the output rate, so reasoning must be
-    // priced as its own dimension for a Gemini row. Every other provider kind
-    // folds reasoning into its output count -- pricing it again would
-    // double-count -- so they leave `reasoning_per_mtok` unset.
-    if provider_kind_is_gemini(config, provider) {
-        rates.reasoning_per_mtok = rates.output_per_mtok;
+    match reasoning_structure(row.key.provider_kind.as_deref()) {
+        // A disjoint-reasoning row bills its thinking tokens at the output
+        // rate; a subsumed one already counted them inside output, so pricing
+        // them again would double-charge.
+        ReasoningStructure::Disjoint => rates.reasoning_per_mtok = rates.output_per_mtok,
+        ReasoningStructure::Subsumed => {}
+        ReasoningStructure::Unknown if row.reasoning_tokens != 0 => return RowCost::Unpriced,
+        ReasoningStructure::Unknown => {}
     }
     // cache_read is billed PER TURN, so the cost basis is the summed cache-read
     // volume (`cache_read_billed`), not the peak. The peak / avg are

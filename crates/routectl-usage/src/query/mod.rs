@@ -77,12 +77,26 @@ pub struct GroupKey {
     pub upstream: Option<String>,
     /// Resolved routing alias. `NOT NULL` in the schema, so always present.
     pub alias: String,
+    /// Provider kind PERSISTED with the row, i.e. what the provider was
+    /// configured as when the request was served -- not what it is configured
+    /// as now. Nullable in the schema: pre-dispatch rows and history written
+    /// before the column was populated carry `None`.
+    ///
+    /// A COST-relevant dimension rather than a display one. Whether reasoning
+    /// tokens were disjoint from the output count is a structural fact about
+    /// the row, so a provider whose `kind` an operator later changed under the
+    /// same name has two eras that must be priced differently. Grouping on
+    /// this keeps them apart; a caller reporting at a kind-agnostic grain
+    /// coalesces the partitions back together AFTER pricing.
+    pub provider_kind: Option<String>,
 }
 
 /// One aggregate row at the finest cost-relevant granularity:
-/// `(model, provider, upstream, alias)`, where `model` coalesces to
-/// `requested_model` so pre-dispatch aborts (NULL `model`) attribute to the
-/// route the caller asked for rather than a NULL bucket. Token FLOW dims
+/// `(model, provider, upstream, alias, provider_kind)`, where `model` coalesces
+/// to `requested_model` so pre-dispatch aborts (NULL `model`) attribute to the
+/// route the caller asked for rather than a NULL bucket, and `provider_kind` is
+/// the kind persisted with the row so each era of a re-kinded provider prices
+/// under what it actually was. Token FLOW dims
 /// (`input_tokens`, `output_tokens`, `cache_write_*`) are summed with
 /// COALESCE so NULL counters contribute 0. `cache_read` is NOT summed: it is
 /// a per-turn SNAPSHOT of cached-context size, so the group reports its peak
@@ -105,7 +119,7 @@ pub struct GroupKey {
 /// `upstream_error` remain inside `errors`.
 #[derive(Debug, Clone)]
 pub struct AggRow {
-    /// The group's `(model, provider, upstream, alias)` key.
+    /// The group's `(model, provider, upstream, alias, provider_kind)` key.
     pub key: GroupKey,
     /// Total requests in the group.
     pub requests: i64,

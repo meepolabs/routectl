@@ -1,7 +1,9 @@
 //! Grouped, priced, deadline-bounded aggregate query over the usage ledger.
 //!
 //! One SQL statement reads the ledger at the finest cost-relevant grain
-//! (`model, provider, upstream, alias`); the fold in this module prices each
+//! (`model, provider, upstream, alias, provider_kind` -- the kind is part of the
+//! grain because reasoning pricing depends on the structure the row was written
+//! under, not on current config); the fold in this module prices each
 //! fine row through a caller-supplied closure BEFORE the upstream dimension is
 //! discarded, rolls the priced fine rows up to the requested coarse dimension,
 //! and derives the display metrics. Totals are folded from the SAME per-group
