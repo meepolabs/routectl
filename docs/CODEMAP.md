@@ -319,8 +319,10 @@ listed at the bottom of each crate.
   `bounded_diagnostics`
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
   `BoundedLogSample<T>`, the collection-time bound for the diagnostic samples
-  attached to aggregated WARN records (`push`, and `push_distinct` for
-  dedup-by-equality via a linear scan over the at-most-8 stored values).
+  attached to aggregated WARN records (`push`, `push_distinct` for
+  dedup-by-equality via a linear scan over the at-most-8 stored values, and
+  `push_distinct_lazily` / `is_full` for a value that costs real work to
+  materialize, so a full sample renders nothing).
   `truncated` is set only when an item is dropped at capacity, never derived
   from an offered-vs-stored count. Dependency-free and declared without a
   feature gate, so every provider lane shares one cap; the per-request tally
@@ -552,8 +554,11 @@ listed at the bottom of each crate.
   `filter_anthropic_betas`, `translate_tool`, `translate_system`,
   `lift_legacy_system` for the Bedrock egress and `mod.rs`; also owns
   `drop_unrepresentable_output_format_keys`, the assembled-body scrub of the
-  `output_config.format` keys Anthropic rejects (`name`, `strict`), shared by
-  all three Claude seams
+  `output_config.format` keys Anthropic rejects (`name`, `strict`) -- that
+  scrub is shared by all three Claude seams -- and wires the `output_schema`
+  mandatory-key repair on the same assembled body, which covers the
+  anthropic-api and bedrock-invoke seams only (Converse is uncovered by
+  design)
 - `src/anthropic_api/system.rs` -- system-prompt translation:
   `translate_system` (typed `SystemContent` -> wire) + `lift_legacy_system`
   (Role::System fallback for direct callers) + `lift_legacy_system_stripped`
@@ -596,6 +601,22 @@ listed at the bottom of each crate.
   the Bedrock-Invoke egress after its own allowlist filters) keyed on
   `output_config.format`, and effort (`body_has_output_config_effort` +
   `union_effort_beta`, own-OAuth lane only) keyed on `output_config.effort`
+- `src/anthropic_api/output_schema.rs` -- surgical repair of the ONE field
+  Anthropic requires on every object in `output_config.format.schema`:
+  `inject_additional_properties_false` walks the ASSEMBLED body (after the
+  converter and the provider-extras merge, the only point that sees a
+  caller-supplied format) and inserts `additionalProperties: false` where the
+  key is ABSENT; a present `false` is preserved and a present non-`false`
+  value is forwarded VERBATIM with one bounded paths-only WARN, never dropped.
+  Object detection is by shape; descent is a fixed schema-position set, so
+  instance-valued keywords (`const`, `enum`, `examples`, `default`) stay
+  opaque and `$ref` is never dereferenced. Iterative and bounded
+  (`MAX_SCHEMA_DEPTH`, plus `MAX_SCHEMA_NODES` spent at PUSH time so the work
+  stack and the path arena are bounded by the node limit rather than by the
+  body size limit), a breach erroring cleanly; WARN paths are rendered only
+  for the entries the bounded sample can keep and capped at
+  `RENDERED_PATH_CHARS` while rendering, so caller-chosen segment names bound
+  neither the walk's cost nor the log record's size
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical
   `ChatResponse` (content-block walk, stop_reason map, usage cache stats)
 - `src/anthropic_api/sse.rs` -- Anthropic SSE event state machine

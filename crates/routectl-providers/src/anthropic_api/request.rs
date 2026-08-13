@@ -669,6 +669,24 @@ pub(crate) fn normalize_deferring_format_key_warn(
             dropped_format_keys.merged(drop_unrepresentable_output_format_keys(obj));
     }
 
+    // Repair the ONE field Anthropic requires on every object in
+    // output_config.format.schema: `additionalProperties: false`. Runs on the
+    // assembled body AFTER the provider-extras merge and the converter, for
+    // the same reason the key scrub above does -- a caller-supplied
+    // output_config.format wins via `entry().or_insert()`, so a converter-side
+    // repair would be a no-op for exactly the callers that omit the key. The
+    // WARN (a present non-`false` value forwarded verbatim) is emitted here
+    // rather than deferred: both seams that call this function
+    // (`normalize` and the Bedrock-Invoke `normalize_request`) run it once per
+    // request, and neither RE-RUNS the repair afterward. Not the same as
+    // "neither rewrites the schema": the Bedrock-Invoke
+    // `additional_model_request_fields` merge runs after this and can replace
+    // `output_config` wholesale, which no repair pass then sees. That seam is
+    // a filed follow-up; the one-WARN-per-request conclusion holds either way.
+    if let Some(obj) = body.as_object_mut() {
+        super::output_schema::inject_additional_properties_false(id, obj)?.warn(id);
+    }
+
     // When context_management emulation is active we have already applied
     // the edits above. Strip the `context_management` body key so it is
     // never forwarded to the upstream (non-Anthropic providers reject it).
@@ -958,6 +976,11 @@ mod response_format_tests {
     /// The caller's schema is forwarded intact -- only the two unrepresentable
     /// sibling keys are omitted. Discarding a caller's JSON-schema keyword
     /// would be silent constraint loss and is deliberately NOT done.
+    ///
+    /// `additionalProperties: false` IS added, on the root and on every nested
+    /// object: Anthropic rejects an object schema that omits it, and its only
+    /// accepted value is `false`, so supplying it discards no caller intent.
+    /// Adding a mandatory key is not the same act as dropping a constraint.
     #[test]
     fn caller_schema_keywords_survive_the_key_drop() {
         let schema = json!({
@@ -970,9 +993,12 @@ mod response_format_tests {
             "json_schema": {"name": "widget", "schema": schema.clone(), "strict": true}
         })));
         let body = normalize("anthropic:test", &req, false, &[], false, None, false).unwrap();
+        let mut expected = schema;
+        expected["additionalProperties"] = json!(false);
         assert_eq!(
-            body["output_config"]["format"]["schema"], schema,
-            "the caller's schema must ship byte-identical: {body}"
+            body["output_config"]["format"]["schema"], expected,
+            "every caller keyword must survive; only the mandatory \
+             additionalProperties is added: {body}"
         );
     }
 
