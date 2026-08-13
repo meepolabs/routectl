@@ -522,10 +522,15 @@ whenever the request's ASSEMBLED body carries the field that flag gates:
 
 Both bypass `[providers.X] allowed_betas` and `[bedrock] allowed_betas`.
 
-Neither is a client-opted beta: each is a routectl-derived server
-requirement implied by the feature the request is already using. Upstream
-rejects a body carrying the gated field without its flag, so dropping the
-flag would guarantee a 400 rather than constrain anything.
+Neither is a client-opted beta: each is a routectl-derived capability
+signal implied by the feature the request is already using. A 2026-08-11
+live capture on `api.anthropic.com` (one lane, one seat, one model)
+accepted `output_config.format` both with and without
+`structured-outputs-2025-12-15`, so that union is retained as
+belt-and-braces rather than a proven hard requirement; the
+`output_config.effort` case remains unmeasured. Dropping either flag is
+therefore not a reliable way to constrain a request -- an older account or
+model tier may still gate the field.
 
 Both carve-outs are ONE-WAY -- the body's field adds the flag; a
 caller-supplied flag with no matching field is passed through untouched

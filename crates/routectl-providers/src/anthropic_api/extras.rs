@@ -538,8 +538,9 @@ fn body_has_adaptive_thinking(body: &Value) -> bool {
 }
 
 /// True iff the assembled body carries `output_config.format`, the
-/// structured-output directive Anthropic gates behind
-/// `STRUCTURED_OUTPUTS_BETA`.
+/// structured-output directive routectl pairs with `STRUCTURED_OUTPUTS_BETA`
+/// (see `union_structured_outputs_beta` for why that union is retained
+/// rather than treated as a proven hard requirement).
 ///
 /// Reads the ASSEMBLED body for the same reason
 /// `reconcile_output_config_effort` does: `merge_provider_extras` and the
@@ -556,10 +557,23 @@ pub(super) fn body_has_output_config_format(body: &Value) -> bool {
 /// `output_config.format`. Idempotent: an already-present flag is neither
 /// duplicated nor reordered.
 ///
-/// A capability-driven server requirement rather than a client-opted beta,
-/// so it runs AFTER the `allowed_betas` filter (`filter_anthropic_betas`)
-/// on every auth kind -- a body carrying the gated field without the flag
-/// is rejected upstream regardless of who asked for it.
+/// A capability-driven signal implied by the shipped body rather than a
+/// client-opted beta, so it runs AFTER the `allowed_betas` filter
+/// (`filter_anthropic_betas`) on every auth kind, with the same standing as
+/// the operator's beta floor.
+///
+/// Retained as belt-and-braces, NOT a proven hard requirement. A 2026-08-11
+/// live capture -- one lane, one seat, one model -- accepted
+/// `output_config.format` both WITH and WITHOUT this beta (200 in both
+/// cases), which refutes the older claim that an ungated body is rejected
+/// upstream regardless of who asked for it. The union stays because that
+/// single measurement does not cover every account or model tier, and an
+/// older tier may still gate the field; the redundant flag was accepted
+/// where measured.
+///
+/// UNMEASURED: whether an unknown or withdrawn beta string is itself
+/// rejected. That is what would turn this union from harmless-redundant
+/// into a liability, so revisit it if Anthropic retires the flag.
 pub(super) fn union_structured_outputs_beta(body: &Value, betas: &mut Vec<String>) {
     if !body_has_output_config_format(body) {
         return;
@@ -614,10 +628,15 @@ pub(super) fn union_effort_beta(body: &Value, betas: &mut Vec<String>) {
 ///
 /// MUST be applied by the body-shape egress AFTER that egress's own beta
 /// allowlist filter runs. On Bedrock-Invoke a non-empty `[bedrock]
-/// allowed_betas` that omits this flag would otherwise drop it again and
-/// ship `output_config.format` ungated -- which AWS rejects. Same standing
-/// as the header carrier: a server requirement implied by the shipped body
-/// is not a client-opted beta subject to an allowlist.
+/// allowed_betas` that omits this flag would otherwise drop it again. Same
+/// standing as the header carrier: a capability signal implied by the
+/// shipped body, not a client-opted beta subject to an allowlist.
+///
+/// See `union_structured_outputs_beta` for the measurement behind keeping
+/// this union rather than a proven hard requirement. On api.anthropic.com
+/// the field was accepted both with and without the beta on the tested
+/// lane; whether AWS Bedrock rejects an ungated body is UNMEASURED, so the
+/// union is retained here too until proven redundant.
 ///
 /// Gated on `bedrock`: Bedrock-Invoke is the only egress that reads betas
 /// from the body, so the lean build has no consumer.

@@ -200,21 +200,27 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         .warn(&cfg.id);
 
     // Capability union, LAST so it reads the body that actually ships: a
-    // body carrying `output_config.format` is rejected by AWS unless the
-    // structured-outputs beta rides along in `anthropic_beta`. Deliberately
-    // AFTER both Bedrock allowlist filters:
+    // body carrying `output_config.format` gains the structured-outputs beta
+    // in `anthropic_beta`. Retained as belt-and-braces, NOT a proven hard
+    // requirement -- a 2026-08-11 live capture on api.anthropic.com (one
+    // lane, one seat, one model) accepted the field both WITH and WITHOUT
+    // the beta, refuting the older "rejected unless the flag rides along"
+    // claim on that surface. Whether AWS rejects an ungated body is
+    // UNMEASURED, and an older account/model tier may still gate the field,
+    // so the union stays; revisit it if Anthropic retires the flag (whether
+    // an unknown beta string is itself rejected is also unmeasured).
+    // Deliberately AFTER both Bedrock allowlist filters:
     //   - after `filter_bedrock_betas`, because the flag is a
-    //     routectl-derived server requirement implied by the shipped body,
+    //     routectl-derived capability signal implied by the shipped body,
     //     not a client-opted beta, so it bypasses `[bedrock] allowed_betas`
     //     with the same standing the operator's `cfg.anthropic_beta` floor
     //     has. Unioning it earlier lets a restrictive allowlist that omits
-    //     the flag drop it again and ship the gated field ungated.
+    //     the flag drop it again.
     //   - after `filter_bedrock_body_fields`, so an `allowed_body_fields`
     //     list that drops `output_config` entirely produces no flag either.
     //     When `output_config.format` DOES survive that filter, the flag it
-    //     implies has to survive too, even if the operator's list omits
-    //     `anthropic_beta` -- an ungated structured-output body is a
-    //     guaranteed 400.
+    //     implies survives too, even if the operator's list omits
+    //     `anthropic_beta`.
     // Feature-triggered and idempotent: no `output_config.format` means no
     // flag, and an already-present flag is neither duplicated nor reordered.
     crate::anthropic_api::request::apply_structured_outputs_beta_to_body(&mut body);
