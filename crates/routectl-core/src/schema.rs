@@ -369,19 +369,36 @@ pub struct RoutectlInternal {
     /// consumers and for every non-Responses ingress.
     pub responses_input_passthrough: Vec<ResponsesPassthroughItem>,
 
-    /// INBOUND per-conversation key captured by the Anthropic ingress
-    /// from the `x-claude-code-session-id` request header, falling back
-    /// to the body `metadata.session_id`. This is the REAL per-conversation
-    /// key -- it differs per conversation.
+    /// INBOUND per-conversation key captured by EVERY ingress dialect from
+    /// a HEADER candidate first, a BODY candidate second. The Anthropic
+    /// ingress reads the `x-claude-code-session-id` header, falling back to
+    /// body `metadata.session_id`. The OpenAI chat-completions and Responses
+    /// ingresses read a curated allowlist of session headers -- the
+    /// `OPENAI_SESSION_HEADERS` const in the CLI crate's
+    /// `ingress::session_key` module is the single source of truth for that
+    /// membership and its precedence order -- falling back to the body's
+    /// top-level `prompt_cache_key`. The shared `resolve_session_key` in
+    /// that module owns the tail of the resolution (trim, empty-as-absent,
+    /// header-over-body precedence, the length bound, and the conflict
+    /// WARN), so the dialects cannot drift apart on it.
     ///
     /// This is the CANONICAL inbound session identity: both the usage
     /// ledger's `UsageRecord.session_id` column (`build_usage_draft` reads
     /// this field directly) and the K-estimator's per-session sample store
     /// (`record_k_sample`) key on this SAME value. A session identified
-    /// only via the `metadata.session_id` fallback (no header) therefore
-    /// still gets a durable ledger row and survives a K-store rebuild
-    /// after a restart -- there is no separate, header-only derivation to
-    /// drift out of sync with this one.
+    /// only via a body fallback (no header) therefore still gets a durable
+    /// ledger row and survives a K-store rebuild after a restart -- there
+    /// is no separate, header-only derivation to drift out of sync with
+    /// this one.
+    ///
+    /// CAVEAT for every consumer: the field carries NO provenance, and not
+    /// every source means the same thing. A header-derived key is a real
+    /// per-conversation id. A `prompt_cache_key`-derived key is OpenAI's
+    /// CACHE-PARTITION value and is NOT a guarantee of per-conversation
+    /// uniqueness: a client that sets it to a stable per-user value (the
+    /// natural cache-affinity choice) collapses all of that user's
+    /// conversations onto one key. Treat the value as an opaque grouping
+    /// key; never assume one key means exactly one conversation.
     ///
     /// Do NOT confuse this with the OUTBOUND per-credential
     /// `ClaudeCodeIdentity::session_id` value minted in
@@ -390,10 +407,10 @@ pub struct RoutectlInternal {
     /// (identical across every conversation on a seat) and is NOT a usable
     /// per-conversation key.
     ///
-    /// `None` when the ingress dialect has no session-identity concept
-    /// (OpenAI chat-completions, Responses) and for library consumers.
-    /// Never serialized to any upstream (it rides on `routectl_internal`,
-    /// which is `#[serde(skip)]`). Must not be logged raw.
+    /// `None` when the request carried no recognized identity source in
+    /// either position, and for library consumers. Never serialized to any
+    /// upstream (it rides on `routectl_internal`, which is
+    /// `#[serde(skip)]`). Must not be logged raw.
     pub inbound_session_key: Option<String>,
 
     /// INBOUND first-party bearer token captured for opt-in passthrough
