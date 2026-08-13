@@ -1054,7 +1054,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   factory builders, the `activation` inventory types (`ActivationState`,
   `ActivationEntry`, `ActivationStatus`, `UnresolvedReason`,
   `ActivatedChange`, `DeactivatedChange`, `ActivationDelta`,
-  `compute_activation`, `diff` as `diff_activation`), and the `doctor` report
+  `compute_activation`, `diff` as `diff_activation`,
+  `provider_kind_for_oauth_id`), and the `doctor` report
   types (`Status`, `Finding`, `WouldTrimPanel`, `DoctorPanels`,
   `DoctorReport`, `ProbeOutcome`, `overall_exit`)
 - `src/activation.rs` -- PURE auto-activation inventory (leaf module; imports
@@ -1064,7 +1065,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   &[(&str, LocalProbe)], config) -> ActivationState` is pure + infallible: the
   candidate universe is the caller-supplied probe slice (each
   `routectl_auth::oauth::known_provider_ids()` id paired with its local
-  probe), each id maps via the hardcoded `provider_kind_for_id` table
+  probe), each id maps via the hardcoded `provider_kind_for_oauth_id` table
+  (public, so the CLI's login output reads the same map)
   (`anthropic`->`anthropic-api`, `codex`->`openai-responses`,
   `xai`->`openai-compat`, `antigravity`->`gemini`) gated by
   `is_cataloged_provider_kind` -- an uncataloged kind (today `gemini`) yields
@@ -3764,7 +3766,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via
   `OAuthStore`; `--label` registers an additional seat without overwriting the
   default; `--print-url` headless flow guarded against providers without a
-  paste-back landing page
+  paste-back landing page; on success prints the provider entry that consumes
+  the new seat
+- `src/commands/login_provider_block.rs` -- renders the ready-to-paste
+  `[providers.<name>]` entry for a logged-in seat (`kind` from
+  `provider_kind_for_oauth_id`, auth selector + endpoint from the one local
+  shape table, `api_key_ref` via `SecretRef::Display` so a `--label` seat keeps
+  its `#<label>`). Mutates no config and emits no credential material
 - `src/commands/logout.rs` -- `routectl logout <provider> [--label <name>]` --
   removes one seat (`--label` removes only the named seat; no label removes
   the default) from the credentials store; first-time logout reported but not
