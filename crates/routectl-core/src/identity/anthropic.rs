@@ -165,11 +165,14 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
 /// (case-insensitive), independent of scheme, port, path, query,
 /// fragment, or `user:pass@` credentials.
 ///
-/// The single source of truth for "is this the Anthropic host" shared by
-/// the WIRE gate (which decides whether to stamp the Claude-Code session
-/// identity headers) and the ROUTER pure-passthrough gate (which decides
-/// whether a forwarded request may egress at all). Both MUST agree, so
-/// the predicate lives here rather than being reimplemented per crate.
+/// The single source of truth for "is this the Anthropic host", shared by
+/// every caller that must agree with the egress: the WIRE gate (which
+/// decides whether to stamp the Claude-Code session identity headers), the
+/// ROUTER pure-passthrough gate (which decides whether a forwarded request
+/// may egress at all), the terminal-Anthropic envelope unwrap, and the
+/// config/CLI surfaces. Because the answer gates first-party identity
+/// treatment and a wire rewrite, it MUST match the host the request path
+/// actually egresses to.
 ///
 /// A precise host match, NOT a substring / suffix test:
 /// `base_url.contains("api.anthropic.com")` would also match a
@@ -179,28 +182,24 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
 /// `https://api.anthropic.com@evil.example`. An exact host match rejects
 /// all of those.
 ///
-/// The host is the authority between the scheme and the first `/?#`, minus
-/// any `user@` credentials and `:port`. Kept dependency-free (no `url`
-/// crate) since the shape is fixed and validated upstream by base-url
-/// scheme validation.
+/// Parses with `url::Url` -- the same parser the request path uses -- and
+/// compares `host_str()` case-insensitively. Using the request parser is
+/// what closes the divergence class BY CONSTRUCTION: a hand-rolled
+/// authority split disagrees with the WHATWG URL rules the request path
+/// follows (e.g. a backslash is a path separator under a special scheme),
+/// so an authority like `https://evil.example\@api.anthropic.com/` egresses
+/// to `evil.example` while a naive `@`-split would read it as the Anthropic
+/// host. Invalid URLs, URLs with no host, and non-hierarchical URLs return
+/// `false`. This does NOT rely on config-time validation: several callers
+/// (core and provider APIs) reach the predicate directly, so it must be
+/// self-sufficient.
 pub fn is_anthropic_api_host(base_url: &str) -> bool {
-    let after_scheme = base_url
-        .strip_prefix("https://")
-        .or_else(|| base_url.strip_prefix("http://"))
-        .unwrap_or(base_url);
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    // Drop optional `user:pass@` credentials, then the optional `:port`.
-    let host = authority
-        .rsplit('@')
-        .next()
-        .unwrap_or(authority)
-        .split(':')
-        .next()
-        .unwrap_or(authority);
-    host.eq_ignore_ascii_case("api.anthropic.com")
+    match url::Url::parse(base_url) {
+        Ok(url) => url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com")),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -216,8 +215,9 @@ mod tests {
         ));
         assert!(is_anthropic_api_host("https://api.anthropic.com:443/v1"));
         assert!(is_anthropic_api_host("https://API.Anthropic.Com"));
-        // A credentials prefix on the authority is stripped before the host
-        // check, so it cannot be used to smuggle a different real host.
+        // A credentials prefix on the authority is stripped by the parser
+        // before the host check, so it cannot be used to smuggle a
+        // different real host.
         assert!(is_anthropic_api_host("https://user:pass@api.anthropic.com"));
         // Sibling-domain takeover, host-in-path/query/fragment, and a
         // credentials-suffix smuggle must NOT match.
@@ -236,6 +236,95 @@ mod tests {
         assert!(!is_anthropic_api_host("https://anthropic.com"));
         assert!(!is_anthropic_api_host(
             "https://api.anthropic.com@evil.example"
+        ));
+    }
+
+    #[test]
+    fn backslash_authority_matches_the_url_parsers_egress_host() {
+        // NEGATIVE CONTROL for the resolver-divergence fix. Under a special
+        // scheme the WHATWG URL parser treats a backslash as a path
+        // separator, so this authority egresses to `evil.example`. The old
+        // hand-rolled split answered `true` here (it read the segment after
+        // the last `@`), granting first-party Anthropic treatment to a
+        // request that actually leaves for `evil.example`. The predicate
+        // must now agree with the parser and return `false`.
+        assert_eq!(
+            url::Url::parse("https://evil.example\\@api.anthropic.com/")
+                .unwrap()
+                .host_str(),
+            Some("evil.example"),
+            "parser egress host is evil.example, not the Anthropic host"
+        );
+        assert!(!is_anthropic_api_host(
+            "https://evil.example\\@api.anthropic.com/"
+        ));
+        assert!(!is_anthropic_api_host(
+            "https://evil.example\\@api.anthropic.com:443/v1"
+        ));
+
+        // The mirror shape: the backslash makes `api.anthropic.com` the real
+        // host, so the predicate must answer `true` -- matching the parser.
+        assert_eq!(
+            url::Url::parse("https://api.anthropic.com\\@evil.example/")
+                .unwrap()
+                .host_str(),
+            Some("api.anthropic.com")
+        );
+        assert!(is_anthropic_api_host(
+            "https://api.anthropic.com\\@evil.example/"
+        ));
+    }
+
+    #[test]
+    fn control_bytes_and_case_fold_track_the_parser() {
+        // A tab inside the authority is stripped by the parser, so the real
+        // host is `api.anthropic.com`: the predicate matches the parser.
+        assert!(is_anthropic_api_host(
+            "https://evil.example\t@api.anthropic.com"
+        ));
+        // Backslash truncates the authority, so the real host here is
+        // `API.ANTHROPIC.COM` -- matched case-insensitively.
+        assert!(is_anthropic_api_host(
+            "https://API.ANTHROPIC.COM\\@evil.example"
+        ));
+        // A control byte before a backslash-truncated evil host still
+        // resolves away from the Anthropic host.
+        assert!(!is_anthropic_api_host(
+            "https://evil.example\n\\@api.anthropic.com"
+        ));
+    }
+
+    #[test]
+    fn invalid_missing_host_and_non_hierarchical_urls_do_not_match() {
+        // Unparseable / hostless / non-hierarchical inputs are never the
+        // Anthropic host.
+        assert!(!is_anthropic_api_host(""));
+        assert!(!is_anthropic_api_host("https://"));
+        assert!(!is_anthropic_api_host("not a url"));
+        assert!(!is_anthropic_api_host("api.anthropic.com"));
+        assert!(!is_anthropic_api_host("mailto:api.anthropic.com"));
+        // An invalid port makes the whole URL unparseable -> false.
+        assert!(!is_anthropic_api_host("https://api.anthropic.com:evil"));
+    }
+
+    #[test]
+    fn ipv6_authority_does_not_match_the_anthropic_host() {
+        assert!(!is_anthropic_api_host("https://[::1]"));
+        assert!(!is_anthropic_api_host("https://[::1]:8080/v1"));
+    }
+
+    #[test]
+    fn trailing_dot_does_not_match() {
+        // A fully-qualified trailing-dot host is a DIFFERENT host string.
+        assert!(!is_anthropic_api_host("https://api.anthropic.com."));
+    }
+
+    #[test]
+    fn query_and_fragment_do_not_defeat_the_host_match() {
+        // The host is read from the authority, so trailing query/fragment
+        // components leave a genuine Anthropic URL matching.
+        assert!(is_anthropic_api_host(
+            "https://api.anthropic.com/v1?beta=1#frag"
         ));
     }
 

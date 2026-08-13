@@ -379,6 +379,27 @@ mod base_url_validation_tests {
         let err = validate_base_url_scheme("p", "not a url at all").unwrap_err();
         assert!(err.to_string().contains("not a valid URL"));
     }
+
+    /// NOTE what this test does and does NOT exercise. Every input here is
+    /// rejected UPSTREAM of the host guard, by `url::Url::parse` (an empty
+    /// authority under a special scheme is a parse error) -- so these
+    /// assertions pin the rejection, not the guard, and they still pass with
+    /// the guard removed. The guard is a deliberate belt-and-braces backstop:
+    /// `host_str()` can only be `None` or empty under a NON-special scheme,
+    /// which the scheme check already rejects, so no input can reach it
+    /// today. It stays for the day `url` changes its parse behavior.
+    #[test]
+    fn hostless_authority_rejected() {
+        let err = validate_base_url_scheme("acme", "https://").unwrap_err();
+        assert!(err.to_string().contains("acme"), "got: {err}");
+
+        for url in ["http://", "https://:443/v1", "https://@/v1"] {
+            assert!(
+                validate_base_url_scheme("p", url).is_err(),
+                "expected rejection for hostless base_url {url}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
