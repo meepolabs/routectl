@@ -9,6 +9,7 @@
 use routectl_auth::{LoginOptions, OAuthStore};
 use routectl_core::{Error, Result};
 
+use crate::commands::login_provider_block::provider_block;
 use crate::commands::seat::validate_label;
 
 pub async fn run(
@@ -34,7 +35,25 @@ pub async fn run(
     routectl_auth::oauth::run_login(provider, &store, opts)
         .await
         .map_err(|e| Error::Auth(e.to_string()))?;
+    print_next_step(provider, label);
     Ok(())
+}
+
+/// Print the provider entry that consumes the seat just minted. The
+/// credential alone routes no traffic: nothing in `config.toml` reaches it
+/// until an operator adds this block, and login writes no config itself.
+///
+/// An id with no rendered block (not reachable via the CLI, whose accepted
+/// set IS the login registry) prints nothing rather than a partial hint.
+fn print_next_step(provider: &str, label: Option<&str>) {
+    let Some(block) = provider_block(provider, label) else {
+        return;
+    };
+    println!(
+        "\nCredential stored. Nothing routes to it yet -- add this entry to \
+         your config.toml:\n\n{}",
+        block.render()
+    );
 }
 
 /// Whether `provider` has a real headless `--print-url` landing page.

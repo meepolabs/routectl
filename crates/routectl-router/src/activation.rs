@@ -210,7 +210,12 @@ impl ActivationDelta {
 /// `gemini` carries no baked catalog rows today, so `antigravity` gates
 /// through to `Unresolved(NotCataloged)` until a gemini catalog lands --
 /// intentional, not a bug (see `is_cataloged_provider_kind`).
-fn provider_kind_for_id(oauth_id: &str) -> Option<&'static str> {
+///
+/// Public so surfaces outside the activation path (the CLI's login
+/// success output) read the id->kind mapping from this one table instead
+/// of restating it.
+#[must_use]
+pub fn provider_kind_for_oauth_id(oauth_id: &str) -> Option<&'static str> {
     match oauth_id {
         "anthropic" => Some("anthropic-api"),
         "codex" => Some("openai-responses"),
@@ -255,7 +260,7 @@ const fn status_from_probe(probe: LocalProbe) -> ActivationStatus {
 pub fn compute_activation(probes: &[(&str, LocalProbe)], config: &Config) -> ActivationState {
     let mut entries = BTreeMap::new();
     for (oauth_id, probe) in probes {
-        let kind = provider_kind_for_id(oauth_id);
+        let kind = provider_kind_for_oauth_id(oauth_id);
         let status = if kind.is_some_and(is_cataloged_provider_kind) {
             status_from_probe(*probe)
         } else {
@@ -707,7 +712,7 @@ mod tests {
     fn every_known_oauth_id_has_a_kind_mapping() {
         for id in routectl_auth::oauth::known_provider_ids() {
             assert!(
-                provider_kind_for_id(id).is_some(),
+                provider_kind_for_oauth_id(id).is_some(),
                 "no id->kind mapping for oauth provider `{id}`"
             );
         }
@@ -725,7 +730,7 @@ mod tests {
         let cataloged: Vec<&str> = routectl_auth::oauth::known_provider_ids()
             .iter()
             .copied()
-            .filter(|id| provider_kind_for_id(id).is_some_and(is_cataloged_provider_kind))
+            .filter(|id| provider_kind_for_oauth_id(id).is_some_and(is_cataloged_provider_kind))
             .collect();
         assert_eq!(cataloged, ["anthropic", "codex", "xai"]);
     }
