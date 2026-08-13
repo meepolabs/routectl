@@ -174,7 +174,7 @@ Two of the gated flags are additionally unioned ON DEMAND, keyed on what the ass
 | `output_config.format` | `structured-outputs-2025-12-15` | every auth kind (suppressed on the forwarded leg) |
 | `output_config.effort` | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
 
-Both unions run AFTER the `allowed_betas` filter and after the floor: they are server requirements implied by the shipped body, not client-opted betas. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
+Both unions run AFTER the `allowed_betas` filter and after the floor: they are capability signals implied by the shipped body, not client-opted betas. `output_config.format` was measured 2026-08-11 (one lane, one seat, one model) to be accepted both with and without its beta, so its union is retained as belt-and-braces rather than a proven hard requirement; the `output_config.effort` case is unmeasured. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
 
 ### Sampling params stripped on the own-OAuth lane
 
