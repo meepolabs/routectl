@@ -216,6 +216,16 @@ the rejection envelope never renders into an `error = ?e` line.
   256 chars on 4xx/5xx upstream paths, intentionally. Full body
   inspection is available at trace level -- see the Triage recipes
   section above.
+- The inbound per-conversation session key, which is client-supplied and
+  may be user-identifying. The header-vs-body conflict warning carries
+  only the boolean fact of a mismatch, and the shadow-misfire warning
+  carries a hash rather than the value.
+  ACKNOWLEDGED EXCEPTION: the inbound session headers themselves
+  (`x-session-id`, `session_id`, `session-id`, `agent-session-id`,
+  `x-task-id`) do appear verbatim in the direction-1 ingress header
+  trace, which is double-opt-in (`ROUTECTL_TRACE_HEADERS` plus trace
+  level) and deliberately shows session headers so captured fixtures
+  reproduce a real client's request.
 
 ## Trace-level surfaces
 
