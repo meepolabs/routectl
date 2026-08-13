@@ -36,6 +36,38 @@ fn seat_capability_requires_an_anthropic_family_upstream_for_bedrock() {
     ));
 }
 
+/// The Anthropic-family requirement is BEDROCK-scoped, not global.
+/// `anthropic-api` is admitted regardless of the upstream model id, while
+/// `bedrock` is admitted only for an Anthropic-family id. Stating the
+/// family gate globally would be false -- this pins the asymmetry the
+/// existing predicate test does not, since that one exercises the
+/// `anthropic-api` arm only with an Anthropic-family id.
+#[test]
+fn anthropic_family_gate_is_bedrock_scoped_not_global() {
+    // A non-Anthropic model id under anthropic-api is still admitted: the
+    // family requirement does not apply to that kind.
+    assert!(
+        seat_can_count_tokens(
+            Some("anthropic-api"),
+            "us.meta.llama4-scout-17b-instruct-v1:0"
+        ),
+        "anthropic-api is admitted regardless of model family",
+    );
+    // The same id under bedrock is refused: the family gate is per-kind.
+    assert!(
+        !seat_can_count_tokens(Some("bedrock"), "us.meta.llama4-scout-17b-instruct-v1:0"),
+        "a non-Anthropic bedrock model must be refused",
+    );
+    // A bedrock seat IS admitted for an Anthropic-family id.
+    assert!(
+        seat_can_count_tokens(
+            Some("bedrock"),
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        ),
+        "an Anthropic-family bedrock model is count_tokens-capable",
+    );
+}
+
 #[cfg(feature = "bedrock")]
 #[tokio::test]
 async fn bedrock_seat_on_an_anthropic_model_serves_the_count() {

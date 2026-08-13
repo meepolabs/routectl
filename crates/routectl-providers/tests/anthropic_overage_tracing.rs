@@ -10,8 +10,9 @@
 //!
 //! count_tokens capability-vs-health split (drives `count_tokens()`):
 //!
-//!   - A 501 (upstream does not implement count_tokens) logs at DEBUG as a
-//!     capability note; it must NOT emit the shared "upstream error" WARN.
+//!   - A wire 501 -- the remote upstream declaring it does not implement
+//!     the endpoint -- is a CAPABILITY signal: it logs at DEBUG as a
+//!     capability note and must NOT emit the shared "upstream error" WARN.
 //!   - A non-501 error (e.g. 500) keeps the "upstream error" WARN.
 //!
 //! NEVER asserted / NEVER present: any token or credential value. The
