@@ -10,18 +10,19 @@
 //! model versions and is not published as a public library. The
 //! upstream's `/v1/messages/count_tokens` is the source of truth.
 //!
-//! Why walk to a capable provider (not strictly the first target): only
-//! the anthropic-api egress kind implements count_tokens, and it is
-//! Claude-only, so every capable target shares the same Anthropic
-//! tokenizer family. `Router::count_tokens` skips count_tokens-incapable
-//! KINDS (e.g. Bedrock, for which routectl does not implement
-//! count_tokens yet -- AWS itself DOES ship a CountTokens API) before
-//! dispatch, AND walks past a capable-by-kind seat that returns a
-//! capability error at runtime -- a local NotImplemented or a wire 501
-//! (e.g. an anthropic-api base_url that back-hops to a Bedrock egress).
-//! It 501s only when no capable seat yields a count. Walking never
-//! crosses tokenizer families, so a count served by a fallback still
-//! reflects the caller's tokenizer. See `Router::count_tokens`.
+//! Why walk to a capable provider (not strictly the first target): the
+//! walk admits only seats that count in the caller's own Anthropic
+//! tokenizer family, so a count served by a fallback still reflects the
+//! caller's tokenizer. `Router::count_tokens` decides capability per
+//! seat from its egress kind and upstream model id
+//! (`seat_can_count_tokens`): `anthropic-api` is admitted unconditionally
+//! (Claude-only), and a `bedrock` seat only when its upstream model id is
+//! an Anthropic-family id -- a non-Anthropic Bedrock model, or an opaque
+//! inference-profile ARN, is skipped before dispatch. It also walks past
+//! a capable-by-kind seat that returns a capability error at runtime -- a
+//! local NotImplemented or a wire 501 (e.g. a remote anthropic-api
+//! base_url whose own upstream cannot count). It 501s only when no
+//! capable seat yields a count. See `Router::count_tokens`.
 
 use std::sync::Arc;
 

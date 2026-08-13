@@ -2498,9 +2498,9 @@ pub(super) fn rate_limit_reset_hint(err: &Error, policy: &RetryPolicy) -> Option
 /// - `Error::NotImplemented` -- the local trait-default (a provider that
 ///   never overrode `count_tokens`), and
 /// - `Error::Upstream { status: 501, .. }` -- a WIRE 501 from an
-///   upstream (e.g. an anthropic-api base_url that back-hops to a
-///   Bedrock egress for which routectl does not implement count_tokens
-///   yet -- AWS itself DOES ship a CountTokens API).
+///   upstream that declares it does not implement the endpoint (e.g. a
+///   remote anthropic-api base_url that proxies to an egress which
+///   cannot count).
 ///
 /// Both mean "this seat cannot count", NOT "this seat is unhealthy". The
 /// count_tokens walk treats them as capability signals: release the
