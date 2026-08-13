@@ -1058,8 +1058,13 @@ async fn both_legacy_and_nested_present_drops_legacy_with_warn() {
         .get("output_config")
         .and_then(|oc| oc.get("format"))
         .expect("output_config.format must reach upstream");
-    // Nested wins.
-    assert_eq!(format["schema"], nested_schema);
+    // Nested wins over legacy: the shipped schema carries the nested
+    // properties, not the legacy ones. `additionalProperties: false` is
+    // injected on egress because Anthropic requires it explicitly on every
+    // object (see the additionalProperties repair on the assembled body).
+    let mut expected = nested_schema.clone();
+    expected["additionalProperties"] = json!(false);
+    assert_eq!(format["schema"], expected);
 }
 
 // ---------------------------------------------------------------------------

@@ -654,10 +654,18 @@ mod structured_output_format_shape {
             vec!["schema", "type"],
             "output_config.format must carry exactly {{type, schema}}; got body: {body}"
         );
+        // Every caller keyword survives; the ONE addition is
+        // `additionalProperties: false`, which Anthropic requires explicitly
+        // on every object and whose only accepted value is `false`. Supplying
+        // a mandatory key contradicts no caller intent, unlike dropping a
+        // constraint the caller wrote.
+        let mut expected_schema = schema;
+        expected_schema["additionalProperties"] = json!(false);
         assert_eq!(
             format.get("schema"),
-            Some(&schema),
-            "the caller's schema must ship unchanged; got body: {body}"
+            Some(&expected_schema),
+            "the caller's schema must ship with only the mandatory \
+             additionalProperties added; got body: {body}"
         );
         assert!(
             !body.to_string().contains("answer_schema"),

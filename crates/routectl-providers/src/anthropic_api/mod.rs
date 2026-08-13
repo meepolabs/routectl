@@ -30,6 +30,7 @@ pub(crate) mod context_management;
 pub(crate) mod envelope_policy;
 mod extras;
 mod messages;
+mod output_schema;
 pub(crate) mod parts;
 mod ratelimit_unified;
 pub mod request;

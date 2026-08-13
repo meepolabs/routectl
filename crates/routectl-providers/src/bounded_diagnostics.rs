@@ -83,6 +83,16 @@ impl<T> BoundedLogSample<T> {
         self.items.is_empty()
     }
 
+    /// Whether the sample has reached the cap and can store nothing more.
+    ///
+    /// Exists so a collection site whose item is EXPENSIVE to materialize
+    /// (a rendered path, a formatted fragment) can skip the work entirely
+    /// once no further item can be stored -- see
+    /// [`Self::push_distinct_lazily`].
+    pub const fn is_full(&self) -> bool {
+        self.items.len() >= MAX_LOGGED_DIAGNOSTIC_ITEMS
+    }
+
     /// Whether at least one item was dropped because the sample was
     /// already full.
     ///
@@ -104,6 +114,26 @@ impl<T: PartialEq> BoundedLogSample<T> {
             return;
         }
         self.push(value);
+    }
+
+    /// [`Self::push_distinct`] for a value that costs real work to
+    /// materialize: `materialize` is NOT called once the sample is full, so
+    /// the collection site pays only for the items that can actually reach
+    /// the log record.
+    ///
+    /// The one semantic difference from `push_distinct`: at capacity this
+    /// marks the sample truncated without knowing whether the value would
+    /// have been a repeat of a stored one, because deciding that would
+    /// require the very work being skipped. A collection site whose values
+    /// are already distinct by construction loses nothing; one that expects
+    /// heavy duplication and needs exact truncation should keep calling
+    /// `push_distinct`.
+    pub fn push_distinct_lazily(&mut self, materialize: impl FnOnce() -> T) {
+        if self.is_full() {
+            self.truncated = true;
+            return;
+        }
+        self.push_distinct(materialize());
     }
 }
 
@@ -207,5 +237,50 @@ mod tests {
         assert!(sample.truncated());
         assert_eq!(sample.len(), MAX_LOGGED_DIAGNOSTIC_ITEMS);
         assert!(!sample.items().contains(&u32::MAX));
+    }
+
+    #[test]
+    fn push_distinct_lazily_stops_materializing_once_the_sample_is_full() {
+        // Arrange
+        let mut sample: BoundedLogSample<u32> = BoundedLogSample::new();
+        let mut materializations = 0usize;
+
+        // Act
+        for i in 0..(MAX_LOGGED_DIAGNOSTIC_ITEMS as u32 * 5) {
+            sample.push_distinct_lazily(|| {
+                materializations += 1;
+                i
+            });
+        }
+
+        // Assert
+        assert_eq!(
+            materializations, MAX_LOGGED_DIAGNOSTIC_ITEMS,
+            "a full sample must not pay to build a value it cannot store"
+        );
+        assert_eq!(sample.len(), MAX_LOGGED_DIAGNOSTIC_ITEMS);
+        assert!(
+            sample.truncated(),
+            "the dropped items must still be visible"
+        );
+        assert!(sample.is_full());
+    }
+
+    /// Below capacity the lazy path is the eager path: it materializes and it
+    /// deduplicates, so repeats neither grow the sample nor claim truncation.
+    #[test]
+    fn push_distinct_lazily_deduplicates_below_capacity() {
+        // Arrange
+        let mut sample: BoundedLogSample<&str> = BoundedLogSample::new();
+
+        // Act
+        for value in ["alpha", "beta", "alpha"] {
+            sample.push_distinct_lazily(|| value);
+        }
+
+        // Assert
+        assert_eq!(sample.items(), &["alpha", "beta"]);
+        assert!(!sample.truncated());
+        assert!(!sample.is_full());
     }
 }
