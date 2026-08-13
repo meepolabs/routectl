@@ -1,0 +1,64 @@
+---
+source: crates/routectl-providers/tests/contract_egress_bedrock_converse.rs
+assertion_line: 414
+expression: body
+---
+{
+  "additionalModelResponseFieldPaths": [
+    "/stop_sequence"
+  ],
+  "inferenceConfig": {
+    "maxTokens": 1024
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "document": {
+                  "citations": {
+                    "enabled": true
+                  },
+                  "format": "md",
+                  "name": "Meeting Notes [2026]",
+                  "source": {
+                    "bytes": "IyBOb3Rlcw=="
+                  }
+                }
+              },
+              {
+                "document": {
+                  "format": "csv",
+                  "name": "rows-csv",
+                  "source": {
+                    "bytes": "YSxiLGMK"
+                  }
+                }
+              }
+            ],
+            "toolUseId": "toolu_doc_2"
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "history compatibility only; do not call",
+          "inputSchema": {
+            "json": {
+              "properties": {},
+              "type": "object"
+            }
+          },
+          "name": "routectl__history_compat_noop"
+        }
+      }
+    ]
+  }
+}
