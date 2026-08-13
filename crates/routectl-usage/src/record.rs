@@ -119,13 +119,21 @@ pub struct UsageRecord {
     /// Seat the served target drew from. `None` for keyless / non-pooled
     /// targets.
     pub seat: Option<String>,
-    /// Populated from the Anthropic ingress's `inbound_session_key`
-    /// (header `x-claude-code-session-id`, falling back to body
-    /// `metadata.session_id`) -- see
-    /// `routectl_core::ChatRequest::routectl_internal.inbound_session_key`.
-    /// `None` for the OpenAI chat-completions and Responses dialects,
-    /// which do not set `inbound_session_key` (no session-identity
-    /// concept on those wire protocols).
+    /// Populated from the request's canonical `inbound_session_key` -- see
+    /// `routectl_core::ChatRequest::routectl_internal.inbound_session_key`
+    /// for the per-dialect sources and the caveats a reader of this column
+    /// must know. All three ingress dialects assign it: Anthropic from the
+    /// `x-claude-code-session-id` header or body `metadata.session_id`;
+    /// OpenAI chat-completions and Responses from a curated session-header
+    /// allowlist (the `OPENAI_SESSION_HEADERS` const in the CLI crate's
+    /// `ingress::session_key` is the only list) or, failing that, the body's
+    /// `prompt_cache_key`.
+    ///
+    /// `None` when the request carried no recognized identity source. This
+    /// column records no provenance, so a real conversation id and a
+    /// `prompt_cache_key`-derived key are indistinguishable here; the
+    /// latter is a cache-partition value and is NOT guaranteed unique per
+    /// conversation.
     pub session_id: Option<String>,
 
     // SHAPE

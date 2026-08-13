@@ -3332,6 +3332,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   divisor) over system + message text; seeds the synthesized
   `message_start.usage.input_tokens` so the pre-inversion fast path shows a
   live context meter until the terminal `message_delta` overwrites it
+- `src/ingress/session_key.rs` -- shared inbound per-conversation
+  session-key resolution: `OPENAI_SESSION_HEADERS` (the ordered, grounded
+  allowlist of session headers the OpenAI-shaped ingresses accept, and the
+  single source of truth for that membership), `first_session_header`, and
+  `resolve_session_key` (header-over-body precedence, trim,
+  empty/oversized/control-bearing candidate treated as absent,
+  `MAX_INBOUND_SESSION_KEY_BYTES` bound, and one raw-value-free
+  `session_key_source_conflict` WARN when header and body disagree). Each
+  dialect keeps only its own VOCABULARY and delegates the tail here
 - `src/ingress/openai.rs` -- OpenAI Chat Completions ingress; lifts
   `role:"system"` and `role:"developer"` messages into `req.system`
   (preserving per-block `cache_control`), promotes the Cursor-style
@@ -3342,7 +3351,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   internal `matched_stop_sequence` on render, and stamps the OpenAI
   envelope on render (`object`, nullable `system_fingerprint`, `created`
   on chunks; synthesizes `chatcmpl-<uuid>` id + unix `created` when the
-  upstream omitted them, stream-stable across chunks). Tests: inline unit tests in this
+  upstream omitted them, stream-stable across chunks). Captures the inbound
+  per-conversation key into `routectl_internal.inbound_session_key` via
+  `ingress::session_key` (first allowlist header, else the body's top-level
+  `prompt_cache_key`, read from the swept extras); the lift is a copy, so
+  `prompt_cache_key` still forwards upstream. Tests: inline unit tests in this
   file plus `tests/server.rs`, `tests/contract_ingress.rs`,
   `tests/cross_dialect_render.rs`, `tests/e2e_reasoning.rs`,
   `tests/replay_ingress.rs`
@@ -3354,12 +3367,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (wraps a Responses-family blob in the `reasoning_envelope`; everything
   else, Anthropic-sourced above all, byte-verbatim)
 - `src/ingress/anthropic/parse.rs` -- Anthropic body -> canonical
-  `ChatRequest`; forward-compat sweep into `provider_extras`.
-  `resolve_inbound_session_key` captures the inbound per-conversation key (the
-  `x-claude-code-session-id` request header, else body `metadata.session_id`)
-  into `routectl_internal.inbound_session_key` for session-sticky seat
-  selection; the `metadata` read is non-destructive so `metadata` still
-  round-trips into `provider_extras`
+  `ChatRequest`; forward-compat sweep into `provider_extras`. Captures the
+  inbound per-conversation key into
+  `routectl_internal.inbound_session_key` for session-sticky seat
+  selection: the dialect-local accessors `inbound_session_header` (the
+  `x-claude-code-session-id` request header) and `metadata_session_id`
+  (body `metadata.session_id`) feed the shared
+  `ingress::session_key::resolve_session_key`, which owns precedence,
+  trim, the bound and the conflict WARN; the `metadata` read is
+  non-destructive so `metadata` still round-trips into `provider_extras`
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic
   Messages response body shape
 - `src/ingress/anthropic/stream.rs` -- canonical `ChatChunk` -> Anthropic SSE
