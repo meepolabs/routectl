@@ -46,7 +46,8 @@ const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
 const FNV_PRIME: u64 = 1099511628211;
 
 /// Compute an FNV-1a 64-bit hash of an arbitrary byte slice.
-fn fnv1a_hash(bytes: &[u8]) -> u64 {
+#[must_use]
+pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;
     for &byte in bytes {
         hash ^= u64::from(byte);

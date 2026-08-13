@@ -1884,8 +1884,13 @@ impl Router {
                     }
                     crate::k_estimator::ShadowOutcome::Misfire => {
                         meta.would_trim_shadow_misfire = Some(1);
+                        // The session key is caller-controlled and the schema
+                        // forbids logging it raw, but the misfire is only
+                        // actionable if an operator can correlate the same
+                        // triple across lines -- so the key rides as a stable
+                        // FNV-1a hash (toolchain-stable, unlike DefaultHasher).
                         tracing::warn!(
-                            session_key = %session_key,
+                            session_key_hash = crate::context_trim::fnv1a_hash(session_key.as_bytes()),
                             provider_kind = provider_kind.unwrap_or(""),
                             model = %model,
                             "would_trim_shadow_misfire: trimmed cacheable prefix shifted turn-to-turn",
@@ -2772,6 +2777,10 @@ mod context_reduction_dispatch_tests;
 #[cfg(test)]
 #[path = "k_query_key_tests.rs"]
 mod k_query_key_tests;
+
+#[cfg(test)]
+#[path = "shadow_misfire_log_tests.rs"]
+mod shadow_misfire_log_tests;
 
 #[cfg(test)]
 #[path = "observability_seam_tests.rs"]
