@@ -585,4 +585,151 @@ mod tests {
             "a session identified only via metadata.session_id must survive rebuild"
         );
     }
+
+    /// An OpenAI-chat body carrying an allowlisted session header, driven
+    /// through the real ingress, the real draft boundary and the real
+    /// `UsageWriter`, then rebuilt: the K-estimator triple must exist.
+    /// Nothing here constructs `inbound_session_key` or picks a
+    /// `session_id`; both come out of the parse. The triple keys on the
+    /// SERVED model nickname (`model`), not the requested wire id, which is
+    /// what the live estimator queries with.
+    #[test]
+    fn warm_forms_k_triple_for_header_identified_openai_chat_request() {
+        // Arrange
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-session-id", "sid-openai-chat".parse().expect("header"));
+        let req = {
+            use crate::ingress::IngressAdapter;
+            use crate::ingress::openai::OpenAiIngress;
+            OpenAiIngress
+                .parse_request_value(&headers, body)
+                .expect("parse openai chat request")
+        };
+        let mut draft = crate::handlers::usage_capture::build_usage_draft(
+            "openai",
+            &req,
+            "req-openai-chat-rebuild".to_string(),
+        );
+        assert_eq!(
+            draft.session_id.as_deref(),
+            Some("sid-openai-chat"),
+            "draft session_id must come from the ingress-lifted inbound_session_key"
+        );
+        // Only the dispatch-derived columns the reuse-sample query's NOT NULL
+        // filters need, matching what the real `observe_*` calls would set.
+        draft.provider_kind = Some("openai-compat".to_string());
+        draft.model = Some("gpt-4o-served".to_string());
+        draft.cache_read = Some(64);
+        draft.outcome = routectl_usage::Outcome::Ok;
+
+        let (_dir, path) = temp_db_path();
+        let (handle, writer) = routectl_usage::UsageWriter::start(
+            path.clone(),
+            routectl_usage::CHANNEL_CAPACITY,
+            0,
+            true,
+        );
+        handle.try_send(draft);
+        // Drop the producer handle BEFORE shutdown so the channel-close
+        // drain signal can fire (see the metadata-derived test above).
+        drop(handle);
+        writer.shutdown();
+
+        // Act
+        let store = KSessionStore::new();
+        warm_k_store_from_ledger(&path, &store);
+
+        // Assert: the persisted row itself carries the key, and the rebuild
+        // forms exactly the triple the estimator looks up.
+        assert_eq!(
+            persisted_session_id(&path, "req-openai-chat-rebuild").as_deref(),
+            Some("sid-openai-chat"),
+            "the ledger row must persist the ingress-derived session id"
+        );
+        assert_eq!(store.len(), 1);
+        let samples = store
+            .get(&KSessionKey {
+                session_key: "sid-openai-chat".into(),
+                provider_kind: "openai-compat".into(),
+                model: "gpt-4o-served".into(),
+            })
+            .expect("OpenAI-chat traffic must form a K-estimator triple");
+        let reuse: Vec<bool> = samples.iter().map(|s| s.observed_reuse).collect();
+        assert_eq!(reuse, vec![true]);
+    }
+
+    /// Negative control for the test above, in its own db: a request whose
+    /// header is outside the allowlist and whose body carries no session
+    /// field stays keyless end to end -- no draft `session_id`, nothing to
+    /// warm.
+    #[test]
+    fn warm_stays_empty_for_openai_chat_request_without_recognized_identity() {
+        // Arrange
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-session-affinity", "unlisted".parse().expect("header"));
+        let req = {
+            use crate::ingress::IngressAdapter;
+            use crate::ingress::openai::OpenAiIngress;
+            OpenAiIngress
+                .parse_request_value(&headers, body)
+                .expect("parse openai chat request")
+        };
+        let mut draft = crate::handlers::usage_capture::build_usage_draft(
+            "openai",
+            &req,
+            "req-openai-chat-keyless".to_string(),
+        );
+        assert_eq!(
+            draft.session_id, None,
+            "no recognized identity source must leave the draft keyless"
+        );
+        draft.provider_kind = Some("openai-compat".to_string());
+        draft.model = Some("gpt-4o-served".to_string());
+        draft.cache_read = Some(64);
+        draft.outcome = routectl_usage::Outcome::Ok;
+
+        let (_dir, path) = temp_db_path();
+        let (handle, writer) = routectl_usage::UsageWriter::start(
+            path.clone(),
+            routectl_usage::CHANNEL_CAPACITY,
+            0,
+            true,
+        );
+        handle.try_send(draft);
+        drop(handle);
+        writer.shutdown();
+
+        // Act
+        let store = KSessionStore::new();
+        warm_k_store_from_ledger(&path, &store);
+
+        // Assert
+        assert_eq!(persisted_session_id(&path, "req-openai-chat-keyless"), None);
+        assert!(
+            store.is_empty(),
+            "a keyless row must warm no K-estimator triple"
+        );
+    }
+
+    /// Read back the `session_id` a written ledger row actually persisted,
+    /// so the assertion covers the stored column rather than only the
+    /// in-memory draft.
+    fn persisted_session_id(path: &Path, request_id: &str) -> Option<String> {
+        let db = open_readonly(path).expect("open written ledger");
+        db.conn()
+            .query_row(
+                "SELECT session_id FROM requests WHERE request_id = ?1",
+                rusqlite::params![request_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("ledger row exists")
+    }
 }
