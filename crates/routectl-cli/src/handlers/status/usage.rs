@@ -122,6 +122,32 @@ struct UsageGroup {
     cache_read_present: i64,
 }
 
+impl UsageGroup {
+    /// Fold another era-partition of the SAME reported group in (verified by
+    /// [`same_reported_group`]). Every field this panel emits is additive
+    /// except the cached-context peak, which is a per-turn SNAPSHOT high-water
+    /// mark and so takes the MAX; the error-class maps merge per class.
+    fn merge(&mut self, other: Self) {
+        self.requests += other.requests;
+        self.ok += other.ok;
+        self.errors += other.errors;
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
+        self.cache_read_peak = self.cache_read_peak.max(other.cache_read_peak);
+        self.cache_read_billed += other.cache_read_billed;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.server_tool_calls += other.server_tool_calls;
+        self.stream_count += other.stream_count;
+        self.client_disconnect_total += other.client_disconnect_total;
+        self.cache_read_present += other.cache_read_present;
+        for (class, count) in other.errors_by_class {
+            *self.errors_by_class.entry(class).or_default() += count;
+        }
+    }
+}
+
 /// One seat's latest quota-bearing snapshot. The `quota_*` ledger columns are
 /// shared across vendors, so `provider_kind` is the discriminator a client
 /// MUST read to interpret `utilization` (a fraction of a per-provider window)
@@ -261,6 +287,13 @@ fn collect(
 /// rollup groups. The flat error breakdown is merged into a per-group
 /// `class -> count` map keyed by the shared group key, then accumulated into
 /// the window-wide totals map.
+///
+/// The ledger read groups at a finer grain than this panel reports: it carries
+/// the row's persisted `provider_kind` so cost can be resolved per era, while
+/// this panel's documented group grain is `(alias, provider, model, upstream)`.
+/// The era partitions are therefore coalesced back together here, which keeps
+/// the panel's group CARDINALITY and wire shape identical to what a kind-blind
+/// read produced -- a group spanning two eras reports the sum of both.
 fn assemble(
     token: &'static str,
     bounds: WindowBounds,
@@ -278,7 +311,7 @@ fn assemble(
     }
 
     let mut totals = UsageTotals::default();
-    let mut groups = Vec::with_capacity(rows.len());
+    let mut groups: Vec<UsageGroup> = Vec::with_capacity(rows.len());
     for row in rows {
         totals.requests += row.requests;
         totals.ok += row.ok;
@@ -290,8 +323,15 @@ fn assemble(
         totals.server_tool_calls += row.server_tool_calls;
         totals.client_disconnect_total += row.client_disconnect_total;
         totals.cache_read_present += row.cache_read_present;
+        // The breakdown is grouped at the SAME kind-bearing grain as the
+        // aggregate, so this stays an exact-match lookup; the class maps are
+        // merged together when the era partitions coalesce below.
         let group_classes = per_group.remove(&row.key).unwrap_or_default();
-        groups.push(map_group(row, group_classes));
+        let mapped = map_group(row, group_classes);
+        match groups.iter_mut().find(|g| same_reported_group(g, &mapped)) {
+            Some(existing) => existing.merge(mapped),
+            None => groups.push(mapped),
+        }
     }
     totals.errors_by_class = totals_by_class;
     UsagePanel {
@@ -303,6 +343,13 @@ fn assemble(
         quota: quota.into_iter().map(map_quota).collect(),
         would_trim: map_would_trim(would_trim),
     }
+}
+
+/// Whether two mapped groups occupy the same REPORTED group of this panel, i.e.
+/// agree on the whole `(alias, provider, model, upstream)` key the wire carries.
+/// Two rows of one re-kinded provider satisfy this and are merged.
+fn same_reported_group(a: &UsageGroup, b: &UsageGroup) -> bool {
+    a.alias == b.alias && a.provider == b.provider && a.model == b.model && a.upstream == b.upstream
 }
 
 fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup {
@@ -910,6 +957,7 @@ mod tests {
                     provider: Some("p".into()),
                     upstream: Some("u".into()),
                     alias: "a".into(),
+                    provider_kind: Some("anthropic-api".into()),
                 },
                 requests: 3,
                 ok: 2,
@@ -942,6 +990,7 @@ mod tests {
                     provider: Some("p".into()),
                     upstream: Some("u".into()),
                     alias: "a".into(),
+                    provider_kind: Some("anthropic-api".into()),
                 },
                 "http-5xx".into(),
                 1,
@@ -1033,6 +1082,116 @@ mod tests {
             .map(|v| v.as_i64().unwrap())
             .sum();
         assert_eq!(breakdown_sum, 4);
+    }
+
+    /// Seed a WAL ledger whose rows share ONE `(alias, provider, model,
+    /// upstream)` key but carry DIFFERENT persisted `provider_kind` values --
+    /// the shape a provider re-kinded in place leaves behind. Each tuple is
+    /// `(kind, outcome, resolved_class)`; `kind` is `Option` so a genuine SQL
+    /// NULL era is expressible.
+    fn seed_two_kind_eras(path: &Path, rows: &[(Option<&str>, &str, Option<&str>)]) {
+        let db = open(path).expect("open ledger");
+        let now = Local::now().timestamp_millis();
+        for (i, (kind, outcome, class)) in rows.iter().enumerate() {
+            db.conn()
+                .execute(
+                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                     requested_model, alias, model, provider, upstream, provider_kind, \
+                     stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
+                     fallback_count, input_tokens, output_tokens, reasoning_tokens, \
+                     cache_read, ttfb_ms, resolved_class) \
+                     VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 'm', 'p', 'u', ?3, \
+                     1, ?4, 500, 0, 0, 1, 0, 10, 20, 5, 5, 100, ?5)",
+                    rusqlite::params![now, format!("r{i}"), kind, outcome, class],
+                )
+                .expect("seed era row");
+        }
+    }
+
+    #[tokio::test]
+    async fn group_cardinality_is_unchanged_by_the_kind_partitioned_read() {
+        // The ledger read groups at a finer grain than this panel reports, so
+        // the era partitions must be coalesced before emitting: three eras of
+        // one provider are ONE reported group carrying all three rows, never
+        // three groups with an identical key.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_two_kind_eras(
+            &path,
+            &[
+                (Some("gemini"), "ok", None),
+                (Some("openai-compat"), "ok", None),
+                (None, "ok", None),
+            ],
+        );
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let groups = json["data"]["groups"].as_array().unwrap();
+        assert_eq!(
+            groups.len(),
+            1,
+            "three persisted kinds under one key are ONE reported group: {groups:?}"
+        );
+        // The single group carries every era's rows and token flows.
+        assert_eq!(groups[0]["requests"], 3);
+        assert_eq!(groups[0]["input_tokens"], 30);
+        assert_eq!(groups[0]["output_tokens"], 60);
+        assert_eq!(groups[0]["reasoning_tokens"], 15);
+        // cache_read is a per-turn SNAPSHOT: the peak is a MAX across eras, the
+        // billed volume a SUM.
+        assert_eq!(groups[0]["cache_read_peak"], 5);
+        assert_eq!(groups[0]["cache_read_billed"], 15);
+        assert_eq!(groups[0]["cache_read_present"], 3);
+        // And the group reconciles with totals, so neither fold lost a row.
+        assert_eq!(json["data"]["totals"]["requests"], 3);
+        assert_eq!(json["data"]["totals"]["reasoning_tokens"], 15);
+    }
+
+    #[tokio::test]
+    async fn error_classes_from_every_kind_era_merge_into_one_group_breakdown() {
+        // The error breakdown is grouped at the SAME kind-bearing grain as the
+        // aggregate, so each era's class map is looked up separately and then
+        // merged. A class occurring in two eras must SUM, not shadow.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_two_kind_eras(
+            &path,
+            &[
+                (Some("gemini"), "upstream_error", Some("http-5xx")),
+                (Some("openai-compat"), "upstream_error", Some("http-5xx")),
+                (Some("openai-compat"), "upstream_error", Some("timeout")),
+                (None, "gate_blocked", None),
+                (Some("gemini"), "ok", None),
+            ],
+        );
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let groups = json["data"]["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "one reported group across the eras");
+        let group = &groups[0];
+        assert_eq!(group["errors"], 4);
+        assert_eq!(
+            group["errors_by_class"]["http-5xx"], 2,
+            "the same class in two eras sums rather than shadowing"
+        );
+        assert_eq!(group["errors_by_class"]["timeout"], 1);
+        assert_eq!(group["errors_by_class"]["unclassified"], 1);
+        // The merged breakdown still sums EXACTLY to the group's error count --
+        // the invariant a missed lookup would break silently.
+        let group_sum: i64 = group["errors_by_class"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_i64().unwrap())
+            .sum();
+        assert_eq!(group_sum, group["errors"].as_i64().unwrap());
+        assert_eq!(json["data"]["totals"]["errors"], 4);
     }
 
     #[tokio::test]

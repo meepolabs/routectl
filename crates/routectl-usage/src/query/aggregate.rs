@@ -48,9 +48,17 @@ pub struct QuotaSnapshot {
 /// queries MUST agree on the fine grain and on every base column, because the
 /// same `map_agg_row` mapper reads both by ordinal position. Duplicating the
 /// column list as two literals would let one drift silently past the other.
+///
+/// `provider_kind` is a group-key column, not a display dimension: reasoning
+/// tokens are DISJOINT from output for some kinds and subsumed for others, so a
+/// row's cost depends on the kind PERSISTED with it. Grouping on it keeps each
+/// era of a renamed-kind provider in its own partition, so each is priced by
+/// what it actually was. Callers that report at the documented external grain
+/// coalesce these partitions back together after pricing.
 macro_rules! agg_base_columns {
     () => {
         "    COALESCE(model, requested_model) AS model, provider, upstream, alias,
+    provider_kind,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
     SUM(CASE WHEN outcome NOT IN ('ok', 'client_disconnect')
@@ -95,7 +103,8 @@ macro_rules! agg_base_columns {
 /// never drift apart.
 macro_rules! agg_group_by {
     () => {
-        "GROUP BY COALESCE(model, requested_model), provider, upstream, alias"
+        "GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
+         provider_kind"
     };
 }
 
@@ -284,9 +293,10 @@ pub(super) struct FineRow {
     pub fallback_served: i64,
 }
 
-/// Windowed aggregate grouped by `(model, provider, upstream, alias)`.
-/// Rows outside `[from_ms, to_ms)` are excluded. The caller rolls these up
-/// for display and prices them per upstream.
+/// Windowed aggregate grouped by
+/// `(model, provider, upstream, alias, provider_kind)`. Rows outside
+/// `[from_ms, to_ms)` are excluded. The caller prices each row from its
+/// PERSISTED `provider_kind` and then rolls the partitions up for display.
 pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, QueryError> {
     let mut stmt = db.conn().prepare(AGG_SQL)?;
     let rows = stmt
@@ -300,18 +310,18 @@ pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, 
 pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
     Ok(FineRow {
         agg: map_agg_row(row)?,
-        ttfb_max: row.get(28)?,
-        ttft_sum: row.get(29)?,
-        ttft_count: row.get(30)?,
-        latency_sum: row.get(31)?,
-        latency_max: row.get(32)?,
-        input_tokens_max: row.get(33)?,
-        input_tokens_present: row.get(34)?,
-        tok_s_sum: row.get(35)?,
-        tok_s_count: row.get(36)?,
-        cache_hit_sum: row.get(37)?,
-        cache_hit_count: row.get(38)?,
-        fallback_served: row.get(39)?,
+        ttfb_max: row.get(29)?,
+        ttft_sum: row.get(30)?,
+        ttft_count: row.get(31)?,
+        latency_sum: row.get(32)?,
+        latency_max: row.get(33)?,
+        input_tokens_max: row.get(34)?,
+        input_tokens_present: row.get(35)?,
+        tok_s_sum: row.get(36)?,
+        tok_s_count: row.get(37)?,
+        cache_hit_sum: row.get(38)?,
+        cache_hit_count: row.get(39)?,
+        fallback_served: row.get(40)?,
     })
 }
 
@@ -321,7 +331,7 @@ pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
 /// index is read here.
 pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64)> {
     let fine = map_fine_row(row)?;
-    let bucket = row.get(40)?;
+    let bucket = row.get(41)?;
     Ok((fine, bucket))
 }
 
@@ -352,31 +362,32 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
             provider: row.get(1)?,
             upstream: row.get(2)?,
             alias: row.get(3)?,
+            provider_kind: row.get(4)?,
         },
-        requests: row.get(4)?,
-        ok: row.get(5)?,
-        errors: row.get(6)?,
-        input_tokens: row.get(7)?,
-        output_tokens: row.get(8)?,
-        reasoning_tokens: row.get(9)?,
-        cache_read_peak: row.get(10)?,
-        cache_read_avg: row.get(11)?,
-        cache_read_billed: row.get(12)?,
-        cache_write_5m: row.get(13)?,
-        cache_write_1h: row.get(14)?,
-        server_tool_calls: row.get(15)?,
-        sum_ttfb_ms: row.get(16)?,
-        ttfb_count: row.get(17)?,
-        gen_window_ms: row.get(18)?,
-        gen_output_tokens: row.get(19)?,
-        reasoning_present: row.get(20)?,
-        cache_read_present: row.get(21)?,
-        cache_write_5m_present: row.get(22)?,
-        cache_write_1h_present: row.get(23)?,
-        server_tool_present: row.get(24)?,
-        stream_count: row.get(25)?,
-        client_disconnect_total: row.get(26)?,
-        client_disconnect_pre_dispatch: row.get(27)?,
+        requests: row.get(5)?,
+        ok: row.get(6)?,
+        errors: row.get(7)?,
+        input_tokens: row.get(8)?,
+        output_tokens: row.get(9)?,
+        reasoning_tokens: row.get(10)?,
+        cache_read_peak: row.get(11)?,
+        cache_read_avg: row.get(12)?,
+        cache_read_billed: row.get(13)?,
+        cache_write_5m: row.get(14)?,
+        cache_write_1h: row.get(15)?,
+        server_tool_calls: row.get(16)?,
+        sum_ttfb_ms: row.get(17)?,
+        ttfb_count: row.get(18)?,
+        gen_window_ms: row.get(19)?,
+        gen_output_tokens: row.get(20)?,
+        reasoning_present: row.get(21)?,
+        cache_read_present: row.get(22)?,
+        cache_write_5m_present: row.get(23)?,
+        cache_write_1h_present: row.get(24)?,
+        server_tool_present: row.get(25)?,
+        stream_count: row.get(26)?,
+        client_disconnect_total: row.get(27)?,
+        client_disconnect_pre_dispatch: row.get(28)?,
     })
 }
 
@@ -392,12 +403,14 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
 pub(super) const ERRORS_BY_CLASS_SQL: &str = "\
 SELECT
     COALESCE(model, requested_model) AS model, provider, upstream, alias,
+    provider_kind,
     COALESCE(resolved_class, 'unclassified')            AS class,
     COUNT(*)                                            AS count
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
   AND outcome NOT IN ('ok', 'client_disconnect')
 GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
+         provider_kind,
          COALESCE(resolved_class, 'unclassified')";
 
 /// Windowed per-group error breakdown by resolved failure class. Returns one
@@ -419,8 +432,9 @@ pub fn errors_by_class(
                 provider: row.get(1)?,
                 upstream: row.get(2)?,
                 alias: row.get(3)?,
+                provider_kind: row.get(4)?,
             };
-            Ok((key, row.get::<_, String>(4)?, row.get::<_, i64>(5)?))
+            Ok((key, row.get::<_, String>(5)?, row.get::<_, i64>(6)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -475,7 +489,7 @@ pub fn latest_quota_by_seat(db: &UsageDb) -> Result<Vec<QuotaSnapshot>, QueryErr
 }
 
 const TTFBS_SQL: &str = "\
-SELECT model, provider, upstream, alias, ttfb_ms
+SELECT model, provider, upstream, alias, provider_kind, ttfb_ms
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
   AND ttfb_ms IS NOT NULL AND stream = 1 AND outcome = 'ok'";
@@ -493,8 +507,9 @@ pub fn ttfbs(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<(GroupKey, i6
                 provider: row.get(1)?,
                 upstream: row.get(2)?,
                 alias: row.get(3)?,
+                provider_kind: row.get(4)?,
             };
-            Ok((key, row.get::<_, i64>(4)?))
+            Ok((key, row.get::<_, i64>(5)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)

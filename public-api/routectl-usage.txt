@@ -677,6 +677,7 @@ pub struct routectl_usage::GroupKey
 pub routectl_usage::GroupKey::alias: alloc::string::String
 pub routectl_usage::GroupKey::model: core::option::Option<alloc::string::String>
 pub routectl_usage::GroupKey::provider: core::option::Option<alloc::string::String>
+pub routectl_usage::GroupKey::provider_kind: core::option::Option<alloc::string::String>
 pub routectl_usage::GroupKey::upstream: core::option::Option<alloc::string::String>
 impl core::clone::Clone for routectl_usage::GroupKey
 pub fn routectl_usage::GroupKey::clone(&self) -> routectl_usage::GroupKey

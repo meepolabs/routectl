@@ -2369,7 +2369,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   that violates its width/count invariants) and its hand-written
   `From<rusqlite::Error>`, which is what makes `Interrupted` reachable from
   EVERY query function without any of them taking a deadline parameter;
-  `GroupKey`, `AggRow` and re-exports
+  `GroupKey` (whose `provider_kind` is a COST dimension, not a display one: it
+  carries the kind PERSISTED with the row so each era of a re-kinded provider
+  prices by what it was, and a surface reporting at the kind-agnostic grain
+  coalesces the partitions back together after pricing), `AggRow` and re-exports
   the whole read-side surface from the five submodules so every symbol stays at
   `routectl_usage::` unchanged
 - `src/query/deadline.rs` -- `DeadlineGuard::install(db, deadline)`: the
@@ -2398,7 +2401,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `GroupDim`, `RowCost`, `QueryResult`, `QueryGroup`, `QueryMetrics` /
   `QueryTotals`, `CostStatus`, and the time-series types `BucketSpec` /
   `QuerySeries` / `SeriesBucket`. One statement reads at the fine
-  `(model, provider, upstream, alias)` grain with alias/provider filters as
+  `(model, provider, upstream, alias, provider_kind)` grain with alias/provider
+  filters as
   BIND params; the fold prices each fine row through the caller's closure
   BEFORE upstream is dropped, rolls to the coarse `GroupDim` (sums additive,
   MAX-across-MAX, ratios kept as numerator/denominator pairs), derives the
@@ -2984,7 +2988,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ts_start_ms` freshness) + would-trim summary; per-group and totals
   `errors_by_class` failure-class breakdown, `client_disconnect_total` +
   reporting-only `cache_read_present` denominator; NEVER request
-  rows/ids/bodies/prompts). Ledger-open/query failures classify to the shed
+  rows/ids/bodies/prompts). The ledger reads group at a FINER grain than the
+  panel reports (they carry each row's persisted `provider_kind` so cost is
+  era-resolvable), so `assemble` coalesces the era partitions -- metrics and
+  error-class maps alike -- back to the documented
+  `(alias,provider,model,upstream)` grain before emitting, leaving the panel's
+  group cardinality and wire shape unchanged. Ledger-open/query failures classify to the shed
   codes `no_data`/`schema_mismatch`/`db_busy`/`db_unavailable` (busy/lock read
   from the `rusqlite` error code) through `open_error_code` /
   `query_error_code`, both `pub(super)` and shared with `/status/query` so the
@@ -3810,7 +3819,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Config::pricing_for` -> `estimate_cost_tokens` (`$X.XX` or `n/a` when
   unpriced) through `cost_for_row`, which yields the usage crate's `RowCost`
   tri-state and is shared with `/status/query`'s pricing closure so the two
-  surfaces can never disagree about what a row costs. `--detail` adds cache-write split + nearest-rank p95/max latency
+  surfaces can never disagree about what a row costs. Reasoning tokens are
+  priced from the row's PERSISTED `provider_kind` (disjoint for `gemini`,
+  subsumed in the output count for every other kind), never from current
+  config, so re-kinding a provider in place cannot reprice history; a row whose
+  kind is absent AND that reported nonzero reasoning fails CLOSED as
+  `Unpriced` rather than guessing a structure. `--detail` adds cache-write split + nearest-rank p95/max latency
   + wall-time + server-tool counts. Both the per-group and the footer
   cache-hit-rate flow through ONE shared denominator rule --
   `cache_prompt_den` (`input + cache_read_billed + cache_write_5m +
