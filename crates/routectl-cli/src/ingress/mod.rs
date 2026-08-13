@@ -27,6 +27,7 @@ use serde_json::Value;
 pub mod anthropic;
 pub mod openai;
 pub mod openai_responses;
+pub mod session_key;
 pub mod token_estimate;
 
 /// Header used by harnesses that can override the canonical `model`

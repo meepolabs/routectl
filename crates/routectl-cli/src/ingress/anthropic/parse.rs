@@ -11,6 +11,7 @@ use routectl_core::{ChatRequest, Error, ReasoningConfig, Result};
 use routectl_core::{ContentPart, MessageContent};
 
 use crate::ingress::read_alias_header;
+use crate::ingress::session_key::resolve_session_key;
 
 pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<ChatRequest> {
     let obj = body.as_object_mut().ok_or_else(|| {
@@ -91,8 +92,10 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // Capture the INBOUND per-conversation key (header wins, then
     // body `metadata.session_id`). Borrows `metadata` so it stays intact
     // for the round-trip re-insertion into extras below. Never logged raw.
-    req.routectl_internal.inbound_session_key =
-        resolve_inbound_session_key(headers, metadata.as_ref());
+    req.routectl_internal.inbound_session_key = resolve_session_key(
+        inbound_session_header(headers),
+        metadata_session_id(&metadata),
+    );
 
     // Translate thinking config.
     if let Some(t) = thinking {
@@ -147,42 +150,25 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     Ok(req)
 }
 
-/// Resolve the INBOUND per-conversation session key. Priority: the
-/// inbound `x-claude-code-session-id` HTTP header (axum lowercases
-/// inbound names), then the body `metadata.session_id`. Each candidate
-/// is trimmed; an empty-after-trim value is treated as absent and falls
-/// through. Returns `None` when neither is present. The `metadata`
-/// argument is borrowed, not consumed, so the object still round-trips.
-///
-/// When BOTH candidates are present and differ after trim, emits one
-/// `warn`-level `session_key_source_conflict` log carrying only the
-/// boolean fact of the mismatch -- never the raw header or metadata
-/// values (never logged raw, per the capture note above). This
-/// otherwise-silent split would key the header-derived request into a
-/// different K-estimator / ledger session than the metadata-derived one.
-fn resolve_inbound_session_key(headers: &HeaderMap, metadata: Option<&Value>) -> Option<String> {
-    let header_key = headers
+/// The Anthropic dialect's HEADER vocabulary for inbound session identity:
+/// the single `x-claude-code-session-id` header (axum lowercases inbound
+/// names). Trim, precedence, bounds and the conflict WARN all live in
+/// [`resolve_session_key`], shared with the OpenAI-shaped ingresses.
+fn inbound_session_header(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get("x-claude-code-session-id")
         .and_then(|h| h.to_str().ok())
-        .map(str::trim)
-        .filter(|t| !t.is_empty());
-    let metadata_key = metadata
+}
+
+/// The Anthropic dialect's BODY vocabulary for inbound session identity:
+/// the nested `metadata.session_id`. Borrows, so the `metadata` object
+/// still round-trips into `provider_extras`.
+fn metadata_session_id(metadata: &Option<Value>) -> Option<&str> {
+    metadata
+        .as_ref()
         .and_then(|m| m.as_object())
         .and_then(|o| o.get("session_id"))
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|t| !t.is_empty());
-
-    if let (Some(h), Some(m)) = (header_key, metadata_key)
-        && h != m
-    {
-        tracing::warn!(
-            session_key_source_conflict = true,
-            "inbound session key mismatch between header and metadata.session_id"
-        );
-    }
-
-    header_key.or(metadata_key).map(str::to_string)
 }
 
 /// Field names the canonical `ChatRequest` deserializes directly from
