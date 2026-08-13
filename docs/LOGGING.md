@@ -225,7 +225,9 @@ the rejection envelope never renders into an `error = ?e` line.
   `x-task-id`) do appear verbatim in the direction-1 ingress header
   trace, which is double-opt-in (`ROUTECTL_TRACE_HEADERS` plus trace
   level) and deliberately shows session headers so captured fixtures
-  reproduce a real client's request.
+  reproduce a real client's request. That set is the `OPENAI_SESSION_HEADERS`
+  allowlist in `ingress::session_key`, which is authoritative -- the list
+  here is a reader's convenience and follows it.
 
 ## Trace-level surfaces
 
