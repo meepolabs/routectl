@@ -36,6 +36,8 @@ mod reported_model;
 mod retry;
 #[path = "router/runtime_policy.rs"]
 mod runtime_policy;
+#[path = "router/window_gate.rs"]
+mod window_gate;
 
 /// Mock provider whose behavior is parameterized per-call.
 struct MockProvider {
