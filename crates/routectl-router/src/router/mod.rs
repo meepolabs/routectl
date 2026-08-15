@@ -167,6 +167,20 @@ pub struct Router {
     /// treats the first turn after a reload as `FirstSeen`, which is the
     /// safe default (no false misfire on a fresh fingerprint after a reload).
     shadow_store: Arc<crate::k_estimator::ShadowStore>,
+    /// Per-lane token-estimate correction evidence, keyed by
+    /// `(provider_kind, served nickname)`. Read at the context-window gate's
+    /// decision point to correct the estimate it compares, written
+    /// post-response from the ingress capture path.
+    ///
+    /// Not the LRU shape `k_session_store` uses: a lane is an
+    /// operator-declared nickname on one of the four provider kinds, so the
+    /// keyspace is bounded by the loaded config rather than by client
+    /// traffic, and a plain map cannot grow past it.
+    ///
+    /// MUST survive a hot-reload (see `carry_over_calibration_from`): a wipe
+    /// sends every lane back to the uncorrected estimate, and because that IS
+    /// the pre-correction behavior the loss reads as health.
+    calibration_store: Arc<crate::calibration::CalibrationStore>,
     /// In-memory learned-capability registry (the `k_session_store`
     /// pattern): per-(target, feature) negatives the dispatch path learns
     /// from upstream request faults. Interior-locked and mutated through
@@ -1137,6 +1151,7 @@ impl Router {
             crate::k_estimator::LedgerBackedK::new(k_session_store.clone()),
         );
         let shadow_store = Arc::new(crate::k_estimator::ShadowStore::default());
+        let calibration_store = Arc::new(crate::calibration::CalibrationStore::default());
         // Registry tempo comes from the `[capability]` knobs (hours ->
         // Duration); the kill switch is deliberately NOT read here -- the
         // act / learn sites gate on it, so a disabled subsystem keeps the
@@ -1165,6 +1180,7 @@ impl Router {
             k_session_store,
             k_estimator,
             shadow_store,
+            calibration_store,
             learned_capabilities,
             learned_replay,
             override_registry,
@@ -1317,6 +1333,25 @@ impl Router {
             .import_entries(previous.k_session_store.export_entries());
     }
 
+    /// Carry the previous Router's per-lane token-estimate correction
+    /// evidence into this freshly-built Router during a hot-reload.
+    ///
+    /// Mandatory. Each lane's samples are minutes-to-hours of accumulated
+    /// evidence about how far that model's real token count sits from the
+    /// router's byte-length estimate. Dropping them on a rebuild sends every
+    /// lane back to the uncorrected estimate until traffic re-warms it -- and
+    /// because the uncorrected estimate is exactly the pre-correction
+    /// behavior, the loss is invisible: nothing errors, nothing warns, every
+    /// lane simply reads as not-yet-calibrated, which is indistinguishable
+    /// from health.
+    ///
+    /// No ordering discipline (unlike the LRU-shaped session carries): the
+    /// lane map never evicts, so there is no eviction frontier to preserve.
+    pub fn carry_over_calibration_from(&mut self, previous: &Self) {
+        self.calibration_store
+            .import_entries(previous.calibration_store.export_entries());
+    }
+
     /// Install the catalog overlay this Router's resolved-model table was
     /// merged against, stamping its revision at the same time. Called by the
     /// CLI builder immediately after the resolved models are merged with the
@@ -1460,6 +1495,49 @@ impl Router {
                 observed_reuse: cache_read > 0,
             },
         );
+    }
+
+    /// Record one live token-estimate observation into the per-lane
+    /// calibration store. Called best-effort from the ingress capture path
+    /// AFTER the served target and the response's own prompt total are known.
+    ///
+    /// A lane requires BOTH halves of its key: the served provider kind and
+    /// the served model NICKNAME. A target missing either forms no lane and
+    /// the call is a no-op -- deliberately NOT falling back to the upstream
+    /// wire id, because that label is what a later ledger-driven rebuild
+    /// cannot reproduce, and a live path recording under a label the rebuild
+    /// filters out would make the two disagree about the same lane.
+    ///
+    /// `session_key` names the CALLER the observation came from and is used
+    /// only to derive an opaque cohort tag, so that no single high-volume
+    /// caller defines a lane's correction. It is a reduction dimension only,
+    /// never part of the lane key, and it is hashed before it is stored: the
+    /// store outlives the request and must hold nothing that identifies one.
+    /// Every keyless request shares one cohort, so a lane fed only keyless
+    /// traffic never reaches the distinct-cohort floor and stays uncorrected.
+    ///
+    /// A single mutex lock plus a small push; it must never fail, panic, or
+    /// meaningfully slow the request, so it returns nothing and swallows the
+    /// no-lane case silently.
+    pub fn record_calibration_sample(
+        &self,
+        provider_kind: Option<&str>,
+        nickname: Option<&str>,
+        session_key: Option<&str>,
+        estimated_tokens: u64,
+        prompt_tokens: u64,
+        ts: std::time::SystemTime,
+    ) {
+        let (Some(provider_kind), Some(nickname)) = (provider_kind, nickname) else {
+            return;
+        };
+        let key = crate::calibration::LaneKey {
+            provider_kind: provider_kind.to_string(),
+            nickname: nickname.to_string(),
+        };
+        let cohort = session_key.map_or(0, crate::log_hash::salted_log_hash);
+        self.calibration_store
+            .record(key, estimated_tokens, prompt_tokens, cohort, ts);
     }
 
     /// Look up a model nickname in the resolved table.

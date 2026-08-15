@@ -328,6 +328,18 @@
       },
       "type": "object"
     },
+    "CalibrationConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[calibration]` config block. Kill switch for the\nlearned per-lane correction of the router's token estimate. A missing\n`[calibration]` table deserializes to `CalibrationConfig::default()`\n(enabled), so an existing config needs no migration.\n\nDefault ON is safe because a lane produces no correction until it has\naccumulated real evidence: a fresh install behaves exactly as it would\nwith the switch off, and every refusal path (thin evidence, stale\nevidence, an out-of-band reduced ratio) falls back to the uncorrected\nestimate.\n\nOff stops the correction from being APPLIED and nothing else. The static\ncontext-window gate keeps gating on the uncorrected estimate, and the\ncollected evidence is retained, so switching back on is instant rather\nthan a re-learn.\n\nOne field deliberately, following `WindowGateConfig`: the reduction's\nsample floors and sane band are baked constants, not operator knobs,\nbecause a per-deployment band turns a routing decision into a support\nsurface.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Master switch for applying the learned correction. Default on.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "CapabilityConfig": {
       "additionalProperties": false,
       "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window, 14d staleness hint), and each per-field\n`#[serde(default)]` keeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets. `staleness_hint_days` sets the\nage past which a verified capability reads as stale in diagnostics\n(display-only; not wired into the act path).\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.\n\n`overrides` is the operator capability-override map. It nests under\nthis existing `[capability]` parent as `[capability.overrides]` -- no\nnew top-level Config section is introduced, so the config-classify\ncoverage in routectl-cli stays exhaustive.",
@@ -1994,6 +2006,13 @@
       "default": {},
       "description": "Operator-facing LEGACY `[cache_pricing]` field-level override table\nfor the baked catalog economics rows (`crate::catalog`). Slated for\nretirement once its data migrates into the catalog overlay\n(`crate::catalog_overlay`). Each\nkey is a `\"provider_kind:model_glob\"` selector (e.g.\n`\"openai-compat:grok-*\"`); each value is a sparse\n[`crate::catalog::CachePricingOverride`] -- only the fields the\noperator wants to correct, the rest inheriting the baked-in value.\nAn empty / omitted block is the norm; this exists to patch a cell\nthat drifted before a routectl release can re-bake it. An override\nthat sets `wm` below the conservative sentinel must carry\n`override_acknowledges_cost_risk = true` or the merge is rejected by\nthe consuming cost gate. The selector keys are NOT validated against\nthe baked table here (an unmatched selector is simply inert).",
       "type": "object"
+    },
+    "calibration": {
+      "$ref": "#/$defs/CalibrationConfig",
+      "default": {
+        "enabled": true
+      },
+      "description": "Operator-facing `[calibration]` block. Kill switch for the learned\nper-lane correction of the router's token estimate. A missing block\nleaves the correction enabled; setting `enabled = false` makes the\ncontext-window gate read the uncorrected estimate exactly as it did\nbefore the correction existed, while retaining the evidence already\ncollected. Hot-reloadable -- the flag is read per chain resolution."
     },
     "capability": {
       "$ref": "#/$defs/CapabilityConfig",

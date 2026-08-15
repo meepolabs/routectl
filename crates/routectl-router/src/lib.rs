@@ -12,6 +12,7 @@
 
 pub(crate) mod activation;
 pub(crate) mod anthropic_family;
+pub(crate) mod calibration;
 pub(crate) mod capability_detect;
 pub(crate) mod capability_display;
 pub(crate) mod capability_matcher;
@@ -94,11 +95,12 @@ pub use catalog_state::{
     selector_key as catalog_state_selector_key,
 };
 pub use config::{
-    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CapabilityConfig, Config,
-    ConfigVersionError, HistoryReasoning, LegacyMitmCredentialSourceError, LogConfig, MitmConfig,
-    ModelEntry, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
-    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig,
-    TrimConfig, UsageConfig, VersionTooNewError, WindowGateConfig, preflight_config_version,
+    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CalibrationConfig,
+    CapabilityConfig, Config, ConfigVersionError, HistoryReasoning,
+    LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, OverrideEntry,
+    PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
+    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
+    VersionTooNewError, WindowGateConfig, preflight_config_version,
     preflight_legacy_mitm_credential_source, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]

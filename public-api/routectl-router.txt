@@ -1565,6 +1565,73 @@ impl<T> typenum::type_operators::Same for routectl_router::CacheConfig
 pub type routectl_router::CacheConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CacheConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::CacheConfig::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::config::CalibrationConfig
+pub routectl_router::config::CalibrationConfig::enabled: bool
+impl core::clone::Clone for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::clone(&self) -> routectl_router::CalibrationConfig
+impl core::cmp::Eq for routectl_router::CalibrationConfig
+impl core::cmp::PartialEq for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::eq(&self, &routectl_router::CalibrationConfig) -> bool
+impl core::default::Default for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::default() -> Self
+impl core::fmt::Debug for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::CalibrationConfig
+impl schemars::JsonSchema for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::inline_schema() -> bool
+pub fn routectl_router::CalibrationConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::CalibrationConfig::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::CalibrationConfig::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::CalibrationConfig
+impl core::marker::Send for routectl_router::CalibrationConfig
+impl core::marker::Sync for routectl_router::CalibrationConfig
+impl core::marker::Unpin for routectl_router::CalibrationConfig
+impl core::marker::UnsafeUnpin for routectl_router::CalibrationConfig
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CalibrationConfig
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CalibrationConfig
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CalibrationConfig where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CalibrationConfig where U: core::convert::From<T>
+pub fn routectl_router::CalibrationConfig::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CalibrationConfig where U: core::convert::Into<T>
+pub type routectl_router::CalibrationConfig::Error = core::convert::Infallible
+pub fn routectl_router::CalibrationConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CalibrationConfig where U: core::convert::TryFrom<T>
+pub type routectl_router::CalibrationConfig::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CalibrationConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub type routectl_router::CalibrationConfig::Owned = T
+pub fn routectl_router::CalibrationConfig::clone_into(&self, &mut T)
+pub fn routectl_router::CalibrationConfig::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub fn routectl_router::CalibrationConfig::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CalibrationConfig where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CalibrationConfig where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CalibrationConfig where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub unsafe fn routectl_router::CalibrationConfig::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub fn routectl_router::CalibrationConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CalibrationConfig
+impl<T> serde_core::de::DeserializeOwned for routectl_router::CalibrationConfig where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CalibrationConfig where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CalibrationConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CalibrationConfig
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CalibrationConfig
+impl<T> typenum::type_operators::Same for routectl_router::CalibrationConfig
+pub type routectl_router::CalibrationConfig::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CalibrationConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CalibrationConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::config::CapabilityConfig
 pub routectl_router::config::CapabilityConfig::decay_hours: u64
 pub routectl_router::config::CapabilityConfig::enabled: bool
@@ -1641,6 +1708,7 @@ pub routectl_router::config::Config::aliases: alloc::collections::btree::map::BT
 pub routectl_router::config::Config::bedrock: routectl_router::BedrockGlobalConfig
 pub routectl_router::config::Config::cache: routectl_router::CacheConfig
 pub routectl_router::config::Config::cache_pricing: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>
+pub routectl_router::config::Config::calibration: routectl_router::CalibrationConfig
 pub routectl_router::config::Config::capability: routectl_router::CapabilityConfig
 pub routectl_router::config::Config::log: routectl_router::LogConfig
 pub routectl_router::config::Config::mitm: core::option::Option<routectl_router::MitmConfig>
@@ -3252,6 +3320,7 @@ pub struct routectl_router::router::Router
 pub routectl_router::router::Router::config: alloc::sync::Arc<routectl_router::config::Config>
 pub routectl_router::router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
@@ -3265,6 +3334,7 @@ pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::co
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary
+pub fn routectl_router::router::Router::record_calibration_sample(&self, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, u64, u64, std::time::SystemTime)
 pub fn routectl_router::router::Router::record_k_sample(&self, core::option::Option<&str>, &str, &str, u64, std::time::SystemTime)
 pub fn routectl_router::router::Router::register(&mut self, impl core::convert::Into<alloc::string::String>, alloc::sync::Arc<dyn routectl_core::provider::Provider>)
 impl routectl_router::router::Router
@@ -7002,6 +7072,73 @@ impl<T> typenum::type_operators::Same for routectl_router::catalog::CachePricing
 pub type routectl_router::catalog::CachePricingSelector::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::catalog::CachePricingSelector where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::catalog::CachePricingSelector::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::CalibrationConfig
+pub routectl_router::CalibrationConfig::enabled: bool
+impl core::clone::Clone for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::clone(&self) -> routectl_router::CalibrationConfig
+impl core::cmp::Eq for routectl_router::CalibrationConfig
+impl core::cmp::PartialEq for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::eq(&self, &routectl_router::CalibrationConfig) -> bool
+impl core::default::Default for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::default() -> Self
+impl core::fmt::Debug for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::CalibrationConfig
+impl schemars::JsonSchema for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::inline_schema() -> bool
+pub fn routectl_router::CalibrationConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::CalibrationConfig::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::CalibrationConfig::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::CalibrationConfig
+impl core::marker::Send for routectl_router::CalibrationConfig
+impl core::marker::Sync for routectl_router::CalibrationConfig
+impl core::marker::Unpin for routectl_router::CalibrationConfig
+impl core::marker::UnsafeUnpin for routectl_router::CalibrationConfig
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CalibrationConfig
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CalibrationConfig
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CalibrationConfig where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CalibrationConfig where U: core::convert::From<T>
+pub fn routectl_router::CalibrationConfig::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CalibrationConfig where U: core::convert::Into<T>
+pub type routectl_router::CalibrationConfig::Error = core::convert::Infallible
+pub fn routectl_router::CalibrationConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CalibrationConfig where U: core::convert::TryFrom<T>
+pub type routectl_router::CalibrationConfig::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CalibrationConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub type routectl_router::CalibrationConfig::Owned = T
+pub fn routectl_router::CalibrationConfig::clone_into(&self, &mut T)
+pub fn routectl_router::CalibrationConfig::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub fn routectl_router::CalibrationConfig::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CalibrationConfig where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CalibrationConfig where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CalibrationConfig where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub unsafe fn routectl_router::CalibrationConfig::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CalibrationConfig
+pub fn routectl_router::CalibrationConfig::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CalibrationConfig where T: core::clone::Clone
+pub fn routectl_router::CalibrationConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CalibrationConfig
+impl<T> serde_core::de::DeserializeOwned for routectl_router::CalibrationConfig where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CalibrationConfig where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CalibrationConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CalibrationConfig
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CalibrationConfig
+impl<T> typenum::type_operators::Same for routectl_router::CalibrationConfig
+pub type routectl_router::CalibrationConfig::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CalibrationConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CalibrationConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::CapabilityConfig
 pub routectl_router::CapabilityConfig::decay_hours: u64
 pub routectl_router::CapabilityConfig::enabled: bool
@@ -7587,6 +7724,7 @@ pub routectl_router::Config::aliases: alloc::collections::btree::map::BTreeMap<a
 pub routectl_router::Config::bedrock: routectl_router::BedrockGlobalConfig
 pub routectl_router::Config::cache: routectl_router::CacheConfig
 pub routectl_router::Config::cache_pricing: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>
+pub routectl_router::Config::calibration: routectl_router::CalibrationConfig
 pub routectl_router::Config::capability: routectl_router::CapabilityConfig
 pub routectl_router::Config::log: routectl_router::LogConfig
 pub routectl_router::Config::mitm: core::option::Option<routectl_router::MitmConfig>
@@ -10577,6 +10715,7 @@ pub struct routectl_router::Router
 pub routectl_router::Router::config: alloc::sync::Arc<routectl_router::config::Config>
 pub routectl_router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
@@ -10590,6 +10729,7 @@ pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::co
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary
+pub fn routectl_router::router::Router::record_calibration_sample(&self, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, u64, u64, std::time::SystemTime)
 pub fn routectl_router::router::Router::record_k_sample(&self, core::option::Option<&str>, &str, &str, u64, std::time::SystemTime)
 pub fn routectl_router::router::Router::register(&mut self, impl core::convert::Into<alloc::string::String>, alloc::sync::Arc<dyn routectl_core::provider::Provider>)
 impl routectl_router::router::Router

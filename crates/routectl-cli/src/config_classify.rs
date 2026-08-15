@@ -40,6 +40,7 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "reduction",
     "trim",
     "window_gate",
+    "calibration",
     "cache_pricing",
     "capability",
 ];

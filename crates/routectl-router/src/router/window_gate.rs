@@ -17,6 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use routectl_core::ChatRequest;
 
+use crate::calibration::{Factor, LaneKey};
+
 use super::{DispatchTarget, Router};
 
 /// Numerator of the safety margin the estimate must exceed before a target
@@ -112,9 +114,33 @@ struct SkipReport {
     state_key: String,
     nickname: String,
     window: u64,
+    corrected_tokens: u64,
 }
 
 impl Router {
+    /// The learned per-lane correction to apply to this target's estimate,
+    /// or `None` to compare the raw estimate exactly as the static gate does.
+    ///
+    /// Every refusal collapses here: the kill switch, a target that forms no
+    /// lane (either half of the key absent), an unseen lane, one with too
+    /// little or too old evidence, and one whose reduced ratio fell outside
+    /// the sane band. One `None`, so there is one fallback path.
+    ///
+    /// The lane's model dimension is the served NICKNAME, the same label the
+    /// recording path writes under. Keying it on the upstream wire id would
+    /// silently never match, holding every lane uncorrected forever while
+    /// reading as health.
+    fn calibration_factor(&self, target: &DispatchTarget, now: SystemTime) -> Option<Factor> {
+        if !self.config.calibration.enabled {
+            return None;
+        }
+        let key = LaneKey {
+            provider_kind: (*target.provider_kind.as_ref()?).to_string(),
+            nickname: target.nickname.clone()?,
+        };
+        self.calibration_store.factor_for(&key, now)
+    }
+
     /// Skip chain targets whose context window clearly cannot hold the
     /// estimated request, keyed on the shipped safety margin.
     ///
@@ -152,6 +178,9 @@ impl Router {
         let mut estimate: Option<u64> = None;
         let mut overflowing: Vec<bool> = vec![false; chain.len()];
         let mut first_skipped: Option<SkipReport> = None;
+        // One clock read for the whole pass, so every target's evidence is
+        // aged against the same instant.
+        let now = SystemTime::now();
         for (idx, target) in chain.iter().enumerate() {
             // An unconfirmed window (unset, `Disabled`, or `Missing`) KEEPS
             // the target: skipping is the aggressive behavior here, and an
@@ -169,8 +198,16 @@ impl Router {
             // against.
             let estimated_tokens =
                 *estimate.get_or_insert_with(|| crate::context_trim::estimate_total_tokens(req));
+            // The corrected figure is a LOCAL, deliberately. Each target is
+            // its own lane, so one raw serialization feeds a per-target
+            // corrected value here -- and no other estimate consumer can
+            // adopt this number, which is what keeps the persisted
+            // estimate columns meaning exactly what they meant before.
+            let corrected_tokens = self
+                .calibration_factor(target, now)
+                .map_or(estimated_tokens, |factor| factor.apply(estimated_tokens));
             let window = u64::from(window);
-            if !exceeds_window_margin(estimated_tokens, window) {
+            if !exceeds_window_margin(corrected_tokens, window) {
                 continue;
             }
             overflowing[idx] = true;
@@ -179,6 +216,7 @@ impl Router {
                     state_key: target.state_key.clone(),
                     nickname: target.nickname.clone().unwrap_or_default(),
                     window,
+                    corrected_tokens,
                 });
             }
         }
@@ -204,12 +242,18 @@ impl Router {
         // target. routectl-internal identifiers (state key, model nickname)
         // and catalog / estimate figures ONLY -- never anything from the
         // request body, its tools, its attachments, or the session key.
+        //
+        // Both figures are reported: the raw estimate, and the corrected one
+        // the decision actually used. They are equal on an uncorrected lane,
+        // and their divergence is the only way an operator can see a learned
+        // correction move a skip.
         if throttle.claim(now_epoch_secs()) {
             tracing::warn!(
                 event = "window_gate_skip",
                 state_key = %report.state_key,
                 model = %report.nickname,
                 estimated_tokens,
+                corrected_tokens = report.corrected_tokens,
                 window_tokens = report.window,
                 skips_total,
                 "target context window cannot hold the estimated request; \

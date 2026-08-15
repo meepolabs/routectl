@@ -539,6 +539,7 @@ async fn rebuild_router_for_seat_change(
     new_router.carry_over_runtime_state_from(&router_swap.load_full());
     new_router.carry_over_sticky_from(&router_swap.load_full());
     new_router.carry_over_k_store_from(&router_swap.load_full());
+    new_router.carry_over_calibration_from(&router_swap.load_full());
     new_router.carry_over_learned_from(&router_swap.load_full());
     router_swap.store(Arc::new(new_router));
     tracing::info!(
@@ -625,6 +626,7 @@ pub(super) async fn handle_config_reload(
     new_router.carry_over_runtime_state_from(&previous_router);
     new_router.carry_over_sticky_from(&previous_router);
     new_router.carry_over_k_store_from(&previous_router);
+    new_router.carry_over_calibration_from(&previous_router);
     new_router.carry_over_learned_from(&previous_router);
 
     // A reload that advanced the catalog version or overlay revision moves the
