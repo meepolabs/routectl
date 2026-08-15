@@ -594,7 +594,7 @@ fn carry_over_calibration_from_preserves_a_learned_factor() {
         .factor_for(&key, now)
         .expect("the fed evidence clears the reduction's floors");
 
-    let mut after = Router::new(config);
+    let mut after = router_serving_nicknames(&config, &[nickname]);
     assert_eq!(
         after.calibration_store.factor_for(&key, now),
         None,
@@ -607,6 +607,100 @@ fn carry_over_calibration_from_preserves_a_learned_factor() {
     // Assert: the SAME factor survives, not merely some factor.
     assert_eq!(after.calibration_store.factor_for(&key, now), Some(learned));
     assert_eq!(after.calibration_store.export_entries().len(), 1);
+}
+
+#[test]
+fn carry_over_calibration_from_drops_lanes_the_new_config_no_longer_serves() {
+    // The store has no LRU because the lane keyspace is bounded by the loaded
+    // config. An unfiltered carry-over breaks that bound: a run of reloads
+    // that rename models would carry every retired name forward forever,
+    // growing the map with lanes no request can ever reach. Only the lane
+    // whose nickname the new resolved table still holds survives.
+    use std::time::SystemTime;
+
+    let kind = "openai-compat";
+    let now = SystemTime::now();
+
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    for nickname in ["kept", "retired"] {
+        for i in 0..9 {
+            before.record_calibration_sample(
+                Some(kind),
+                Some(nickname),
+                Some(&format!("caller-{}", i % 3)),
+                10_000,
+                13_000,
+                now,
+            );
+        }
+    }
+    assert_eq!(before.calibration_store.len(), 2);
+
+    // Act: the replacement router serves only `kept`.
+    let mut after = router_serving_nicknames(&config, &["kept"]);
+    after.carry_over_calibration_from(&before);
+
+    // Assert
+    let surviving: Vec<String> = after
+        .calibration_store
+        .export_entries()
+        .into_iter()
+        .map(|(key, _)| key.nickname)
+        .collect();
+    assert_eq!(surviving, vec!["kept".to_string()]);
+}
+
+/// A Router serving exactly `nicknames` out of its resolved table, so the
+/// calibration carry-over's nickname filter has something to admit against.
+/// The models resolve onto a stub provider; these tests never dispatch.
+fn router_serving_nicknames(config: &Arc<Config>, nicknames: &[&str]) -> Router {
+    use routectl_core::{ChatChunk, ChatResponse, Provider};
+
+    struct StubProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for StubProvider {
+        fn id(&self) -> &'static str {
+            "stub"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> routectl_core::Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> routectl_core::Result<ChatResponse> {
+            Err(Error::normalize_response("stub", "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> routectl_core::Result<ChatResponse> {
+            unreachable!("calibration carry-over tests never dispatch")
+        }
+        async fn stream(
+            &self,
+            _: ChatRequest,
+        ) -> routectl_core::Result<
+            futures::stream::BoxStream<'static, routectl_core::Result<ChatChunk>>,
+        > {
+            unreachable!("calibration carry-over tests never dispatch")
+        }
+    }
+
+    let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+    let mut router = Router::new(config.clone());
+    let models = nicknames
+        .iter()
+        .map(|nickname| {
+            (
+                (*nickname).to_string(),
+                Arc::new(ResolvedModel::new(
+                    *nickname,
+                    "p",
+                    provider.clone(),
+                    "upstream",
+                )),
+            )
+        })
+        .collect();
+    router.install_resolved_models(models);
+    router
 }
 
 #[test]

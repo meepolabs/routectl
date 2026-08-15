@@ -477,12 +477,19 @@ async fn complete_response<A: IngressAdapter>(
             // response; a keyless / no-served-target request is skipped
             // inside the helper.
             capture.record_k_sample(&router, session_key.as_deref());
-            capture.record_calibration_sample(&router, session_key.as_deref());
             match adapter.render_response(resp) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
                     // only path where the client receives 200 + body, so
                     // finalize `ok` here rather than before the render.
+                    //
+                    // The live calibration sample respects the SAME boundary.
+                    // A render failure finalizes `UpstreamError`, which clears
+                    // both persisted evidence columns; recording before the
+                    // render would leave the in-memory store holding a sample
+                    // the ledger refused, so the lane would route one way now
+                    // and another way after a restart rebuilt from the ledger.
+                    capture.record_calibration_sample(&router, session_key.as_deref());
                     capture.finalize(Outcome::Ok);
                     // The trace-level egress body (dir 4) fires inside the
                     // adapter render now, before the single `to_vec`: the
