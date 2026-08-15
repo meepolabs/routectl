@@ -1719,7 +1719,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   two-phase learn (`commit` on stripped-repair success, `settle_success` ->
   clear-on-carried-success returning the `CapabilityClearedEvent` rows for
   `DispatchMeta.cleared_capabilities`, unsettled `Drop` on an unrelated error)
-  and records the `DispatchMeta.replay_degradation` summary
+  and records the `DispatchMeta.replay_degradation` summary; owns
+  `strip_replay_artifacts_recalibrating`, THE dispatch-path strip entry point,
+  which re-stamps `DispatchMeta.calib_estimated_tokens` whenever a strip
+  actually shrank the payload
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
