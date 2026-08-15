@@ -1851,9 +1851,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `filter_chain_by_window` skips a target whose confirmed
   `max_context_tokens` clearly cannot hold `context_trim::estimate_total_tokens`,
   keyed on the `exceeds_window_margin` integer-ratio predicate
-  (`WINDOW_MARGIN_NUMERATOR`/`_DENOMINATOR`, shipped at 3/4 -- conservative
-  against the estimator's asymmetric deflate error, deliberately not an
-  operator knob). Under the `[window_gate]` kill switch, whose OFF path
+  (`WINDOW_MARGIN_NUMERATOR`/`_DENOMINATOR`, shipped at 3/4 -- low enough to
+  cover an estimator deflate up to 4/3, and below the effective input ceiling
+  the output reserve leaves (~0.68 of a 200k-class window), deliberately not
+  an operator knob). Under the `[window_gate]` kill switch, whose OFF path
   returns before any estimate exists. Never empties the chain and has NO
   empty-chain error path (the deliberate contract difference from
   `feature_filter`): a chain of one, an unconfirmed / `Disabled` / `Missing`

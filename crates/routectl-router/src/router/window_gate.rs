@@ -27,11 +27,26 @@ const WINDOW_MARGIN_NUMERATOR: u64 = 3;
 /// past 3/4 of the window.
 ///
 /// An INTEGER ratio, deliberately: a routing decision must not hinge on a
-/// float comparison. The value is conservative against the estimator's
-/// ASYMMETRIC error -- a byte-length estimate deflates by roughly 1.3-1.5x
-/// on high-entropy prose, the only direction that can make a skip wrong, and
-/// 3/4 leaves headroom for it. Not an operator knob: a margin tuned per
-/// deployment turns a routing decision into a support surface.
+/// float comparison.
+///
+/// Lowering the ratio is what guards the estimator's DEFLATE direction: a
+/// byte-length estimate deflates by roughly 1.3-1.5x on high-entropy prose,
+/// and 3/4 covers a deflate factor up to 4/3. The 1.5x tail is deliberately
+/// left to the reactive backstop. Both error directions are survivable, and
+/// they cost differently: an underestimate MISSES a skip, costing one doomed
+/// round trip before the request falls onward; an overestimate makes a FALSE
+/// skip, which among confirmed windows is a re-route rather than a denial,
+/// because one estimate is compared against every window, so every surviving
+/// confirmed-window target is strictly larger and therefore also fits.
+///
+/// 3/4 is not slack. The catalog window is TOTAL context, while the output
+/// reserve on Anthropic-shape lanes (up to 64k by default) is subtracted from
+/// it before any input fits, so the effective INPUT ceiling is lower than the
+/// window -- on a 200k-class lane it lands near 0.68 of it, under the
+/// fraction at which this margin skips.
+///
+/// Not an operator knob: a margin tuned per deployment turns a routing
+/// decision into a support surface.
 const WINDOW_MARGIN_DENOMINATOR: u64 = 4;
 
 /// Minimum seconds between two skip WARNs in one process. A broken or
