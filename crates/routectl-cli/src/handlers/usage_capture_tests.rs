@@ -206,6 +206,67 @@ fn observe_response_fully_cached_prompt_stores_zero() {
     assert_eq!(cap.record.input_tokens, Some(0_u64));
 }
 
+// -------- calibration evidence: the cache-inclusive prompt total ----------
+//
+// The evidence denominator is the canonical `prompt_tokens`, which is
+// cache-INCLUSIVE on every egress. The whole reason it gets its own column
+// rather than being reconstructed from `input_tokens` plus the cache columns
+// is that `input_tokens` is the cache-EXCLUSIVE residual, and its subtraction
+// uses the AGGREGATE cache-creation total, which is never persisted -- only
+// the frequently-absent per-TTL split is. The fully-cached case below is the
+// sharpest form of that: the residual is 0 while the real prompt total is the
+// entire window.
+//
+// These assert on the PERSISTED row, not the in-memory draft: `finalize`
+// stamps the admission decision and moves the record into the writer in one
+// step, so the ledger is the only place the decision is observable -- which
+// makes these the end-to-end round-trip proof as well.
+
+/// A capture plus everything needed to drain it to disk and read the row
+/// back: the handle (to poll the persisted counter), the writer (to flush on
+/// shutdown), the tempdir guard, and the DB path.
+fn capture_over_a_readable_db() -> (
+    UsageCapture,
+    UsageHandle,
+    UsageWriter,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let req = routectl_core::ChatRequest {
+        model: "m".to_string(),
+        messages: vec![Message {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            refusal: None,
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let draft = build_usage_draft("anthropic", &req, "calib-row".to_string());
+    let cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    (cap, handle, writer, dir, db_path)
+}
+
+/// The persisted `(calib_estimated_tokens, calib_prompt_tokens)` pair.
+fn persisted_evidence_pair(path: &std::path::Path) -> (Option<i64>, Option<i64>) {
+    let conn = rusqlite::Connection::open(path).expect("read open");
+    conn.query_row(
+        "SELECT calib_estimated_tokens, calib_prompt_tokens \
+         FROM requests WHERE request_id='calib-row'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .expect("row")
+}
+
 /// Spin until the writer has persisted `want` rows or a deadline passes.
 fn wait_persisted(handle: &UsageHandle, want: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -216,6 +277,122 @@ fn wait_persisted(handle: &UsageHandle, want: u64) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     true
+}
+
+#[tokio::test]
+async fn fully_cached_prompt_records_the_whole_cache_inclusive_total() {
+    // Arrange: every one of the 1000 prompt tokens came from cache (700
+    // read + 300 created), so the cache-EXCLUSIVE residual is exactly 0.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let resp = response_with_cache(Some(1000), Some(700), Some(300), None);
+
+    // Act
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: the persisted evidence total is the FULL prompt. Sourcing it
+    // from the cache-exclusive `input_tokens` column would store 0 here --
+    // this exact number is why the column exists.
+    let (_, prompt) = persisted_evidence_pair(&path);
+    assert_eq!(
+        prompt,
+        Some(1000),
+        "the evidence total must be the cache-inclusive prompt"
+    );
+    let residual: Option<i64> = rusqlite::Connection::open(&path)
+        .expect("read open")
+        .query_row(
+            "SELECT input_tokens FROM requests WHERE request_id='calib-row'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("row");
+    assert_eq!(
+        residual,
+        Some(0),
+        "sanity: the cache-exclusive residual really is zero for this request"
+    );
+}
+
+#[tokio::test]
+async fn streaming_fully_cached_prompt_records_the_whole_cache_inclusive_total() {
+    // Arrange: the terminal delta carries the same cumulative usage.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let chunk = chunk_with_cache(Some(1000), Some(700), Some(300), None);
+
+    // Act
+    cap.observe_chunk(&chunk);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: parity with the non-streaming path.
+    let (_, prompt) = persisted_evidence_pair(&path);
+    assert_eq!(prompt, Some(1000));
+}
+
+#[tokio::test]
+async fn success_with_an_unreported_prompt_total_records_no_evidence() {
+    // Arrange: usage present but the prompt total is a reported 0 -- the
+    // canonical field is not optional, so an upstream that reports nothing
+    // is indistinguishable from one reporting zero at this layer.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let resp = response_with_cache(Some(0), None, None, None);
+
+    // Act
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: refused rather than stored -- a 0 denominator is a data bug,
+    // not evidence.
+    let (_, prompt) = persisted_evidence_pair(&path);
+    assert_eq!(prompt, None);
+}
+
+#[tokio::test]
+async fn non_success_outcome_records_no_evidence_even_with_a_reported_total() {
+    // Arrange: a real prompt total observed, but the request then failed.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let resp = response_with_cache(Some(1000), Some(600), Some(300), None);
+
+    // Act
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::UpstreamError);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: a failed request pairs no trustworthy estimate with an actual.
+    let (_, prompt) = persisted_evidence_pair(&path);
+    assert_eq!(prompt, None);
+}
+
+#[tokio::test]
+async fn both_evidence_values_round_trip_to_the_ledger_together() {
+    // Arrange: the estimate arrives via the dispatch meta (as the router
+    // stamps it) and the actual via the response usage.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let mut meta = any_dispatch_meta().await;
+    meta.calib_estimated_tokens = Some(9_500);
+    let resp = response_with_cache(Some(10_000), Some(4_000), Some(1_000), None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: raw numerator and denominator, both intact, neither averaged.
+    assert_eq!(persisted_evidence_pair(&path), (Some(9_500), Some(10_000)));
 }
 
 /// A `UsageCapture` plus the handle (so tests can poll the persisted

@@ -1674,7 +1674,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `routectl::feature_unsupported` INFO via `emit_feature_unsupported` on a
   lift, and bumps the `RouterMetrics` counters. Would-trim recording lives
   here with the loop: `record_would_trim` + `would_trim_k_floor_for_meta` +
-  `record_near_lossless_marks` (`NEAR_LOSSLESS_RECORDER_VERSION`). The
+  `record_near_lossless_marks` (`NEAR_LOSSLESS_RECORDER_VERSION`).
+  `record_would_trim` additionally stamps
+  `DispatchMeta.calib_estimated_tokens` -- the token-estimate calibration
+  numerator -- BEFORE its `trigger_tokens` early return, reusing the estimate
+  it already computes, so the evidence lands on every dispatched attempt
+  rather than only on trim-triggering ones (last-writer-wins across a chain
+  walk leaves the served attempt's estimate). The
   dispatch-path context reducer (`apply_json_minify`,
   `reduction_strategy_token` -> `DispatchMeta.reduction_strategy`) runs after
   overlays and before the auto-cache injection call
@@ -2574,7 +2580,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   EXISTS` in one transaction with the version bump, fresh-create and
   migrated-open both covered) -- the unified forever-contract ledger the
   warm-rebuild replayer reads on boot; carries no body / message / prompt
-  column (log hygiene)
+  column (log hygiene). v14 (`SCHEMA_VERSION = 14`) appends the nullable
+  token-estimate calibration pair `calib_estimated_tokens` (routectl's own
+  byte-heuristic estimate of the dispatched payload, stamped for every
+  dispatched attempt) + `calib_prompt_tokens` (the upstream's CACHE-INCLUSIVE
+  prompt total, recorded only on a success and only when nonzero) via
+  `migrate_v13_to_v14` (guarded `ALTER TABLE requests ADD COLUMN ...`, one
+  transaction with the version bump, same append-last shape whether created
+  fresh at v14 or migrated from v13; no backfill). The pair is raw
+  numerator/denominator, never a stored ratio, and `calib_prompt_tokens` is
+  deliberately NOT derived from `input_tokens + cache_read + cache_write_*`:
+  `input_tokens` is the cache-EXCLUSIVE residual whose subtraction uses the
+  aggregate cache-creation total, which is not persisted -- a derivation runs
+  short on most cache-reusing rows
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
@@ -2868,7 +2886,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   common non-capability path, best-effort like every usage write. The legacy
   `capability_learn_events` write path is RETIRED here (the request path no
   longer calls `try_send_learn_event`; the table / variant /
-  `try_send_learn_event` remain, deprecation-doc-commented, no DROP)
+  `try_send_learn_event` remain, deprecation-doc-commented, no DROP). Also
+  owns the token-estimate calibration pair's capture side: `observe_meta`
+  copies `DispatchMeta::calib_estimated_tokens` (the numerator the router
+  stamps per dispatched attempt), `observe_response` / `observe_chunk` hold the
+  cache-INCLUSIVE canonical `prompt_tokens` on the guard, and `finalize`
+  admits it into `calib_prompt_tokens` via `admissible_prompt_total` -- success
+  outcome AND a nonzero reported total, otherwise NULL (the canonical field is
+  not optional, so an unreported total arrives as a real 0)
 - `src/handlers/status/mod.rs` -- read-only `/status` family. `StatusState`
   carries ONLY read handles (a `StatusRouterHandle` read-only facade over the
   router `ArcSwap` -- see `router_view.rs` -- plus the `activation` `ArcSwap`

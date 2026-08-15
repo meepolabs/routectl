@@ -1749,22 +1749,26 @@ impl Router {
 
     /// NON-MUTATING would-trim advisory recording, gated by ONE independent
     /// check: the request's estimated token count clears
-    /// `params.trigger_tokens`. Below the trigger, records nothing at all
-    /// (every `would_trim_*` field stays `None`) and returns early. At or
-    /// above it, runs TWO independent measurements against the same
-    /// resolved `(provider_kind, model)` pricing row:
+    /// `params.trigger_tokens`. Below the trigger, records no would-trim
+    /// advisory at all (every `would_trim_*` field stays `None`) and returns
+    /// early. At or above it, runs TWO independent measurements against the
+    /// same resolved `(provider_kind, model)` pricing row:
     ///
     /// 1. The shipped size-baseline plan (`propose_steady_state_trim`):
     ///    freed-token count `d`, break-even K*, `k_floor`, and the shadow
-    ///    misfire monitor. UNCHANGED by this task -- still driven entirely
-    ///    by the `propose` path, and still records nothing when `propose`
-    ///    finds no cut (its own columns stay `None`).
+    ///    misfire monitor. Records nothing when `propose` finds no cut (its
+    ///    own columns stay `None`).
     /// 2. The near-lossless pass (`record_near_lossless_marks`): dedup /
     ///    supersession attribution, path-extractability counts, the
     ///    recorder-version marker, the raw-marks blob, and the
     ///    context-fraction advisory. Runs INDEPENDENTLY of whether (1)
     ///    found a cut, so near-lossless opportunity is measured even where
     ///    the size baseline declines.
+    ///
+    /// `meta.calib_estimated_tokens` is the ONE exception to the trigger
+    /// gate: it is stamped before the early return, for every dispatched
+    /// attempt. It is calibration evidence, not a trim advisory -- gating it
+    /// on size would train a correction factor on large requests only.
     ///
     /// CRITICAL: this NEVER mutates `attempt_req`. Both measurements only
     /// read the request and never call `apply_trim_plan`, so the bytes sent
@@ -1818,7 +1822,14 @@ impl Router {
         meta: &mut DispatchMeta,
     ) {
         let params = self.config.trim.to_params();
-        if estimate_total_tokens(attempt_req) <= params.trigger_tokens {
+        let estimated_tokens = estimate_total_tokens(attempt_req);
+        // The calibration numerator is stamped HERE, before the trigger
+        // check, so it lands for every dispatched attempt rather than only
+        // for the large ones the trim advisories select for. It reuses the
+        // one estimate this function already needs, so an unconditional
+        // stamp costs no extra serialization of the request.
+        meta.calib_estimated_tokens = Some(estimated_tokens);
+        if estimated_tokens <= params.trigger_tokens {
             return;
         }
 
@@ -2784,6 +2795,10 @@ mod k_query_key_tests;
 #[cfg(test)]
 #[path = "shadow_misfire_log_tests.rs"]
 mod shadow_misfire_log_tests;
+
+#[cfg(test)]
+#[path = "calibration_evidence_tests.rs"]
+mod calibration_evidence_tests;
 
 #[cfg(test)]
 #[path = "observability_seam_tests.rs"]

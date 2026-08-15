@@ -563,12 +563,14 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             would_trim_raw_marks,
             r.would_trim_context_fraction,
             r.resolved_class,
+            r.calib_estimated_tokens,
+            r.calib_prompt_tokens,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?54` positions match the params list above.
+/// `schema.rs` exactly; `?1..?56` positions match the params list above.
 /// The DDL's three write-stopped legacy decision columns are absent from
 /// this list on purpose -- an omitted nullable column stores NULL.
 const INSERT_SQL: &str = "\
@@ -595,7 +597,9 @@ INSERT OR IGNORE INTO requests (
     would_trim_recorder_version,
     would_trim_raw_marks,
     would_trim_context_fraction,
-    resolved_class
+    resolved_class,
+    calib_estimated_tokens,
+    calib_prompt_tokens
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -619,7 +623,9 @@ INSERT OR IGNORE INTO requests (
     ?51,
     ?52,
     ?53,
-    ?54
+    ?54,
+    ?55,
+    ?56
 )";
 
 #[cfg(test)]
@@ -689,6 +695,8 @@ mod tests {
             would_trim_recorder_version: None,
             would_trim_raw_marks: None,
             would_trim_context_fraction: None,
+            calib_estimated_tokens: None,
+            calib_prompt_tokens: None,
         }
     }
 
@@ -873,6 +881,35 @@ mod tests {
             )
             .expect("row");
         assert_eq!(resolved_class, Some("rate-limited".to_string()));
+    }
+
+    #[tokio::test]
+    async fn try_send_round_trips_the_calibration_evidence_pair() {
+        // Arrange: the pair binds at the two LAST column positions, so
+        // distinct values catch a placeholder shift at the tail.
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let mut rec = record("rt-calib");
+        rec.calib_estimated_tokens = Some(48_120);
+        rec.calib_prompt_tokens = Some(51_003);
+
+        // Act
+        handle.try_send(rec);
+        assert!(wait_persisted(handle.counters(), 1), "row not persisted");
+        writer.shutdown();
+
+        // Assert: both raw values read back exactly, never pre-averaged.
+        let conn = Connection::open(&path).expect("read");
+        let (estimated, prompt): (i64, i64) = conn
+            .query_row(
+                "SELECT calib_estimated_tokens, calib_prompt_tokens \
+                 FROM requests WHERE request_id='rt-calib'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(estimated, 48_120);
+        assert_eq!(prompt, 51_003);
     }
 
     #[test]

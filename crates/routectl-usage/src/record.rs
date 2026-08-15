@@ -240,6 +240,26 @@ pub struct UsageRecord {
     /// `None` until the near-lossless recorder pass computes it. Recording
     /// only.
     pub would_trim_context_fraction: Option<f64>,
+    /// Token-estimate calibration evidence, numerator side: routectl's own
+    /// byte-heuristic token estimate of the payload that was dispatched.
+    /// Stamped for every dispatched request regardless of size, so the
+    /// evidence population is not skewed toward large or multi-target
+    /// requests. `None` when no target was dispatched.
+    pub calib_estimated_tokens: Option<u64>,
+    /// Token-estimate calibration evidence, denominator side: the upstream's
+    /// own prompt total for the same request, CACHE-INCLUSIVE (the canonical
+    /// `prompt_tokens`, which every egress produces as the sum of new,
+    /// cache-creation and cache-read input). Recorded ONLY on a success and
+    /// ONLY when nonzero: the canonical field is not optional, so an upstream
+    /// that reports no total yields a real 0, and storing that would train a
+    /// correction factor on a data bug.
+    ///
+    /// This is deliberately NOT the cache-exclusive `input_tokens` column,
+    /// nor reconstructable from it: that column subtracts the AGGREGATE
+    /// cache-creation total, which is not persisted anywhere (only the
+    /// frequently-absent per-TTL split is), so any such reconstruction runs
+    /// short on most cache-reusing rows and biases a learned factor low.
+    pub calib_prompt_tokens: Option<u64>,
 
     // TIMING
     /// End-to-end request latency, milliseconds.
@@ -403,6 +423,8 @@ mod tests {
             would_trim_recorder_version: Some(1),
             would_trim_raw_marks: Some(json!([{"kind": "dedup", "index": 0}])),
             would_trim_context_fraction: Some(0.25),
+            calib_estimated_tokens: Some(9_500),
+            calib_prompt_tokens: Some(10_000),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -468,6 +490,8 @@ mod tests {
             would_trim_recorder_version: None,
             would_trim_raw_marks: None,
             would_trim_context_fraction: None,
+            calib_estimated_tokens: None,
+            calib_prompt_tokens: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

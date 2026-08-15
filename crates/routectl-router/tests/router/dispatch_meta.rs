@@ -178,3 +178,36 @@ async fn gate_blocked_dispatch_has_zero_attempts_but_named_provider() {
     // request never reached it.
     assert_eq!(p1.calls(), 1);
 }
+
+/// A SINGLE-TARGET dispatch records the token-estimate calibration
+/// numerator. The window gate returns a one-entry chain untouched before it
+/// ever computes an estimate, so harvesting the estimate there would silently
+/// restrict the evidence to multi-target chains. This pins the real end-to-end
+/// path: one alias, one model, one provider, and the estimate still arrives on
+/// the meta the usage capture reads.
+#[tokio::test]
+async fn single_target_dispatch_records_the_calibration_estimate() {
+    // Arrange: a one-entry chain -- nothing to fall back to.
+    let p1 = MockProvider::new("p1", vec![Behavior::Ok]);
+    let r = router_with_config_providers(
+        &["m1"],
+        vec![("m1".into(), "p1".into(), "up1".into())],
+        vec![("p1".into(), p1 as Arc<dyn Provider>)],
+        default_test_retry(),
+    );
+
+    // Act
+    let Dispatched { meta, result } = r
+        .complete_with_options(req("fast"), RouterOptions::new())
+        .await;
+    result.expect("ok");
+
+    // Assert: one target served, and the estimate is a real positive count
+    // for the dispatched payload rather than an absent or zero value.
+    assert_eq!(meta.fallback_count, 0, "sanity: single-target chain");
+    assert!(
+        meta.calib_estimated_tokens.is_some_and(|est| est > 0),
+        "a single-target dispatch must still record the estimate, got {:?}",
+        meta.calib_estimated_tokens,
+    );
+}

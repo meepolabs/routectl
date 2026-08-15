@@ -2987,6 +2987,7 @@ pub fn routectl_router::router::CapabilityObserveEvent::into_shared(self) -> Sha
 #[non_exhaustive] pub struct routectl_router::router::DispatchMeta
 pub routectl_router::router::DispatchMeta::attempt_count: u32
 pub routectl_router::router::DispatchMeta::cache_strategy: core::option::Option<&'static str>
+pub routectl_router::router::DispatchMeta::calib_estimated_tokens: core::option::Option<u64>
 pub routectl_router::router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::router::DispatchMeta::fallback_count: u32
@@ -7884,6 +7885,7 @@ pub fn routectl_router::DiffRow::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::DispatchMeta
 pub routectl_router::DispatchMeta::attempt_count: u32
 pub routectl_router::DispatchMeta::cache_strategy: core::option::Option<&'static str>
+pub routectl_router::DispatchMeta::calib_estimated_tokens: core::option::Option<u64>
 pub routectl_router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::DispatchMeta::fallback_count: u32

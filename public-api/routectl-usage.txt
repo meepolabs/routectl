@@ -1438,6 +1438,8 @@ pub routectl_usage::UsageRecord::attempt_count: u32
 pub routectl_usage::UsageRecord::cache_read: core::option::Option<u64>
 pub routectl_usage::UsageRecord::cache_write_1h: core::option::Option<u64>
 pub routectl_usage::UsageRecord::cache_write_5m: core::option::Option<u64>
+pub routectl_usage::UsageRecord::calib_estimated_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::calib_prompt_tokens: core::option::Option<u64>
 pub routectl_usage::UsageRecord::error_class: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::extra: core::option::Option<serde_json::value::Value>
 pub routectl_usage::UsageRecord::fallback_count: u32

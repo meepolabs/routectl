@@ -84,6 +84,8 @@ pub(crate) fn build_usage_draft(
         would_trim_recorder_version: None,
         would_trim_raw_marks: None,
         would_trim_context_fraction: None,
+        calib_estimated_tokens: None,
+        calib_prompt_tokens: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -341,6 +343,12 @@ pub(crate) struct UsageCapture {
     last_prompt: u32,
     last_completion: u32,
     last_total: u32,
+    /// Cache-INCLUSIVE prompt total most recently reported by the upstream
+    /// (the canonical `prompt_tokens`, unlike the cache-EXCLUSIVE residual
+    /// the `input_tokens` column stores). Held here rather than stamped
+    /// straight onto the record because it is admitted as calibration
+    /// evidence only on the success finalize -- see `finalize`.
+    observed_prompt_total: u32,
     /// The dispatch's auto-cache decision token, read PRE-persistence by
     /// the cache-outcome / cache-summary log emitters. Log-only: the ledger
     /// no longer persists it.
@@ -361,6 +369,7 @@ impl UsageCapture {
             last_prompt: 0,
             last_completion: 0,
             last_total: 0,
+            observed_prompt_total: 0,
             cache_strategy: None,
         }
     }
@@ -431,6 +440,7 @@ impl UsageCapture {
         self.record.would_trim_recorder_version = meta.would_trim_recorder_version;
         self.record.would_trim_raw_marks = meta.would_trim_raw_marks.clone();
         self.record.would_trim_context_fraction = meta.would_trim_context_fraction;
+        self.record.calib_estimated_tokens = meta.calib_estimated_tokens;
         self.drain_capability_events(meta, catalog_version, overlay_revision);
     }
 
@@ -525,6 +535,13 @@ impl UsageCapture {
             .rev()
             .find_map(|c| c.finish_reason.clone());
         if let Some(u) = &resp.usage {
+            // Calibration evidence: the canonical `prompt_tokens` verbatim,
+            // cache-INCLUSIVE, kept BEFORE the cache-exclusive subtraction
+            // below discards it. Uniform across every egress -- each
+            // translator produces this field as new + cache-creation +
+            // cache-read (or is natively inclusive) -- so no per-provider
+            // branching is needed here.
+            self.observed_prompt_total = u.prompt_tokens;
             // Store cache-EXCLUSIVE new input: the canonical `prompt_tokens`
             // is cache-inclusive, but cost.rs prices input / cache_read /
             // cache_write_* as disjoint dimensions. Subtract the aggregate
@@ -570,6 +587,11 @@ impl UsageCapture {
         if let Some(u) = &chunk.usage {
             if let Some(p) = u.prompt_tokens {
                 self.last_prompt = p;
+                // Same cache-INCLUSIVE calibration evidence as the
+                // non-streaming path takes; the cumulative counters
+                // Anthropic emits on the terminal delta make
+                // last-writer-wins the whole-prompt total.
+                self.observed_prompt_total = p;
                 // Cache-exclusive new input, derived from THIS delta's own
                 // cache fields (Anthropic sends prompt + cache together on
                 // the terminal message_delta), so the per-chunk derivation
@@ -792,6 +814,7 @@ impl UsageCapture {
         }
         self.finalized = true;
         self.record.outcome = outcome;
+        self.record.calib_prompt_tokens = self.admissible_prompt_total(outcome);
         self.record.ts_end = epoch_ms_now();
         self.record.latency_ms = i64::try_from(self.start.elapsed().as_millis()).unwrap_or(0);
         self.record.ttfb_ms = self
@@ -805,6 +828,25 @@ impl UsageCapture {
         // `finalized` is already set above, so the only later access --
         // Drop -- short-circuits and never touches the taken record.
         self.usage.try_send(std::mem::take(&mut self.record));
+    }
+
+    /// The observed cache-INCLUSIVE prompt total, if it is admissible as
+    /// calibration evidence for a row finishing with `outcome`.
+    ///
+    /// Two refusals, both fail-closed:
+    ///
+    /// - a non-success row is refused outright -- a partial or failed request
+    ///   has no trustworthy pairing between what was estimated and what the
+    ///   upstream actually charged for;
+    /// - a success reporting a ZERO total is refused. The canonical prompt
+    ///   field is not optional, so an upstream that reports nothing arrives
+    ///   here as a real 0 rather than an absence, and a stored 0 would drag a
+    ///   later correction factor toward zero on what is purely a data bug.
+    const fn admissible_prompt_total(&self, outcome: Outcome) -> Option<u64> {
+        if !matches!(outcome, Outcome::Ok) || self.observed_prompt_total == 0 {
+            return None;
+        }
+        Some(self.observed_prompt_total as u64)
     }
 
     /// Emit the auto-cache outcome signal for an auto-emitted breakpoint:
