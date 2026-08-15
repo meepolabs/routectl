@@ -213,6 +213,12 @@ impl Router {
         // THIRD never-skip-the-last layer: an empty result is refused, and
         // `skipped` is the original chain in its original order in exactly
         // that case. There is no empty-chain error path in this module.
+        //
+        // Deliberately redundant: the all-overflow refusal above already
+        // guarantees a survivor, so this cannot fire today. It stays because
+        // the never-empty guarantee must not rest on a single condition --
+        // a future edit to either layer above leaves this one standing. Do
+        // not strip it as dead code.
         if kept.is_empty() {
             return skipped;
         }
