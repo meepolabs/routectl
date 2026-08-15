@@ -1161,7 +1161,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `enabled`, `decay_hours`, `inferred_window_hours`, `staleness_hint_days`)
   drives the learned-capability registry and is hot-reloadable;
   `WindowGateConfig` (global `[window_gate]`: `enabled`, default true) is the
-  hot-reloadable kill switch for the proactive context-window gate. The whole
+  hot-reloadable kill switch for the proactive context-window gate;
+  `CalibrationConfig` (global `[calibration]`: `enabled`, default true) is the
+  hot-reloadable kill switch for APPLYING the learned per-lane token-estimate
+  correction (off leaves the static window gate intact and retains collected
+  evidence). The whole
   `Config` tree derives `schemars::JsonSchema` alongside serde so
   `schema_gen.rs` can render the committed `routectl.schema.json`
   (`class_overrides`, a `BTreeMap<u16, _>`, carries a `#[schemars(with)]`
@@ -1608,6 +1612,26 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `KeepReason` and `PrefixReductionCandidate` are also `#[non_exhaustive]`;
   `f32` row multipliers are widened to `f64` for the arithmetic. Imports ONLY
   the pricing row + std -- no Config/Router/provider/async
+- `src/calibration/mod.rs` -- learned per-lane correction of the router's token
+  estimate; re-exports `Factor` + `CalibrationStore` / `LaneKey` (the whole
+  public surface -- the reduction and the lane ring stay module-private)
+- `src/calibration/store.rs` -- `Mutex<HashMap<LaneKey, LaneSamples>>` evidence
+  map (NOT an LRU: a lane is `(provider_kind, served NICKNAME)`, so the
+  keyspace is bounded by the loaded model table, unlike the client-driven
+  session keyspace `k_estimator` guards). `record` converts one
+  estimate/actual pair to an integer permille ratio and pushes it onto the
+  lane's bounded ring (`SAMPLES_PER_LANE`), dropping a pair with a zero on
+  either side; `factor_for` reduces a lane; `export_entries` / `import_entries`
+  are the hot-reload carry-over seam (`Router::carry_over_calibration_from`)
+- `src/calibration/factor.rs` -- the reduction and the correction arithmetic.
+  `Factor::apply(raw) = raw * permille / 1000` in `u64`, no float (the window
+  gate's own no-float-in-a-routing-decision constraint); the ratio is
+  `actual / estimate`, so above `IDENTITY_PERMILLE` GROWS the corrected
+  estimate. `reduce` is cohort-balanced (median per cohort, then median of
+  cohort medians, `MIN_COHORTS`) over samples inside `MAX_SAMPLE_AGE` past
+  `MIN_SAMPLES`, and REFUSES (returns `None`, not a clamp) a reduced ratio
+  outside `MIN_SANE_PERMILLE..=MAX_SANE_PERMILLE`. Every refusal cause
+  collapses to `None`, which is the uncorrected estimate
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /
@@ -1629,12 +1653,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   forwarded-credential path). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
-  `carry_over_learned_from` reload carries + `install_catalog_overlay` (the
+  `carry_over_calibration_from` / `carry_over_learned_from` reload carries +
+  `install_catalog_overlay` (the
   single writer of the RETAINED accepted overlay and its revision stamp), the
   `catalog_version` / `overlay_revision` / `catalog_overlay` getters and
   `rebuild_learned_from_ledger` (the boot warm-rebuild seam: delegates to
   `capability_rebuild::rebuild_capabilities_into` over the PRIVATE learned
   registry so it stays encapsulated), `register`, `record_k_sample`,
+  `record_calibration_sample` (the live per-lane token-estimate evidence write;
+  requires BOTH a served provider kind and a served NICKNAME or it forms no
+  lane, and hashes the session key into an opaque reduction cohort),
   `resolve_nickname`, `has_forwarded_provider`, `override_registry`. Also owns
   the header-compose constants
   (`AUTH_HEADERS`/`MANAGED_HEADERS`/`LIST_VALUED_HEADERS`, consumed by
@@ -1858,8 +1886,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   immediately after `filter_chain_by_features`, so the ordering makes "last
   surviving target" mean last after the hard capability drops):
   `filter_chain_by_window` skips a target whose confirmed
-  `max_context_tokens` clearly cannot hold `context_trim::estimate_total_tokens`,
-  keyed on the `exceeds_window_margin` integer-ratio predicate
+  `max_context_tokens` clearly cannot hold `context_trim::estimate_total_tokens`
+  AS CORRECTED by the target's own learned per-lane factor (`calibration`; the
+  corrected figure is a LOCAL here and deliberately not a shared helper the
+  trim / advisory estimate call sites could adopt, and an uncorrected lane
+  compares the raw estimate byte-identically), keyed on the
+  `exceeds_window_margin` integer-ratio predicate
   (`WINDOW_MARGIN_NUMERATOR`/`_DENOMINATOR`, shipped at 3/4 -- low enough to
   cover an estimator deflate up to 4/3, and below the effective input ceiling
   the output reserve leaves (~0.68 of a 200k-class window), deliberately not
@@ -2896,7 +2928,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cache-INCLUSIVE canonical `prompt_tokens` on the guard, and `finalize`
   admits it into `calib_prompt_tokens` via `admissible_prompt_total` -- success
   outcome AND a nonzero reported total, otherwise NULL (the canonical field is
-  not optional, so an unreported total arrives as a real 0)
+  not optional, so an unreported total arrives as a real 0).
+  `record_calibration_sample` feeds that SAME admitted pair into the router's
+  in-memory per-lane store (post-response, best-effort, sibling to
+  `record_k_sample`), keyed on the served nickname the ledger row also carries
 - `src/handlers/status/mod.rs` -- read-only `/status` family. `StatusState`
   carries ONLY read handles (a `StatusRouterHandle` read-only facade over the
   router `ArcSwap` -- see `router_view.rs` -- plus the `activation` `ArcSwap`

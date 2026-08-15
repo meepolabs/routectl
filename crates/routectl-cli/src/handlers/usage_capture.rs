@@ -806,6 +806,49 @@ impl UsageCapture {
         router.record_k_sample(session_key, provider_kind, model, cache_read, ts);
     }
 
+    /// Record one live token-estimate observation into the router's per-lane
+    /// calibration store, from the same values the ledger's own calibration
+    /// pair is built from: the estimate stamped at the attempt site
+    /// (`observe_meta`) and the upstream's cache-inclusive prompt total
+    /// (`observe_response` / `observe_chunk`).
+    ///
+    /// Best-effort and POST-response, same placement as
+    /// [`UsageCapture::record_k_sample`]: call it once the served target and
+    /// the response usage are observed. It must never change the response or
+    /// fail the request.
+    ///
+    /// `self.record.model` is the served NICKNAME (`observe_meta` copies
+    /// `DispatchMeta::served_model`, which is the target's nickname and never
+    /// the upstream wire id) -- the same label the gate's lane lookup keys on.
+    /// A dispatch missing either half of that key forms no lane and is
+    /// skipped inside the router.
+    ///
+    /// Admission mirrors the persisted pair exactly: only a success, and only
+    /// a nonzero prompt total. The canonical upstream field is not optional,
+    /// so an upstream reporting nothing arrives as a real zero, and admitting
+    /// it would drag the lane's correction toward zero -- the direction that
+    /// makes the context-window gate admit oversized requests.
+    pub(crate) fn record_calibration_sample(
+        &self,
+        router: &routectl_router::Router,
+        session_key: Option<&str>,
+    ) {
+        let Some(estimated_tokens) = self.record.calib_estimated_tokens else {
+            return;
+        };
+        let Some(prompt_tokens) = self.admissible_prompt_total(Outcome::Ok) else {
+            return;
+        };
+        router.record_calibration_sample(
+            self.record.provider_kind.as_deref(),
+            self.record.model.as_deref(),
+            session_key,
+            estimated_tokens,
+            prompt_tokens,
+            ms_to_system_time(self.record.ts_start),
+        );
+    }
+
     /// Stamp timing + outcome and emit the row exactly once. Idempotent:
     /// Never blocks / awaits / panics -- safe from Drop.
     pub(crate) fn finalize(&mut self, outcome: Outcome) {

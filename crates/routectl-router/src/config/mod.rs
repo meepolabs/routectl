@@ -16,11 +16,11 @@ pub(crate) use schema::default_anthropic_base;
 pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::routectl_config_dir;
 pub use schema::{
-    AliasValue, BedrockGlobalConfig, CacheCapability, CacheConfig, CapabilityConfig,
-    CredentialSource, HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter,
-    OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
-    ReductionConfig, RegistryEntry, RetryPolicy, SeatSelection, ServerAuth, ServerConfig,
-    TrimConfig, UsageConfig, WindowGateConfig,
+    AliasValue, BedrockGlobalConfig, CacheCapability, CacheConfig, CalibrationConfig,
+    CapabilityConfig, CredentialSource, HistoryReasoning, LogConfig, MitmConfig, ModelEntry,
+    NicknameIter, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
+    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, SeatSelection, ServerAuth,
+    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -166,6 +166,15 @@ pub struct Config {
     /// resolution, so a live config swap applies without a restart.
     #[serde(default)]
     pub window_gate: WindowGateConfig,
+
+    /// Operator-facing `[calibration]` block. Kill switch for the learned
+    /// per-lane correction of the router's token estimate. A missing block
+    /// leaves the correction enabled; setting `enabled = false` makes the
+    /// context-window gate read the uncorrected estimate exactly as it did
+    /// before the correction existed, while retaining the evidence already
+    /// collected. Hot-reloadable -- the flag is read per chain resolution.
+    #[serde(default)]
+    pub calibration: CalibrationConfig,
 
     /// Operator-facing LEGACY `[cache_pricing]` field-level override table
     /// for the baked catalog economics rows (`crate::catalog`). Slated for

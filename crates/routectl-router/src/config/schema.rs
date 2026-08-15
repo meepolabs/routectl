@@ -295,6 +295,43 @@ impl Default for WindowGateConfig {
     }
 }
 
+/// Operator-facing `[calibration]` config block. Kill switch for the
+/// learned per-lane correction of the router's token estimate. A missing
+/// `[calibration]` table deserializes to `CalibrationConfig::default()`
+/// (enabled), so an existing config needs no migration.
+///
+/// Default ON is safe because a lane produces no correction until it has
+/// accumulated real evidence: a fresh install behaves exactly as it would
+/// with the switch off, and every refusal path (thin evidence, stale
+/// evidence, an out-of-band reduced ratio) falls back to the uncorrected
+/// estimate.
+///
+/// Off stops the correction from being APPLIED and nothing else. The static
+/// context-window gate keeps gating on the uncorrected estimate, and the
+/// collected evidence is retained, so switching back on is instant rather
+/// than a re-learn.
+///
+/// One field deliberately, following `WindowGateConfig`: the reduction's
+/// sample floors and sane band are baked constants, not operator knobs,
+/// because a per-deployment band turns a routing decision into a support
+/// surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CalibrationConfig {
+    /// Master switch for applying the learned correction. Default on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+        }
+    }
+}
+
 /// Operator-facing `[log]` config block. Each field mirrors a
 /// well-known env var:
 ///
@@ -2804,6 +2841,10 @@ mod capability_config_tests;
 #[cfg(test)]
 #[path = "window_gate_config_tests.rs"]
 mod window_gate_config_tests;
+
+#[cfg(test)]
+#[path = "calibration_config_tests.rs"]
+mod calibration_config_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

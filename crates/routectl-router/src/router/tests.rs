@@ -560,6 +560,56 @@ fn carry_over_k_store_from_preserves_windows_and_lru_order() {
 }
 
 #[test]
+fn carry_over_calibration_from_preserves_a_learned_factor() {
+    // Regression guard for the silent-collapse trap, calibration edition: a
+    // hot-reload must NOT drop a lane's learned correction. It is the worst
+    // instance of the trap, because a wiped lane falls back to the
+    // uncorrected estimate -- which is the pre-correction behavior, so the
+    // loss reads as health rather than as breakage.
+    use std::time::SystemTime;
+
+    let kind = "openai-compat";
+    let nickname = "opus";
+    let now = SystemTime::now();
+
+    // Arrange: enough balanced evidence for one lane to produce a factor.
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    for i in 0..9 {
+        before.record_calibration_sample(
+            Some(kind),
+            Some(nickname),
+            Some(&format!("caller-{}", i % 3)),
+            10_000,
+            13_000,
+            now,
+        );
+    }
+    let key = crate::calibration::LaneKey {
+        provider_kind: kind.to_string(),
+        nickname: nickname.to_string(),
+    };
+    let learned = before
+        .calibration_store
+        .factor_for(&key, now)
+        .expect("the fed evidence clears the reduction's floors");
+
+    let mut after = Router::new(config);
+    assert_eq!(
+        after.calibration_store.factor_for(&key, now),
+        None,
+        "a freshly built router starts with no learned lanes",
+    );
+
+    // Act
+    after.carry_over_calibration_from(&before);
+
+    // Assert: the SAME factor survives, not merely some factor.
+    assert_eq!(after.calibration_store.factor_for(&key, now), Some(learned));
+    assert_eq!(after.calibration_store.export_entries().len(), 1);
+}
+
+#[test]
 fn router_new_builds_learned_registry_reflecting_config_knobs() {
     use routectl_core::capability::{FailurePhase, SignalTier};
     use std::time::{Duration, Instant};

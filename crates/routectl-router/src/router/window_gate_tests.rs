@@ -48,6 +48,13 @@ impl Provider for StubProvider {
 }
 
 fn router(gate_enabled: bool) -> Router {
+    router_with(gate_enabled, true)
+}
+
+/// A router with both switches set explicitly. The calibration switch is
+/// separate from the gate's own: turning the correction off must leave the
+/// static gate fully intact.
+fn router_with(gate_enabled: bool, calibration_enabled: bool) -> Router {
     let body = format!(
         "version = 3\n\
          [providers.p]\n\
@@ -55,7 +62,9 @@ fn router(gate_enabled: bool) -> Router {
          base_url = \"https://x\"\n\
          api_key_ref = \"literal:k\"\n\
          [window_gate]\n\
-         enabled = {gate_enabled}\n"
+         enabled = {gate_enabled}\n\
+         [calibration]\n\
+         enabled = {calibration_enabled}\n"
     );
     let config: Config = toml::from_str(&body).expect("config parses");
     Router::new(Arc::new(config))
@@ -331,4 +340,376 @@ fn the_warn_throttle_refuses_a_second_claim_inside_the_interval() {
     assert!(!throttle.claim(now));
     assert!(!throttle.claim(now + SKIP_WARN_INTERVAL_SECS - 1));
     assert!(throttle.claim(now + SKIP_WARN_INTERVAL_SECS));
+}
+
+// ---------------------------------------------------------------------------
+// Learned per-lane correction of the estimate the gate compares.
+// ---------------------------------------------------------------------------
+
+/// Provider kind of every calibratable target below. Real token: the lane key
+/// carries whatever `DispatchTarget::provider_kind` holds.
+const LANE_KIND: &str = "openai-compat";
+
+/// The correction the fed evidence below reduces to: the upstream counted
+/// twice what the byte-length estimate predicted.
+const UNDER_COUNT_PERMILLE: u64 = 2_000;
+
+/// A target on a confirmed window that also carries a provider kind, so it
+/// forms a lane. `into_one_dispatch_target` leaves the kind unset, which is
+/// itself the no-lane case exercised further down.
+fn calibratable_target(nickname: &str, window: u32) -> DispatchTarget {
+    let mut target = target_with_window(nickname, window);
+    target.provider_kind = Some(LANE_KIND);
+    target
+}
+
+/// Feed one lane enough balanced evidence to produce a correction, at the
+/// ratio implied by `estimated` / `actual`. Goes through the SAME public
+/// recording entry point production uses, so the key the gate later queries
+/// on is proven to match the key the live write landed under.
+fn feed_lane(router: &Router, nickname: Option<&str>, estimated: u64, actual: u64) {
+    for i in 0..9 {
+        router.record_calibration_sample(
+            Some(LANE_KIND),
+            nickname,
+            Some(&format!("caller-{}", i % 3)),
+            estimated,
+            actual,
+            SystemTime::now(),
+        );
+    }
+}
+
+/// A window the CORRECTED estimate clearly exceeds while the RAW estimate
+/// sits inside the margin. The one fixture that separates a corrected gate
+/// from the static one: `raw <= w*3/4 < raw*factor`.
+fn only_the_corrected_estimate_overflows(req: &ChatRequest) -> u32 {
+    let raw = estimated_tokens(req);
+    // `just_inside_margin` is the largest window the raw estimate still fits;
+    // the corrected estimate is `factor` times larger, so it overflows it as
+    // long as the factor exceeds the 4/3 slack the margin allows.
+    just_inside_margin(req)
+        .min(u32::try_from(raw * UNDER_COUNT_PERMILLE / 1_000 * 4 / 3).expect("fits u32"))
+}
+
+/// The gate's verdict on a two-target chain whose FIRST target sits exactly
+/// at the raw-estimate margin boundary and whose second always survives.
+///
+/// The ONE shared assertion helper behind every "behaves exactly as the
+/// static gate" claim below: it returns the kept nicknames plus the skip
+/// count, so a corrected run and an uncorrected run are compared as data
+/// rather than as four separately-written expectations.
+fn verdict_on_boundary_chain(router: &Router, req: &ChatRequest) -> (Vec<String>, u64) {
+    let chain = vec![
+        calibratable_target("boundary", only_the_corrected_estimate_overflows(req)),
+        calibratable_target("roomy", comfortably_large(req)),
+    ];
+    let kept = router.filter_chain_by_window(chain, req);
+    let names = nicknames(&kept).iter().map(|n| (*n).to_string()).collect();
+    (names, router.metrics.window_gate_skips_total())
+}
+
+/// What the static gate does on that chain: keeps both targets, counts no
+/// skip. Every `None` cause must reproduce this exactly.
+fn static_gate_verdict() -> (Vec<String>, u64) {
+    (vec!["boundary".to_string(), "roomy".to_string()], 0)
+}
+
+#[test]
+fn a_calibrated_lane_skips_a_target_the_raw_estimate_would_have_kept() {
+    // The feature, in one assertion. The raw estimate fits this window; the
+    // lane's learned correction says the real count is twice that, so the
+    // target genuinely cannot hold the request and is skipped.
+    let router = router(true);
+    let req = oversized_request();
+    feed_lane(
+        &router,
+        Some("boundary"),
+        estimated_tokens(&req),
+        estimated_tokens(&req) * UNDER_COUNT_PERMILLE / 1_000,
+    );
+
+    let (kept, skips) = verdict_on_boundary_chain(&router, &req);
+
+    assert_eq!(kept, vec!["roomy".to_string()]);
+    assert_eq!(skips, 1);
+    assert_ne!(
+        (kept, skips),
+        static_gate_verdict(),
+        "the fixture must actually separate a corrected gate from the static one",
+    );
+}
+
+#[test]
+fn a_cold_lane_behaves_exactly_as_the_static_gate() {
+    // No evidence at all.
+    let router = router(true);
+    let req = oversized_request();
+
+    assert_eq!(
+        verdict_on_boundary_chain(&router, &req),
+        static_gate_verdict()
+    );
+}
+
+#[test]
+fn a_thin_lane_behaves_exactly_as_the_static_gate() {
+    // Evidence at the correcting ratio, but below the reduction's floors:
+    // one caller, two samples.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    for _ in 0..2 {
+        router.record_calibration_sample(
+            Some(LANE_KIND),
+            Some("boundary"),
+            Some("one-caller"),
+            raw,
+            raw * UNDER_COUNT_PERMILLE / 1_000,
+            SystemTime::now(),
+        );
+    }
+
+    assert_eq!(
+        verdict_on_boundary_chain(&router, &req),
+        static_gate_verdict()
+    );
+}
+
+#[test]
+fn a_stale_lane_behaves_exactly_as_the_static_gate() {
+    // Enough balanced evidence, all of it long expired.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    let long_ago = SystemTime::UNIX_EPOCH;
+    for i in 0..9 {
+        router.record_calibration_sample(
+            Some(LANE_KIND),
+            Some("boundary"),
+            Some(&format!("caller-{}", i % 3)),
+            raw,
+            raw * UNDER_COUNT_PERMILLE / 1_000,
+            long_ago,
+        );
+    }
+
+    assert_eq!(
+        verdict_on_boundary_chain(&router, &req),
+        static_gate_verdict()
+    );
+}
+
+#[test]
+fn a_lane_whose_ratio_is_out_of_range_behaves_exactly_as_the_static_gate() {
+    // Enough balanced fresh evidence, reducing to an implausible ratio. The
+    // refusal (rather than a clamp to the band's edge) is what sends this
+    // lane back to the static gate instead of letting it still move it.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    feed_lane(&router, Some("boundary"), raw, raw * 50);
+
+    assert_eq!(
+        verdict_on_boundary_chain(&router, &req),
+        static_gate_verdict()
+    );
+}
+
+#[test]
+fn the_calibration_kill_switch_behaves_exactly_as_the_static_gate() {
+    // A lane with evidence that WOULD correct, and the switch off. Proves the
+    // switch stops the correction without touching the gate itself, and that
+    // the evidence is retained rather than discarded.
+    let router = router_with(true, false);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    feed_lane(
+        &router,
+        Some("boundary"),
+        raw,
+        raw * UNDER_COUNT_PERMILLE / 1_000,
+    );
+
+    assert_eq!(
+        verdict_on_boundary_chain(&router, &req),
+        static_gate_verdict()
+    );
+    assert!(
+        !router.calibration_store.is_empty(),
+        "switching the correction off must not discard collected evidence",
+    );
+}
+
+#[test]
+fn a_nickname_less_target_forms_no_lane_on_either_side() {
+    // A target lacking a nickname has no lane, so neither the recording path
+    // nor the gate's lookup may invent one from another label. Feeding under
+    // `None` records nothing at all, and the reverse -- evidence recorded
+    // under a real nickname -- must not reach a target that has none.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+
+    feed_lane(&router, None, raw, raw * UNDER_COUNT_PERMILLE / 1_000);
+    assert!(
+        router.calibration_store.is_empty(),
+        "a nickname-less dispatch must create no lane",
+    );
+
+    // Evidence under a real nickname, consulted by a target that has none.
+    feed_lane(
+        &router,
+        Some("boundary"),
+        raw,
+        raw * UNDER_COUNT_PERMILLE / 1_000,
+    );
+    let mut nameless = calibratable_target("boundary", only_the_corrected_estimate_overflows(&req));
+    nameless.nickname = None;
+    let chain = vec![
+        nameless,
+        calibratable_target("roomy", comfortably_large(&req)),
+    ];
+
+    let kept = router.filter_chain_by_window(chain, &req);
+
+    assert_eq!(
+        nicknames(&kept),
+        vec!["", "roomy"],
+        "a nickname-less target is compared against the raw estimate",
+    );
+    assert_eq!(router.metrics.window_gate_skips_total(), 0);
+}
+
+#[test]
+fn a_target_without_a_provider_kind_forms_no_lane() {
+    // The other half of the key. `into_one_dispatch_target` leaves the kind
+    // unset on the legacy construction path, and an unset kind must refuse
+    // the lane rather than key on the nickname alone.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    feed_lane(
+        &router,
+        Some("boundary"),
+        raw,
+        raw * UNDER_COUNT_PERMILLE / 1_000,
+    );
+
+    let chain = vec![
+        target_with_window("boundary", only_the_corrected_estimate_overflows(&req)),
+        target_with_window("roomy", comfortably_large(&req)),
+    ];
+    let kept = router.filter_chain_by_window(chain, &req);
+
+    assert_eq!(nicknames(&kept), vec!["boundary", "roomy"]);
+    assert_eq!(router.metrics.window_gate_skips_total(), 0);
+}
+
+#[test]
+fn each_chain_target_is_corrected_by_its_own_lane() {
+    // The factor is per-lane and each target IS a lane, so one raw
+    // serialization feeds a per-target corrected figure. Two targets on the
+    // same window: only the one whose lane learned an under-count is skipped.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    let window = only_the_corrected_estimate_overflows(&req);
+    feed_lane(
+        &router,
+        Some("corrected"),
+        raw,
+        raw * UNDER_COUNT_PERMILLE / 1_000,
+    );
+
+    let chain = vec![
+        calibratable_target("corrected", window),
+        calibratable_target("uncorrected", window),
+    ];
+    let kept = router.filter_chain_by_window(chain, &req);
+
+    assert_eq!(nicknames(&kept), vec!["uncorrected"]);
+    assert_eq!(router.metrics.window_gate_skips_total(), 1);
+}
+
+#[test]
+fn an_over_counting_lane_admits_a_target_the_static_gate_would_skip() {
+    // The other direction, pinned at the gate rather than in the reduction: a
+    // lane whose real token count runs BELOW the estimate shrinks the
+    // corrected figure, so a target the static gate skipped is kept.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    // Half the estimate, i.e. a 500-permille factor.
+    feed_lane(&router, Some("halved"), raw, raw / 2);
+    // A window the RAW estimate overflows (raw > w*3/4) while the halved one
+    // fits it (raw/2 <= w*3/4): the window equal to the raw estimate.
+    let window = u32::try_from(raw).expect("fixture estimate fits u32");
+
+    // A target on that window with no lane of its own IS skipped, which is
+    // what makes the kept assertion below attributable to the correction.
+    let control = router.filter_chain_by_window(
+        vec![
+            calibratable_target("plain", window),
+            calibratable_target("roomy", comfortably_large(&req)),
+        ],
+        &req,
+    );
+    assert_eq!(nicknames(&control), vec!["roomy"]);
+
+    let chain = vec![
+        calibratable_target("halved", window),
+        calibratable_target("roomy", comfortably_large(&req)),
+    ];
+    let kept = router.filter_chain_by_window(chain, &req);
+
+    assert_eq!(
+        nicknames(&kept),
+        vec!["halved", "roomy"],
+        "the corrected estimate fits a window the raw one did not",
+    );
+}
+
+#[test]
+fn the_skip_warn_reports_both_the_raw_and_the_corrected_figure() {
+    // The divergence between the two is the only way an operator can see a
+    // learned correction move a skip. Neither figure, nor anything else on
+    // the line, may carry request content.
+    let throttle = SkipWarnThrottle::new();
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    feed_lane(
+        &router,
+        Some("boundary"),
+        raw,
+        raw * UNDER_COUNT_PERMILLE / 1_000,
+    );
+
+    let events = routectl_testkit::capture_events(|| {
+        let chain = vec![
+            calibratable_target("boundary", only_the_corrected_estimate_overflows(&req)),
+            calibratable_target("roomy", comfortably_large(&req)),
+        ];
+        let kept = router.filter_chain_by_window_with(chain, &req, &throttle);
+        assert_eq!(nicknames(&kept), vec!["roomy"]);
+    });
+
+    let warn = events
+        .iter()
+        .find(|e| e.field("event") == Some("window_gate_skip"))
+        .expect("one skip WARN");
+    assert_eq!(
+        warn.field("estimated_tokens").map(str::to_string),
+        Some(raw.to_string()),
+    );
+    assert_eq!(
+        warn.field("corrected_tokens").map(str::to_string),
+        Some((raw * UNDER_COUNT_PERMILLE / 1_000).to_string()),
+    );
+    let rendered = format!("{} {:?}", warn.message, warn.fields);
+    assert!(
+        !rendered.contains(REQUEST_BODY_MARKER),
+        "no request content may reach the log line; got {rendered}",
+    );
 }

@@ -477,6 +477,7 @@ async fn complete_response<A: IngressAdapter>(
             // response; a keyless / no-served-target request is skipped
             // inside the helper.
             capture.record_k_sample(&router, session_key.as_deref());
+            capture.record_calibration_sample(&router, session_key.as_deref());
             match adapter.render_response(resp) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
@@ -950,6 +951,7 @@ async fn drive_stream<A: IngressAdapter>(
     // affects the bytes already sent. Then finalize the row as a clean
     // completion; the egress trace-summary fires from inside `finalize`.
     capture.record_k_sample(&router, session_key.as_deref());
+    capture.record_calibration_sample(&router, session_key.as_deref());
     capture.finalize(Outcome::Ok);
 }
 
