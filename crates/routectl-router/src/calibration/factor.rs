@@ -55,7 +55,10 @@ const MIN_COHORTS: usize = 3;
 /// How old a sample may be and still count. Beyond this the request mix that
 /// produced it is no longer evidence about the request mix arriving now --
 /// prompt shape, tool payloads and system prefixes all drift.
-const MAX_SAMPLE_AGE: Duration = Duration::from_hours(24);
+///
+/// Also bounds how far back the boot warm rebuild reads: a sample older than
+/// this cannot survive the reduction, so loading one is pure waste.
+pub const MAX_SAMPLE_AGE: Duration = Duration::from_hours(24);
 
 /// Lower end of the sane band. The estimator counts serialized bytes over
 /// four, so a real tokenizer disagreeing with it by more than a factor of two

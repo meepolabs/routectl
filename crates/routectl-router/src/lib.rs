@@ -59,6 +59,7 @@ pub use activation::{
     DeactivatedChange, UnresolvedReason, compute_activation, diff as diff_activation,
     provider_kind_for_oauth_id,
 };
+pub use calibration::{CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary};
 pub use capability_detect::{CapabilityObservation, DetectorContext, ObservationDirection, detect};
 pub use capability_display::{DisplayVerdict, resolve_display_verdict};
 pub use capability_matcher::resolve_requested_capability;

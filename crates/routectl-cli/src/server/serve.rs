@@ -21,8 +21,8 @@ use super::reload::{
 };
 use super::router_build::build_router_from_config_with_overlay;
 use super::{
-    AppState, CompositeStore, capability_rebuild, check_bind_safety, k_rebuild, request_id,
-    status_gate,
+    AppState, CompositeStore, calibration_rebuild, capability_rebuild, check_bind_safety,
+    k_rebuild, request_id, status_gate,
 };
 
 /// Bind a TCP listener, then serve. Exposes the bound address for tests.
@@ -178,6 +178,16 @@ pub async fn serve_on_listener_with_overlay(
     // (re-warming there would clobber fresher live samples with older
     // ledger history).
     k_rebuild::warm_k_store_from_ledger(&config.usage.db_path, &router.k_session_store);
+
+    // One-shot warm of the per-lane token-estimate correction from the same
+    // ledger, on the owned `router` BEFORE it is wrapped in the ArcSwap and
+    // bootstrap-only -- NOT on hot-reload, where `carry_over_calibration_from`
+    // preserves the live store (re-warming there would clobber fresher live
+    // samples with older evidence). Runs the migrating open itself, because
+    // the evidence columns exist only after the newest migration and a
+    // read-only open rejects an older schema outright; ordering this before
+    // the writer means the migration contends with nothing.
+    calibration_rebuild::warm_calibration_from_ledger(&config.usage.db_path, &router);
 
     // Start the usage writer BEFORE the capability warm and before building
     // AppState. The writer opens the DB once here and owns it for the

@@ -1613,16 +1613,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `f32` row multipliers are widened to `f64` for the arithmetic. Imports ONLY
   the pricing row + std -- no Config/Router/provider/async
 - `src/calibration/mod.rs` -- learned per-lane correction of the router's token
-  estimate; re-exports `Factor` + `CalibrationStore` / `LaneKey` (the whole
-  public surface -- the reduction and the lane ring stay module-private)
+  estimate; re-exports `Factor` + `CalibrationStore` / `LaneKey` / `cohort_of`
+  and the warm-rebuild seam (`CalibrationLedgerReader` /
+  `CalibrationLedgerRow` / `CalibrationRebuildSummary` / `rebuild_into`) -- the
+  reduction and the lane ring stay module-private
 - `src/calibration/store.rs` -- `Mutex<HashMap<LaneKey, LaneSamples>>` evidence
   map (NOT an LRU: a lane is `(provider_kind, served NICKNAME)`, so the
   keyspace is bounded by the loaded model table, unlike the client-driven
   session keyspace `k_estimator` guards). `record` converts one
   estimate/actual pair to an integer permille ratio and pushes it onto the
   lane's bounded ring (`SAMPLES_PER_LANE`), dropping a pair with a zero on
-  either side; `factor_for` reduces a lane; `export_entries` / `import_entries`
-  are the hot-reload carry-over seam (`Router::carry_over_calibration_from`)
+  either side and REPORTING whether it stored (the warm rebuild tallies its
+  drops from that bool, so both paths share ONE admission rule);
+  `factor_for` reduces a lane; `calibrated_lane_count` runs the same reduction
+  over every lane for boot observability; `cohort_of` is the one session-key
+  to opaque-cohort derivation both the live write and the rebuild call;
+  `export_entries` / `import_entries` are the hot-reload carry-over seam
+  (`Router::carry_over_calibration_from`)
 - `src/calibration/factor.rs` -- the reduction and the correction arithmetic.
   `Factor::apply(raw) = raw * permille / 1000` in `u64`, no float (the window
   gate's own no-float-in-a-routing-decision constraint); the ratio is
@@ -1632,6 +1639,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `MIN_SAMPLES`, and REFUSES (returns `None`, not a clamp) a reduced ratio
   outside `MIN_SANE_PERMILLE..=MAX_SANE_PERMILLE`. Every refusal cause
   collapses to `None`, which is the uncorrected estimate
+- `src/calibration/rebuild.rs` -- boot warm rebuild of the lane store from the
+  persisted evidence, so a restart does not un-learn a lane. Owns the
+  `CalibrationLedgerReader` DI seam (the usage crate is a leaf this crate does
+  not depend on, so the concrete reader lives in routectl-cli) plus
+  `CalibrationLedgerRow` and `CalibrationRebuildSummary`. `rebuild_into`
+  reads the `[now - MAX_SAMPLE_AGE, now]` window, replays OLDEST-FIRST through
+  `CalibrationStore::record` (no second validation / reduction / bounds path),
+  drops a row whose nickname left the resolved-model table, and judges
+  freshness against the passed-in clock. Reached through
+  `Router::rebuild_calibration_from_ledger`, which supplies the
+  resolved-model predicate and keeps the store encapsulated
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /
@@ -1659,7 +1677,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `catalog_version` / `overlay_revision` / `catalog_overlay` getters and
   `rebuild_learned_from_ledger` (the boot warm-rebuild seam: delegates to
   `capability_rebuild::rebuild_capabilities_into` over the PRIVATE learned
-  registry so it stays encapsulated), `register`, `record_k_sample`,
+  registry so it stays encapsulated),
+  `rebuild_calibration_from_ledger` (the same shape for the PRIVATE
+  calibration store, supplying the resolved-model predicate that drops a
+  renamed nickname), `register`, `record_k_sample`,
   `record_calibration_sample` (the live per-lane token-estimate evidence write;
   requires BOTH a served provider kind and a served NICKNAME or it forms no
   lane, and hashes the session key into an opaque reduction cohort),
@@ -2376,10 +2397,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `UsageWriter`/`CHANNEL_CAPACITY`,
   `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`open_rw`/`OpenError`,
   the read-side query surface
-  (`aggregate`/`ttfbs`/`latest_quota_by_seat`/`query`/`k_calibration_summary`/`near_lossless_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`
+  (`aggregate`/`ttfbs`/`latest_quota_by_seat`/`query`/`k_calibration_summary`/`near_lossless_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`/`read_calibration_samples_since`
   + the capability-ledger reads
   `read_capability_events_after`/`latest_tombstone` + the row/summary types
-  `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`NearLosslessAttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
+  `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`NearLosslessAttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CalibrationSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
   `estimate_cost_tokens`/`CostBreakdown`/`Rates` (+ the `#[doc(hidden)]`
   record-path `estimate_cost`), `CapabilityLearnEvent`, `CapabilityEvent` +
   `insert_capability_event` (the append-only capability-ledger writer,
@@ -2508,8 +2529,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ShadowMisfireSummary`, `NearLosslessAttributionSummary`, `KCalibration`,
   `ReuseSampleRow`); carries the COALESCE zero-row guards so a SUM/CASE over
   an empty ledger reads as 0 rather than erroring
-- `src/query/capability.rs` -- capability-ledger read queries for the
-  warm-rebuild replayer; exports `read_capability_events_after(conn,
+- `src/query/calibration.rs` -- token-estimate calibration evidence read for
+  the router's boot warm rebuild; exports `read_calibration_samples_since` +
+  `CalibrationSampleRow`. Admission mirrors the live write row for row --
+  `outcome = 'ok'`, both `calib_*` columns NOT NULL (the pair is admitted or
+  refused as a unit), `provider_kind`/`model` NOT NULL -- because a rebuild
+  that admitted more would let a restart replay rows live traffic never
+  recorded. `model` is the SERVED NICKNAME, the same label the gate's lane
+  lookup keys on; `session_id` is deliberately NOT filtered (the live path
+  records a keyless request too). Newest-N cap with a `rowid` tie-break,
+  returned oldest-first so a replay lands in arrival order
+- `src/query/capability.rs` -- capability-ledger read queries for the  warm-rebuild replayer; exports `read_capability_events_after(conn,
   after_rowid, limit)` (rows with rowid > `after_rowid`, ordered `ts ASC,
   rowid ASC`, capped at `limit`) and `latest_tombstone(conn)` (the
   highest-rowid tombstone's boundary key + stamped revision, or `None`) with
@@ -2674,14 +2704,29 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`serve_with_bounded_drain` + `drain_deadline_watcher` + `DRAIN_DEADLINE`),
   MITM front-proxy spawn (`start_mitm_proxy`), and the usage-writer lifecycle
   (`build_usage_writer` / `drain_usage_writer`). On the owned router before
-  the `ArcSwap`, boot runs the K-store warm (`k_rebuild`) then the
+  the `ArcSwap`, boot runs the K-store warm (`k_rebuild`), then the
+  calibration-lane warm (`calibration_rebuild`), then the
   learned-capability warm (`capability_rebuild`); `build_usage_writer` is
   sequenced AHEAD of the capability warm so the fail-closed boot tombstone has
-  a `UsageHandle` to enqueue through. Router construction is delegated to
-  `router_build`. Boot seeds the initial activation inventory and spawns the
-  reload pipeline (both owned by the `reload` submodule); a forwarded
-  (pure-proxy) egress is an explicit `[providers.X] credential_source =
-  "forwarded"` block -- no zero-config synthetic-egress injection
+  a `UsageHandle` to enqueue through, and BEHIND the calibration warm, which
+  performs its own migrating open (see that module). Router construction is
+  delegated to `router_build`. Boot seeds the initial activation inventory and
+  spawns the reload pipeline (both owned by the `reload` submodule); a
+  forwarded (pure-proxy) egress is an explicit `[providers.X]
+  credential_source = "forwarded"` block -- no zero-config synthetic-egress
+  injection
+- `src/server/calibration_rebuild.rs` -- bridges the leaf usage ledger to the
+  router's `CalibrationLedgerReader` seam and runs the boot warm of the
+  per-lane token-estimate correction. `warm_calibration_from_ledger` (called
+  from `serve` on the owned router before the `ArcSwap`, bootstrap-only --
+  never on hot-reload, where `carry_over_calibration_from` preserves the live
+  store) runs the MIGRATING open itself before its first query: the evidence
+  columns exist only after the newest migration and the read-only open rejects
+  an older schema outright, so relying on the usage writer's own (spawned,
+  concurrent) open would trade a silent miss for a race. Read failures return
+  EMPTY, never partial -- a factor reduced from a half-read slice is one the
+  full evidence never supported -- and the tally is logged in one info line
+  with a `warn` when the row cap truncated the read
 - `src/server/capability_rebuild.rs` -- serve-side reaction to the shared
   capability-ledger read (the reader, clock map, and boundary classification
   live in `ledger_reader.rs`). `warm_capability_registry_from_ledger` (called
