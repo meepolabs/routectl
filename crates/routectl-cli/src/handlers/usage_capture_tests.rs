@@ -395,6 +395,52 @@ async fn both_evidence_values_round_trip_to_the_ledger_together() {
     assert_eq!(persisted_evidence_pair(&path), (Some(9_500), Some(10_000)));
 }
 
+#[tokio::test]
+async fn a_non_success_outcome_persists_neither_half_of_a_populated_pair() {
+    // Arrange: the estimate is already stamped (as `observe_meta` leaves it
+    // the moment a target is dispatched) and a real prompt total was
+    // observed -- then the request fails. This is the state that exposes a
+    // half-admitted pair: the refusal has to reach BOTH columns.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let mut meta = any_dispatch_meta().await;
+    meta.calib_estimated_tokens = Some(9_500);
+    let resp = response_with_cache(Some(10_000), Some(4_000), Some(1_000), None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::UpstreamError);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: refused as a UNIT. A stored estimate with a NULL actual would
+    // put the two columns in different populations, so an estimate-side
+    // aggregate would count a sample the actual-side aggregate skips.
+    assert_eq!(persisted_evidence_pair(&path), (None, None));
+}
+
+#[tokio::test]
+async fn a_zero_prompt_total_persists_neither_half_of_a_populated_pair() {
+    // Arrange: same populated estimate, a SUCCESS, but the upstream reports a
+    // zero prompt total -- the other refusal, which must clear the pair too.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let mut meta = any_dispatch_meta().await;
+    meta.calib_estimated_tokens = Some(9_500);
+    let resp = response_with_cache(Some(0), None, None, None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(persisted_evidence_pair(&path), (None, None));
+}
+
 /// A `UsageCapture` plus the handle (so tests can poll the persisted
 /// counter) and the writer (so tests can drain it to disk on shutdown).
 fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, tempfile::TempDir) {

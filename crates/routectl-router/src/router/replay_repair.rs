@@ -25,6 +25,11 @@
 //! ([`is_replayable`] over [`scheme_of`]), never any client-supplied claim,
 //! so a hostile or incompatible pairing is stripped regardless of what an
 //! envelope asserted.
+//!
+//! Both strip moments -- the proactive one here and the on-retry one in the
+//! dispatch arm -- go through [`strip_replay_artifacts_recalibrating`], which
+//! also re-stamps the calibration estimate so the evidence numerator always
+//! describes the bytes that actually went upstream.
 
 use std::time::Instant;
 
@@ -33,9 +38,10 @@ use routectl_core::failure_class::{FailureClass, ReplayAttempt};
 use routectl_core::{ChatRequest, ReplayScheme, Replayability, is_replayable, scheme_of};
 
 use crate::capability_strip::strip_replay_artifacts;
+use crate::context_trim::estimate_total_tokens;
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
-use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchTarget, Router};
+use super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, Router};
 
 /// The carried-artifact admission for one dispatch target: the single-flight
 /// guards held while the optimistically-carried variant is in flight, the
@@ -106,6 +112,37 @@ impl ReplayCarryPlan<'_> {
     }
 }
 
+/// Strip the lane-rejected reasoning artifacts off a per-attempt request AND
+/// bring the calibration estimate back in line with the payload that will
+/// actually go upstream. THE dispatch-path entry point for the strip: every
+/// site that mutates a live `attempt_req` goes through here.
+///
+/// `record_would_trim` stamps `meta.calib_estimated_tokens` once, before the
+/// retry loop, from the request as it stood then. A strip -- proactive
+/// (a resident negative or a peer probe) or on-retry (the strip repair) --
+/// makes the dispatched payload SMALLER than that stamp describes, while the
+/// provider's reported prompt total reflects the smaller payload. Left
+/// uncorrected the evidence ratio comes out too low, and a low correction
+/// factor shrinks a corrected estimate until the window gate admits requests
+/// the static estimate had correctly judged too large.
+///
+/// The re-estimate runs ONLY when the strip actually removed something, so
+/// the overwhelming majority of dispatches -- which carry no artifact the
+/// lane rejects -- pay no extra serialization. Taking `meta` as a required
+/// parameter is deliberate: a future strip site cannot be added on this path
+/// without deciding what happens to the estimate.
+pub(super) fn strip_replay_artifacts_recalibrating(
+    attempt_req: &mut ChatRequest,
+    lane: ReplayScheme,
+    meta: &mut DispatchMeta,
+) -> bool {
+    if !strip_replay_artifacts(attempt_req, lane) {
+        return false;
+    }
+    meta.calib_estimated_tokens = Some(estimate_total_tokens(attempt_req));
+    true
+}
+
 impl Router {
     /// Whether an effective failure class is the proven reasoning-replay
     /// rejection this arm repairs.
@@ -121,11 +158,14 @@ impl Router {
     /// admit / proactive-strip split. Returns `None` (leaving `attempt_req`
     /// carried as-is) when the lane is unestablished or no non-portable
     /// artifact is present, and `None` (after stripping `attempt_req` in
-    /// place) when any pair is acting-negative or already under a peer probe.
+    /// place, and re-stamping the calibration estimate to match the stripped
+    /// payload) when any pair is acting-negative or already under a peer
+    /// probe.
     pub(super) fn plan_replay_carry<'a>(
         &'a self,
         target: &DispatchTarget,
         attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
         now: Instant,
     ) -> Option<ReplayCarryPlan<'a>> {
         let lane = target.provider.as_ref()?.replay_lane();
@@ -147,7 +187,7 @@ impl Router {
                     // the guards already taken releases their slots without
                     // learning, then strip proactively before dispatch.
                     drop(guards);
-                    strip_replay_artifacts(attempt_req, lane);
+                    strip_replay_artifacts_recalibrating(attempt_req, lane, meta);
                     return None;
                 }
             }
@@ -195,3 +235,7 @@ fn is_portable(format: Option<&str>, lane: ReplayScheme) -> bool {
 #[cfg(test)]
 #[path = "replay_repair_tests.rs"]
 mod replay_repair_tests;
+
+#[cfg(test)]
+#[path = "replay_strip_calibration_tests.rs"]
+mod replay_strip_calibration_tests;

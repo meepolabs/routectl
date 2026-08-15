@@ -814,7 +814,7 @@ impl UsageCapture {
         }
         self.finalized = true;
         self.record.outcome = outcome;
-        self.record.calib_prompt_tokens = self.admissible_prompt_total(outcome);
+        self.admit_evidence_pair(outcome);
         self.record.ts_end = epoch_ms_now();
         self.record.latency_ms = i64::try_from(self.start.elapsed().as_millis()).unwrap_or(0);
         self.record.ttfb_ms = self
@@ -828,6 +828,24 @@ impl UsageCapture {
         // `finalized` is already set above, so the only later access --
         // Drop -- short-circuits and never touches the taken record.
         self.usage.try_send(std::mem::take(&mut self.record));
+    }
+
+    /// Admit or refuse the calibration evidence PAIR as a unit.
+    ///
+    /// The estimate column was copied from the dispatch meta long before the
+    /// outcome was known (`observe_meta`), so a refusal decided here has to
+    /// clear it as well: a row carrying an estimate with no paired actual
+    /// would put the two columns in different populations, and an
+    /// estimate-side aggregate would then count samples the actual-side
+    /// aggregate skips.
+    const fn admit_evidence_pair(&mut self, outcome: Outcome) {
+        match self.admissible_prompt_total(outcome) {
+            Some(total) => self.record.calib_prompt_tokens = Some(total),
+            None => {
+                self.record.calib_prompt_tokens = None;
+                self.record.calib_estimated_tokens = None;
+            }
+        }
     }
 
     /// The observed cache-INCLUSIVE prompt total, if it is admissible as

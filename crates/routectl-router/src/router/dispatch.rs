@@ -23,7 +23,6 @@ use routectl_core::{
 };
 use serde_json::Value;
 
-use crate::capability_strip::strip_replay_artifacts;
 use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::{CacheCapability, RetryPolicy};
 use crate::context_trim::{
@@ -41,6 +40,7 @@ use super::class_observe::{
 };
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::overlays::apply_layered_overlays;
+use super::replay_repair::strip_replay_artifacts_recalibrating;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
@@ -431,9 +431,11 @@ impl Router {
             // carried variant intact; `None` either found nothing to repair or
             // already stripped `attempt_req` proactively (an acting negative or
             // a peer probe). Runs after every request-shaping step so the
-            // gray-artifact count reflects the exact carried bytes.
+            // gray-artifact count reflects the exact carried bytes. A proactive
+            // strip re-stamps the calibration estimate, so the evidence
+            // numerator describes the stripped payload the upstream will price.
             let now_admit = Instant::now();
-            let mut replay_plan = self.plan_replay_carry(target, &mut attempt_req, now_admit);
+            let mut replay_plan = self.plan_replay_carry(target, &mut attempt_req, meta, now_admit);
             let mut replay_repair_attempted = false;
             let mut replay_reject_status: u16 = 0;
             let mut skip_replay_backoff = false;
@@ -716,7 +718,7 @@ impl Router {
                                 repair_succeeded: false,
                                 learned: false,
                             });
-                            strip_replay_artifacts(&mut attempt_req, lane);
+                            strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
                             skip_replay_backoff = true;
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
@@ -1176,7 +1178,7 @@ impl Router {
             // the single-flight slot for each non-portable carried scheme, or
             // strip proactively when an acting negative / peer probe refuses.
             let now_admit = Instant::now();
-            let mut replay_plan = self.plan_replay_carry(target, &mut attempt_req, now_admit);
+            let mut replay_plan = self.plan_replay_carry(target, &mut attempt_req, meta, now_admit);
             let mut replay_repair_attempted = false;
             let mut replay_reject_status: u16 = 0;
             let attempt_policy = self.compose_attempt_policy(
@@ -1454,7 +1456,7 @@ impl Router {
                                 repair_succeeded: false,
                                 learned: false,
                             });
-                            strip_replay_artifacts(&mut attempt_req, lane);
+                            strip_replay_artifacts_recalibrating(&mut attempt_req, lane, meta);
                             self.release_probe_slot(state_key);
                             probe_guard.disarm();
                             // Preserve the genuine replay-rejection error as
@@ -1768,7 +1770,12 @@ impl Router {
     /// `meta.calib_estimated_tokens` is the ONE exception to the trigger
     /// gate: it is stamped before the early return, for every dispatched
     /// attempt. It is calibration evidence, not a trim advisory -- gating it
-    /// on size would train a correction factor on large requests only.
+    /// on size would train a correction factor on large requests only. This
+    /// stamp is the estimate for the request as it stands HERE, before the
+    /// retry loop; a later reasoning-replay strip shrinks the dispatched
+    /// payload and re-stamps it (see
+    /// `strip_replay_artifacts_recalibrating`), so the persisted value always
+    /// describes the bytes that actually went upstream.
     ///
     /// CRITICAL: this NEVER mutates `attempt_req`. Both measurements only
     /// read the request and never call `apply_trim_plan`, so the bytes sent
