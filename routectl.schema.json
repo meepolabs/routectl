@@ -1945,6 +1945,18 @@
         }
       },
       "type": "object"
+    },
+    "WindowGateConfig": {
+      "additionalProperties": false,
+      "description": "Operator-facing `[window_gate]` config block. Kill switch for the\nproactive context-window gate, which de-prioritizes routing targets\nwhose context window cannot hold the estimated request. A missing\n`[window_gate]` table deserializes to `WindowGateConfig::default()`\n(enabled), so an existing config needs no migration.\n\nOff must be byte-identical to no gate at all: no estimate computed, no\nchain reordering, no diagnostics movement.\n\nOne field deliberately: the gate's safety margin against estimator\nerror is a baked constant, not an operator knob, because a margin\ntuned per deployment turns a routing decision into a support surface.\n`#[non_exhaustive]` leaves room for a later knob without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time instead of silently ignoring it.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Master switch for the proactive context-window gate. Default on.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2091,6 +2103,13 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "window_gate": {
+      "$ref": "#/$defs/WindowGateConfig",
+      "default": {
+        "enabled": true
+      },
+      "description": "Operator-facing `[window_gate]` block. Kill switch for the\nproactive context-window gate. A missing block leaves the gate\nenabled; setting `enabled = false` restores the pre-gate routing\nbehavior exactly. Hot-reloadable -- the flag is read per chain\nresolution, so a live config swap applies without a restart."
     }
   },
   "title": "Config",
