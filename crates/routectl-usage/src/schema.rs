@@ -13,7 +13,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -186,7 +186,35 @@ CREATE TABLE IF NOT EXISTS requests (
     -- same ordinal position whether the DB was created fresh at v12 or migrated
     -- from v11 via ALTER TABLE ... ADD COLUMN resolved_class (which always
     -- appends). No backfill -- older rows stay NULL.
-    resolved_class  TEXT
+    resolved_class  TEXT,
+
+    -- TOKEN-ESTIMATE CALIBRATION EVIDENCE (v14): the raw (estimate, actual)
+    -- pair for one served request, so a per-lane correction factor can be
+    -- learned offline or in memory from raw evidence rather than a
+    -- pre-averaged ratio. `calib_estimated_tokens` is routectl's own
+    -- byte-heuristic estimate of the dispatched payload;
+    -- `calib_prompt_tokens` is the upstream's own cache-INCLUSIVE prompt
+    -- total, recorded only on a success and only when nonzero (an unreported
+    -- total arrives as a real 0 and would train the factor on a data bug).
+    -- Both NULL on any row that is not a success with a reported total; a
+    -- NULL in either column simply makes the row inadmissible as evidence,
+    -- which is why there is no CHECK tying them together.
+    --
+    -- `calib_prompt_tokens` is NOT derivable from `input_tokens + cache_read
+    -- + cache_write_5m + cache_write_1h`: `input_tokens` is cache-EXCLUSIVE
+    -- and its subtraction uses the AGGREGATE cache-creation total, which is
+    -- not itself persisted (only the per-TTL split is, and that split is
+    -- frequently absent). Such a derivation is short by the whole
+    -- cache-creation total on the majority of cache-reusing rows, which
+    -- biases a learned factor LOW -- the direction that makes a corrected
+    -- estimate too small. Hence the direct column.
+    --
+    -- Appended last so these columns land in the same ordinal position
+    -- whether the DB was created fresh at v14 or migrated from v13 via
+    -- `ALTER TABLE ... ADD COLUMN` (which always appends). No backfill --
+    -- older rows stay NULL.
+    calib_estimated_tokens INTEGER,
+    calib_prompt_tokens INTEGER
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

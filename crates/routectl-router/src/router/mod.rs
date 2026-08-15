@@ -758,6 +758,16 @@ pub struct DispatchMeta {
     /// near-lossless pass did not run (below trigger) OR the resolved
     /// row's context window is unknown (fail-closed). Recording only.
     pub would_trim_context_fraction: Option<f64>,
+    /// Token-estimate calibration evidence: routectl's own byte-heuristic
+    /// token estimate of the payload actually dispatched to the served
+    /// target. Stamped for EVERY dispatched attempt, unconditionally -- no
+    /// size trigger, no chain-length condition, no kill switch -- so the
+    /// evidence population is not skewed toward the large or multi-target
+    /// requests that other advisories select for. Last-writer-wins across a
+    /// chain walk, which leaves the SERVED attempt's estimate: the one whose
+    /// reported usage it will be compared against. `None` when no target was
+    /// dispatched. Recording only.
+    pub calib_estimated_tokens: Option<u64>,
     /// Learned-capability observations captured on the dispatch error
     /// arm(s) for this request. Empty on the common (non-capability)
     /// path; carries one event per eligible, deduped, acting observation
@@ -856,6 +866,7 @@ impl DispatchMeta {
             would_trim_recorder_version: None,
             would_trim_raw_marks: None,
             would_trim_context_fraction: None,
+            calib_estimated_tokens: None,
             learned_capabilities: Vec::new(),
             capability_observations: Vec::new(),
             cleared_capabilities: Vec::new(),

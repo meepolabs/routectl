@@ -2,8 +2,8 @@ use super::*;
 use crate::migrate::migrate_to_current;
 use crate::record::UsageRecord;
 use crate::schema::{
-    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS,
-    META_SCHEMA_VERSION, SCHEMA_VERSION,
+    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX,
+    META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -1452,7 +1452,135 @@ fn migration_rejects_newer_db_version() {
     assert!(matches!(result, Err(MigrateError::VersionTooNew { .. })));
 }
 
-/// Pins the physical `requests` DDL shape: 57 columns, in this exact
+/// Full `(name, declared type, notnull, ordinal)` shape of a table, in
+/// physical column order -- the comparison unit for a fresh-vs-migrated
+/// schema-identity assertion.
+fn table_shape(conn: &Connection, table: &str) -> Vec<(String, String, i64)> {
+    let mut stmt = conn
+        .prepare("SELECT name, type, \"notnull\" FROM pragma_table_info(?1)")
+        .expect("prepare table_info");
+    stmt.query_map([table], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })
+    .expect("query table_info")
+    .map(|r| r.expect("row"))
+    .collect()
+}
+
+/// The `requests` DDL as it stood before the calibration-evidence pair was
+/// appended: the current DDL truncated right after the last v13 column.
+/// Derived from the live constant rather than hand-copied so it cannot
+/// silently diverge from the real prior shape.
+fn requests_ddl_without_calibration_columns() -> String {
+    const LAST_V13_COLUMN: &str = "    resolved_class  TEXT,";
+    let (head, tail) = CREATE_REQUESTS_TABLE
+        .split_once(LAST_V13_COLUMN)
+        .expect("current DDL still ends its v13 column set with resolved_class");
+    assert!(
+        tail.contains("calib_estimated_tokens") && tail.contains("calib_prompt_tokens"),
+        "the calibration columns must be the trailing appended pair"
+    );
+    format!("{head}    resolved_class  TEXT\n)")
+}
+
+/// A v13 DB (created before the calibration-evidence pair existed) must
+/// migrate to v14 with a schema PHYSICALLY IDENTICAL to a fresh v14 DB --
+/// same columns, same declared types, same null-ability, same order. This is
+/// the append-last contract: a reader cannot tell a migrated file from a
+/// fresh one. Any pre-existing row survives with both columns NULL (no
+/// backfill), and a second pass is a no-op.
+#[test]
+fn v13_to_v14_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
+    // Arrange: a genuine v13-shaped `requests` table (the full current DDL
+    // minus the two appended columns) carrying a pre-migration row.
+    let (_migrated_dir, migrated_path) = temp_db_path();
+    let migrated = Connection::open(&migrated_path).expect("raw open");
+    migrated
+        .execute_batch(&requests_ddl_without_calibration_columns())
+        .expect("build v13 requests table");
+    migrated
+        .execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('schema_version', '13');
+             INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, input_tokens, cache_read) \
+                 VALUES (1, 2, 'pre-calib-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, \
+                 1, 0, 100, 900);
+             PRAGMA user_version = 13;",
+        )
+        .expect("seed v13 db");
+    assert_eq!(user_version(&migrated), 13);
+    let has_column = |c: &Connection, name: &str| -> bool {
+        c.prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name=?1")
+            .expect("prepare")
+            .exists([name])
+            .expect("query")
+    };
+    assert!(
+        !has_column(&migrated, "calib_estimated_tokens"),
+        "sanity: the v13 table carries neither calibration column"
+    );
+
+    // Act
+    let version = migrate_to_current(&migrated, 0).expect("migrate v13->v14");
+
+    // Assert: version landed, both columns exist, and the pre-migration row
+    // survives with its prior token columns intact and both new ones NULL.
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(user_version(&migrated), SCHEMA_VERSION);
+    let (input_tokens, cache_read, estimated, prompt): (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    ) = migrated
+        .query_row(
+            "SELECT input_tokens, cache_read, calib_estimated_tokens, calib_prompt_tokens \
+             FROM requests WHERE request_id='pre-calib-row'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .expect("old row survives");
+    assert_eq!(input_tokens, Some(100));
+    assert_eq!(cache_read, Some(900));
+    assert!(
+        estimated.is_none(),
+        "migrated row must have NULL calib_estimated_tokens -- no backfill"
+    );
+    assert!(
+        prompt.is_none(),
+        "migrated row must have NULL calib_prompt_tokens -- no backfill"
+    );
+    let meta_version: String = migrated
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("meta schema_version");
+    assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+
+    // Assert: the migrated shape is byte-identical to a fresh one.
+    let (_fresh_dir, fresh_path) = temp_db_path();
+    let fresh = open(&fresh_path).expect("open fresh db");
+    assert_eq!(
+        table_shape(&migrated, "requests"),
+        table_shape(fresh.conn(), "requests"),
+        "a migrated v13 DB must be indistinguishable from a fresh v14 DB"
+    );
+
+    // Idempotent: a second pass over an already-current DB is a no-op.
+    let again = migrate_to_current(&migrated, 0).expect("re-run migrate");
+    assert_eq!(again, SCHEMA_VERSION);
+    assert!(has_column(&migrated, "calib_prompt_tokens"));
+}
+
+/// Pins the physical `requests` DDL shape: 59 columns, in this exact
 /// order, with this exact null-ability. The set intentionally EXCEEDS the
 /// `UsageRecord` field set by three write-stopped legacy columns
 /// (`strategy`, `reduction_strategy`, `selection_decision`), which the DDL
@@ -1521,6 +1649,8 @@ fn requests_columns_match_physical_schema() {
         ("would_trim_raw_marks", false),
         ("would_trim_context_fraction", false),
         ("resolved_class", false),
+        ("calib_estimated_tokens", false),
+        ("calib_prompt_tokens", false),
     ];
 
     let (_dir, path) = temp_db_path();
