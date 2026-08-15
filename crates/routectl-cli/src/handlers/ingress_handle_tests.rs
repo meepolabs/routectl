@@ -1916,6 +1916,197 @@ async fn capture_non_stream_render_failure_emits_upstream_error_row() {
     assert_eq!(rows[0].request_id, "req-render-502");
 }
 
+/// Adapter wrapper whose `render_response` always fails, leaving every other
+/// trait method delegated to the inner adapter. Drives the non-streaming
+/// render-failure arm of `complete_response` end to end.
+struct RenderResponseFailsAdapter<A: IngressAdapter> {
+    inner: A,
+}
+
+impl<A: IngressAdapter> IngressAdapter for RenderResponseFailsAdapter<A> {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn error_envelope_shape(&self) -> ErrorEnvelopeShape {
+        self.inner.error_envelope_shape()
+    }
+    fn parse_request(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> routectl_core::Result<routectl_core::ChatRequest> {
+        self.inner.parse_request(headers, body)
+    }
+    fn render_response(
+        &self,
+        _resp: routectl_core::ChatResponse,
+    ) -> routectl_core::Result<bytes::Bytes> {
+        Err(Error::Internal("synthetic render_response failure".into()))
+    }
+    fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
+        self.inner.new_stream_state(ctx)
+    }
+    fn render_chunk(
+        &self,
+        chunk: routectl_core::ChatChunk,
+        state: &mut dyn IngressStreamState,
+    ) -> routectl_core::Result<Vec<SseEvent>> {
+        self.inner.render_chunk(chunk, state)
+    }
+    fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
+        self.inner.render_eos(state)
+    }
+    fn render_error_eos(
+        &self,
+        state: &mut dyn IngressStreamState,
+        error: &dyn std::fmt::Display,
+        class: &crate::ingress::StreamErrorClass,
+    ) -> Vec<SseEvent> {
+        self.inner.render_error_eos(state, error, class)
+    }
+}
+
+/// LIVE and PERSISTED calibration admission must agree exactly. A render
+/// failure after a good upstream response finalizes `upstream_error`, which
+/// clears both persisted evidence columns -- so the in-memory lane store must
+/// hold nothing either. If it did, the lane would correct one way until the
+/// next restart and another way after the rebuild dropped the same evidence,
+/// which is a behavior change with no signal attached to it.
+///
+/// Asserting only on the persisted columns would pass against a live-side
+/// leak, so the assertion is on the router's own lane set.
+#[tokio::test]
+async fn a_render_failure_leaves_no_live_calibration_evidence() {
+    use crate::ingress::openai::OpenAiIngress;
+    use std::sync::Arc;
+
+    // Arrange: a reachable upstream returning a usable prompt total, so the
+    // evidence pair the recording needs is fully present -- the ONLY reason
+    // no sample may land is the render failure.
+    let upstream = calibration_upstream().await;
+    let router = Arc::new(calibration_recording_router(&upstream.uri()).await);
+    assert!(
+        router.calibration_lanes().is_empty(),
+        "a freshly built router holds no lane evidence",
+    );
+
+    // Act: the real non-streaming handler path, with an adapter that fails
+    // to serialize the response the upstream delivered.
+    let rig = CaptureRig::new();
+    let req = sample_request("a", false);
+    let draft = build_usage_draft("openai", &req, "req-calib-render-fail".to_string());
+    let resp = complete_response(
+        Arc::clone(&router),
+        req,
+        Default::default(),
+        RenderResponseFailsAdapter {
+            inner: OpenAiIngress,
+        },
+        ErrorEnvelopeShape::OpenAi,
+        rig.handle.clone().expect("rig handle present"),
+        draft,
+    )
+    .await;
+
+    // Assert: the client got an error, the row is not `ok`, and NO lane was
+    // created live.
+    assert_ne!(resp.status(), StatusCode::OK);
+    assert!(
+        router.calibration_lanes().is_empty(),
+        "a request the ledger refuses must leave no live lane evidence",
+    );
+    let rows = rig.flush_and_read().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "upstream_error");
+}
+
+/// A clean completion over the same rig DOES record, so the test above pins
+/// the render boundary rather than a recording path that never fires at all.
+#[tokio::test]
+async fn a_clean_completion_records_live_calibration_evidence() {
+    use crate::ingress::openai::OpenAiIngress;
+    use std::sync::Arc;
+
+    let upstream = calibration_upstream().await;
+    let router = Arc::new(calibration_recording_router(&upstream.uri()).await);
+    let rig = CaptureRig::new();
+    let req = sample_request("a", false);
+    let draft = build_usage_draft("openai", &req, "req-calib-ok".to_string());
+
+    let resp = complete_response(
+        Arc::clone(&router),
+        req,
+        Default::default(),
+        OpenAiIngress,
+        ErrorEnvelopeShape::OpenAi,
+        rig.handle.clone().expect("rig handle present"),
+        draft,
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        router.calibration_lanes(),
+        vec![("openai-compat".to_string(), "m".to_string())],
+        "a delivered 200 records the lane the served target names",
+    );
+}
+
+/// A mock upstream answering one non-streaming completion with a nonzero
+/// prompt total, so the calibration evidence pair is fully present.
+async fn calibration_upstream() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "model": "gpt-4o",
+            "created": 1_700_000_000_i64,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 4_000, "completion_tokens": 5, "total_tokens": 4_005}
+        })))
+        .mount(&upstream)
+        .await;
+    upstream
+}
+
+/// A Router over one reachable openai-compat model, built through the real
+/// bootstrap so the served `provider_kind` / nickname a calibration lane keys
+/// on are both stamped by an actual dispatch.
+async fn calibration_recording_router(upstream_base: &str) -> routectl_router::Router {
+    use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat(upstream_base, crate::test_secret::file_ref("k")),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    build_test_router(Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    }))
+    .await
+}
+
 /// Truth-table row 7: a streaming render failure AFTER the SSE head has
 /// committed keeps http_status=200. Mirrors `drive_stream`'s render-Err
 /// ordering exactly (the render-failure arm is not cheaply reachable end-

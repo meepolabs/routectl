@@ -1625,11 +1625,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   lane's bounded ring (`SAMPLES_PER_LANE`), dropping a pair with a zero on
   either side and REPORTING whether it stored (the warm rebuild tallies its
   drops from that bool, so both paths share ONE admission rule);
-  `factor_for` reduces a lane; `calibrated_lane_count` runs the same reduction
+  `factor_for` clones the lane's samples under the lock and reduces OUTSIDE
+  the critical section (the lookup is on the dispatch path, so reducing under
+  the one store-wide mutex would serialize unrelated lanes);
+  `calibrated_lane_count` runs the same reduction
   over every lane for boot observability; `cohort_of` is the one session-key
   to opaque-cohort derivation both the live write and the rebuild call;
   `export_entries` / `import_entries` are the hot-reload carry-over seam
-  (`Router::carry_over_calibration_from`)
+  (`Router::carry_over_calibration_from`, which filters the export against the
+  new resolved-model table so renamed models cannot accumulate dead lanes)
 - `src/calibration/factor.rs` -- the reduction and the correction arithmetic.
   `Factor::apply(raw) = raw * permille / 1000` in `u64`, no float (the window
   gate's own no-float-in-a-routing-decision constraint); the ratio is
@@ -1649,7 +1653,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   drops a row whose nickname left the resolved-model table, and judges
   freshness against the passed-in clock. Reached through
   `Router::rebuild_calibration_from_ledger`, which supplies the
-  resolved-model predicate and keeps the store encapsulated
+  resolved-model predicate (`Router::knows_nickname`, shared with the reload
+  carry-over) and keeps the store encapsulated. `CalibrationRebuildSummary` is
+  `#[non_exhaustive]` with a `new` constructor, so a further tally field is not
+  a breaking change
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /
@@ -1684,6 +1691,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `record_calibration_sample` (the live per-lane token-estimate evidence write;
   requires BOTH a served provider kind and a served NICKNAME or it forms no
   lane, and hashes the session key into an opaque reduction cohort),
+  `calibration_lanes` (lane IDENTITIES only, never samples -- the observability
+  read surface over the otherwise-private store), `knows_nickname` (the ONE
+  lane-admission predicate, shared by the boot rebuild and the reload carry),
   `resolve_nickname`, `has_forwarded_provider`, `override_registry`. Also owns
   the header-compose constants
   (`AUTH_HEADERS`/`MANAGED_HEADERS`/`LIST_VALUED_HEADERS`, consumed by
@@ -1771,7 +1781,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and records the `DispatchMeta.replay_degradation` summary; owns
   `strip_replay_artifacts_recalibrating`, THE dispatch-path strip entry point,
   which re-stamps `DispatchMeta.calib_estimated_tokens` whenever a strip
-  actually shrank the payload
+  actually shrank the payload. The raw lane-directional strip it wraps is
+  PRIVATE to this module: it drops the assistant-turn `reasoning_details`
+  whose `is_replayable(scheme_of(detail.format), lane)` is `Strip` or `Gray`
+  (the repair variant carries no unproven artifact) while keeping
+  proven-portable `Carry` details and the legacy plaintext `reasoning` text,
+  mutating through the `Arc::make_mut` copy-on-write seam behind a read-only
+  pre-scan so a no-op never clones and the rest of the request stays
+  byte-identical (prompt-cache affinity). Private so no dispatch call site can
+  strip without the re-stamp; its direct behavior coverage lives in
+  `src/router/replay_strip_tests.rs`
 - `src/router/class_observe.rs` -- pure classification/observability leaf
   shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
@@ -2174,14 +2193,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   AND the `context_management` body key; `advisor` strips only its grounded
   tool shape (no beta token is fabricated). `reasoning_replay ->
   Strip(AssistantReasoning)` has NO `strip_plan` row by design: its transform
-  is lane-directional, so it lives in `strip_replay_artifacts(req, lane)`,
-  which drops the assistant-turn `reasoning_details` whose
-  `is_replayable(scheme_of(detail.format), lane)` is `Strip` or `Gray` (the
-  repair variant carries no unproven artifact) while keeping proven-portable
-  `Carry` details and the legacy plaintext `reasoning` text, mutating through
-  the `Arc::make_mut` copy-on-write seam behind a read-only pre-scan so a
-  no-op never clones and the rest of the request stays byte-identical
-  (prompt-cache affinity). `StripInterceptor` skips that key -- it is not a
+  is lane-directional, so it lives in `router/replay_repair.rs` instead of
+  here. `StripInterceptor` skips that key -- it is not a
   key-only transform -- and is not yet wired to a dispatch repair branch.
   `strip_beta_tokens(feature_key)`
   exposes the beta surface so the dispatch layer's operator-floor-pin guard
@@ -2976,7 +2989,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   not optional, so an unreported total arrives as a real 0).
   `record_calibration_sample` feeds that SAME admitted pair into the router's
   in-memory per-lane store (post-response, best-effort, sibling to
-  `record_k_sample`), keyed on the served nickname the ledger row also carries
+  `record_k_sample`), keyed on the served nickname the ledger row also carries.
+  The non-streaming caller records it INSIDE the successful-render arm, on the
+  same boundary as `finalize(Ok)`: a render failure finalizes `upstream_error`,
+  which clears both persisted columns, so recording earlier would leave the
+  live store holding evidence the ledger refused
 - `src/handlers/status/mod.rs` -- read-only `/status` family. `StatusState`
   carries ONLY read handles (a `StatusRouterHandle` read-only facade over the
   router `ArcSwap` -- see `router_view.rs` -- plus the `activation` `ArcSwap`

@@ -31,13 +31,15 @@
 //! also re-stamps the calibration estimate so the evidence numerator always
 //! describes the bytes that actually went upstream.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use routectl_core::capability::REASONING_REPLAY;
 use routectl_core::failure_class::{FailureClass, ReplayAttempt};
-use routectl_core::{ChatRequest, ReplayScheme, Replayability, is_replayable, scheme_of};
+use routectl_core::{
+    ChatRequest, ReasoningDetail, ReplayScheme, Replayability, is_replayable, scheme_of,
+};
 
-use crate::capability_strip::strip_replay_artifacts;
 use crate::context_trim::estimate_total_tokens;
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
@@ -143,6 +145,59 @@ pub(super) fn strip_replay_artifacts_recalibrating(
     true
 }
 
+/// Remove the replayed reasoning artifacts the target lane's replay validator
+/// would reject, WITHOUT touching the calibration estimate.
+///
+/// Private to this module by design: the wrapper above is the only reachable
+/// entry point from the dispatch path. A strip that runs after the estimate
+/// stamp leaves the stored estimate describing a payload that was never sent,
+/// so no call site may take the raw strip and skip the re-stamp.
+///
+/// Lane-parameterized: `lane` is the [`ReplayScheme`] of the target the
+/// request is about to be dispatched to. Each assistant-turn
+/// `reasoning_details` entry is judged by `is_replayable(scheme_of(entry
+/// format), lane)`:
+///
+/// - [`Replayability::Carry`] -- proven portable onto this lane; kept.
+/// - [`Replayability::Strip`] -- proven rejected; removed.
+/// - [`Replayability::Gray`] -- not established; removed here because this
+///   surface exists to build the already-tried-and-rejected variant, where an
+///   unproven artifact is exactly what the lane objected to. The optimistic
+///   carry-once path runs before this and is unaffected.
+///
+/// The legacy plaintext `reasoning` field is NEVER touched: it is text a
+/// client may render, not an artifact any replay validator inspects.
+///
+/// Returns true when at least one artifact was removed. Untouched messages
+/// keep their exact position and every other field byte-for-byte -- nothing is
+/// reordered or rebuilt -- so upstream prompt-cache affinity survives.
+fn strip_replay_artifacts(req: &mut ChatRequest, lane: ReplayScheme) -> bool {
+    let has_removable = req.messages.iter().any(|message| {
+        message
+            .reasoning_details
+            .iter()
+            .any(|detail| is_removable(detail, lane))
+    });
+    if !has_removable {
+        return false;
+    }
+    for message in Arc::make_mut(&mut req.messages) {
+        message
+            .reasoning_details
+            .retain(|detail| !is_removable(detail, lane));
+    }
+    true
+}
+
+/// Whether one reasoning detail must be dropped before dispatch onto a lane
+/// of scheme `lane`.
+fn is_removable(detail: &ReasoningDetail, lane: ReplayScheme) -> bool {
+    matches!(
+        is_replayable(scheme_of(detail.format.as_deref()), lane),
+        Replayability::Strip | Replayability::Gray
+    )
+}
+
 impl Router {
     /// Whether an effective failure class is the proven reasoning-replay
     /// rejection this arm repairs.
@@ -235,6 +290,10 @@ fn is_portable(format: Option<&str>, lane: ReplayScheme) -> bool {
 #[cfg(test)]
 #[path = "replay_repair_tests.rs"]
 mod replay_repair_tests;
+
+#[cfg(test)]
+#[path = "replay_strip_tests.rs"]
+mod replay_strip_tests;
 
 #[cfg(test)]
 #[path = "replay_strip_calibration_tests.rs"]

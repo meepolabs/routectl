@@ -3320,6 +3320,7 @@ pub struct routectl_router::router::Router
 pub routectl_router::router::Router::config: alloc::sync::Arc<routectl_router::config::Config>
 pub routectl_router::router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
@@ -7202,12 +7203,14 @@ impl<T> typenum::type_operators::Same for routectl_router::CalibrationLedgerRow
 pub type routectl_router::CalibrationLedgerRow::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CalibrationLedgerRow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::CalibrationLedgerRow::into_shared(self) -> Shared
-pub struct routectl_router::CalibrationRebuildSummary
+#[non_exhaustive] pub struct routectl_router::CalibrationRebuildSummary
 pub routectl_router::CalibrationRebuildSummary::accepted: usize
 pub routectl_router::CalibrationRebuildSummary::lanes_calibrated: usize
 pub routectl_router::CalibrationRebuildSummary::rejected_pair: usize
 pub routectl_router::CalibrationRebuildSummary::rejected_unknown_nickname: usize
 pub routectl_router::CalibrationRebuildSummary::rows_loaded: usize
+impl routectl_router::CalibrationRebuildSummary
+pub const fn routectl_router::CalibrationRebuildSummary::new(usize, usize, usize, usize, usize) -> Self
 impl core::clone::Clone for routectl_router::CalibrationRebuildSummary
 pub fn routectl_router::CalibrationRebuildSummary::clone(&self) -> routectl_router::CalibrationRebuildSummary
 impl core::cmp::Eq for routectl_router::CalibrationRebuildSummary
@@ -10842,6 +10845,7 @@ pub struct routectl_router::Router
 pub routectl_router::Router::config: alloc::sync::Arc<routectl_router::config::Config>
 pub routectl_router::Router::k_session_store: alloc::sync::Arc<routectl_router::KSessionStore>
 impl routectl_router::router::Router
+pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)

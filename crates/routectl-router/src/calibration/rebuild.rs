@@ -100,6 +100,10 @@ pub trait CalibrationLedgerReader: Send + Sync {
 }
 
 /// Per-rebuild tally, for boot observability and pinned by tests.
+///
+/// `#[non_exhaustive]` so a further tally field can be added later without a
+/// breaking change; construct through `Default` plus struct-update syntax.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CalibrationRebuildSummary {
     /// Rows the reader handed back. Equal to the cap means the read was
@@ -116,6 +120,28 @@ pub struct CalibrationRebuildSummary {
     /// Lanes that produce a correction once the replay is in, judged against
     /// the rebuild's own clock.
     pub lanes_calibrated: usize,
+}
+
+impl CalibrationRebuildSummary {
+    /// Construct a tally from its counts. Provided because the type is
+    /// `#[non_exhaustive]`: a caller in another crate (the boot-observability
+    /// log's own tests) cannot use a struct literal, and struct-update syntax
+    /// is equally unavailable across the crate boundary.
+    pub const fn new(
+        rows_loaded: usize,
+        accepted: usize,
+        rejected_unknown_nickname: usize,
+        rejected_pair: usize,
+        lanes_calibrated: usize,
+    ) -> Self {
+        Self {
+            rows_loaded,
+            accepted,
+            rejected_unknown_nickname,
+            rejected_pair,
+            lanes_calibrated,
+        }
+    }
 }
 
 /// Replay a ledger slice into `store`, returning the tally.

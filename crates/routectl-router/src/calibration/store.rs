@@ -137,9 +137,18 @@ impl CalibrationStore {
     /// `None` covers every refusal cause -- unseen lane, too little evidence,
     /// evidence too old, and a reduced ratio outside the sane band -- so the
     /// one decision site has exactly one fallback path.
+    ///
+    /// The reduction runs OUTSIDE the lock: it groups, sorts and takes medians
+    /// over the lane's samples, and this call sits on the dispatch path behind
+    /// the ONE store-wide mutex, so reducing while holding the guard makes
+    /// every other lane's lookup queue behind work that concerns none of them.
+    /// The clone is bounded by [`SAMPLES_PER_LANE`].
     pub fn factor_for(&self, key: &LaneKey, now: SystemTime) -> Option<Factor> {
-        let guard = self.lanes.lock();
-        reduce(guard.get(key)?, now)
+        let samples = {
+            let guard = self.lanes.lock();
+            guard.get(key)?.clone()
+        };
+        reduce(&samples, now)
     }
 
     /// Number of lanes holding at least one sample. Test read surface today;

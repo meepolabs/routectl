@@ -334,13 +334,7 @@ async fn evidence_older_than_the_age_bound_does_not_come_back_calibrated() {
 
 #[test]
 fn rebuild_log_reports_the_tally_and_stays_quiet_under_the_cap() {
-    let summary = CalibrationRebuildSummary {
-        rows_loaded: REBUILD_ROW_LIMIT - 1,
-        accepted: 40,
-        rejected_unknown_nickname: 2,
-        rejected_pair: 1,
-        lanes_calibrated: 3,
-    };
+    let summary = CalibrationRebuildSummary::new(REBUILD_ROW_LIMIT - 1, 40, 2, 1, 3);
 
     let events = routectl_testkit::capture_events(|| emit_rebuild_log(&summary));
 
@@ -363,12 +357,7 @@ fn rebuild_log_reports_the_tally_and_stays_quiet_under_the_cap() {
 fn rebuild_log_warns_when_the_row_cap_truncated_the_read() {
     // A silent truncation reads as "we loaded everything", so hitting the cap
     // must warn rather than pass on the info line alone.
-    let summary = CalibrationRebuildSummary {
-        rows_loaded: REBUILD_ROW_LIMIT,
-        accepted: REBUILD_ROW_LIMIT,
-        lanes_calibrated: 5,
-        ..CalibrationRebuildSummary::default()
-    };
+    let summary = CalibrationRebuildSummary::new(REBUILD_ROW_LIMIT, REBUILD_ROW_LIMIT, 0, 0, 5);
 
     let events = routectl_testkit::capture_events(|| emit_rebuild_log(&summary));
 

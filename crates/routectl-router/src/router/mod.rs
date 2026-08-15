@@ -1347,9 +1347,30 @@ impl Router {
     ///
     /// No ordering discipline (unlike the LRU-shaped session carries): the
     /// lane map never evicts, so there is no eviction frontier to preserve.
+    ///
+    /// A lane whose nickname this Router's resolved table no longer holds is
+    /// DROPPED, through the same predicate the boot rebuild filters rows by.
+    /// The store has no LRU because the lane keyspace is bounded by the loaded
+    /// config; importing retired lanes unconditionally would break exactly
+    /// that bound, since a run of reloads with renamed models would carry every
+    /// past name forward forever.
     pub fn carry_over_calibration_from(&mut self, previous: &Self) {
-        self.calibration_store
-            .import_entries(previous.calibration_store.export_entries());
+        let retained = previous
+            .calibration_store
+            .export_entries()
+            .into_iter()
+            .filter(|(key, _)| self.knows_nickname(&key.nickname))
+            .collect();
+        self.calibration_store.import_entries(retained);
+    }
+
+    /// Whether `nickname` is still in this Router's resolved model table.
+    ///
+    /// THE one calibration-lane admission predicate: both the boot rebuild and
+    /// the hot-reload carry-over go through it, so a lane the one path refuses
+    /// cannot be the lane the other admits.
+    fn knows_nickname(&self, nickname: &str) -> bool {
+        self.resolved_models.contains_key(nickname)
     }
 
     /// Install the catalog overlay this Router's resolved-model table was
@@ -1540,6 +1561,20 @@ impl Router {
             .record(key, estimated_tokens, prompt_tokens, cohort, ts);
     }
 
+    /// Every calibration lane currently holding evidence, as
+    /// `(provider_kind, nickname)` pairs.
+    ///
+    /// The store itself stays encapsulated; this hands out lane IDENTITIES
+    /// only, never samples. Read surface for boot / reload observability and
+    /// for pinning that a refused request left no live evidence behind.
+    pub fn calibration_lanes(&self) -> Vec<(String, String)> {
+        self.calibration_store
+            .export_entries()
+            .into_iter()
+            .map(|(key, _)| (key.provider_kind, key.nickname))
+            .collect()
+    }
+
     /// Replay a slice of persisted calibration evidence into the private
     /// per-lane store during boot warm-rebuild, returning the tally.
     ///
@@ -1565,7 +1600,7 @@ impl Router {
         crate::calibration::rebuild_into(
             reader,
             &self.calibration_store,
-            &|nickname| self.resolved_models.contains_key(nickname),
+            &|nickname| self.knows_nickname(nickname),
             now,
             limit,
         )
