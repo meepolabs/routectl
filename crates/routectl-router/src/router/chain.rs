@@ -314,6 +314,10 @@ impl Router {
     /// offending feature key(s) so the operator's triage starts from
     /// the right place.
     ///
+    /// A second pass then skips any target whose catalog context window
+    /// clearly cannot hold the estimated request, under its own kill
+    /// switch. That pass never empties the chain and never errors.
+    ///
     /// The second tuple element carries the re-probes the filter admitted
     /// (a lapsed learned negative whose single probe slot this request
     /// claimed). Each one MUST be settled by the dispatch path -- success,
@@ -335,6 +339,12 @@ impl Router {
         );
         let mut admissions = Vec::new();
         let chain = self.filter_chain_by_features(chain, &features, &req.model, &mut admissions)?;
+        // Window pass AFTER the feature filter, never before: "the last
+        // surviving target" must be counted against the chain the HARD
+        // capability drops left behind. Reversed, the window pass could skip
+        // a target that feature filtering then makes the last one, and the
+        // feature filter would fabricate an empty-chain error.
+        let chain = self.filter_chain_by_window(chain, req);
         Ok((chain, admissions))
     }
 }

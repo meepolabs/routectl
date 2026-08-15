@@ -40,6 +40,7 @@ mod replay_repair;
 mod runtime_gate;
 mod status;
 mod sticky;
+mod window_gate;
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_learn::CapabilityLearnEvent;
 pub use capability_observe::CapabilityObserveEvent;
@@ -336,6 +337,12 @@ struct RouterMetrics {
     /// window). Advisory-only under the routing gate. Bumped once per acting
     /// F3 observation by the response-evidence observer.
     f3_suspect_total: AtomicU64,
+    /// Chain targets the proactive context-window gate skipped before
+    /// dispatch (the estimated request clearly exceeded the target's
+    /// catalog window). The authoritative skip count: the skip WARN is
+    /// rate-limited per process, this is not. Bumped once per skipped
+    /// target by the window gate.
+    window_gate_skips_total: AtomicU64,
 }
 
 impl RouterMetrics {
@@ -418,6 +425,12 @@ impl RouterMetrics {
 
     fn incr_f3_suspect(&self) {
         self.f3_suspect_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump the window-gate skip count, returning the new running total so
+    /// the gate's rate-limited WARN can report it without a second load.
+    fn incr_window_gate_skip(&self) -> u64 {
+        self.window_gate_skips_total.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Read the cumulative unknown-upstream-classification count.
@@ -539,6 +552,13 @@ impl RouterMetrics {
     #[cfg(test)]
     fn f3_suspect_total(&self) -> u64 {
         self.f3_suspect_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative window-gate skip count.
+    /// Test-only read surface today; ungate with the metrics snapshot.
+    #[cfg(test)]
+    fn window_gate_skips_total(&self) -> u64 {
+        self.window_gate_skips_total.load(Ordering::Relaxed)
     }
 }
 

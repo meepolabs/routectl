@@ -1642,7 +1642,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   declares the per-concern submodules: `dispatch`, `class_observe`, `chain`,
   `overlays`, `feature_filter`, `capability_learn`, `capability_observe`,
   `capability_cleared`, `cache_plan`, `runtime_gate`, `sticky`,
-  `count_tokens`, `status`, `replay_repair`
+  `count_tokens`, `status`, `replay_repair`, `window_gate`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -1844,6 +1844,24 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `capacity_snapshot_for` reads -> `seat_pool::sticky_least_loaded_order`),
   `gather_capacity_snapshots`, and `apply_sticky_outcome` (stamps the
   selection_decision token)
+- `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
+  chain filter pass (called from `chain::dispatch_chain_for_request`
+  immediately after `filter_chain_by_features`, so the ordering makes "last
+  surviving target" mean last after the hard capability drops):
+  `filter_chain_by_window` skips a target whose confirmed
+  `max_context_tokens` clearly cannot hold `context_trim::estimate_total_tokens`,
+  keyed on the `exceeds_window_margin` integer-ratio predicate
+  (`WINDOW_MARGIN_NUMERATOR`/`_DENOMINATOR`, shipped at 3/4 -- conservative
+  against the estimator's asymmetric deflate error, deliberately not an
+  operator knob). Under the `[window_gate]` kill switch, whose OFF path
+  returns before any estimate exists. Never empties the chain and has NO
+  empty-chain error path (the deliberate contract difference from
+  `feature_filter`): a chain of one, an unconfirmed / `Disabled` / `Missing`
+  window, and an all-overflowing chain each keep their targets. Owns the
+  `SkipWarnThrottle` per-process last-WARN-epoch stamp
+  (`SKIP_WARN_INTERVAL_SECS`) bounding the skip WARN to one line per interval
+  across requests, while `RouterMetrics::window_gate_skips_total` stays the
+  exact skip count
 - `src/runtime_state.rs` -- per-model (nickname-keyed) token-bucket RPM
   limiter + circuit breaker state machine; `force_open` parks the breaker for
   an explicit reset hint, bypassing the consecutive-failure threshold;
