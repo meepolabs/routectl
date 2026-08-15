@@ -3333,6 +3333,7 @@ pub fn routectl_router::router::Router::install_resolved_models(&mut self, alloc
 pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::config::Config>) -> Self
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
+pub fn routectl_router::router::Router::rebuild_calibration_from_ledger(&self, &dyn routectl_router::CalibrationLedgerReader, std::time::SystemTime, usize) -> routectl_router::CalibrationRebuildSummary
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::router::Router::record_calibration_sample(&self, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, u64, u64, std::time::SystemTime)
 pub fn routectl_router::router::Router::record_k_sample(&self, core::option::Option<&str>, &str, &str, u64, std::time::SystemTime)
@@ -7139,6 +7140,132 @@ impl<T> typenum::type_operators::Same for routectl_router::CalibrationConfig
 pub type routectl_router::CalibrationConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CalibrationConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::CalibrationConfig::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::CalibrationLedgerRow
+pub routectl_router::CalibrationLedgerRow::estimated_tokens: u64
+pub routectl_router::CalibrationLedgerRow::nickname: alloc::string::String
+pub routectl_router::CalibrationLedgerRow::prompt_tokens: u64
+pub routectl_router::CalibrationLedgerRow::provider_kind: alloc::string::String
+pub routectl_router::CalibrationLedgerRow::session_key: core::option::Option<alloc::string::String>
+pub routectl_router::CalibrationLedgerRow::ts: std::time::SystemTime
+impl routectl_router::CalibrationLedgerRow
+pub const fn routectl_router::CalibrationLedgerRow::new(std::time::SystemTime, alloc::string::String, alloc::string::String, core::option::Option<alloc::string::String>, u64, u64) -> Self
+impl core::clone::Clone for routectl_router::CalibrationLedgerRow
+pub fn routectl_router::CalibrationLedgerRow::clone(&self) -> routectl_router::CalibrationLedgerRow
+impl core::cmp::Eq for routectl_router::CalibrationLedgerRow
+impl core::cmp::PartialEq for routectl_router::CalibrationLedgerRow
+pub fn routectl_router::CalibrationLedgerRow::eq(&self, &routectl_router::CalibrationLedgerRow) -> bool
+impl core::fmt::Debug for routectl_router::CalibrationLedgerRow
+pub fn routectl_router::CalibrationLedgerRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::CalibrationLedgerRow
+impl core::marker::Freeze for routectl_router::CalibrationLedgerRow
+impl core::marker::Send for routectl_router::CalibrationLedgerRow
+impl core::marker::Sync for routectl_router::CalibrationLedgerRow
+impl core::marker::Unpin for routectl_router::CalibrationLedgerRow
+impl core::marker::UnsafeUnpin for routectl_router::CalibrationLedgerRow
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CalibrationLedgerRow
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CalibrationLedgerRow
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CalibrationLedgerRow where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CalibrationLedgerRow::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CalibrationLedgerRow where U: core::convert::From<T>
+pub fn routectl_router::CalibrationLedgerRow::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CalibrationLedgerRow where U: core::convert::Into<T>
+pub type routectl_router::CalibrationLedgerRow::Error = core::convert::Infallible
+pub fn routectl_router::CalibrationLedgerRow::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CalibrationLedgerRow where U: core::convert::TryFrom<T>
+pub type routectl_router::CalibrationLedgerRow::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CalibrationLedgerRow::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CalibrationLedgerRow where T: core::clone::Clone
+pub type routectl_router::CalibrationLedgerRow::Owned = T
+pub fn routectl_router::CalibrationLedgerRow::clone_into(&self, &mut T)
+pub fn routectl_router::CalibrationLedgerRow::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CalibrationLedgerRow where T: core::clone::Clone
+pub fn routectl_router::CalibrationLedgerRow::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CalibrationLedgerRow where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CalibrationLedgerRow::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CalibrationLedgerRow where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationLedgerRow::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CalibrationLedgerRow where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationLedgerRow::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CalibrationLedgerRow where T: core::clone::Clone
+pub unsafe fn routectl_router::CalibrationLedgerRow::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CalibrationLedgerRow
+pub fn routectl_router::CalibrationLedgerRow::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CalibrationLedgerRow where T: core::clone::Clone
+pub fn routectl_router::CalibrationLedgerRow::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CalibrationLedgerRow
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CalibrationLedgerRow where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationLedgerRow::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CalibrationLedgerRow::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CalibrationLedgerRow
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CalibrationLedgerRow
+impl<T> typenum::type_operators::Same for routectl_router::CalibrationLedgerRow
+pub type routectl_router::CalibrationLedgerRow::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CalibrationLedgerRow where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CalibrationLedgerRow::into_shared(self) -> Shared
+pub struct routectl_router::CalibrationRebuildSummary
+pub routectl_router::CalibrationRebuildSummary::accepted: usize
+pub routectl_router::CalibrationRebuildSummary::lanes_calibrated: usize
+pub routectl_router::CalibrationRebuildSummary::rejected_pair: usize
+pub routectl_router::CalibrationRebuildSummary::rejected_unknown_nickname: usize
+pub routectl_router::CalibrationRebuildSummary::rows_loaded: usize
+impl core::clone::Clone for routectl_router::CalibrationRebuildSummary
+pub fn routectl_router::CalibrationRebuildSummary::clone(&self) -> routectl_router::CalibrationRebuildSummary
+impl core::cmp::Eq for routectl_router::CalibrationRebuildSummary
+impl core::cmp::PartialEq for routectl_router::CalibrationRebuildSummary
+pub fn routectl_router::CalibrationRebuildSummary::eq(&self, &routectl_router::CalibrationRebuildSummary) -> bool
+impl core::default::Default for routectl_router::CalibrationRebuildSummary
+pub fn routectl_router::CalibrationRebuildSummary::default() -> routectl_router::CalibrationRebuildSummary
+impl core::fmt::Debug for routectl_router::CalibrationRebuildSummary
+pub fn routectl_router::CalibrationRebuildSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::CalibrationRebuildSummary
+impl core::marker::StructuralPartialEq for routectl_router::CalibrationRebuildSummary
+impl core::marker::Freeze for routectl_router::CalibrationRebuildSummary
+impl core::marker::Send for routectl_router::CalibrationRebuildSummary
+impl core::marker::Sync for routectl_router::CalibrationRebuildSummary
+impl core::marker::Unpin for routectl_router::CalibrationRebuildSummary
+impl core::marker::UnsafeUnpin for routectl_router::CalibrationRebuildSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CalibrationRebuildSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CalibrationRebuildSummary
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::CalibrationRebuildSummary where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::CalibrationRebuildSummary::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::CalibrationRebuildSummary where U: core::convert::From<T>
+pub fn routectl_router::CalibrationRebuildSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CalibrationRebuildSummary where U: core::convert::Into<T>
+pub type routectl_router::CalibrationRebuildSummary::Error = core::convert::Infallible
+pub fn routectl_router::CalibrationRebuildSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CalibrationRebuildSummary where U: core::convert::TryFrom<T>
+pub type routectl_router::CalibrationRebuildSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CalibrationRebuildSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CalibrationRebuildSummary where T: core::clone::Clone
+pub type routectl_router::CalibrationRebuildSummary::Owned = T
+pub fn routectl_router::CalibrationRebuildSummary::clone_into(&self, &mut T)
+pub fn routectl_router::CalibrationRebuildSummary::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CalibrationRebuildSummary where T: core::clone::Clone
+pub fn routectl_router::CalibrationRebuildSummary::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CalibrationRebuildSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CalibrationRebuildSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CalibrationRebuildSummary where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationRebuildSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CalibrationRebuildSummary where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationRebuildSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CalibrationRebuildSummary where T: core::clone::Clone
+pub unsafe fn routectl_router::CalibrationRebuildSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CalibrationRebuildSummary
+pub fn routectl_router::CalibrationRebuildSummary::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CalibrationRebuildSummary where T: core::clone::Clone
+pub fn routectl_router::CalibrationRebuildSummary::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CalibrationRebuildSummary
+impl<T> outref::AsOut<T> for routectl_router::CalibrationRebuildSummary where T: core::marker::Copy
+pub fn routectl_router::CalibrationRebuildSummary::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CalibrationRebuildSummary where T: ?core::marker::Sized
+pub fn routectl_router::CalibrationRebuildSummary::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CalibrationRebuildSummary::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CalibrationRebuildSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CalibrationRebuildSummary
+impl<T> typenum::type_operators::Same for routectl_router::CalibrationRebuildSummary
+pub type routectl_router::CalibrationRebuildSummary::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CalibrationRebuildSummary where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CalibrationRebuildSummary::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::CapabilityConfig
 pub routectl_router::CapabilityConfig::decay_hours: u64
 pub routectl_router::CapabilityConfig::enabled: bool
@@ -10728,6 +10855,7 @@ pub fn routectl_router::router::Router::install_resolved_models(&mut self, alloc
 pub fn routectl_router::router::Router::new(alloc::sync::Arc<routectl_router::config::Config>) -> Self
 pub const fn routectl_router::router::Router::overlay_revision(&self) -> u64
 pub const fn routectl_router::router::Router::override_registry(&self) -> &routectl_router::OverrideRegistry
+pub fn routectl_router::router::Router::rebuild_calibration_from_ledger(&self, &dyn routectl_router::CalibrationLedgerReader, std::time::SystemTime, usize) -> routectl_router::CalibrationRebuildSummary
 pub fn routectl_router::router::Router::rebuild_learned_from_ledger(&self, &dyn routectl_router::CapabilityLedgerReader) -> routectl_router::CapabilityRebuildSummary
 pub fn routectl_router::router::Router::record_calibration_sample(&self, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, u64, u64, std::time::SystemTime)
 pub fn routectl_router::router::Router::record_k_sample(&self, core::option::Option<&str>, &str, &str, u64, std::time::SystemTime)
@@ -11869,6 +11997,8 @@ pub const routectl_router::CATALOG_SNAPSHOT_DATE: &str
 pub const routectl_router::CATALOG_VERSION: u32
 pub const routectl_router::CURRENT_CONFIG_VERSION: u32
 pub const routectl_router::K_SESSION_CAPACITY: usize
+pub trait routectl_router::CalibrationLedgerReader: core::marker::Send + core::marker::Sync
+pub fn routectl_router::CalibrationLedgerReader::read_calibration_samples(&self, std::time::SystemTime, usize) -> alloc::vec::Vec<routectl_router::CalibrationLedgerRow>
 pub trait routectl_router::CapabilityLedgerReader: core::marker::Send + core::marker::Sync
 pub fn routectl_router::CapabilityLedgerReader::read_events(&self) -> alloc::vec::Vec<routectl_router::CapabilityEventRow>
 pub fn routectl_router::CapabilityLedgerReader::tombstone(&self) -> core::option::Option<routectl_router::ReplayTombstone>

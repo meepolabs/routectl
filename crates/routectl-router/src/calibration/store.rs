@@ -21,7 +21,7 @@ use super::factor::{Factor, IDENTITY_PERMILLE, reduce};
 /// per-process floor is the declared lane count times this, regardless of
 /// traffic shape. Comfortably above the reduction's sample and cohort floors
 /// so a lane can hold several cohorts' worth of recent history.
-const SAMPLES_PER_LANE: usize = 64;
+pub const SAMPLES_PER_LANE: usize = 64;
 
 /// Identity of one calibration lane.
 ///
@@ -96,19 +96,31 @@ pub struct CalibrationStore {
 }
 
 impl CalibrationStore {
-    /// Turn one estimate/actual pair into a stored sample for `key`.
+    /// Turn one estimate/actual pair into a stored sample for `key`, reporting
+    /// whether it was stored.
     ///
     /// A pair with a zero on either side is dropped rather than stored: a zero
     /// estimate has no ratio at all, and a zero actual is an upstream that
     /// reported nothing rather than a request that genuinely cost nothing --
     /// storing it would drag the lane's reduced ratio toward zero, which is
     /// the direction that makes the window gate admit oversized requests.
-    pub fn record(&self, key: LaneKey, estimated: u64, actual: u64, cohort: u64, ts: SystemTime) {
+    ///
+    /// The live dispatch path ignores the return value; the warm rebuild reads
+    /// it to tally what it dropped, which is what keeps the two paths sharing
+    /// ONE admission rule instead of each re-deciding it.
+    pub fn record(
+        &self,
+        key: LaneKey,
+        estimated: u64,
+        actual: u64,
+        cohort: u64,
+        ts: SystemTime,
+    ) -> bool {
         if estimated == 0 || actual == 0 {
-            return;
+            return false;
         }
         let Some(permille) = permille_ratio(estimated, actual) else {
-            return;
+            return false;
         };
         let sample = Sample {
             ts,
@@ -117,6 +129,7 @@ impl CalibrationStore {
         };
         let mut guard = self.lanes.lock();
         guard.entry(key).or_default().push(sample);
+        true
     }
 
     /// The correction for `key`, or `None` when the lane has no usable one.
@@ -141,6 +154,20 @@ impl CalibrationStore {
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.lanes.lock().is_empty()
+    }
+
+    /// How many lanes currently produce a correction, judged against `now`.
+    ///
+    /// Runs the SAME reduction the gate's lookup runs, so a lane counted here
+    /// is a lane the gate would correct -- there is no second notion of
+    /// "calibrated" to drift from it. Boot-observability read surface for the
+    /// warm rebuild's summary.
+    pub fn calibrated_lane_count(&self, now: SystemTime) -> usize {
+        self.lanes
+            .lock()
+            .values()
+            .filter(|samples| reduce(samples, now).is_some())
+            .count()
     }
 
     /// Snapshot every lane and its samples, for carrying the learned state
@@ -172,6 +199,21 @@ impl CalibrationStore {
 fn permille_ratio(estimated: u64, actual: u64) -> Option<u32> {
     let scaled = actual.checked_mul(u64::from(IDENTITY_PERMILLE))?;
     u32::try_from(scaled / estimated).ok()
+}
+
+/// The opaque cohort tag a caller's session key reduces to.
+///
+/// The ONE derivation, shared by the live write and the boot warm rebuild: two
+/// derivations would let the same caller count as two cohorts across a
+/// restart, which is exactly how a lane could clear the distinct-cohort floor
+/// on evidence one caller produced. Every keyless request shares tag zero, so
+/// a lane fed only keyless traffic never clears that floor at all.
+///
+/// The hash is process-salted, so a tag is never comparable across restarts --
+/// which is fine, because nothing persists one: the rebuild re-derives every
+/// tag from the session ids it just read.
+pub fn cohort_of(session_key: Option<&str>) -> u64 {
+    session_key.map_or(0, crate::log_hash::salted_log_hash)
 }
 
 #[cfg(test)]

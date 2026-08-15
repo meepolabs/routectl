@@ -449,6 +449,54 @@ impl<T> core::convert::From<T> for routectl_usage::BucketSpec
 pub fn routectl_usage::BucketSpec::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::BucketSpec
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::BucketSpec
+pub struct routectl_usage::CalibrationSampleRow
+pub routectl_usage::CalibrationSampleRow::estimated_tokens: i64
+pub routectl_usage::CalibrationSampleRow::model: alloc::string::String
+pub routectl_usage::CalibrationSampleRow::prompt_tokens: i64
+pub routectl_usage::CalibrationSampleRow::provider_kind: alloc::string::String
+pub routectl_usage::CalibrationSampleRow::session_id: core::option::Option<alloc::string::String>
+pub routectl_usage::CalibrationSampleRow::ts_start_ms: i64
+impl core::clone::Clone for routectl_usage::CalibrationSampleRow
+pub fn routectl_usage::CalibrationSampleRow::clone(&self) -> routectl_usage::CalibrationSampleRow
+impl core::cmp::Eq for routectl_usage::CalibrationSampleRow
+impl core::cmp::PartialEq for routectl_usage::CalibrationSampleRow
+pub fn routectl_usage::CalibrationSampleRow::eq(&self, &routectl_usage::CalibrationSampleRow) -> bool
+impl core::fmt::Debug for routectl_usage::CalibrationSampleRow
+pub fn routectl_usage::CalibrationSampleRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::CalibrationSampleRow
+impl core::marker::Freeze for routectl_usage::CalibrationSampleRow
+impl core::marker::Send for routectl_usage::CalibrationSampleRow
+impl core::marker::Sync for routectl_usage::CalibrationSampleRow
+impl core::marker::Unpin for routectl_usage::CalibrationSampleRow
+impl core::marker::UnsafeUnpin for routectl_usage::CalibrationSampleRow
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::CalibrationSampleRow
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::CalibrationSampleRow
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::CalibrationSampleRow where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::CalibrationSampleRow::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::CalibrationSampleRow where U: core::convert::From<T>
+pub fn routectl_usage::CalibrationSampleRow::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::CalibrationSampleRow where U: core::convert::Into<T>
+pub type routectl_usage::CalibrationSampleRow::Error = core::convert::Infallible
+pub fn routectl_usage::CalibrationSampleRow::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::CalibrationSampleRow where U: core::convert::TryFrom<T>
+pub type routectl_usage::CalibrationSampleRow::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::CalibrationSampleRow::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::CalibrationSampleRow where T: core::clone::Clone
+pub type routectl_usage::CalibrationSampleRow::Owned = T
+pub fn routectl_usage::CalibrationSampleRow::clone_into(&self, &mut T)
+pub fn routectl_usage::CalibrationSampleRow::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::CalibrationSampleRow where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::CalibrationSampleRow::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::CalibrationSampleRow where T: ?core::marker::Sized
+pub fn routectl_usage::CalibrationSampleRow::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::CalibrationSampleRow where T: ?core::marker::Sized
+pub fn routectl_usage::CalibrationSampleRow::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::CalibrationSampleRow where T: core::clone::Clone
+pub unsafe fn routectl_usage::CalibrationSampleRow::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::CalibrationSampleRow
+pub fn routectl_usage::CalibrationSampleRow::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::CalibrationSampleRow
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::CalibrationSampleRow
 pub struct routectl_usage::CapabilityEvent
 pub routectl_usage::CapabilityEvent::capability: alloc::string::String
 pub routectl_usage::CapabilityEvent::catalog_version: i64
@@ -1624,6 +1672,7 @@ pub fn routectl_usage::open_readonly(impl core::convert::AsRef<std::path::Path>)
 pub fn routectl_usage::open_readonly_fastfail(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
 pub fn routectl_usage::open_rw(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<routectl_usage::UsageDb, routectl_usage::OpenError>
 pub fn routectl_usage::query(&routectl_usage::UsageDb, &routectl_usage::QuerySpec, impl core::ops::function::Fn(&routectl_usage::AggRow) -> routectl_usage::RowCost, std::time::Instant) -> core::result::Result<routectl_usage::QueryResult, routectl_usage::QueryError>
+pub fn routectl_usage::read_calibration_samples_since(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::CalibrationSampleRow>>
 pub fn routectl_usage::read_capability_events_after(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::CapabilityEventRow>>
 pub fn routectl_usage::read_reuse_samples_since(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::ReuseSampleRow>>
 pub fn routectl_usage::shadow_misfire_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::ShadowMisfireSummary, routectl_usage::QueryError>

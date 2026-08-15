@@ -166,3 +166,72 @@ fn an_absurd_pair_is_refused_rather_than_truncated_into_the_band() {
 
     assert!(store.is_empty());
 }
+
+#[test]
+fn record_reports_whether_the_pair_was_stored() {
+    // The rebuild tallies its drops from this return value, which is what
+    // keeps both paths sharing ONE admission rule instead of each deciding.
+    let store = CalibrationStore::default();
+    let k = key("anthropic-api", "opus");
+
+    assert!(store.record(k.clone(), 10_000, 12_500, 1, now()));
+    assert!(!store.record(k.clone(), 0, 12_500, 1, now()));
+    assert!(!store.record(k.clone(), 10_000, 0, 1, now()));
+    assert!(!store.record(k, 1, u64::MAX, 1, now()));
+}
+
+#[test]
+fn the_calibrated_lane_count_only_counts_lanes_the_gate_would_correct() {
+    // The count runs the SAME reduction the gate's lookup runs, so there is
+    // no second notion of "calibrated" to drift from it.
+    let store = CalibrationStore::default();
+    let calibrated = key("anthropic-api", "opus");
+    let thin = key("anthropic-api", "sonnet");
+    for i in 0..9 {
+        store.record(calibrated.clone(), 10_000, 12_000, i % 3, now());
+    }
+    // Nine samples from ONE cohort: clears the sample floor, misses the
+    // distinct-cohort one.
+    for _ in 0..9 {
+        store.record(thin.clone(), 10_000, 12_000, 7, now());
+    }
+
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.calibrated_lane_count(now()), 1);
+}
+
+#[test]
+fn a_lane_whose_evidence_aged_out_stops_counting_as_calibrated() {
+    // Freshness is judged against the clock passed in, so the same store
+    // reports differently as time moves past the age bound.
+    let store = CalibrationStore::default();
+    let k = key("anthropic-api", "opus");
+    for i in 0..9 {
+        store.record(k.clone(), 10_000, 12_000, i % 3, now());
+    }
+
+    assert_eq!(store.calibrated_lane_count(now()), 1);
+    assert_eq!(
+        store.calibrated_lane_count(now() + Duration::from_hours(48)),
+        0
+    );
+}
+
+#[test]
+fn every_keyless_caller_shares_one_cohort_so_such_a_lane_never_calibrates() {
+    // The shared cohort derivation: a keyless request gets tag zero, so a
+    // lane fed only keyless traffic can never clear the distinct-cohort
+    // floor. Live writes and the ledger rebuild call the SAME function, so a
+    // caller cannot count as two cohorts across a restart.
+    assert_eq!(cohort_of(None), 0);
+    assert_eq!(cohort_of(Some("caller")), cohort_of(Some("caller")));
+    assert_ne!(cohort_of(Some("caller-a")), cohort_of(Some("caller-b")));
+
+    let store = CalibrationStore::default();
+    let k = key("anthropic-api", "opus");
+    for _ in 0..9 {
+        store.record(k.clone(), 10_000, 12_000, cohort_of(None), now());
+    }
+
+    assert_eq!(store.calibrated_lane_count(now()), 0);
+}

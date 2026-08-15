@@ -1535,9 +1535,40 @@ impl Router {
             provider_kind: provider_kind.to_string(),
             nickname: nickname.to_string(),
         };
-        let cohort = session_key.map_or(0, crate::log_hash::salted_log_hash);
+        let cohort = crate::calibration::cohort_of(session_key);
         self.calibration_store
             .record(key, estimated_tokens, prompt_tokens, cohort, ts);
+    }
+
+    /// Replay a slice of persisted calibration evidence into the private
+    /// per-lane store during boot warm-rebuild, returning the tally.
+    ///
+    /// Delegates to the calibration module's rebuild over the store this
+    /// Router owns, so the store stays encapsulated rather than handed out --
+    /// same shape as the learned-capability warm. Rows are replayed through
+    /// the SAME store write the live path uses, so no second validation or
+    /// reduction path exists to diverge from it.
+    ///
+    /// Rows naming a nickname absent from this Router's resolved model table
+    /// are dropped: a history of renamed models would otherwise grow the lane
+    /// map with lanes that can never serve a request.
+    ///
+    /// Bootstrap only. A hot reload carries the live store over instead
+    /// (`carry_over_calibration_from`); re-reading history there would clobber
+    /// fresher live samples with older evidence.
+    pub fn rebuild_calibration_from_ledger(
+        &self,
+        reader: &dyn crate::calibration::CalibrationLedgerReader,
+        now: std::time::SystemTime,
+        limit: usize,
+    ) -> crate::calibration::CalibrationRebuildSummary {
+        crate::calibration::rebuild_into(
+            reader,
+            &self.calibration_store,
+            &|nickname| self.resolved_models.contains_key(nickname),
+            now,
+            limit,
+        )
     }
 
     /// Look up a model nickname in the resolved table.

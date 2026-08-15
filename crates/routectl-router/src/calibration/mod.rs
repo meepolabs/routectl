@@ -24,9 +24,17 @@
 //!   of a real extreme correction. Clamping to the bound would let a
 //!   mis-keyed lane still move a routing decision; refusing sends it back to
 //!   the uncorrected estimate.
+//!
+//! Evidence survives a restart: [`rebuild`] replays the persisted pairs back
+//! through the same store write at boot, and a hot reload carries the live
+//! store over instead of re-reading history.
 
 pub mod factor;
+pub mod rebuild;
 pub mod store;
 
 pub use factor::Factor;
-pub use store::{CalibrationStore, LaneKey};
+pub use rebuild::{
+    CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary, rebuild_into,
+};
+pub use store::{CalibrationStore, LaneKey, cohort_of};
