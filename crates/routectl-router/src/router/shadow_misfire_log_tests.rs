@@ -3,7 +3,8 @@
 //! The inbound session key is caller-controlled and the canonical schema
 //! declares it must not be logged raw. The WARN must still identify the
 //! affected (session, provider_kind, model) triple so an operator can
-//! correlate misfires across lines, so the key rides as a stable hash.
+//! correlate misfires across lines, so the key rides as a per-process
+//! salted hash: stable within one run, unpredictable across runs.
 use super::*;
 use routectl_core::content_part::{ContentPart, KnownContentPart};
 use routectl_core::schema::{Message, MessageContent, Role};
@@ -154,11 +155,21 @@ fn shadow_misfire_warn_hashes_session_key_instead_of_logging_it_raw() {
     assert_eq!(
         warn.field("session_key_hash"),
         Some(
+            crate::log_hash::salted_log_hash(RAW_SESSION_KEY)
+                .to_string()
+                .as_str()
+        ),
+        "the triple must stay correlatable via a hash that is stable within the run",
+    );
+    assert_ne!(
+        warn.field("session_key_hash"),
+        Some(
             crate::context_trim::fnv1a_hash(RAW_SESSION_KEY.as_bytes())
                 .to_string()
                 .as_str()
         ),
-        "the triple must stay correlatable via a stable hash of the key",
+        "the logged hash must be salted, not the unsalted fingerprint hash a \
+         dictionary attack inverts",
     );
 }
 
@@ -178,5 +189,33 @@ fn record_first_seen(router: &Router) {
     assert_eq!(
         meta.would_trim_shadow_misfire, None,
         "the first record for a triple is FirstSeen, not a verdict",
+    );
+}
+
+/// Correlation is the reason the hash is logged at all: two misfires for
+/// the same session key, from independent routers within one process, must
+/// render the same `session_key_hash` so an operator can group them. Salting
+/// the hash must not cost that.
+#[test]
+fn misfire_warns_for_one_key_share_a_hash_within_a_run() {
+    let hashes: Vec<String> = (0..2)
+        .map(|_| {
+            let router = Router::new(Arc::new(Config::default()));
+            record_first_seen(&router);
+            let events = routectl_testkit::capture_events(|| {
+                record(&router, &triggering_req("shifted head XXXX"));
+            });
+            events
+                .iter()
+                .find(|e| e.message.starts_with("would_trim_shadow_misfire"))
+                .and_then(|e| e.field("session_key_hash"))
+                .unwrap_or_else(|| panic!("expected a hashed misfire WARN, got: {events:?}"))
+                .to_string()
+        })
+        .collect();
+
+    assert_eq!(
+        hashes[0], hashes[1],
+        "the same session key must hash identically within one process",
     );
 }
