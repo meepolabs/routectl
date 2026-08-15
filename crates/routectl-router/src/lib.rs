@@ -43,6 +43,7 @@ pub(crate) mod glob;
 pub(crate) mod k_estimator;
 pub(crate) mod learned_capability;
 pub(crate) mod learned_replay;
+pub(crate) mod log_hash;
 pub(crate) mod override_registry;
 pub(crate) mod resolved;
 pub mod router;

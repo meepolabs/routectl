@@ -1900,6 +1900,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `json_object`), or any tool is strict (`ToolDef::Custom.strict == Some(true)`
   or `ToolDef::Other` with `"strict": true`);
   `derive_feature_keys(tools, provider_extras, response_format)` is pure
+- `src/log_hash.rs` -- `salted_log_hash`: per-process salted hash
+  (`OnceLock<RandomState>` + `BuildHasher::hash_one`, no new crate dep) for
+  logging a caller-controlled value as a correlation token. Stable within one
+  run so an operator can group lines, unpredictable across runs so a logged
+  hash of a guessable input (a client keying its session by email or
+  username) is not dictionary-invertible. Deliberately NOT
+  `context_trim::fnv1a_hash`, which must stay cross-process stable because it
+  fingerprints a trimmed prefix; nothing may persist or cross-restart compare
+  a value from here
 - `src/learned_capability.rs` -- bounded in-memory capability-truth registry
   keyed `(state_key, normalized feature_key) -> LearnedEntry`,
   verdict-discriminated by `EntryVerdict` (a `Verified` VerifiedWorking
@@ -3358,7 +3367,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   allowlist of session headers the OpenAI-shaped ingresses accept, and the
   single source of truth for that membership), `first_session_header`, and
   `resolve_session_key` (header-over-body precedence, trim,
-  empty/oversized/control-bearing candidate treated as absent,
+  empty/oversized/non-graphic-ASCII candidate treated as absent -- the
+  graphic-ASCII bound excludes Cc controls, U+2028/U+2029, the Cf bidi
+  overrides and isolates, and the zero-width characters, all of which would
+  otherwise spoof the ledger `session_id` column an operator later renders --
   `MAX_INBOUND_SESSION_KEY_BYTES` bound, and one raw-value-free
   `session_key_source_conflict` WARN when header and body disagree). Each
   dialect keeps only its own VOCABULARY and delegates the tail here

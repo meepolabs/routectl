@@ -1887,10 +1887,13 @@ impl Router {
                         // The session key is caller-controlled and the schema
                         // forbids logging it raw, but the misfire is only
                         // actionable if an operator can correlate the same
-                        // triple across lines -- so the key rides as a stable
-                        // FNV-1a hash (toolchain-stable, unlike DefaultHasher).
+                        // triple across lines -- so the key rides as a hash
+                        // salted per process. Correlation within a run is all
+                        // the WARN needs, and the per-process salt denies an
+                        // offline dictionary attack on a client that keys its
+                        // session by a stable per-user string.
                         tracing::warn!(
-                            session_key_hash = crate::context_trim::fnv1a_hash(session_key.as_bytes()),
+                            session_key_hash = crate::log_hash::salted_log_hash(session_key),
                             provider_kind = provider_kind.unwrap_or(""),
                             model = %model,
                             "would_trim_shadow_misfire: trimmed cacheable prefix shifted turn-to-turn",

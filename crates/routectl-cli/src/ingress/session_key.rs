@@ -73,10 +73,25 @@ pub(crate) const MAX_INBOUND_SESSION_KEY_BYTES: usize = 256;
 
 /// Trim a raw candidate and accept it only if it can safely become a
 /// session key: non-empty, at most [`MAX_INBOUND_SESSION_KEY_BYTES`], and
-/// free of Unicode control characters and line/paragraph separators (which
-/// would let a client forge log lines out of a value that reaches log
-/// context). Ordinary punctuation is NOT restricted; ledger writes bind the
-/// value as a parameter.
+/// composed entirely of GRAPHIC ASCII (`!` through `~`).
+///
+/// The accepted value persists to the ledger `session_id` column, where an
+/// operator later renders or greps it. A client-chosen bidi override or
+/// isolate (U+202E and U+2066-2069) embedded there visually reorders the
+/// surrounding text of any such rendering, and a zero-width character
+/// (U+200B, U+FEFF) makes two rows that display identically compare
+/// unequal -- both are display spoofs against the operator, not against a
+/// log line. Restricting to graphic ASCII excludes those, the Cc controls,
+/// and U+2028/U+2029 by construction, and costs no recall on any observed
+/// emitter: each sends a uuid or a hash of one. Interior whitespace is
+/// excluded with them DELIBERATELY, and not because nothing can carry it --
+/// a legacy user-named session id can, since the name is validated only for
+/// path traversal and length before becoming the header value. The trade is
+/// accepted knowingly: such a lane resolves keyless rather than admitting a
+/// value that displays with invisible padding in a column an operator greps.
+/// Widening to permit a space would reintroduce exactly the hazard this
+/// predicate exists to close. Ordinary punctuation is NOT restricted; ledger
+/// writes bind the value as a parameter.
 ///
 /// A rejected candidate is indistinguishable from an absent one, so
 /// resolution falls through to the next source and the request itself is
@@ -87,10 +102,7 @@ fn accept_candidate(raw: &str) -> Option<&str> {
     if trimmed.is_empty() || trimmed.len() > MAX_INBOUND_SESSION_KEY_BYTES {
         return None;
     }
-    if trimmed
-        .chars()
-        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
-    {
+    if !trimmed.chars().all(|c| c.is_ascii_graphic()) {
         return None;
     }
     Some(trimmed)
@@ -98,7 +110,7 @@ fn accept_candidate(raw: &str) -> Option<&str> {
 
 /// First accepted [`OPENAI_SESSION_HEADERS`] value present on the request,
 /// in the const's precedence order, trimmed. A value that fails the
-/// length/control-character bound is skipped like an absent one.
+/// length/character bound is skipped like an absent one.
 ///
 /// No case normalization here or anywhere else in this module: `HeaderName`
 /// is lowercase-normalized when the request is parsed, so the lowercase
@@ -114,7 +126,7 @@ pub fn first_session_header(headers: &HeaderMap) -> Option<&str> {
 
 /// Resolve the inbound session key from a header candidate and a body
 /// candidate. Each is trimmed and must pass the length and
-/// control-character bound; the header wins when both survive, and a
+/// graphic-ASCII bound; the header wins when both survive, and a
 /// candidate that fails is indistinguishable from an absent one, so
 /// resolution falls through to the next source. The request itself is
 /// never rejected and the forwarded body is never mutated.
@@ -316,6 +328,40 @@ mod tests {
                 Some("from-body"),
                 "control-bearing candidate must be treated as absent: {bad:?}",
             );
+            assert_eq!(resolve_session_key(Some(bad), None), None, "{bad:?}");
+        }
+    }
+
+    /// The Cf FORMAT characters are the operator-facing display hazard:
+    /// they carry no glyph, so a value bearing one renders as an ordinary
+    /// id in the ledger column while reordering or hiding the text around
+    /// it. `char::is_control` covers only the Cc category, so none of these
+    /// were caught before the predicate narrowed to graphic ASCII.
+    #[test]
+    fn resolve_falls_through_on_bidi_and_zero_width_format_characters() {
+        for bad in [
+            "sid\u{202e}with-rtl-override",
+            "sid\u{202d}with-ltr-override",
+            "sid\u{2066}with-lrt-isolate",
+            "sid\u{2069}with-pop-isolate",
+            "sid\u{200b}with-zero-width-space",
+            "sid\u{feff}with-byte-order-mark",
+        ] {
+            assert_eq!(
+                resolve_session_key(Some(bad), Some("from-body")).as_deref(),
+                Some("from-body"),
+                "format-bearing candidate must be treated as absent: {bad:?}",
+            );
+            assert_eq!(resolve_session_key(Some(bad), None), None, "{bad:?}");
+        }
+    }
+
+    /// Non-ASCII letters are rejected with them. No emitter sends one, and
+    /// admitting them would reopen the confusable-glyph half of the same
+    /// ledger-display hazard.
+    #[test]
+    fn resolve_falls_through_on_non_ascii_letters_and_interior_whitespace() {
+        for bad in ["sid-caf\u{e9}", "sid-\u{0441}yrillic-es", "sid with-space"] {
             assert_eq!(resolve_session_key(Some(bad), None), None, "{bad:?}");
         }
     }
