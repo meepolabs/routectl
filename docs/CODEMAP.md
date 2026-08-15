@@ -1159,7 +1159,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   of a raw upstream status to a failure class), both empty-by-default and
   defined in `src/class_policy.rs`; `CapabilityConfig` (global `[capability]`:
   `enabled`, `decay_hours`, `inferred_window_hours`, `staleness_hint_days`)
-  drives the learned-capability registry and is hot-reloadable. The whole
+  drives the learned-capability registry and is hot-reloadable;
+  `WindowGateConfig` (global `[window_gate]`: `enabled`, default true) is the
+  hot-reloadable kill switch for the proactive context-window gate. The whole
   `Config` tree derives `schemars::JsonSchema` alongside serde so
   `schema_gen.rs` can render the committed `routectl.schema.json`
   (`class_overrides`, a `BTreeMap<u16, _>`, carries a `#[schemars(with)]`

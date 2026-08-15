@@ -97,7 +97,7 @@ pub use config::{
     ConfigVersionError, HistoryReasoning, LegacyMitmCredentialSourceError, LogConfig, MitmConfig,
     ModelEntry, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
     ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig,
-    TrimConfig, UsageConfig, VersionTooNewError, preflight_config_version,
+    TrimConfig, UsageConfig, VersionTooNewError, WindowGateConfig, preflight_config_version,
     preflight_legacy_mitm_credential_source, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]

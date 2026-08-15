@@ -263,6 +263,38 @@ const fn default_trim_keep_recent_messages() -> usize {
     crate::context_trim::DEFAULT_KEEP_RECENT_MESSAGES
 }
 
+/// Operator-facing `[window_gate]` config block. Kill switch for the
+/// proactive context-window gate, which de-prioritizes routing targets
+/// whose context window cannot hold the estimated request. A missing
+/// `[window_gate]` table deserializes to `WindowGateConfig::default()`
+/// (enabled), so an existing config needs no migration.
+///
+/// Off must be byte-identical to no gate at all: no estimate computed, no
+/// chain reordering, no diagnostics movement.
+///
+/// One field deliberately: the gate's safety margin against estimator
+/// error is a baked constant, not an operator knob, because a margin
+/// tuned per deployment turns a routing decision into a support surface.
+/// `#[non_exhaustive]` leaves room for a later knob without breaking
+/// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
+/// config-load time instead of silently ignoring it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct WindowGateConfig {
+    /// Master switch for the proactive context-window gate. Default on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for WindowGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+        }
+    }
+}
+
 /// Operator-facing `[log]` config block. Each field mirrors a
 /// well-known env var:
 ///
@@ -2768,6 +2800,10 @@ const fn default_backoff_multiplier() -> f64 {
 #[cfg(test)]
 #[path = "capability_config_tests.rs"]
 mod capability_config_tests;
+
+#[cfg(test)]
+#[path = "window_gate_config_tests.rs"]
+mod window_gate_config_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

@@ -20,7 +20,7 @@ pub use schema::{
     CredentialSource, HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter,
     OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
     ReductionConfig, RegistryEntry, RetryPolicy, SeatSelection, ServerAuth, ServerConfig,
-    TrimConfig, UsageConfig,
+    TrimConfig, UsageConfig, WindowGateConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -158,6 +158,14 @@ pub struct Config {
     /// the trimmer's current conservative behavior is unchanged.
     #[serde(default)]
     pub trim: TrimConfig,
+
+    /// Operator-facing `[window_gate]` block. Kill switch for the
+    /// proactive context-window gate. A missing block leaves the gate
+    /// enabled; setting `enabled = false` restores the pre-gate routing
+    /// behavior exactly. Hot-reloadable -- the flag is read per chain
+    /// resolution, so a live config swap applies without a restart.
+    #[serde(default)]
+    pub window_gate: WindowGateConfig,
 
     /// Operator-facing LEGACY `[cache_pricing]` field-level override table
     /// for the baked catalog economics rows (`crate::catalog`). Slated for
