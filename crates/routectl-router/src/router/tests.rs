@@ -651,6 +651,144 @@ fn carry_over_calibration_from_drops_lanes_the_new_config_no_longer_serves() {
     assert_eq!(surviving, vec!["kept".to_string()]);
 }
 
+/// Building the quota store's key from the model's own credential ref is what
+/// makes the READ side and the WRITE side share one derivation; a hand-built
+/// key here would pass whichever key the store used, so the test goes through
+/// the exposed helper exactly as production does.
+fn quota_seat_key(provider: &str, label: Option<&str>) -> crate::quota::key::SeatKey {
+    let secret_ref = routectl_auth::SecretRef::OAuth {
+        provider: provider.to_string(),
+        label: label.map(str::to_string),
+    };
+    crate::quota::key::seat_key_for_secret_ref(Some(&secret_ref)).expect("an oauth ref has a key")
+}
+
+/// A Router serving one model on an OAuth credential, so the quota store has a
+/// declared seat to admit readings for.
+fn router_serving_one_oauth_seat(config: &Arc<Config>, label: Option<&str>) -> Router {
+    let mut router = router_serving_nicknames(config, &["opus"]);
+    let provider = router
+        .resolved_models
+        .get("opus")
+        .expect("the installed model")
+        .provider
+        .clone();
+    let model = ResolvedModel::new("opus", "p", provider, "upstream").with_auth_secret_ref(
+        routectl_auth::SecretRef::OAuth {
+            provider: "anthropic".to_string(),
+            label: label.map(str::to_string),
+        },
+    );
+    router
+        .install_resolved_models(std::iter::once(("opus".to_string(), Arc::new(model))).collect());
+    router
+}
+
+/// One observed reading, for the carry-over tests. Built through the reducer so
+/// the snapshot is shaped exactly as a real observation is.
+fn observed_quota_reading(utilization: &str) -> crate::quota::reduce::QuotaSnapshot {
+    use routectl_core::upstream_meta::AnthropicUnifiedQuota;
+
+    let reset_secs = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .expect("a post-epoch clock")
+        .as_secs()
+        + 3_600;
+    let mut quota = AnthropicUnifiedQuota::default();
+    quota.utilization = Some(utilization.to_string());
+    quota.extras = vec![("5h-reset".into(), reset_secs.to_string())];
+    crate::quota::reduce::reduce_anthropic(
+        &quota,
+        &crate::quota::freshness::ObservationStamp::now(),
+    )
+    .snapshot
+}
+
+/// The fraction of a seat's FAST window, or `None` when it reads as no
+/// evidence.
+fn quota_fast_fraction(router: &Router, key: &crate::quota::key::SeatKey) -> Option<f64> {
+    let reading = router
+        .quota_store
+        .reading_for(key, &crate::quota::freshness::ObservationStamp::now())?;
+    match reading.fast {
+        crate::quota::window::QuotaWindow::Known { utilization, .. } => {
+            Some(utilization.fraction())
+        }
+        crate::quota::window::QuotaWindow::Unknown => None,
+    }
+}
+
+#[test]
+fn installing_resolved_models_declares_their_oauth_seats_to_the_quota_store() {
+    // The keyspace bound: the store admits the config's declared seats and
+    // nothing else, so a stray identity cannot mint an entry.
+    let config = Arc::new(Config::default());
+
+    let router = router_serving_one_oauth_seat(&config, Some("seat-b"));
+
+    assert!(
+        router
+            .quota_store
+            .admits(&quota_seat_key("anthropic", Some("seat-b")))
+    );
+    assert!(
+        !router
+            .quota_store
+            .admits(&quota_seat_key("anthropic", Some("seat-never-configured"))),
+        "an undeclared seat must not be admitted"
+    );
+}
+
+#[test]
+fn carry_over_quota_from_preserves_a_seats_latest_reading() {
+    // Regression guard for the silent-collapse trap, quota edition -- and the
+    // worst instance of it: an emptied quota store is indistinguishable from a
+    // fleet of seats that have not reported yet, which IS the cap-dormant
+    // fallback. So the loss reads as health.
+    let config = Arc::new(Config::default());
+    let key = quota_seat_key("anthropic", Some("seat-b"));
+    let before = router_serving_one_oauth_seat(&config, Some("seat-b"));
+    assert!(
+        before
+            .quota_store
+            .observe(&key, observed_quota_reading("0.42")),
+        "the declared seat accepts a reading"
+    );
+
+    let mut after = router_serving_one_oauth_seat(&config, Some("seat-b"));
+    assert!(
+        after.quota_store.is_empty(),
+        "a freshly built router starts with no readings"
+    );
+
+    after.carry_over_quota_from(&before);
+
+    assert_eq!(quota_fast_fraction(&after, &key), Some(0.42));
+    assert_eq!(after.quota_store.len(), 1);
+}
+
+#[test]
+fn carry_over_quota_from_drops_a_seat_the_new_config_no_longer_declares() {
+    // Same bound the calibration carry-over defends one dimension over: an
+    // unfiltered carry-over would keep every seat any past config declared,
+    // growing the map with accounts no request can reach.
+    let config = Arc::new(Config::default());
+    let retired = quota_seat_key("anthropic", Some("retired"));
+    let before = router_serving_one_oauth_seat(&config, Some("retired"));
+    before
+        .quota_store
+        .observe(&retired, observed_quota_reading("0.42"));
+    assert_eq!(before.quota_store.len(), 1);
+
+    let mut after = router_serving_one_oauth_seat(&config, Some("kept"));
+    after.carry_over_quota_from(&before);
+
+    assert!(
+        after.quota_store.is_empty(),
+        "a retired seat's reading must not survive the rebuild"
+    );
+}
+
 /// A Router serving exactly `nicknames` out of its resolved table, so the
 /// calibration carry-over's nickname filter has something to admit against.
 /// The models resolve onto a stub provider; these tests never dispatch.

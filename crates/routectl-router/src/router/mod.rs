@@ -181,6 +181,21 @@ pub struct Router {
     /// sends every lane back to the uncorrected estimate, and because that IS
     /// the pre-correction behavior the loss reads as health.
     calibration_store: Arc<crate::calibration::CalibrationStore>,
+    /// Latest per-seat subscription-quota reading, keyed by the OAuth
+    /// `provider#label` ACCOUNT identity (see `crate::quota::key`) and NOT by
+    /// the model-scoped `state_key`: quota is reported once per credential
+    /// account, so a model-scoped key would shard one account's single reading
+    /// across one entry per nickname.
+    ///
+    /// One latest snapshot per seat, not a ring and not an LRU: there is no
+    /// reduction over history here (the freshest reading IS the answer), and the
+    /// keyspace is the credential-store-declared seat set rather than anything
+    /// client-driven.
+    ///
+    /// MUST survive a hot-reload (see `carry_over_quota_from`): an emptied store
+    /// reads exactly as a fleet of seats that have not reported yet, which is
+    /// the cap-dormant fallback -- so the loss would look like health.
+    quota_store: Arc<crate::quota::store::QuotaStore>,
     /// In-memory learned-capability registry (the `k_session_store`
     /// pattern): per-(target, feature) negatives the dispatch path learns
     /// from upstream request faults. Interior-locked and mutated through
@@ -1152,6 +1167,7 @@ impl Router {
         );
         let shadow_store = Arc::new(crate::k_estimator::ShadowStore::default());
         let calibration_store = Arc::new(crate::calibration::CalibrationStore::default());
+        let quota_store = Arc::new(crate::quota::store::QuotaStore::default());
         // Registry tempo comes from the `[capability]` knobs (hours ->
         // Duration); the kill switch is deliberately NOT read here -- the
         // act / learn sites gate on it, so a disabled subsystem keeps the
@@ -1181,6 +1197,7 @@ impl Router {
             k_estimator,
             shadow_store,
             calibration_store,
+            quota_store,
             learned_capabilities,
             learned_replay,
             override_registry,
@@ -1268,6 +1285,32 @@ impl Router {
                 .entry(nickname.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&policy))));
         }
+        self.admit_quota_seats();
+    }
+
+    /// Declare the OAuth account keys the quota store will hold readings for:
+    /// every credential identity reachable from the resolved model table,
+    /// counting both a pooled model's seats and a non-pooled model's own
+    /// credential.
+    ///
+    /// This is what bounds the store's keyspace to the loaded config. It runs at
+    /// install time (and therefore on every rebuild), so a config that dropped a
+    /// seat neither keeps a live reading for it nor accepts a new one.
+    fn admit_quota_seats(&self) {
+        use crate::quota::key::seat_key_for_secret_ref;
+
+        let mut admitted = Vec::new();
+        for m in self.resolved_models.values() {
+            if let Some(seats) = m.seats.as_ref() {
+                admitted.extend(
+                    seats
+                        .iter()
+                        .filter_map(|seat| seat_key_for_secret_ref(seat.auth_secret_ref.as_ref())),
+                );
+            }
+            admitted.extend(seat_key_for_secret_ref(m.auth_secret_ref.as_ref()));
+        }
+        self.quota_store.admit_seats(admitted);
     }
 
     /// Carry over per-nickname runtime state from a previous Router.
@@ -1362,6 +1405,29 @@ impl Router {
             .filter(|(key, _)| self.knows_nickname(&key.nickname))
             .collect();
         self.calibration_store.import_entries(retained);
+    }
+
+    /// Carry the previous Router's latest per-seat subscription-quota readings
+    /// into this freshly-built Router during a hot-reload.
+    ///
+    /// Mandatory, and for a reason that makes omitting it worse than it looks:
+    /// an emptied quota store is indistinguishable from a fleet of seats that
+    /// have not reported yet, which is the cap-dormant fallback. So a dropped
+    /// store does not error, does not warn, and does not degrade visibly -- it
+    /// silently un-arms the placement signal until traffic re-reports on every
+    /// seat, and until then reads as health.
+    ///
+    /// This carry-over MUST be called at every reload site. A single missed site
+    /// is a config swap that empties the store on that path only, which no
+    /// symptom would distinguish from the same silence.
+    ///
+    /// A seat outside the NEW config's declared set is dropped: the import goes
+    /// through the store's own admission, the same gate the live feed passes, so
+    /// a run of reloads over renamed or removed seats cannot carry retired keys
+    /// forward and break the keyspace bound.
+    pub fn carry_over_quota_from(&mut self, previous: &Self) {
+        self.quota_store
+            .import_entries(previous.quota_store.export_entries());
     }
 
     /// Whether `nickname` is still in this Router's resolved model table.
@@ -1660,3 +1726,7 @@ mod forwarded_model_transparency_tests;
 #[cfg(test)]
 #[path = "seat_pool_dispatch_tests.rs"]
 mod seat_pool_dispatch_tests;
+
+#[cfg(test)]
+#[path = "quota_feed_dispatch_tests.rs"]
+mod quota_feed_dispatch_tests;

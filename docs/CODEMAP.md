@@ -1710,7 +1710,50 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   it happens to equal `5h-reset` on every captured envelope, so pairing them
   would pass unobserved, and a test pins the refusal. Codex converts its 0-100
   percent to a fraction; strict where `UsageCapture::observe_codex_quota` is
-  loose (routing signal vs observability record), cross-referenced at both sites
+  loose (routing signal vs observability record), cross-referenced at both sites.
+  Returns a `Reduction` (the snapshot plus every REPORTED window refused,
+  partitioned by `RejectionReason`: invalid utilization, expired / implausible
+  reset, overflow) -- an absent window is dormant, not a rejection
+- `src/quota/key.rs` -- `SeatKey`, the store key, and the ONE derivation both
+  sides share. Keyed on `seat_pool::seat_identity`'s OAuth `provider#label`
+  ACCOUNT identity, NEVER on `seat_state_key`'s model-scoped
+  `{nickname}#{label}`: quota is reported once per credential, so a model-scoped
+  key would shard one account's single reading across one entry per nickname.
+  Private field, no other constructor -- `seat_key_for_secret_ref` (the READ
+  side, from a `SeatTarget`'s own ref) and `seat_key_for_served_identity` (the
+  WRITE side, from `DispatchMeta::served_seat`) both bottom out in
+  `seat_identity`, so the two sides agreeing is a property of the type. That
+  matters because a mismatch fails SILENTLY GREEN: every write lands, every read
+  misses, and a hand-built-key unit test passes either way
+- `src/quota/store.rs` -- `Mutex<HashMap<SeatKey, StoredReading>>`, ONE latest
+  reading per seat. Bounded by the credential-store-declared OAuth seat set
+  (`admit_seats`, enforced at INSERTION), the same operator-declared-keyspace
+  argument the calibration store rests on one dimension over -- deliberately
+  NOT calibration's bounded ring (no reduction over history: the freshest
+  reading IS the answer) and NOT the K tracker's LRU (nothing here is
+  client-supplied). Merge is PER-WINDOW and independent: a newer valid `Known`
+  wins including when utilization DECREASES, an incoming `Unknown` preserves a
+  still-fresh `Known` and leaves `Unknown` once it lapses, an older observation
+  never overwrites a newer (ordered on the MONOTONIC clock), omitting one window
+  never erases the other, expired state is never revived. Each window carries its
+  OWN observation stamp so a preserved window keeps aging on the instant it was
+  read -- one stamp per snapshot would let a re-stamp make a stale reading
+  immortal. `reading_for` re-applies expiry at READ time. Exact per-reason
+  rejection counters plus one rate-limited WARN carrying the running totals
+  (the window-gate skip pattern); only the routectl-internal account key and
+  counters reach a log line. `export_entries` / `import_entries` carry readings
+  across a reload through the same admission the live feed passes
+- `src/quota/feed.rs` -- the post-response feed, wired on BOTH completion paths.
+  `feed_response` reads `ChatResponse::upstream_meta` at the terminal
+  non-streaming success arm; `FirstChunkFeed` is armed with the served seat's key
+  at the stream hand-back and lifts `ChatChunk::upstream_meta` off the FIRST
+  chunk carrying it (the only chunk that does), inside
+  `wrap_with_breaker_accounting` -- before the caller renders it, never per
+  chunk, and never at end-of-stream where the reading is already gone. Wiring
+  only the non-streaming path would leave a streaming client's every seat reading
+  as no-evidence with no error and no warning. Feeds the seat that ACTUALLY
+  served; `served_seat`'s absent cases (pre-dispatch failure, non-OAuth ref,
+  forwarded credential) are all correct skips
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /
@@ -1732,7 +1775,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   forwarded-credential path). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
-  `carry_over_calibration_from` / `carry_over_learned_from` reload carries +
+  `carry_over_calibration_from` / `carry_over_quota_from` /
+  `carry_over_learned_from` reload carries +
   `install_catalog_overlay` (the
   single writer of the RETAINED accepted overlay and its revision stamp), the
   `catalog_version` / `overlay_revision` / `catalog_overlay` getters and
@@ -1748,6 +1792,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `calibration_lanes` (lane IDENTITIES only, never samples -- the observability
   read surface over the otherwise-private store), `knows_nickname` (the ONE
   lane-admission predicate, shared by the boot rebuild and the reload carry),
+  `admit_quota_seats` (declares the config's OAuth account keys to the quota
+  store at install time, which is what bounds that store's keyspace),
   `resolve_nickname`, `has_forwarded_provider`, `override_registry`. Also owns
   the header-compose constants
   (`AUTH_HEADERS`/`MANAGED_HEADERS`/`LIST_VALUED_HEADERS`, consumed by
@@ -1767,7 +1813,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `rate_limit_reset_hint` clamps an `Error::Upstream.retry_after` to the
   configured ceiling and folds a small reset into the next sleep (a larger
   reset parks the provider via the breaker instead). `run_with_timeout`,
-  `wrap_with_breaker_accounting`, and `try_stream_with_first_content` (buffers
+  `wrap_with_breaker_accounting` (also the STREAMING quota seam: offers each Ok
+  chunk to the armed `quota::feed::FirstChunkFeed`), and
+  `try_stream_with_first_content` (buffers
   content-free leading chunks -- a `delta.role` opener, id/model metadata --
   until the first content-bearing chunk per `is_content_bearing`, so the
   fallback boundary is first CONTENT, not stream-open) wrap each
@@ -2860,7 +2908,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   graceful-shutdown joins. Unit tests live in the `#[path]`-included sibling
   sidecars `activation_tests.rs` (activation-recompute + audit-event tests,
   run on the current-thread runtime for the capture subscriber) and
-  `reload_tests.rs` (reload-pipeline + coordinator tests)
+  `reload_tests.rs` (reload-pipeline + coordinator tests, incl. the structural
+  guard that BOTH carry-over blocks carry the per-seat quota readings -- a
+  one-site-only carry silently empties that store on the missed path, and an
+  empty store reads exactly as the cap-dormant fallback)
 - `src/server/config_load.rs` -- effective-config load/parse/validate,
   re-exported at `server::` paths from `mod.rs`. The shared config loader
   splits into `parse_config_only` (version + legacy-mitm preflight + typed

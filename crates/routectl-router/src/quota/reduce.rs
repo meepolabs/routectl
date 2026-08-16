@@ -45,12 +45,64 @@ use super::curation::{
     ANTHROPIC_FAST_SOURCE_ID, ANTHROPIC_PROVIDER_KIND, CODEX_PROVIDER_KIND, CuratedWindow,
     RESET_TOLERANCE, row_for,
 };
-use super::freshness::{ObservationStamp, accept_reset};
+use super::freshness::{ObservationStamp, ResetRejection, accept_reset};
 use super::window::{Billing, QuotaWindow, Utilization, WindowRole};
 
 /// Scale of the Codex `primary-used-percent` value, which is a 0-100 percent
 /// rather than the 0-1 fraction the normalized shape carries.
 const PERCENT_SCALE: f64 = 100.0;
+
+/// Why one REPORTED window was refused, in a fixed closed set so the counters
+/// that partition on it never interpolate an upstream string.
+///
+/// A window the provider did not report at all -- or one this crate curates no
+/// row for -- is NOT a rejection: it is dormant, which is the normal state for
+/// an uncurated provider, and counting it would bury the real refusals under
+/// steady-state noise. Only a value that WAS reported and could not be trusted
+/// lands here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectionReason {
+    /// The reported utilization was not a finite value inside the utilization
+    /// scale, so there was no headroom reading to salvage.
+    InvalidUtilization,
+    /// The reported reset had already passed when the response was read.
+    ExpiredReset,
+    /// The reported reset fell beyond the window's own duration plus
+    /// tolerance, so it cannot describe that window -- the class an
+    /// epoch-milliseconds value misparsed as seconds falls into.
+    ImplausibleReset,
+    /// The reported reset could not be represented, or a bound over it could
+    /// not be computed.
+    Overflow,
+}
+
+impl RejectionReason {
+    /// The reason a refused reset maps to.
+    const fn from_reset(rejection: &ResetRejection) -> Self {
+        match rejection {
+            ResetRejection::Expired => Self::ExpiredReset,
+            ResetRejection::Implausible => Self::ImplausibleReset,
+            ResetRejection::Overflow => Self::Overflow,
+        }
+    }
+}
+
+/// One reduction's output: the normalized snapshot plus every reported window
+/// it had to refuse.
+///
+/// The two travel together because a caller needs both and they are decided at
+/// the same point: the snapshot is what the store merges, and the rejections
+/// are what the store's per-reason counters and its rate-limited WARN report.
+/// Deriving the reasons a second time at the call site would be a second
+/// implementation of the trust rules.
+#[derive(Debug, Clone)]
+pub struct Reduction {
+    /// The normalized reading.
+    pub snapshot: QuotaSnapshot,
+    /// Reported windows refused, in curated-role order. Empty on a clean
+    /// reduction and on a provider that simply reported nothing.
+    pub rejections: Vec<RejectionReason>,
+}
 
 /// One seat's normalized quota reading, as the reducers produce it.
 ///
@@ -71,7 +123,8 @@ pub struct QuotaSnapshot {
     pub billing: Billing,
 }
 
-/// Reduce Anthropic's unified quota family onto the normalized snapshot.
+/// Reduce Anthropic's unified quota family onto the normalized snapshot, plus
+/// every reported window the trust rules refused.
 ///
 /// `5h-utilization` is the only CAPACITY-WINDOW utilization the shipped header
 /// parser types (as `utilization`). It types five more suffixes -- `status`,
@@ -84,19 +137,23 @@ pub struct QuotaSnapshot {
 ///
 /// Widening that struct instead is out of scope by design: it feeds the shared
 /// ledger write path, which this derived-only reading must not disturb.
-pub fn reduce_anthropic(
-    quota: &AnthropicUnifiedQuota,
-    observed: &ObservationStamp,
-) -> QuotaSnapshot {
-    QuotaSnapshot {
-        observed: *observed,
-        fast: anthropic_window(quota, observed, &WindowRole::Fast),
-        slow: anthropic_window(quota, observed, &WindowRole::Slow),
-        billing: anthropic_billing(quota),
+pub fn reduce_anthropic(quota: &AnthropicUnifiedQuota, observed: &ObservationStamp) -> Reduction {
+    let mut rejections = Vec::new();
+    let fast = anthropic_window(quota, observed, &WindowRole::Fast, &mut rejections);
+    let slow = anthropic_window(quota, observed, &WindowRole::Slow, &mut rejections);
+    Reduction {
+        snapshot: QuotaSnapshot {
+            observed: *observed,
+            fast,
+            slow,
+            billing: anthropic_billing(quota),
+        },
+        rejections,
     }
 }
 
-/// Reduce the Codex quota family onto the normalized snapshot.
+/// Reduce the Codex quota family onto the normalized snapshot, plus every
+/// reported window the trust rules refused.
 ///
 /// Codex yields a SLOW window and nothing else, and that comes out of the
 /// curated table rather than out of this function: there is no curated Codex
@@ -105,12 +162,18 @@ pub fn reduce_anthropic(
 /// limit is in force, not which budget the request billed against, and reading
 /// it as billing evidence would be the same unknown-as-known confusion the
 /// tri-state exists to prevent.
-pub fn reduce_codex(quota: &CodexQuota, observed: &ObservationStamp) -> QuotaSnapshot {
-    QuotaSnapshot {
-        observed: *observed,
-        fast: codex_window(quota, observed, &WindowRole::Fast),
-        slow: codex_window(quota, observed, &WindowRole::Slow),
-        billing: Billing::Unknown,
+pub fn reduce_codex(quota: &CodexQuota, observed: &ObservationStamp) -> Reduction {
+    let mut rejections = Vec::new();
+    let fast = codex_window(quota, observed, &WindowRole::Fast, &mut rejections);
+    let slow = codex_window(quota, observed, &WindowRole::Slow, &mut rejections);
+    Reduction {
+        snapshot: QuotaSnapshot {
+            observed: *observed,
+            fast,
+            slow,
+            billing: Billing::Unknown,
+        },
+        rejections,
     }
 }
 
@@ -120,6 +183,7 @@ fn anthropic_window(
     quota: &AnthropicUnifiedQuota,
     observed: &ObservationStamp,
     role: &WindowRole,
+    rejections: &mut Vec<RejectionReason>,
 ) -> QuotaWindow {
     let Some(row) = row_for(ANTHROPIC_PROVIDER_KIND, role) else {
         return QuotaWindow::Unknown;
@@ -131,27 +195,37 @@ fn anthropic_window(
     };
     // Only the suffix naming THIS window; never the bare `reset`.
     let raw_reset = extra(&quota.extras, &format!("{}-reset", row.source_id));
-    assemble(raw_utilization.and_then(fraction), raw_reset, observed, row)
+    assemble(
+        raw_utilization,
+        raw_reset,
+        observed,
+        row,
+        fraction,
+        rejections,
+    )
 }
 
 /// The Codex window for one role, or `Unknown` when it is uncurated or
 /// unreadable.
-fn codex_window(quota: &CodexQuota, observed: &ObservationStamp, role: &WindowRole) -> QuotaWindow {
+fn codex_window(
+    quota: &CodexQuota,
+    observed: &ObservationStamp,
+    role: &WindowRole,
+    rejections: &mut Vec<RejectionReason>,
+) -> QuotaWindow {
     let Some(row) = row_for(CODEX_PROVIDER_KIND, role) else {
         return QuotaWindow::Unknown;
     };
     // The captured family types exactly one window's values, and the curated
     // Codex row is that window; a further Codex row would need its own
     // capture and its own accessor rather than a guess at a suffix.
-    let utilization = quota
-        .primary_used_percent
-        .as_deref()
-        .and_then(percent_as_fraction);
     assemble(
-        utilization,
+        quota.primary_used_percent.as_deref(),
         quota.primary_reset_at.as_deref(),
         observed,
         row,
+        percent_as_fraction,
+        rejections,
     )
 }
 
@@ -168,22 +242,37 @@ fn anthropic_billing(quota: &AnthropicUnifiedQuota) -> Billing {
     }
 }
 
-/// Build a `Known` window, or `Unknown` if any part of it cannot be trusted.
+/// Build a `Known` window, or `Unknown` if any part of it cannot be trusted,
+/// pushing a reason for every value that WAS reported and was refused.
 ///
 /// The reset goes through `accept_reset` with the CURATED duration, which is
 /// the only way to obtain the `ValidatedReset` the variant demands -- so a
 /// misparsed reset cannot reach a trusted window even by mistake. A rejection
 /// costs this window alone.
+///
+/// An ABSENT value is not a rejection. A provider that reports nothing for a
+/// window is dormant, and counting each such response would swamp the counters
+/// that exist to make real refusals visible.
 fn assemble(
-    utilization: Option<Utilization>,
+    raw_utilization: Option<&str>,
     raw_reset: Option<&str>,
     observed: &ObservationStamp,
     row: &CuratedWindow,
+    parse_utilization: fn(&str) -> Option<Utilization>,
+    rejections: &mut Vec<RejectionReason>,
 ) -> QuotaWindow {
-    let Some(utilization) = utilization else {
+    let Some(raw_utilization) = raw_utilization else {
         return QuotaWindow::Unknown;
     };
-    let Some(reset_at) = raw_reset.and_then(epoch_seconds) else {
+    let Some(utilization) = parse_utilization(raw_utilization) else {
+        rejections.push(RejectionReason::InvalidUtilization);
+        return QuotaWindow::Unknown;
+    };
+    let Some(raw_reset) = raw_reset else {
+        return QuotaWindow::Unknown;
+    };
+    let Some(reset_at) = epoch_seconds(raw_reset) else {
+        rejections.push(RejectionReason::Overflow);
         return QuotaWindow::Unknown;
     };
     match accept_reset(reset_at, observed, row.duration, RESET_TOLERANCE) {
@@ -191,7 +280,10 @@ fn assemble(
             utilization,
             reset_at,
         },
-        Err(_) => QuotaWindow::Unknown,
+        Err(rejection) => {
+            rejections.push(RejectionReason::from_reset(&rejection));
+            QuotaWindow::Unknown
+        }
     }
 }
 
