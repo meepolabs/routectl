@@ -432,17 +432,27 @@ impl QuotaStore {
     }
 
     /// Running rejection totals, partitioned by reason.
+    ///
+    /// Test-only read surface: the production reporter is the throttled WARN in
+    /// [`QuotaStore::record_rejection`], which reads the counters inline. A
+    /// `/status` field would be a persisted-vocabulary addition this
+    /// derived-only reading deliberately does not make.
+    #[cfg(test)]
     pub fn rejection_totals(&self) -> RejectionTotals {
         self.rejections.totals()
     }
 
-    /// Number of seats holding a reading.
+    /// Number of seats holding a reading. Test-only: nothing in production
+    /// asks how many seats have reported, only what a given seat reports.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.seats.lock().len()
     }
 
     /// True when no seat holds a reading -- the state a process restart starts
-    /// in, since nothing rebuilds this store from the ledger.
+    /// in, since nothing rebuilds this store from the ledger. Test-only, for
+    /// the same reason as [`QuotaStore::len`].
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.seats.lock().is_empty()
     }

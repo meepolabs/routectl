@@ -101,7 +101,7 @@ pub use config::{
     CapabilityConfig, Config, ConfigVersionError, HistoryReasoning,
     LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, OverrideEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
-    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
+    RegistryEntry, RetryPolicy, SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
     VersionTooNewError, WindowGateConfig, preflight_config_version,
     preflight_legacy_mitm_credential_source, validate_cache_pricing_retired,
 };

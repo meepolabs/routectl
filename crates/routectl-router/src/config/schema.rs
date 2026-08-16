@@ -332,6 +332,54 @@ impl Default for CalibrationConfig {
     }
 }
 
+/// Operator-facing `[seat_quota]` config block. Kill switch for
+/// subscription-quota-aware seat placement, which orders a NEW conversation's
+/// birth seat by each credential account's remaining short-window budget. A
+/// missing `[seat_quota]` table deserializes to `SeatQuotaConfig::default()`
+/// (enabled), so an existing config needs no migration.
+///
+/// Default ON is safe for the same reason the learned correction's is: a seat
+/// produces no reading until a real upstream response carries one, so a fresh
+/// process places exactly as it would with the switch off, and every refusal
+/// path (no reading, an expired one, a reading the trust rules declined, a
+/// provider with no curated short window) falls back to the pre-quota chooser.
+///
+/// Off means the birth chooser for an unpinned session is byte-identical to
+/// the same chooser with no quota placement compiled in: no quota state is
+/// read, no cap orders a pick, no quota placement diagnostic is emitted, and
+/// the dispatchability filter, the breaker health preference, the RPM headroom
+/// ranking and the anti-herd tiebreak all decide exactly as before. Following
+/// `CalibrationConfig`, off does NOT stop collecting or aging readings, so
+/// switching back on is instant rather than a re-observe. Universal affinity
+/// is unaffected in both positions: every pin is preserved and a one-time
+/// migration off an unhealthy seat still happens, because a wrong placement
+/// algorithm must never cost the warm-cache benefit pinning exists for.
+///
+/// One field deliberately, following `WindowGateConfig` and
+/// `CalibrationConfig`: the per-provider caps, the long-window guard and the
+/// freshness bounds are curated constants grounded in captured upstream
+/// evidence, not operator knobs, because a cap tuned per deployment turns a
+/// routing decision into a support surface.
+/// `#[non_exhaustive]` leaves room for a later knob without breaking
+/// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
+/// config-load time instead of silently ignoring it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SeatQuotaConfig {
+    /// Master switch for quota-aware birth placement. Default on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for SeatQuotaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+        }
+    }
+}
+
 /// Operator-facing `[log]` config block. Each field mirrors a
 /// well-known env var:
 ///
@@ -2845,6 +2893,10 @@ mod window_gate_config_tests;
 #[cfg(test)]
 #[path = "calibration_config_tests.rs"]
 mod calibration_config_tests;
+
+#[cfg(test)]
+#[path = "seat_quota_config_tests.rs"]
+mod seat_quota_config_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

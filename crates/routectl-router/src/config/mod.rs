@@ -19,8 +19,8 @@ pub use schema::{
     AliasValue, BedrockGlobalConfig, CacheCapability, CacheConfig, CalibrationConfig,
     CapabilityConfig, CredentialSource, HistoryReasoning, LogConfig, MitmConfig, ModelEntry,
     NicknameIter, OverrideEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
-    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, SeatSelection, ServerAuth,
-    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig,
+    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection,
+    ServerAuth, ServerConfig, TrimConfig, UsageConfig, WindowGateConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -175,6 +175,17 @@ pub struct Config {
     /// collected. Hot-reloadable -- the flag is read per chain resolution.
     #[serde(default)]
     pub calibration: CalibrationConfig,
+
+    /// Operator-facing `[seat_quota]` block. Kill switch for
+    /// subscription-quota-aware seat placement. A missing block leaves quota
+    /// placement enabled; setting `enabled = false` makes an unpinned
+    /// conversation's birth seat resolve exactly as it did before quota
+    /// placement existed, while still collecting and aging readings so
+    /// switching back on is instant. Affinity pins and the one-time migration
+    /// off an unhealthy seat are unaffected in either position.
+    /// Hot-reloadable -- the flag is read per birth pick.
+    #[serde(default)]
+    pub seat_quota: SeatQuotaConfig,
 
     /// Operator-facing LEGACY `[cache_pricing]` field-level override table
     /// for the baked catalog economics rows (`crate::catalog`). Slated for

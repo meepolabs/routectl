@@ -70,6 +70,13 @@ impl ObservationStamp {
     }
 
     /// Wall clock at observation.
+    ///
+    /// Test-only: the wall reading's one production consumer is [`is_fresh`]
+    /// in this module, which reads the field directly. Exposing an accessor to
+    /// production would invite a caller to compare a stored wall time against
+    /// an upstream instant WITHOUT the monotonic half, which is the pairing
+    /// that makes the freshness verdict fail closed.
+    #[cfg(test)]
     pub const fn wall(&self) -> SystemTime {
         self.wall
     }

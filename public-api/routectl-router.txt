@@ -1717,6 +1717,7 @@ pub routectl_router::config::Config::providers: alloc::collections::btree::map::
 pub routectl_router::config::Config::reduction: routectl_router::ReductionConfig
 pub routectl_router::config::Config::registry: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::RegistryEntry>
 pub routectl_router::config::Config::retry: routectl_router::RetryPolicy
+pub routectl_router::config::Config::seat_quota: routectl_router::SeatQuotaConfig
 pub routectl_router::config::Config::server: routectl_router::ServerConfig
 pub routectl_router::config::Config::trim: routectl_router::TrimConfig
 pub routectl_router::config::Config::usage: routectl_router::UsageConfig
@@ -2481,6 +2482,73 @@ impl<T> typenum::type_operators::Same for routectl_router::RetryPolicy
 pub type routectl_router::RetryPolicy::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::RetryPolicy where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::RetryPolicy::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::config::SeatQuotaConfig
+pub routectl_router::config::SeatQuotaConfig::enabled: bool
+impl core::clone::Clone for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::clone(&self) -> routectl_router::SeatQuotaConfig
+impl core::cmp::Eq for routectl_router::SeatQuotaConfig
+impl core::cmp::PartialEq for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::eq(&self, &routectl_router::SeatQuotaConfig) -> bool
+impl core::default::Default for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::default() -> Self
+impl core::fmt::Debug for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::SeatQuotaConfig
+impl schemars::JsonSchema for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::inline_schema() -> bool
+pub fn routectl_router::SeatQuotaConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::SeatQuotaConfig::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::SeatQuotaConfig::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::SeatQuotaConfig
+impl core::marker::Send for routectl_router::SeatQuotaConfig
+impl core::marker::Sync for routectl_router::SeatQuotaConfig
+impl core::marker::Unpin for routectl_router::SeatQuotaConfig
+impl core::marker::UnsafeUnpin for routectl_router::SeatQuotaConfig
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::SeatQuotaConfig
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::SeatQuotaConfig
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::SeatQuotaConfig where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::SeatQuotaConfig where U: core::convert::From<T>
+pub fn routectl_router::SeatQuotaConfig::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::SeatQuotaConfig where U: core::convert::Into<T>
+pub type routectl_router::SeatQuotaConfig::Error = core::convert::Infallible
+pub fn routectl_router::SeatQuotaConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::SeatQuotaConfig where U: core::convert::TryFrom<T>
+pub type routectl_router::SeatQuotaConfig::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::SeatQuotaConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub type routectl_router::SeatQuotaConfig::Owned = T
+pub fn routectl_router::SeatQuotaConfig::clone_into(&self, &mut T)
+pub fn routectl_router::SeatQuotaConfig::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub fn routectl_router::SeatQuotaConfig::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::SeatQuotaConfig where T: 'static + ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::SeatQuotaConfig where T: ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::SeatQuotaConfig where T: ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub unsafe fn routectl_router::SeatQuotaConfig::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub fn routectl_router::SeatQuotaConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::SeatQuotaConfig
+impl<T> serde_core::de::DeserializeOwned for routectl_router::SeatQuotaConfig where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::SeatQuotaConfig where T: ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::SeatQuotaConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::SeatQuotaConfig
+impl<T> tracing::instrument::WithSubscriber for routectl_router::SeatQuotaConfig
+impl<T> typenum::type_operators::Same for routectl_router::SeatQuotaConfig
+pub type routectl_router::SeatQuotaConfig::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::SeatQuotaConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::SeatQuotaConfig::into_shared(self) -> Shared
 pub struct routectl_router::config::ServerAuth
 pub routectl_router::config::ServerAuth::tokens: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::ServerAuth
@@ -3324,6 +3392,7 @@ pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
+pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
 pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
@@ -7863,6 +7932,7 @@ pub routectl_router::Config::providers: alloc::collections::btree::map::BTreeMap
 pub routectl_router::Config::reduction: routectl_router::ReductionConfig
 pub routectl_router::Config::registry: alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::RegistryEntry>
 pub routectl_router::Config::retry: routectl_router::RetryPolicy
+pub routectl_router::Config::seat_quota: routectl_router::SeatQuotaConfig
 pub routectl_router::Config::server: routectl_router::ServerConfig
 pub routectl_router::Config::trim: routectl_router::TrimConfig
 pub routectl_router::Config::usage: routectl_router::UsageConfig
@@ -10849,6 +10919,7 @@ pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
+pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
 pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
@@ -11018,6 +11089,73 @@ impl<T> typenum::type_operators::Same for routectl_router::Sample
 pub type routectl_router::Sample::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::Sample where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::Sample::into_shared(self) -> Shared
+#[non_exhaustive] pub struct routectl_router::SeatQuotaConfig
+pub routectl_router::SeatQuotaConfig::enabled: bool
+impl core::clone::Clone for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::clone(&self) -> routectl_router::SeatQuotaConfig
+impl core::cmp::Eq for routectl_router::SeatQuotaConfig
+impl core::cmp::PartialEq for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::eq(&self, &routectl_router::SeatQuotaConfig) -> bool
+impl core::default::Default for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::default() -> Self
+impl core::fmt::Debug for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::SeatQuotaConfig
+impl schemars::JsonSchema for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::inline_schema() -> bool
+pub fn routectl_router::SeatQuotaConfig::json_schema(&mut schemars::generate::SchemaGenerator) -> schemars::schema::Schema
+pub fn routectl_router::SeatQuotaConfig::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn routectl_router::SeatQuotaConfig::schema_name() -> alloc::borrow::Cow<'static, str>
+impl serde_core::ser::Serialize for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for routectl_router::SeatQuotaConfig
+impl core::marker::Send for routectl_router::SeatQuotaConfig
+impl core::marker::Sync for routectl_router::SeatQuotaConfig
+impl core::marker::Unpin for routectl_router::SeatQuotaConfig
+impl core::marker::UnsafeUnpin for routectl_router::SeatQuotaConfig
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::SeatQuotaConfig
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::SeatQuotaConfig
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::SeatQuotaConfig where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::SeatQuotaConfig where U: core::convert::From<T>
+pub fn routectl_router::SeatQuotaConfig::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::SeatQuotaConfig where U: core::convert::Into<T>
+pub type routectl_router::SeatQuotaConfig::Error = core::convert::Infallible
+pub fn routectl_router::SeatQuotaConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::SeatQuotaConfig where U: core::convert::TryFrom<T>
+pub type routectl_router::SeatQuotaConfig::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::SeatQuotaConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub type routectl_router::SeatQuotaConfig::Owned = T
+pub fn routectl_router::SeatQuotaConfig::clone_into(&self, &mut T)
+pub fn routectl_router::SeatQuotaConfig::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub fn routectl_router::SeatQuotaConfig::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::SeatQuotaConfig where T: 'static + ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::SeatQuotaConfig where T: ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::SeatQuotaConfig where T: ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub unsafe fn routectl_router::SeatQuotaConfig::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::SeatQuotaConfig
+pub fn routectl_router::SeatQuotaConfig::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::SeatQuotaConfig where T: core::clone::Clone
+pub fn routectl_router::SeatQuotaConfig::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::SeatQuotaConfig
+impl<T> serde_core::de::DeserializeOwned for routectl_router::SeatQuotaConfig where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::SeatQuotaConfig where T: ?core::marker::Sized
+pub fn routectl_router::SeatQuotaConfig::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::SeatQuotaConfig::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::SeatQuotaConfig
+impl<T> tracing::instrument::WithSubscriber for routectl_router::SeatQuotaConfig
+impl<T> typenum::type_operators::Same for routectl_router::SeatQuotaConfig
+pub type routectl_router::SeatQuotaConfig::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::SeatQuotaConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::SeatQuotaConfig::into_shared(self) -> Shared
 pub struct routectl_router::ServerAuth
 pub routectl_router::ServerAuth::tokens: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for routectl_router::ServerAuth

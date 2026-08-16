@@ -49,6 +49,7 @@ pub mod curation;
 pub mod feed;
 pub mod freshness;
 pub mod key;
+pub mod placement;
 pub mod reduce;
 pub mod store;
 pub mod window;
