@@ -3074,9 +3074,14 @@ seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sti
   conversation migrates ONCE to a healthy sibling and does not flap back
   when the original recovers. Requires an inbound per-conversation key
   (the `x-claude-code-session-id` header Claude Code sends, or body
-  `metadata.session_id`); a request without one falls back to
-  `fill-first`. The per-request decision (birth_pick / sticky_stay /
-  overflow_repin / defer_no_healthy / keyless_fill_first) is not
+  `metadata.session_id`). A request without one mints no pin, since there
+  is nothing to pin under; it still places by remaining subscription
+  budget when `[seat_quota]` is on and a reading exists, because the only
+  thing that outranks quota fairness is protecting a warm prompt cache and
+  a keyless request has none. With no reading, or with the switch off, it
+  falls back to `fill-first` exactly as before. The per-request decision
+  (birth_pick / sticky_stay / overflow_repin / defer_no_healthy /
+  keyless_quota / keyless_fill_first) is not
   persisted, and only partially logged: a DEBUG line marks a birth pick
   and an overflow repin, while `sticky_stay`, `defer_no_healthy` and the
   keyless fall-through emit nothing. The usage ledger's

@@ -205,10 +205,11 @@ fn a_healthy_pin_is_never_moved_by_a_capped_reading() {
 }
 
 #[test]
-fn a_keyless_request_creates_no_pin_and_places_by_the_unchanged_order() {
-    // A request with no inbound session key makes no sticky pick at all, so it
-    // mints no pin -- and its order is the unchanged fill-first walk, which is
-    // what the keyless collapse has always been.
+fn a_keyless_request_places_by_cap_and_creates_no_pin() {
+    // A keyless request has no warm prompt cache to protect, and cache
+    // preservation is the only thing that outranks quota fairness -- so it
+    // places by remaining budget. It still mints no pin: there is no key to
+    // pin under. The emptiest seat therefore LEADS the walk.
     let router = pooled_router(true);
     seed_readings(&router, &[(Some("seat-c"), 0.0)]);
 
@@ -219,11 +220,53 @@ fn a_keyless_request_creates_no_pin_and_places_by_the_unchanged_order() {
         .map(|t| t.state_key)
         .collect();
 
-    assert_eq!(order, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+    assert_eq!(
+        order.first().map(String::as_str),
+        Some("opus#seat-c"),
+        "the only seat with a fresh below-cap reading must lead a keyless walk"
+    );
+    assert_eq!(
+        order.len(),
+        3,
+        "every eligible seat still follows, so the fall-through walk is preserved"
+    );
     assert!(
         router.sticky_pins.export_entries().is_empty(),
         "a keyless request must create no pin"
     );
+}
+
+#[test]
+fn a_keyless_request_falls_back_to_the_unchanged_walk_without_quota_evidence() {
+    // The other half of the same boundary: with nothing observed, a keyless
+    // request keeps exactly the fill-first collapse it has always had.
+    let router = pooled_router(true);
+
+    let order: Vec<String> = router
+        .dispatch_chain("opus", None)
+        .expect("chain resolves")
+        .into_iter()
+        .map(|t| t.state_key)
+        .collect();
+
+    assert_eq!(order, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+}
+
+#[test]
+fn a_keyless_request_with_the_switch_off_keeps_the_unchanged_walk() {
+    // OFF must not consult quota for a keyless request either, so a reading
+    // that would otherwise lead the walk changes nothing.
+    let router = pooled_router(false);
+    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+
+    let order: Vec<String> = router
+        .dispatch_chain("opus", None)
+        .expect("chain resolves")
+        .into_iter()
+        .map(|t| t.state_key)
+        .collect();
+
+    assert_eq!(order, vec!["opus", "opus#seat-b", "opus#seat-c"]);
 }
 
 #[test]
