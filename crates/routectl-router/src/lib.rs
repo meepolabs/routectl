@@ -46,6 +46,7 @@ pub(crate) mod learned_capability;
 pub(crate) mod learned_replay;
 pub(crate) mod log_hash;
 pub(crate) mod override_registry;
+pub(crate) mod quota;
 pub(crate) mod resolved;
 pub mod router;
 pub mod runtime_state;
