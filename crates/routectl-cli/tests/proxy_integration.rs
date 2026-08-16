@@ -63,11 +63,22 @@ const MITM_HOST: &str = "api.anthropic.com";
 const CONNECT_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
 /// Binds an ephemeral loopback port, reads it back, then drops the
-/// listener -- reserving a free port number for a config field that
-/// needs a concrete `u16` before the real listener (bound later, inside
-/// `serve_on_listener`) exists. Same reserve-then-drop pattern already
-/// used by `tests/proxy_forward.rs`'s dead-upstream-port test; the tiny
-/// reuse race is an accepted cost in a single-process test run.
+/// listener -- reserving a free port NUMBER for `[mitm] listen_port`,
+/// which must be a concrete `u16` in the config before the code under
+/// test binds it (and, in the `[mitm]`-absent test, the number a probe
+/// then asserts stayed free).
+///
+/// Keeping the socket bound instead is not an option here, because what
+/// this call site needs is a bindable port rather than an occupied one:
+/// `serve_on_listener` opens the proxy front itself from
+/// `config.mitm.listen_port`, and the only listener it accepts as an
+/// argument is the main HTTP one, so a pre-bound proxy socket cannot be
+/// handed in.
+///
+/// The residual exposure is a concurrent bind claiming the number
+/// between the drop here and that bind, which would degrade the proxy
+/// start (logged, non-fatal) and fail the test -- accepted for a
+/// single-process run.
 async fn reserve_free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
