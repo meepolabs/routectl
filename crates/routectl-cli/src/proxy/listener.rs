@@ -840,7 +840,15 @@ mod tests {
             .await
             .unwrap();
         let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
+        // Bounded: a regression that answers `200` and establishes the tunnel
+        // leaves neither side closing, so an unbounded read to EOF would STALL
+        // this test instead of failing it -- and a stalled test in a parallel
+        // shard is a worse diagnosis than a red assertion. Observed: mutating
+        // the target to be reachable hung past ten minutes rather than failing.
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+            .await
+            .expect("the CONNECT exchange must close rather than establish a tunnel")
+            .unwrap();
         let response = String::from_utf8_lossy(&response);
         assert!(
             response.starts_with("HTTP/1.1 502"),
