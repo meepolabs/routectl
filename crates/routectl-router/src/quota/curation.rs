@@ -40,8 +40,9 @@ pub const ANTHROPIC_PROVIDER_KIND: &str = "anthropic-api";
 /// Provider kind of the Codex subscription egress.
 pub const CODEX_PROVIDER_KIND: &str = "openai-responses";
 
-/// Upstream id of Anthropic's five-hour window, whose utilization is the one
-/// suffix the shipped header parser types.
+/// Upstream id of Anthropic's five-hour window -- the one CAPACITY-WINDOW
+/// utilization the shipped header parser types (it types five other suffixes
+/// too, none of them a capacity-window utilization).
 pub const ANTHROPIC_FAST_SOURCE_ID: &str = "5h";
 
 /// How much slack a reported reset gets beyond its window's own duration.
