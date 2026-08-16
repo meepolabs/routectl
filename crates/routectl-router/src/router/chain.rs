@@ -235,11 +235,18 @@ impl Router {
             .map(|e| e.runtime().seat_selection)
             .unwrap_or_default();
 
+        let provider_kind = self
+            .config
+            .providers
+            .get(&m.provider_name)
+            .map(crate::config::ProviderEntry::kind_str);
+
         // Sticky least-loaded only engages with a real session key on a
         // multi-seat pool. Every OTHER case (FillFirst, RoundRobin, or
         // keyless / single-seat StickyLeastLoaded) routes through the
         // existing `seat_order_for_request` path UNCHANGED, so keyless
-        // StickyLeastLoaded stays byte-for-byte fill-first.
+        // StickyLeastLoaded stays byte-for-byte fill-first -- and therefore
+        // mints no pin and consults no quota, since it makes no pick at all.
         //
         // `token` is computed ALONGSIDE the order purely for observability:
         // the order and target set below are byte-for-byte what they were
@@ -249,7 +256,8 @@ impl Router {
         let (order, token): (Vec<usize>, Option<&'static str>) = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
                 let pin_key = sticky_pin_key(key, &m.nickname);
-                let (order, tok) = self.sticky_seat_order(seats, &pin_key);
+                let (order, tok) =
+                    self.sticky_seat_order(seats, &pin_key, &m.nickname, provider_kind);
                 (order, Some(tok))
             }
             // Keyless (or single-seat) StickyLeastLoaded collapses to
@@ -274,11 +282,6 @@ impl Router {
                 None,
             ),
         };
-        let provider_kind = self
-            .config
-            .providers
-            .get(&m.provider_name)
-            .map(crate::config::ProviderEntry::kind_str);
         let first = out.len();
         for idx in order {
             let seat = &seats[idx];

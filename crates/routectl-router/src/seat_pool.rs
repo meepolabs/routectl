@@ -25,6 +25,7 @@ use routectl_auth::SecretRef;
 use routectl_core::Provider;
 
 use crate::config::SeatSelection;
+use crate::quota::placement::{QuotaDecision, SeatQuota};
 use crate::runtime_state::{CapacitySnapshot, CircuitPhase};
 
 /// One credential seat of a pooled model: a seat-pinned provider instance
@@ -304,13 +305,23 @@ pub enum SelectionOutcome {
 }
 
 /// Pick the least-loaded HEALTHY index among `candidates`: dispatchable only,
-/// Closed preferred over HalfOpenReady, then max rpm_available (None=+inf),
-/// ties broken deterministically by `tiebreak`. None if no candidate is
-/// dispatchable. `candidates` are indices into `snapshots`.
+/// Closed preferred over HalfOpenReady, then the subscription-quota partition
+/// when it decides, otherwise max rpm_available (None=+inf), ties broken
+/// deterministically by `tiebreak`. None if no candidate is dispatchable.
+/// `candidates` are indices into `snapshots`.
+///
+/// `quota` is index-aligned with `snapshots` and EMPTY whenever quota
+/// contributes nothing -- the kill switch off, a provider curating no short
+/// window, a migration pick. An empty slice makes
+/// [`restrict_by_quota`](crate::quota::placement::restrict_by_quota) answer
+/// `None`, so the RPM headroom ranking below runs exactly as it did before
+/// quota existed. `decision` records which arm ran, for the caller's counters.
 fn pick_least_loaded(
     candidates: &[usize],
     snapshots: &[CapacitySnapshot],
     tiebreak: usize,
+    quota: &[SeatQuota],
+    decision: &mut QuotaDecision,
 ) -> Option<usize> {
     let dispatchable: Vec<usize> = candidates
         .iter()
@@ -335,6 +346,17 @@ fn pick_least_loaded(
         dispatchable
     };
 
+    // The subscription-quota partition supersedes the headroom ranking below
+    // for a pool whose budget is known, and ONLY that ranking: the
+    // dispatchability filter and the health preference above have already run
+    // and are not re-derived, and the anti-herd tiebreak below still breaks
+    // the tie. When the partition declines -- every reading unknown, a mix of
+    // capped-known and unknown, or no readings at all -- the headroom path
+    // runs untouched.
+    if let Some(tied) = crate::quota::placement::restrict_by_quota(&preferred, quota, decision) {
+        return Some(tied[tiebreak % tied.len()]);
+    }
+
     // Least loaded = most available RPM headroom. Treat unlimited (`None`) as
     // +infinity so an unlimited seat always wins the headroom comparison.
     let headroom = |idx: usize| -> f64 { snapshots[idx].rpm_available.unwrap_or(f64::INFINITY) };
@@ -352,64 +374,98 @@ fn pick_least_loaded(
 }
 
 /// Pure seat-selection math for `StickyLeastLoaded`. Decides the per-request
-/// walk order and the [`SelectionOutcome`] (whether/how to update the pin).
+/// walk order, the [`SelectionOutcome`] (whether/how to update the pin), and
+/// which arm of the subscription-quota partition ran.
 ///
 /// `snapshots` is index-aligned with the seat slice (`len == seat_count`),
 /// gathered for the hit AND miss path now (the overflow check reads the
 /// pinned home's snapshot). `pinned_index` is the seat this session is pinned
 /// to (`Some`), or `None` for a birth pick / pin miss. `already_repinned` is
 /// the pin's one-time overflow marker. `tiebreak` seeds the anti-herd
-/// rotation among equally-least-loaded candidates.
+/// rotation among equally-least-loaded candidates. `quota` is index-aligned
+/// with the seats and empty whenever quota contributes nothing.
 ///
 /// One-time overflow-repin with hysteresis: a pinned home that goes
 /// non-dispatchable is migrated ONCE to the least-loaded healthy sibling and
 /// never chased further -- we never compare against or return to the original
 /// seat, so a recovered original cannot pull the session back (no A->B->A
 /// flap).
+///
+/// QUOTA REACHES THE BIRTH PICK ONLY. A healthy pin is kept without quota
+/// being consulted at all, and the migration pick below is made on health and
+/// RPM exactly as before, because the trigger for a migration is a seat that
+/// cannot serve -- never a soft cap. A cap that could move a warm session
+/// would forfeit the prompt-cache locality the pin exists to hold, which is
+/// the one thing this ordering refuses to do.
 pub fn sticky_least_loaded_order(
     seat_count: usize,
     pinned_index: Option<usize>,
     already_repinned: bool,
     snapshots: &[CapacitySnapshot],
     tiebreak: usize,
-) -> (Vec<usize>, SelectionOutcome) {
+    quota: &[SeatQuota],
+) -> (Vec<usize>, SelectionOutcome, QuotaDecision) {
+    let mut decision = QuotaDecision::Dormant;
     if seat_count <= 1 {
         return (
             (0..seat_count).collect(),
             SelectionOutcome::Stay { home: 0 },
+            decision,
         );
     }
 
     let n = seat_count;
     if let Some(home) = pinned_index {
-        // Healthy home: keep serving it; no pin write.
+        // Healthy home: keep serving it; no pin write, no quota read.
         if snapshots[home].is_dispatchable() {
-            return (order_home_first(home, n), SelectionOutcome::Stay { home });
+            return (
+                order_home_first(home, n),
+                SelectionOutcome::Stay { home },
+                decision,
+            );
         }
         // Already migrated once: do NOT chase further. The gate + fallback
         // walk handles the dead home for this request. One-time cap.
         if already_repinned {
-            return (order_home_first(home, n), SelectionOutcome::Stay { home });
+            return (
+                order_home_first(home, n),
+                SelectionOutcome::Stay { home },
+                decision,
+            );
         }
-        // First migration: pick the least-loaded healthy SIBLING.
+        // First migration: pick the least-loaded healthy SIBLING, on health
+        // and RPM alone.
         let siblings: Vec<usize> = (0..n).filter(|&i| i != home).collect();
-        match pick_least_loaded(&siblings, snapshots, tiebreak) {
+        match pick_least_loaded(&siblings, snapshots, tiebreak, &[], &mut decision) {
             Some(new_home) => (
                 order_home_first(new_home, n),
                 SelectionOutcome::OverflowRepin { home: new_home },
+                decision,
             ),
             // No healthy sibling: nowhere better. Stay (no flap, no pin);
             // the gate handles the dead home.
-            None => (order_home_first(home, n), SelectionOutcome::Stay { home }),
+            None => (
+                order_home_first(home, n),
+                SelectionOutcome::Stay { home },
+                decision,
+            ),
         }
     } else {
         // Birth pick: candidate set = all seats.
         let all: Vec<usize> = (0..n).collect();
-        match pick_least_loaded(&all, snapshots, tiebreak) {
-            Some(home) => (order_home_first(home, n), SelectionOutcome::Birth { home }),
+        match pick_least_loaded(&all, snapshots, tiebreak, quota, &mut decision) {
+            Some(home) => (
+                order_home_first(home, n),
+                SelectionOutcome::Birth { home },
+                decision,
+            ),
             // All parked/exhausted: home 0, fill-first order, no pin. A
             // later turn re-picks once a seat is healthy.
-            None => (order_home_first(0, n), SelectionOutcome::DeferNoHealthy),
+            None => (
+                order_home_first(0, n),
+                SelectionOutcome::DeferNoHealthy,
+                decision,
+            ),
         }
     }
 }
@@ -625,7 +681,7 @@ mod tests {
         // A birth pick (pinned_index=None) over all-equal candidates with
         // tiebreak=0 chooses seat 0 and yields the fill-first order, pinning 0.
         let snaps = vec![closed_unlimited(), closed_unlimited(), closed_unlimited()];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 0 });
     }
@@ -635,7 +691,7 @@ mod tests {
         // An existing pin whose home is dispatchable stays: order leads with
         // the home, the rest ascending, and NO new pin is minted.
         let snaps = vec![closed_unlimited(), closed_unlimited(), closed_unlimited()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(2), false, &snaps, 7);
+        let (order, outcome, _) = sticky_least_loaded_order(3, Some(2), false, &snaps, 7, &[]);
         assert_eq!(order, vec![2, 0, 1]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 2 });
     }
@@ -645,7 +701,7 @@ mod tests {
         // Home (index 0) is Open / non-dispatchable; sibling 1 is Closed. Not
         // yet repinned -> migrate ONCE to sibling 1, order leads with 1.
         let snaps = vec![open(), closed_unlimited(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::OverflowRepin { home: 1 });
         assert_eq!(order, vec![1, 0, 2]);
     }
@@ -656,7 +712,7 @@ mod tests {
         // cap holds -> Stay, no second migration even though sibling 1 is
         // healthy.
         let snaps = vec![open(), closed_unlimited(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(0), true, &snaps, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, Some(0), true, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
         assert_eq!(order, vec![0, 1, 2]);
     }
@@ -666,7 +722,7 @@ mod tests {
         // Pinned home non-dispatchable, every sibling also non-dispatchable,
         // not repinned -> Stay (no flap, no pin: nowhere better).
         let snaps = vec![open(), open(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
         assert_eq!(order, vec![0, 1, 2]);
     }
@@ -678,7 +734,7 @@ mod tests {
         // the session back. The pin now points at sibling 1, which is
         // dispatchable -> Stay on 1.
         let recovered = vec![closed_unlimited(), closed_unlimited(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(1), true, &recovered, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, Some(1), true, &recovered, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 1 });
         assert_eq!(order, vec![1, 0, 2]);
     }
@@ -688,12 +744,12 @@ mod tests {
         // A miss still yields Birth on a healthy pool and DeferNoHealthy when
         // all seats are parked.
         let healthy = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &healthy, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &healthy, 0, &[]);
         assert_eq!(order, vec![1, 0, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
 
         let parked = vec![open(), open(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &parked, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &parked, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
     }
@@ -702,7 +758,7 @@ mod tests {
     fn sticky_birth_picks_least_loaded_seat() {
         // Seat 1 has the most RPM headroom -> chosen as home and pinned.
         let snaps = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
         assert_eq!(order, vec![1, 0, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
     }
@@ -718,7 +774,7 @@ mod tests {
             },
             closed_with(3.0),
         ];
-        let (order, outcome) = sticky_least_loaded_order(2, None, false, &snaps, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(2, None, false, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
         assert_eq!(order, vec![1, 0]);
     }
@@ -729,19 +785,19 @@ mod tests {
         // deterministically and wraps -- the anti-herd spread.
         let snaps = vec![closed_with(5.0), closed_with(5.0), closed_with(5.0)];
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 0).1,
+            sticky_least_loaded_order(3, None, false, &snaps, 0, &[]).1,
             SelectionOutcome::Birth { home: 0 }
         );
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 1).1,
+            sticky_least_loaded_order(3, None, false, &snaps, 1, &[]).1,
             SelectionOutcome::Birth { home: 1 }
         );
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 2).1,
+            sticky_least_loaded_order(3, None, false, &snaps, 2, &[]).1,
             SelectionOutcome::Birth { home: 2 }
         );
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 3).1,
+            sticky_least_loaded_order(3, None, false, &snaps, 3, &[]).1,
             SelectionOutcome::Birth { home: 0 }
         );
     }
@@ -751,7 +807,7 @@ mod tests {
         // Every seat Open / not dispatchable: home 0, fill-first order, no
         // pin (a later turn re-picks once a seat is healthy).
         let snaps = vec![open(), open(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0);
+        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
     }
@@ -766,12 +822,20 @@ mod tests {
     fn sticky_single_seat_is_trivial() {
         let snaps = vec![closed_unlimited()];
         assert_eq!(
-            sticky_least_loaded_order(1, None, false, &snaps, 0),
-            (vec![0], SelectionOutcome::Stay { home: 0 })
+            sticky_least_loaded_order(1, None, false, &snaps, 0, &[]),
+            (
+                vec![0],
+                SelectionOutcome::Stay { home: 0 },
+                QuotaDecision::Dormant
+            )
         );
         assert_eq!(
-            sticky_least_loaded_order(0, None, false, &[], 0),
-            (Vec::<usize>::new(), SelectionOutcome::Stay { home: 0 })
+            sticky_least_loaded_order(0, None, false, &[], 0, &[]),
+            (
+                Vec::<usize>::new(),
+                SelectionOutcome::Stay { home: 0 },
+                QuotaDecision::Dormant
+            )
         );
     }
 
@@ -789,5 +853,168 @@ mod tests {
         assert_eq!(pins.get("sess-x"), None);
         pins.put("sess-x", pin("opus#seat-b"));
         assert_eq!(pins.get("sess-x"), Some(pin("opus#seat-b")));
+    }
+
+    // ---- the quota partition inside the chooser ----
+    //
+    // The three layers the partition must NOT touch are pinned here against
+    // quota input that would flip the pick if the partition had swallowed
+    // them: a parked-but-empty seat, a HalfOpenReady-but-empty seat, and a tie
+    // inside the chosen tier.
+
+    /// A below-cap tier with `remaining` unspent.
+    fn below(remaining: f64) -> SeatQuota {
+        SeatQuota::BelowCap { remaining }
+    }
+
+    /// An at-cap tier with `remaining` unspent.
+    fn capped(remaining: f64) -> SeatQuota {
+        SeatQuota::AtCap { remaining }
+    }
+
+    #[test]
+    fn quota_supersedes_the_rpm_ranking_on_a_birth_pick() {
+        // Seat 0 has far more RPM headroom, but seat 1 has the emptier
+        // subscription window. On a subscription pool the window is the real
+        // constraint, so the quota tier decides.
+        let snaps = vec![closed_with(100.0), closed_with(1.0)];
+        let quota = vec![below(0.2), below(0.9)];
+
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
+
+        assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
+        assert_eq!(order, vec![1, 0]);
+        assert_eq!(decision, QuotaDecision::BelowCapTier);
+    }
+
+    #[test]
+    fn quota_never_resurrects_a_non_dispatchable_seat() {
+        // Seat 0 is parked and reports an EMPTY window; seat 1 is healthy and
+        // nearly spent. The dispatchability filter runs first and is not
+        // re-derived, so the parked seat is unreachable however good its
+        // reading -- otherwise a cap would route a request onto a seat that
+        // cannot serve it.
+        let snaps = vec![open(), closed_with(1.0)];
+        let quota = vec![below(1.0), capped(0.05)];
+
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
+
+        assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
+        assert_eq!(order, vec![1, 0]);
+        // Only the healthy seat was eligible, and it is capped-known.
+        assert_eq!(decision, QuotaDecision::AllCappedMostRemaining);
+    }
+
+    #[test]
+    fn quota_never_overrides_the_closed_over_half_open_preference() {
+        // Seat 0 is HalfOpenReady with an EMPTY window; seat 1 is fully Closed
+        // and over its cap. The health preference restricts to the Closed seat
+        // BEFORE quota is consulted, so a breaker recovering from failures is
+        // not handed traffic because its budget looks good.
+        let snaps = vec![
+            CapacitySnapshot {
+                rpm_available: Some(100.0),
+                circuit: CircuitPhase::HalfOpenReady,
+            },
+            closed_with(3.0),
+        ];
+        let quota = vec![below(1.0), capped(0.05)];
+
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
+
+        assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
+        assert_eq!(order, vec![1, 0]);
+        assert_eq!(decision, QuotaDecision::AllCappedMostRemaining);
+    }
+
+    #[test]
+    fn quota_leaves_the_anti_herd_tiebreak_to_break_a_tier_tie() {
+        // Three seats tied on remaining inside the below-cap tier: the
+        // rotation still spreads a burst of new conversations across them
+        // rather than herding every one onto the first.
+        let snaps = vec![closed_with(5.0), closed_with(5.0), closed_with(5.0)];
+        let quota = vec![below(0.8), below(0.8), below(0.8)];
+
+        for (tiebreak, expected) in [(0, 0), (1, 1), (2, 2), (3, 0)] {
+            let (_, outcome, decision) =
+                sticky_least_loaded_order(3, None, false, &snaps, tiebreak, &quota);
+            assert_eq!(outcome, SelectionOutcome::Birth { home: expected });
+            assert_eq!(decision, QuotaDecision::BelowCapTier);
+        }
+    }
+
+    #[test]
+    fn a_mixed_or_unknown_pool_falls_back_to_the_rpm_ranking_exactly() {
+        // Cap-dormant: with no below-cap evidence and at least one unknown
+        // seat, the pick must be the one the RPM ranking makes on its own.
+        let snaps = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
+        let baseline = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
+
+        let mixed = vec![capped(0.3), SeatQuota::Unknown, SeatQuota::Unknown];
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(3, None, false, &snaps, 0, &mixed);
+        assert_eq!((order, outcome), (baseline.0.clone(), baseline.1));
+        assert_eq!(decision, QuotaDecision::MixedUnknownFallback);
+
+        let unknown = vec![SeatQuota::Unknown; 3];
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(3, None, false, &snaps, 0, &unknown);
+        assert_eq!((order, outcome), (baseline.0, baseline.1));
+        assert_eq!(decision, QuotaDecision::AllUnknownFallback);
+    }
+
+    #[test]
+    fn a_warm_pin_is_never_moved_to_honor_a_soft_cap() {
+        // THE ONE THING THIS ORDERING REFUSES TO DO. The pinned home is
+        // healthy and its window is fully spent, while a sibling reports an
+        // empty one. The session stays: a soft cap must never cost the warm
+        // prompt cache the pin exists to hold, so the over-cap session runs to
+        // ACTUAL exhaustion and is rescued by the reactive breaker path.
+        let snaps = vec![closed_with(1.0), closed_with(1.0)];
+        let quota = vec![capped(0.0), below(1.0)];
+
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(2, Some(0), false, &snaps, 0, &quota);
+
+        assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
+        assert_eq!(order, vec![0, 1]);
+        // Quota was not consulted at all on a healthy pin.
+        assert_eq!(decision, QuotaDecision::Dormant);
+    }
+
+    #[test]
+    fn a_migration_off_an_unhealthy_home_ignores_quota() {
+        // The trigger for a migration is a seat that cannot SERVE, never a
+        // soft cap, so the sibling pick is made on health and RPM exactly as
+        // before: sibling 2 has the most headroom and wins despite sibling 1
+        // reporting the emptier window.
+        let snaps = vec![open(), closed_with(1.0), closed_with(50.0)];
+        let quota = vec![SeatQuota::Unknown, below(1.0), capped(0.0)];
+
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &quota);
+
+        assert_eq!(outcome, SelectionOutcome::OverflowRepin { home: 2 });
+        assert_eq!(order, vec![2, 0, 1]);
+        assert_eq!(decision, QuotaDecision::Dormant);
+    }
+
+    #[test]
+    fn a_pool_with_no_dispatchable_seat_defers_regardless_of_quota() {
+        // Existing no-healthy behavior, unchanged: no pin is created and the
+        // fill-first order stands even though every seat reports an empty
+        // window.
+        let snaps = vec![open(), open()];
+        let quota = vec![below(1.0), below(1.0)];
+
+        let (order, outcome, decision) =
+            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
+
+        assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
+        assert_eq!(order, vec![0, 1]);
+        assert_eq!(decision, QuotaDecision::Dormant);
     }
 }

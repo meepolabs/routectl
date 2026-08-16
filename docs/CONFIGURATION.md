@@ -40,6 +40,7 @@ overlays merge, what's reserved.
 - [history_reasoning](#history_reasoning-reasoning-echo-back)
 - [Retry and fallback defaults](#retry-and-fallback-defaults)
 - [Proactive context-window gate (`[window_gate]`)](#proactive-context-window-gate-window_gate)
+- [Quota-aware seat placement (`[seat_quota]`)](#quota-aware-seat-placement-seat_quota)
 
 **Caching and cost**
 - [Prompt-cache auto-emission (`[cache]`)](#prompt-cache-auto-emission-cache)
@@ -137,6 +138,9 @@ sections:
                       # mutates a dispatched request.
 
 [window_gate]         # proactive context-window gate kill switch
+                      # (enabled). Optional; default on.
+
+[seat_quota]          # quota-aware seat placement kill switch
                       # (enabled). Optional; default on.
 
 [bedrock]             # global Bedrock allowlists (allowed_betas,
@@ -341,6 +345,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
 | `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
 | `enabled`                      | `[window_gate]` global          | bool, default true; kill switch for the proactive context-window gate (see `[window_gate]`)       |
+| `enabled`                      | `[seat_quota]` global           | bool, default true; kill switch for quota-aware seat placement (see `[seat_quota]`)               |
 | `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
 | `decay_hours`                  | `[capability]` global           | u64, default 48; hours a learned negative acts before a re-probe (see `[capability]`)             |
 | `inferred_window_hours`        | `[capability]` global           | u64, default 1; window a pending inferred signal waits for confirmation (see `[capability]`)      |
@@ -1274,6 +1279,104 @@ the first skipped target with the estimate, the figure the decision
 actually used, the target's catalog window, and the running skip total.
 Routectl-internal identifiers and catalog figures only -- never anything
 from the request body.
+
+## Quota-aware seat placement (`[seat_quota]`)
+
+On a multi-seat OAuth pool running `sticky-least-loaded`, a NEW
+conversation's birth seat is ordered by each credential account's
+remaining short-window subscription budget, read from the quota headers
+upstreams already return on every response. This is what makes a pool of
+two subscription accounts actually spread new conversations instead of
+tying on available RPM (which is unlimited on a subscription seat) and
+falling through to the anti-herd rotation.
+
+Nothing here can move an established conversation. Placement is
+consulted for a birth pick only, so a soft cap never evicts or migrates a
+session off the seat holding its warm prompt cache -- a pinned session
+over its budget runs to actual exhaustion and is rescued by the reactive
+path (an upstream refusal trips the per-seat breaker and the seat drops
+out of the dispatch filter), exactly as it is today.
+
+It is best-effort and cap-dormant by construction. A seat routectl has
+no trustworthy reading for never competes for a placement, so several
+cases resolve exactly as they did before quota placement existed: a fresh
+process before any response has been observed, a seat whose reading has
+lapsed past its own window, a provider routectl curates no short
+recovering window for (the Codex subscription egress is one -- it reports
+a seven-day window and no short one), and a pool where some seats are
+observed and the rest are not.
+
+Concretely, among the seats the existing health and rate-limit filters
+already admit:
+
+- any seat with a fresh reading below its budget threshold -> the pick is
+  restricted to those, taking the one with the most left;
+- every admitted seat observed and every one over its threshold -> the
+  pick takes the one with the most left, and the request is **never**
+  failed over a budget;
+- anything else -> the unchanged capacity ranking decides.
+
+Ties inside the chosen group still fall to the existing deterministic
+anti-herd rotation, so a burst of new conversations spreads rather than
+herding onto the emptiest seat.
+
+The optional `[seat_quota]` block is the **global** kill switch. A
+missing block keeps the default: placement enabled.
+
+```toml
+[seat_quota]
+# Master switch for quota-aware seat placement. Default true.
+enabled = true
+```
+
+- **`enabled`** (bool, default true) -- the master switch. When `false`,
+  an unpinned conversation's birth seat resolves exactly as it did before
+  quota placement existed: no quota state is read, no budget orders the
+  pick, no quota placement log line is emitted, and the health preference,
+  the rate-limit eligibility filter, the RPM ranking and the anti-herd
+  rotation all decide as before. Conversation pins are preserved and a
+  one-time migration off an unhealthy seat still happens -- the switch
+  gates WHICH seat a birth picks, never whether conversations pin.
+
+**Off still observes.** Turning placement off stops readings from being
+APPLIED and nothing else: routectl keeps collecting and aging them, so
+turning it back on takes effect on the next birth pick rather than after
+a re-observe period. This follows the same shape as the learned-estimate
+correction's switch.
+
+**One field deliberately.** The per-provider budget thresholds, the
+long-window guard and the freshness bounds are constants grounded in
+captured upstream evidence, not operator knobs: a threshold tuned per
+deployment turns a routing decision into a support surface, and the
+fallback in every direction is the pre-quota chooser rather than a denial.
+The switch above is the whole operator surface.
+
+**Hot-reloadable.** `[seat_quota]` is classified alongside the other
+hot-reloadable sections
+(`crates/routectl-cli/src/config_classify.rs`): the flag is read per
+birth pick, so a live config swap -- an editor save the daemon's file
+watcher picks up, or a `routectl config set seat_quota.enabled false` --
+applies to the next new conversation with no restart and no confirmation
+prompt.
+
+An unknown key inside the block fails config load rather than being
+silently ignored, so a typo is reported by `routectl config check`
+instead of leaving placement quietly at its default.
+
+Whether placement is acting is observable in the log: a throttled line
+(at most one per five minutes per process) names the model and which arm
+decided, with the running per-arm totals. A DEBUG line when a budget
+chose the seat, a WARN when the evidence was incomplete and the
+unchanged capacity ranking decided instead -- a steady stream of the
+latter on a busy pool means readings are not reaching routectl for some
+seat. Routectl-internal identifiers and counters only: no session key, no
+account identity, no credential, no header, nothing from a body.
+
+The per-request seat-selection decision vocabulary
+(`birth_pick` / `sticky_stay` / ... , see
+[credential pool](#credential-pool-multiple-seats-per-provider)) is
+UNCHANGED by this feature: quota changes which seat a birth picks, never
+how that decision is named.
 
 ## Per-model knobs
 
@@ -2957,8 +3060,11 @@ seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sti
   warm prompt cache is preserved, while balancing NEW conversations
   across seats by available capacity. A conversation's first request
   picks the least-loaded healthy seat (preferring seats with a closed
-  breaker, then the most RPM headroom, with a deterministic tiebreak so
-  a burst of new conversations does not herd onto one seat); every
+  breaker, then -- on a subscription pool with observed budgets -- the
+  seat with the most remaining short-window budget, otherwise the most
+  RPM headroom, with a deterministic tiebreak so a burst of new
+  conversations does not herd onto one seat; see
+  [`[seat_quota]`](#quota-aware-seat-placement-seat_quota)); every
   later request for that conversation routes back to the same seat. If
   that seat later goes unhealthy (rate-limited or breaker-open), the
   conversation migrates ONCE to a healthy sibling and does not flap back

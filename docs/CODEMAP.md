@@ -1165,7 +1165,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `CalibrationConfig` (global `[calibration]`: `enabled`, default true) is the
   hot-reloadable kill switch for APPLYING the learned per-lane token-estimate
   correction (off leaves the static window gate intact and retains collected
-  evidence). The whole
+  evidence); `SeatQuotaConfig` (global `[seat_quota]`: `enabled`, default true)
+  is the hot-reloadable kill switch for quota-aware birth placement (off is
+  byte-identical to the pre-quota birth chooser for an unpinned session, and
+  following `CalibrationConfig` it retains and keeps aging the collected
+  readings). The whole
   `Config` tree derives `schemars::JsonSchema` alongside serde so
   `schema_gen.rs` can render the committed `routectl.schema.json`
   (`class_overrides`, a `BTreeMap<u16, _>`, carries a `#[schemars(with)]`
@@ -1754,6 +1758,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   as no-evidence with no error and no warning. Feeds the seat that ACTUALLY
   served; `served_seat`'s absent cases (pre-dispatch failure, non-OAuth ref,
   forwarded credential) are all correct skips
+- `src/quota/placement.rs` -- the birth-placement PARTITION, the store's one
+  production reader. `seat_tiers` classifies each seat's FAST window against its
+  curated threshold into `SeatQuota::{Unknown, BelowCap, AtCap}` (empty vec for
+  a provider curating no FAST window -- dormant by construction); reading
+  through `QuotaStore::reading_for` means read-time expiry has already applied,
+  so a lapsed window reads Unknown and never at its last value.
+  `restrict_by_quota` PARTITIONS rather than scoring, because unknown has no
+  neutral number: fresh-known-below-cap restricts to that tier and takes the
+  most remaining (so known-zero beats unknown and unknown never competes);
+  all-known-and-all-capped takes the most remaining and NEVER fails the request;
+  every other case -- all-unknown, mixed capped-known + unknown, no tiers --
+  answers `None` and the caller's unchanged headroom ranking decides. That makes
+  the fail-closed rule structural rather than a constant. Returns the TIED set,
+  leaving the anti-herd rotation to break it. Reads only the FAST window: the
+  SLOW near-exhaustion guard and the billing tri-state are extracted, curated
+  and stored but deliberately UNWIRED here
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /
@@ -2020,9 +2040,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `emit_probe_settlement`/`is_probe_request`/`log_probe_fast_fail`
 - `src/router/sticky.rs` -- sticky seat ordering + capacity snapshots:
   `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
-  `capacity_snapshot_for` reads -> `seat_pool::sticky_least_loaded_order`),
-  `gather_capacity_snapshots`, and `apply_sticky_outcome` (stamps the
-  selection_decision token)
+  `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH
+  only -> `seat_pool::sticky_least_loaded_order`),
+  `gather_capacity_snapshots`, `quota_tiers_for_birth` (returns EMPTY under the
+  `[seat_quota]` kill switch and for a provider curating no FAST window, which
+  is the whole of what OFF does on the placement side -- no store read, no cap,
+  no diagnostic), `record_quota_placement` (per-arm counters plus one
+  throttled line, silent on the dormant arm so OFF leaves no trace), and
+  `apply_sticky_outcome` (stamps the selection_decision token, whose fixed
+  vocabulary quota never extends)
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last
@@ -2066,11 +2092,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `StickyLeastLoaded` selection adds `StickyPins` (a bounded-LRU `session_key
   -> SeatPin{state_key, repinned}` map carried across hot-reload via
   `carry_over_sticky_from`), the pure comparator `pick_least_loaded`
-  (dispatchable + Closed-preferred + max RPM headroom + deterministic
-  anti-herd tiebreak), and `sticky_least_loaded_order` returning the walk
+  (dispatchable filter + Closed-preferred health + the subscription-quota
+  partition where it decides, else max RPM headroom + deterministic anti-herd
+  tiebreak -- quota supersedes ONLY the headroom ranking, and only for a birth),
+  and `sticky_least_loaded_order` returning the walk
   order + a `SelectionOutcome` (Birth / Stay / one-time OverflowRepin with
-  hysteresis / DeferNoHealthy), home-first with the fill-first tail kept as
-  fallback
+  hysteresis / DeferNoHealthy) + the `QuotaDecision` arm that ran, home-first
+  with the fill-first tail kept as fallback. A healthy pin and a migration pick
+  never consult quota, so no soft cap can move a warm session
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain
   pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date
   suffixes (e.g. `_20250305`) so `unsupported_features` on
