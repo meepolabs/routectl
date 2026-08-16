@@ -154,7 +154,7 @@ pub fn strip_beta_tokens(feature_key: &str) -> &'static [&'static str] {
 ///
 /// [`REASONING_REPLAY`] deliberately has no row: its transform depends on
 /// the TARGET LANE, not on the key alone, so it lives in
-/// [`strip_replay_artifacts`] and the interceptor skips it.
+/// `strip_replay_artifacts` and the interceptor skips it.
 fn strip_plan(feature_key: &str) -> Option<StripPlan> {
     match feature_key {
         ADVISOR => Some(StripPlan {
