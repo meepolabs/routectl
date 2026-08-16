@@ -59,8 +59,11 @@ const BUCKET_COUNT: usize = 1000;
 const REPS: usize = 5;
 
 /// Fine-grain key components. Indexed INDEPENDENTLY when seeding, so the fine
-/// grouping key `(model, provider, upstream, alias)` takes all 100 combinations
-/// rather than the 10 correlated pairs a shared index would produce.
+/// grouping key `(model, provider, upstream, alias, provider_kind)` takes all
+/// 100 combinations rather than the 10 correlated pairs a shared index would
+/// produce. The seed statement omits `provider_kind`, so every row takes NULL
+/// on that column -- one uniform value, which is why widening the key left this
+/// fixture's row counts and expectations unchanged.
 const MODELS: [&str; 10] = [
     "m-00", "m-01", "m-02", "m-03", "m-04", "m-05", "m-06", "m-07", "m-08", "m-09",
 ];

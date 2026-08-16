@@ -118,8 +118,9 @@ fn hand_computed_series_matches_the_edge_buckets_metrics_and_costs() {
     // 1000 input + 500 read + 100 write_5m = 1600, so the single eligible
     // row's share is 500 / 1600 = 0.3125 -> 31.25 %.
     assert_close(first.cache_hit_pct, 31.25);
-    // Cost: b1 and b2 share the (model, provider, upstream, alias, bucket)
-    // grain, so they price as ONE fine row of 1000 + 3000 = 4000 input tokens
+    // Cost: b1 and b2 share the
+    // (model, provider, upstream, alias, provider_kind, bucket) grain, so they
+    // price as ONE fine row of 1000 + 3000 = 4000 input tokens
     // -> $4.00, and every row in the bucket is priced.
     assert_eq!(first.cost_status, CostStatus::Priced);
     assert_close(first.cost_usd, 4.0);
