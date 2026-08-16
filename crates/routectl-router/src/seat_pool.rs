@@ -949,6 +949,44 @@ mod tests {
     }
 
     #[test]
+    fn a_keyless_order_never_leads_with_a_non_dispatchable_seat() {
+        // The keyless path shares the dispatchability filter, so an emptier but
+        // PARKED seat cannot lead its walk either -- and the parked seat still
+        // appears in the order so the chain can fall through to it.
+        let snaps = vec![open(), closed_with(1.0)];
+        let quota = vec![below(1.0), below(0.20)];
+        let mut decision = QuotaDecision::Dormant;
+
+        let order = keyless_quota_order(2, &snaps, &quota, 0, &mut decision)
+            .expect("one dispatchable below-cap seat orders the walk");
+
+        assert_eq!(
+            order,
+            vec![1, 0],
+            "the parked seat's empty window must not lead, and it must still follow"
+        );
+        assert_eq!(decision, QuotaDecision::BelowCapTier);
+    }
+
+    #[test]
+    fn a_keyless_order_leads_with_the_emptiest_of_several_below_cap_seats() {
+        // Distinguishes "picks a below-cap seat" from "picks the MOST REMAINING
+        // one": the seat with the most budget left is deliberately not the one
+        // the fixed order reaches first. NOTE the helper takes REMAINING, so a
+        // larger value is an emptier seat.
+        let snaps = vec![closed_with(1.0), closed_with(1.0), closed_with(1.0)];
+        let quota = vec![below(0.30), below(0.95), below(0.40)];
+        let mut decision = QuotaDecision::Dormant;
+
+        let order = keyless_quota_order(3, &snaps, &quota, 0, &mut decision)
+            .expect("three below-cap seats order the walk");
+
+        assert_eq!(order[0], 1, "the most remaining below-cap seat leads");
+        assert_eq!(order.len(), 3, "every seat still follows");
+        assert_eq!(decision, QuotaDecision::BelowCapTier);
+    }
+
+    #[test]
     fn quota_never_overrides_the_closed_over_half_open_preference() {
         // Seat 0 is HalfOpenReady with an EMPTY window; seat 1 is fully Closed
         // and over its cap. The health preference restricts to the Closed seat
