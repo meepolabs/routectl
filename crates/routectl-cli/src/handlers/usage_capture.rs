@@ -677,6 +677,17 @@ impl UsageCapture {
     /// SECONDS -- the scale `quota_reset` stores -- so it lands verbatim.
     /// The Anthropic-only columns (status / overage) have no Codex
     /// counterpart and stay NULL.
+    ///
+    /// The router's `quota::reduce` module converts the same percent for a
+    /// SEAT-PLACEMENT signal, and the two deliberately keep opposite bounds
+    /// rather than sharing one function. This is an observability WRITE path,
+    /// so its bounds are loose on purpose: a percent far above 100 is still
+    /// RECORDED, because a weird upstream value is exactly what an operator
+    /// needs to see. A routing signal cannot afford that -- a value it cannot
+    /// trust has to become cap-dormant instead of a recorded oddity -- so the
+    /// reducer refuses what this arm keeps. Two sites converting one percent
+    /// can drift, so a test there pins both against the same captured input
+    /// and the same expected fraction.
     fn observe_codex_quota(&mut self, q: &routectl_core::CodexQuota) {
         self.record.quota_claim = q.active_limit.clone();
         self.record.quota_utilization = q
