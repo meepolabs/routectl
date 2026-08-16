@@ -265,14 +265,13 @@ pub fn keyless_quota_order(
     if seat_count <= 1 {
         return None;
     }
-    let dispatchable: Vec<usize> = (0..seat_count)
-        .filter(|&i| {
-            snapshots
-                .get(i)
-                .is_some_and(CapacitySnapshot::is_dispatchable)
-        })
-        .collect();
-    let tied = crate::quota::placement::restrict_by_quota(&dispatchable, quota, decision)?;
+    // The SAME eligibility the keyed pick uses -- dispatchability AND the
+    // Closed-over-HalfOpenReady preference. Filtering only dispatchability here
+    // would let a keyless request lead with a half-open probe that happened to
+    // have more budget than a healthy sibling.
+    let all: Vec<usize> = (0..seat_count).collect();
+    let preferred = eligible_candidates(&all, snapshots);
+    let tied = crate::quota::placement::restrict_by_quota(&preferred, quota, decision)?;
     let lead = tied[tiebreak % tied.len()];
     let mut order = Vec::with_capacity(seat_count);
     order.push(lead);
@@ -357,6 +356,43 @@ pub enum SelectionOutcome {
 /// [`restrict_by_quota`](crate::quota::placement::restrict_by_quota) answer
 /// `None`, so the RPM headroom ranking below runs exactly as it did before
 /// quota existed. `decision` records which arm ran, for the caller's counters.
+/// The candidate set every seat pick starts from: dispatchable seats, then the
+/// Closed-over-HalfOpenReady health preference.
+///
+/// THE one place either layer is expressed. Both the keyed birth pick and the
+/// keyless walk go through it, so neither can quietly apply a different notion
+/// of "eligible" -- a keyless request that skipped the health preference would
+/// lead with a half-open probe over a healthy sibling purely because the probe
+/// had more budget left, handing traffic to a breaker still recovering.
+/// Empty when nothing is dispatchable.
+fn eligible_candidates(candidates: &[usize], snapshots: &[CapacitySnapshot]) -> Vec<usize> {
+    let dispatchable: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&i| {
+            snapshots
+                .get(i)
+                .is_some_and(CapacitySnapshot::is_dispatchable)
+        })
+        .collect();
+    if dispatchable.is_empty() {
+        return dispatchable;
+    }
+    // Health preference: if any candidate is fully Closed, do NOT keep a
+    // HalfOpenReady seat.
+    let has_closed = dispatchable
+        .iter()
+        .any(|&i| snapshots[i].circuit == CircuitPhase::Closed);
+    if has_closed {
+        dispatchable
+            .into_iter()
+            .filter(|&i| snapshots[i].circuit == CircuitPhase::Closed)
+            .collect()
+    } else {
+        dispatchable
+    }
+}
+
 fn pick_least_loaded(
     candidates: &[usize],
     snapshots: &[CapacitySnapshot],
@@ -364,28 +400,10 @@ fn pick_least_loaded(
     quota: &[SeatQuota],
     decision: &mut QuotaDecision,
 ) -> Option<usize> {
-    let dispatchable: Vec<usize> = candidates
-        .iter()
-        .copied()
-        .filter(|&i| snapshots[i].is_dispatchable())
-        .collect();
-    if dispatchable.is_empty() {
+    let preferred = eligible_candidates(candidates, snapshots);
+    if preferred.is_empty() {
         return None;
     }
-
-    // Health preference: if any candidate is fully Closed, do NOT pick a
-    // HalfOpenReady seat -- restrict to the Closed ones.
-    let has_closed = dispatchable
-        .iter()
-        .any(|&i| snapshots[i].circuit == CircuitPhase::Closed);
-    let preferred: Vec<usize> = if has_closed {
-        dispatchable
-            .into_iter()
-            .filter(|&i| snapshots[i].circuit == CircuitPhase::Closed)
-            .collect()
-    } else {
-        dispatchable
-    };
 
     // The subscription-quota partition supersedes the headroom ranking below
     // for a pool whose budget is known, and ONLY that ranking: the
@@ -966,6 +984,37 @@ mod tests {
             "the parked seat's empty window must not lead, and it must still follow"
         );
         assert_eq!(decision, QuotaDecision::BelowCapTier);
+    }
+
+    #[test]
+    fn a_keyless_order_keeps_the_closed_over_half_open_preference() {
+        // The defect this pins: filtering only dispatchability let a keyless
+        // request lead with a HalfOpenReady probe purely because it had more
+        // budget left than a healthy Closed sibling, handing traffic to a
+        // breaker still recovering. Both layers are shared with the keyed pick
+        // now, so the Closed seat leads despite being the fuller one.
+        let snaps = vec![
+            CapacitySnapshot {
+                rpm_available: Some(100.0),
+                circuit: CircuitPhase::HalfOpenReady,
+            },
+            closed_with(100.0),
+        ];
+        let quota = vec![below(0.95), below(0.10)];
+        let mut decision = QuotaDecision::Dormant;
+
+        let order = keyless_quota_order(2, &snaps, &quota, 0, &mut decision)
+            .expect("the Closed seat is below cap, so quota orders the walk");
+
+        assert_eq!(
+            order[0], 1,
+            "the healthy Closed seat leads even though the half-open probe has \
+             more budget left"
+        );
+        assert!(
+            order.contains(&0),
+            "the half-open seat still follows so the chain can fall through"
+        );
     }
 
     #[test]

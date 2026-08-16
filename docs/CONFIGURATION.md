@@ -3076,15 +3076,21 @@ seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sti
   (the `x-claude-code-session-id` header Claude Code sends, or body
   `metadata.session_id`). A request without one mints no pin, since there
   is nothing to pin under; it still places by remaining subscription
-  budget when `[seat_quota]` is on and a reading exists, because the only
-  thing that outranks quota fairness is protecting a warm prompt cache and
-  a keyless request has none. With no reading, or with the switch off, it
-  falls back to `fill-first` exactly as before. The per-request decision
-  (birth_pick / sticky_stay / overflow_repin / defer_no_healthy /
-  keyless_quota / keyless_fill_first) is not
+  budget when `[seat_quota]` is on and the evidence is complete enough to
+  act on, because the only thing that outranks quota fairness is
+  protecting a warm prompt cache and a keyless request has none. "Complete
+  enough" is the same bar the keyed pick uses: at least one eligible seat
+  fresh and below its threshold, or every eligible seat fresh-known and
+  over it. Mixed evidence -- some seats observed and over threshold, the
+  rest unobserved -- falls back to `fill-first`, as do a pool with no
+  readings at all and the switch off. The per-request decision (birth_pick
+  / sticky_stay / overflow_repin / defer_no_healthy / keyless_quota /
+  keyless_fill_first) is not
   persisted, and only partially logged: a DEBUG line marks a birth pick
   and an overflow repin, while `sticky_stay`, `defer_no_healthy` and the
-  keyless fall-through emit nothing. The usage ledger's
+  keyless fall-through emit no selection-decision line of their own. Note
+  an incomplete-evidence fallback is separately visible in the throttled
+  quota-placement diagnostic when `[seat_quota]` is on. The usage ledger's
   `selection_decision` column is write-stopped (retained in the schema,
   NULL for every row written by this version onward).
 
