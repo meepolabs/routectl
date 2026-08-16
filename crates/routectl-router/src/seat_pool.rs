@@ -239,6 +239,47 @@ impl StickyPins {
     }
 }
 
+/// The walk order for a KEYLESS request on a sticky-configured pool, ordered by
+/// remaining subscription budget.
+///
+/// A keyless request carries no session identity, so there is no warm prompt
+/// cache to protect and nothing that outranks the budget: cache preservation is
+/// the only thing that ever outranks quota fairness, and a request with no cache
+/// has none to preserve. So it places by cap, and it mints no pin -- there is no
+/// key to pin under.
+///
+/// Shares the partition with the keyed birth pick rather than restating it, so
+/// keyless and keyed can never disagree about what "below cap" means. The chosen
+/// group leads the walk; every remaining eligible seat follows in the fixed
+/// order, so the existing fall-through behavior is preserved rather than
+/// replaced. When the partition declines -- all readings unknown, a mix of
+/// capped-known and unknown, the switch off -- this returns `None` and the
+/// caller keeps the unchanged fill-first walk.
+pub fn keyless_quota_order(
+    seat_count: usize,
+    snapshots: &[CapacitySnapshot],
+    quota: &[SeatQuota],
+    tiebreak: usize,
+    decision: &mut QuotaDecision,
+) -> Option<Vec<usize>> {
+    if seat_count <= 1 {
+        return None;
+    }
+    let dispatchable: Vec<usize> = (0..seat_count)
+        .filter(|&i| {
+            snapshots
+                .get(i)
+                .is_some_and(CapacitySnapshot::is_dispatchable)
+        })
+        .collect();
+    let tied = crate::quota::placement::restrict_by_quota(&dispatchable, quota, decision)?;
+    let lead = tied[tiebreak % tied.len()];
+    let mut order = Vec::with_capacity(seat_count);
+    order.push(lead);
+    order.extend((0..seat_count).filter(|&i| i != lead));
+    Some(order)
+}
+
 /// Resolve the per-request seat walk order for a pooled model.
 ///
 /// `FillFirst` (or any non-pooled model, where `cursors` has no entry):

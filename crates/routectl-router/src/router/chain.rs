@@ -260,18 +260,17 @@ impl Router {
                     self.sticky_seat_order(seats, &pin_key, &m.nickname, provider_kind);
                 (order, Some(tok))
             }
-            // Keyless (or single-seat) StickyLeastLoaded collapses to
-            // fill-first; surface that collapse so an operator can spot the
-            // silent fill-first regime on a pool configured sticky.
-            (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => (
-                crate::seat_pool::seat_order_for_request(
-                    &m.nickname,
-                    seats.len(),
-                    selection,
-                    &self.round_robin,
-                ),
-                Some("keyless_fill_first"),
-            ),
+            // Keyless StickyLeastLoaded has no session identity, so it mints
+            // no pin -- but it still places by remaining budget, because the
+            // only thing that outranks quota fairness is cache preservation
+            // and a keyless request has no warm cache to preserve. When quota
+            // contributes nothing it collapses to fill-first as it always
+            // has; that collapse stays visible in the recorded token so an
+            // operator can still spot a silent fill-first regime on a pool
+            // configured sticky.
+            (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => {
+                self.keyless_seat_order(seats, &m.nickname, provider_kind)
+            }
             _ => (
                 crate::seat_pool::seat_order_for_request(
                     &m.nickname,

@@ -1724,11 +1724,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `{nickname}#{label}`: quota is reported once per credential, so a model-scoped
   key would shard one account's single reading across one entry per nickname.
   Private field, no other constructor -- `seat_key_for_secret_ref` (the READ
-  side, from a `SeatTarget`'s own ref) and `seat_key_for_served_identity` (the
-  WRITE side, from `DispatchMeta::served_seat`) both bottom out in
-  `seat_identity`, so the two sides agreeing is a property of the type. That
-  matters because a mismatch fails SILENTLY GREEN: every write lands, every read
-  misses, and a hand-built-key unit test passes either way
+  side) re-derives through `seat_identity`; `seat_key_for_served_identity` (the
+  WRITE side) wraps the identity a dispatch already derived through it, since a
+  `DispatchTarget` carries the derived identity and not the `SecretRef` behind
+  it. So the type prevents the REVERSE mistake absolutely (a model-scoped
+  `state_key` cannot be used as a `SeatKey`), while the two sides agreeing rests
+  on the callers passing `served_seat` -- which both production sites do, and
+  which the live smoke is what finally closes. That distinction matters because a
+  mismatch fails SILENTLY GREEN: every write lands, every read misses, and a
+  hand-built-key unit test passes either way
+- `src/seat_pool.rs` `keyless_quota_order` -- the walk order for a KEYLESS
+  request on a sticky-configured pool, ordered by remaining budget and sharing
+  `restrict_by_quota` with the keyed birth pick so the two cannot disagree about
+  what "below cap" means. The chosen group leads; every other eligible seat
+  follows in the fixed order, preserving the fall-through walk. `None` when the
+  partition declines, and the caller then keeps the unchanged fill-first
+  collapse (token `keyless_fill_first`; `keyless_quota` when quota ordered it).
+  A keyless request mints NO pin either way -- there is no key to pin under
 - `src/quota/store.rs` -- `Mutex<HashMap<SeatKey, StoredReading>>`, ONE latest
   reading per seat. Bounded by the credential-store-declared OAuth seat set
   (`admit_seats`, enforced at INSERTION), the same operator-declared-keyspace

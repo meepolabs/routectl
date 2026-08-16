@@ -155,6 +155,53 @@ impl Router {
     /// (observability only -- the pin writes, logs, and returned order are
     /// byte-for-byte unchanged from before the token was added). The quota
     /// partition changes WHICH seat a birth picks and never that vocabulary.
+    /// The walk order for a KEYLESS request on a multi-seat sticky pool, plus
+    /// the decision token to record.
+    ///
+    /// No session key means no pin to read and none to write, so this makes a
+    /// placement and not a sticky decision. It still consults quota: a keyless
+    /// request has no warm cache to protect, and cache preservation is the only
+    /// thing the milestone ranks above quota fairness.
+    ///
+    /// Falls back to the unchanged fill-first walk whenever the partition
+    /// declines, and reports the fall-back through the same token the collapse
+    /// has always used so an operator's view of that regime does not change.
+    pub(super) fn keyless_seat_order(
+        &self,
+        seats: &[crate::seat_pool::SeatTarget],
+        nickname: &str,
+        provider_kind: Option<&str>,
+    ) -> (Vec<usize>, Option<&'static str>) {
+        let quota = self.quota_tiers_for_birth(seats, provider_kind);
+        let mut decision = QuotaDecision::Dormant;
+        let ordered = if quota.is_empty() {
+            None
+        } else {
+            let now = Instant::now();
+            let snapshots = self.gather_capacity_snapshots(seats, now);
+            crate::seat_pool::keyless_quota_order(
+                seats.len(),
+                &snapshots,
+                &quota,
+                self.sticky_pins.next_tiebreak(),
+                &mut decision,
+            )
+        };
+        self.record_quota_placement(decision, nickname);
+        match ordered {
+            Some(order) => (order, Some("keyless_quota")),
+            None => (
+                crate::seat_pool::seat_order_for_request(
+                    nickname,
+                    seats.len(),
+                    crate::config::SeatSelection::StickyLeastLoaded,
+                    &self.round_robin,
+                ),
+                Some("keyless_fill_first"),
+            ),
+        }
+    }
+
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
