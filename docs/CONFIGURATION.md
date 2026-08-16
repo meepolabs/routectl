@@ -39,6 +39,7 @@ overlays merge, what's reserved.
 - [Per-model knobs](#per-model-knobs) (reasoning, effort, output caps)
 - [history_reasoning](#history_reasoning-reasoning-echo-back)
 - [Retry and fallback defaults](#retry-and-fallback-defaults)
+- [Proactive context-window gate (`[window_gate]`)](#proactive-context-window-gate-window_gate)
 
 **Caching and cost**
 - [Prompt-cache auto-emission (`[cache]`)](#prompt-cache-auto-emission-cache)
@@ -134,6 +135,9 @@ sections:
                       # keep_recent_messages). Optional; default
                       # 100000 / 20000 / 2 / 6. Advisory only -- never
                       # mutates a dispatched request.
+
+[window_gate]         # proactive context-window gate kill switch
+                      # (enabled). Optional; default on.
 
 [bedrock]             # global Bedrock allowlists (allowed_betas,
                       # allowed_body_fields). Optional.
@@ -336,6 +340,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `clear_at_least_tokens`        | `[trim]` global                 | u64, default 20000; see `[trim]`                                                                  |
 | `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
 | `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
+| `enabled`                      | `[window_gate]` global          | bool, default true; kill switch for the proactive context-window gate (see `[window_gate]`)       |
 | `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
 | `decay_hours`                  | `[capability]` global           | u64, default 48; hours a learned negative acts before a re-probe (see `[capability]`)             |
 | `inferred_window_hours`        | `[capability]` global           | u64, default 1; window a pending inferred signal waits for confirmation (see `[capability]`)      |
@@ -1183,6 +1188,92 @@ clamp live in `RetryPolicy::max_honored_retry_after` and the router's
 `crates/routectl-router/src/router.rs`).
 
 
+
+## Proactive context-window gate (`[window_gate]`)
+
+Before dispatch, routectl estimates the request's token size and skips
+fallback-chain targets whose catalog context window clearly cannot hold
+it, so an oversized request avoids a doomed round trip on a small-window
+entry. This runs after the capability pre-filter, as the second chain
+filter pass.
+
+It is a best-effort filter, not a guarantee. A skip requires a
+CONFIRMED catalog window and a non-final target, and the estimate is
+deliberately margined, so several cases still dispatch: a target whose
+window is unconfirmed, a chain of one, a chain whose every target
+overflows, and any request the estimate undercounts. Each of those falls
+through to the reactive path below.
+
+The gate can never be the reason a request has nowhere to go: it has no
+empty-chain error path. A chain of one is returned untouched before any
+estimate is computed, a target whose catalog window is unconfirmed is
+kept (an unknown fact never enables a skip), and a chain whose every
+target overflows is returned unchanged so the caller sees exactly
+today's upstream error rather than a routectl-invented one.
+
+The optional `[window_gate]` block is the **global** kill switch. A
+missing block keeps the default: the gate enabled.
+
+```toml
+[window_gate]
+# Master switch for the proactive context-window gate. Default true.
+enabled = true
+```
+
+- **`enabled`** (bool, default true) -- the master switch. When
+  `false` the gate returns the resolved chain before it computes
+  anything: no estimate, no chain reordering, no `window_gate_skip`
+  WARN, and no movement in the skip counter. Turning it off is
+  byte-identical to running with no gate at all, which is what makes it
+  a safe first move when you suspect the gate is mis-routing.
+
+**The gate is a fast path, not the safety net.** Disabling it leaves
+reactive classification and fallback fully intact: an upstream that
+rejects an oversized request is still classified and still falls over to
+the next chain entry per the
+[retry and fallback](#retry-and-fallback-defaults) table. With the gate
+off you pay one doomed round trip for the rejection instead of skipping
+it in advance; you do not lose the recovery.
+
+Which class the rejection lands in depends on what the upstream sent.
+The `context-window` class is assigned only when the error envelope
+carries a recognized context-window token (for example the
+OpenAI-compatible `context_length_exceeded`); a 4xx that carries no such
+token is classified `bad-request`. Note the Anthropic-family token set
+is empty today, so an Anthropic oversized-request rejection arrives as
+`bad-request`. This matters if you have narrowed fallback per class:
+retaining `context-window` fallback while disabling `bad-request`
+fallback does not, on its own, guarantee an oversized request falls
+over.
+
+**One field deliberately.** The gate's safety margin against estimator
+error (a request is skipped only once the estimate passes a fixed
+fraction of the target's window) is a baked constant, not an operator
+knob. A margin tuned per deployment turns a routing decision into a
+support surface, and both error directions are already survivable: an
+underestimate misses a skip and costs one round trip, while an
+overestimate is a re-route among confirmed windows rather than a denial.
+The switch above is the whole operator surface; if the gate misbehaves,
+the answer is off, not retuned.
+
+**Hot-reloadable.** `[window_gate]` is classified alongside the other
+hot-reloadable sections
+(`crates/routectl-cli/src/config_classify.rs`): the flag is read per
+chain resolution, so a live config swap -- an editor save the daemon's
+file watcher picks up, or a `routectl config set window_gate.enabled
+false` -- applies to the next request with no restart and no
+confirmation prompt.
+
+An unknown key inside the block fails config load rather than being
+silently ignored, so a typo is reported by `routectl config check`
+instead of leaving the gate quietly at its default.
+
+Whether the gate is acting is observable in the log: a throttled
+`window_gate_skip` WARN (at most one line per minute per process) names
+the first skipped target with the estimate, the figure the decision
+actually used, the target's catalog window, and the running skip total.
+Routectl-internal identifiers and catalog figures only -- never anything
+from the request body.
 
 ## Per-model knobs
 
