@@ -1290,6 +1290,14 @@ two subscription accounts actually spread new conversations instead of
 tying on available RPM (which is unlimited on a subscription seat) and
 falling through to the anti-herd rotation.
 
+`sticky-least-loaded` is the only strategy this applies to. A pool left on
+the `fill-first` default, or set to `round-robin`, places exactly as it
+always has -- neither reads a seat's budget, and the switch below changes
+nothing for them. `fill-first` in particular is unchanged *deliberately*:
+draining one seat is what that setting asks for. Adopting quota-aware
+placement is therefore an explicit
+`seat_selection = "sticky-least-loaded"` on the provider.
+
 Nothing here can move an established conversation. Placement is
 consulted for a birth pick only, so a soft cap never evicts or migrates a
 session off the seat holding its warm prompt cache -- a pinned session
@@ -3058,10 +3066,19 @@ seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sti
 
 - `fill-first` (default) -- drain one seat before advancing to the
   next. A single-seat provider (the common case) keeps today's
-  behavior with no config.
-- `round-robin` -- rotate across seats to spread load.
-- `sticky-least-loaded` -- pin each conversation to one seat so its
-  warm prompt cache is preserved, while balancing NEW conversations
+  behavior with no config. The drain IS this strategy's contract, not a
+  rough edge on it: holding one seat keeps that seat's prompt cache warm,
+  and running it down until the upstream refuses is the price of the
+  locality. Quota-aware placement deliberately does NOT apply here --
+  choosing `fill-first` is choosing that trade, and overriding it would
+  override a stated preference. An operator who wants budget-aware
+  spreading sets `sticky-least-loaded` instead.
+- `round-robin` -- rotate across seats to spread load, advancing the
+  start seat once per request. Quota-aware placement does not apply here
+  either.
+- `sticky-least-loaded` -- the ONLY strategy quota-aware placement and
+  the session-affinity layer apply to. Pin each conversation to one seat
+  so its warm prompt cache is preserved, while balancing NEW conversations
   across seats by available capacity. A conversation's first request
   picks the least-loaded healthy seat (preferring seats with a closed
   breaker, then -- on a subscription pool with observed budgets -- the

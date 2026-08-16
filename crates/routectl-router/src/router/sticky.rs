@@ -133,28 +133,6 @@ impl Router {
         }
     }
 
-    /// Resolve the sticky least-loaded seat walk order for `key` over a
-    /// multi-seat pool. Resolves the pin (with its one-time overflow marker)
-    /// FIRST, gathers the per-seat capacity snapshots (one lock each; N is
-    /// small and locks are uncontended), then asks the pure selector for the
-    /// walk order and a
-    /// [`SelectionOutcome`](crate::seat_pool::SelectionOutcome). On a birth it
-    /// pins the chosen home (`repinned: false`); on a one-time overflow-repin
-    /// it pins the new
-    /// home (`repinned: true`). A healthy home, an already-repinned home, or a
-    /// no-healthy-sibling case stays put with no pin write -- the one-time cap
-    /// + hysteresis. Never logs the raw session key.
-    ///
-    /// Subscription-quota tiers are gathered for the BIRTH candidate set only
-    /// (the pure selector ignores them on every other path), and only while
-    /// the kill switch is on. A healthy pin therefore never reads quota state
-    /// at all, so no soft cap can move a warm session.
-    ///
-    /// Returns the walk order paired with a fixed-vocabulary
-    /// `selection_decision` token mapped from the `SelectionOutcome`
-    /// (observability only -- the pin writes, logs, and returned order are
-    /// byte-for-byte unchanged from before the token was added). The quota
-    /// partition changes WHICH seat a birth picks and never that vocabulary.
     /// The walk order for a KEYLESS request on a multi-seat sticky pool, plus
     /// the decision token to record.
     ///
@@ -202,6 +180,28 @@ impl Router {
         }
     }
 
+    /// Resolve the sticky least-loaded seat walk order for `key` over a
+    /// multi-seat pool. Resolves the pin (with its one-time overflow marker)
+    /// FIRST, gathers the per-seat capacity snapshots (one lock each; N is
+    /// small and locks are uncontended), then asks the pure selector for the
+    /// walk order and a
+    /// [`SelectionOutcome`](crate::seat_pool::SelectionOutcome). On a birth it
+    /// pins the chosen home (`repinned: false`); on a one-time overflow-repin
+    /// it pins the new home (`repinned: true`). A healthy home, an
+    /// already-repinned home, or a no-healthy-sibling case stays put with no
+    /// pin write -- the one-time cap + hysteresis. Never logs the raw session
+    /// key.
+    ///
+    /// Subscription-quota tiers are gathered for the BIRTH candidate set only
+    /// (the pure selector ignores them on every other path), and only while
+    /// the kill switch is on. A healthy pin therefore never reads quota state
+    /// at all, so no soft cap can move a warm session.
+    ///
+    /// Returns the walk order paired with a fixed-vocabulary
+    /// `selection_decision` token mapped from the `SelectionOutcome`
+    /// (observability only -- the pin writes, logs, and returned order are
+    /// byte-for-byte unchanged from before the token was added). The quota
+    /// partition changes WHICH seat a birth picks and never that vocabulary.
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],

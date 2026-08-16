@@ -933,7 +933,7 @@
             "seat_selection": {
               "$ref": "#/$defs/SeatSelection",
               "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
             },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
@@ -1134,7 +1134,7 @@
             "seat_selection": {
               "$ref": "#/$defs/SeatSelection",
               "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
             },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
@@ -1301,7 +1301,7 @@
             "seat_selection": {
               "$ref": "#/$defs/SeatSelection",
               "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
             },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
@@ -1447,7 +1447,7 @@
             "seat_selection": {
               "$ref": "#/$defs/SeatSelection",
               "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
             },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
@@ -1587,7 +1587,7 @@
             "seat_selection": {
               "$ref": "#/$defs/SeatSelection",
               "default": "fill-first",
-              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats; `sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load. Applied per request at dispatch time whenever the\nprovider's credential pool resolves to more than one seat."
+              "description": "How dispatch picks among multiple OAuth seats configured for this\nprovider's credential pool. `fill-first` (the default) drains one\nseat before moving to the next; `round-robin` spreads load across\nseats, advancing the start seat per request;\n`sticky-least-loaded` pins each conversation to one seat for\nprompt-cache affinity while balancing new conversations across seats\nby load, and is the only strategy quota-aware placement applies to.\nApplied per request at dispatch time whenever the provider's\ncredential pool resolves to more than one seat."
             },
             "stream_first_byte_timeout_ms": {
               "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
@@ -1810,21 +1810,21 @@
       "type": "object"
     },
     "SeatSelection": {
-      "description": "Per-provider seat-selection strategy for the OAuth credential pool.\nDefault is `fill-first` so a single-seat provider (the common case)\nkeeps its current behavior with no config.",
+      "description": "Per-provider seat-selection strategy for the OAuth credential pool.\nDefault is `fill-first` so a single-seat provider (the common case)\nkeeps its current behavior with no config.\n\nSubscription-quota-aware placement and the session-affinity layer reach\n`sticky-least-loaded` ONLY. The other two variants keep their own contracts\nunchanged: neither pins a session nor reads a seat's remaining budget.",
       "oneOf": [
         {
           "const": "fill-first",
-          "description": "Drain one seat fully before advancing to the next.",
+          "description": "Drain one seat fully before advancing to the next.\n\nThe drain IS the contract, not a shortcoming of it: holding one seat\nkeeps its prompt cache warm, and running that seat down until the\nupstream refuses is the price of that locality. An operator wanting\nbudget-aware spreading picks `sticky-least-loaded` instead.",
           "type": "string"
         },
         {
           "const": "round-robin",
-          "description": "Rotate across seats to spread load.",
+          "description": "Rotate across seats to spread load. The starting seat advances once per\nREQUEST, so consecutive requests of one conversation land on different\nseats.",
           "type": "string"
         },
         {
           "const": "sticky-least-loaded",
-          "description": "Pin each conversation to one seat for prompt-cache affinity, and\nbalance NEW conversations across seats by load. The contract: a\nconversation's first request picks the least-loaded healthy seat at\nbirth; every subsequent request for that conversation routes back to\nthe same seat so its warm prompt cache is preserved (avoiding a cold\nmiss on every turn). If a pinned home goes unhealthy the conversation\nmigrates once to a healthy sibling and stays there (no flapping back).\nThe selection is a best-effort reorder of the walk: the per-seat\ndispatch gate and the fill-first fallback walk stay authoritative, so\na stale or wrong pin only costs locality, never correctness.",
+          "description": "Pin each conversation to one seat for prompt-cache affinity, and\nbalance NEW conversations across seats by load. The contract: a\nconversation's first request picks the least-loaded healthy seat at\nbirth; every subsequent request for that conversation routes back to\nthe same seat so its warm prompt cache is preserved (avoiding a cold\nmiss on every turn). If a pinned home goes unhealthy the conversation\nmigrates once to a healthy sibling and stays there (no flapping back).\nThe selection is a best-effort reorder of the walk: the per-seat\ndispatch gate and the fill-first fallback walk stay authoritative, so\na stale or wrong pin only costs locality, never correctness.\n\nThe ONLY variant subscription-quota-aware placement applies to: a birth\n(and a keyless request, which mints no pin) ranks candidates by\nremaining short-window budget when `[seat_quota]` is on and the evidence\nsuffices.",
           "type": "string"
         }
       ]
