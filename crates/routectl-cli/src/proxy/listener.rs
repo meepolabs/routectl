@@ -560,6 +560,7 @@ mod tests {
     use std::time::Duration;
 
     use rustls_pki_types::pem::PemObject;
+    use tokio::net::TcpSocket;
     use tokio::sync::watch;
     use wiremock::MockServer;
 
@@ -793,17 +794,24 @@ mod tests {
     }
 
     /// A CONNECT to an unreachable blind-tunnel target must get a `502`
-    /// CONNECT-level failure, never a `200` -- proving the listener
-    /// dials the target BEFORE telling the client the tunnel is
-    /// established (see [`handle_connection`]'s doc for why answering
-    /// `200` before a successful dial would be a false positive).
+    /// CONNECT-level failure with no relayed bytes and no established
+    /// response, never a `200` -- proving the listener dials the target
+    /// BEFORE telling the client the tunnel is established (see
+    /// [`handle_connection`]'s doc for why answering `200` before a
+    /// successful dial would be a false positive).
     #[tokio::test]
     async fn connect_to_an_unreachable_blind_tunnel_target_gets_502_not_200() {
-        // Reserve then drop a loopback port: nothing listens there, so
-        // dialing it is a reliable "connection refused".
-        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Unreachability comes from PRESENCE, not absence: the socket is
+        // bound (so the port is never handed back out as another test's
+        // ephemeral pick, even one asking for SO_REUSEADDR) but never
+        // listens, so every dial is refused. Reserving a port by binding
+        // and DROPPING a listener leaves it free for a sibling to claim in
+        // the window before the dial, at which point the target is
+        // reachable and this test sees the very false 200 it exists to
+        // forbid.
+        let dead = TcpSocket::new_v4().unwrap();
+        dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let dead_port = dead.local_addr().unwrap().port();
-        drop(dead);
 
         let dir = tempfile::tempdir().unwrap();
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
@@ -816,6 +824,7 @@ mod tests {
 
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
+        let metrics = Arc::clone(&ctx.metrics);
         let (_shutdown_tx, shutdown_rx) = watch::channel(());
         tokio::spawn(run_listener(
             proxy_listener,
@@ -837,6 +846,29 @@ mod tests {
             response.starts_with("HTTP/1.1 502"),
             "an unreachable target must get a 502, not a false 200: {response}"
         );
+        // Read to EOF above, so the whole exchange is these bytes: nothing
+        // was relayed and no `200 Connection Established` followed, which a
+        // `starts_with` on the status line alone would not catch.
+        assert_eq!(
+            response, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n",
+            "the 502 must be the bare CONNECT-level failure: {response}"
+        );
+        // The 502 has to be the unreachable-dial one specifically. A 502
+        // booked as anything else, or a second request booked at all (a
+        // tunnel that ran anyway), would mean the listener answered
+        // established despite the failed dial.
+        assert_eq!(
+            metrics.request_count(
+                Leg::BlindTunnel,
+                ResultClass::Unreachable,
+                PathClass::Unknown
+            ),
+            1
+        );
+        assert_eq!(metrics.requests_total(), 1);
+
+        // The bind must outlive the dial -- it IS the unreachability.
+        drop(dead);
     }
 
     /// A CONNECT to `mitm_host` must hand the raw stream to
