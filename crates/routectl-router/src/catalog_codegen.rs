@@ -284,7 +284,7 @@ fn try_render() -> Result<String, String> {
 /// `GeneratedCell` an error variant never carries. A tiered Anthropic-shaped
 /// selector's entry carries its 5m row and, when the source publishes a 1h
 /// price, its 1h row together (see [`anthropic_like_cells`]); every other
-/// selector's entry carries exactly one row. Unlike [`try_render`]'s prior
+/// selector's entry carries exactly one row. Unlike `try_render`'s prior
 /// inline loop, this does not short-circuit on the first error: every
 /// selector is derived so a caller can partition ok/err per selector (a
 /// healthy source disagreement on one family should not hide the outcome of
@@ -293,7 +293,7 @@ fn try_render() -> Result<String, String> {
 /// a caller deriving from freshly fetched sources instead of the vendored
 /// snapshots passes an empty one.
 ///
-/// Compiled in regardless of `gen-catalog`: [`try_render`] calls this on
+/// Compiled in regardless of `gen-catalog`: `try_render` calls this on
 /// the include_str snapshots (feature-gated), and
 /// `crate::catalog_import::build_import_candidate` (never feature-gated)
 /// calls it on freshly fetched sources -- the actual runtime caller, not

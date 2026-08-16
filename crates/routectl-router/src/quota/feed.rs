@@ -20,7 +20,7 @@
 //!
 //! [`feed_response`] runs at the terminal success arm, which returns
 //! immediately after, so it fires once per non-streaming response.
-//! [`feed_first_chunk`] is armed with the seat key and DISARMS itself on the
+//! `feed_first_chunk` is armed with the seat key and DISARMS itself on the
 //! first chunk carrying metadata, so a stream feeds at most once however many
 //! chunks follow -- and a stream that never carries metadata feeds nothing
 //! rather than feeding an empty reading.
