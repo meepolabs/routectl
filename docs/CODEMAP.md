@@ -1689,6 +1689,28 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   epoch-millis-as-seconds value at the door); `is_fresh` requires BOTH a
   monotonic age ceiling and the window's own wall-clock reset, answering
   not-fresh on any arithmetic it cannot perform
+- `src/quota/curation.rs` -- the closed curated window table: ONE `const` slice
+  of `CuratedWindow`, each row carrying provider kind, the upstream's own window
+  id, role, expected DURATION (what bounds the reported reset, curated beside
+  the role so the two cannot drift) and the cap/guard threshold. Anthropic `5h`
+  = Fast at half full, `7d` = Slow at 90%; Codex `primary` (a seven-day window
+  however it is named) = Slow, with NO Fast row -- the absence is the curated
+  fact, so the Codex fast cap is dormant by construction. `rows_for` / `row_for`
+  answer nothing for an uncurated provider kind, which is how a provider with no
+  row runs dormant. Self-tests hold the whole-table invariants (no duplicate
+  role or source window per provider, thresholds inside the utilization scale,
+  no zero duration, `RESET_TOLERANCE` narrower than every window it guards)
+- `src/quota/reduce.rs` -- the two provider reducers onto `QuotaSnapshot`
+  (`observed` + per-role windows + billing). Reads the curated row for each
+  role, so a role is never inferred from a window's name, and routes every reset
+  through `accept_reset` with that row's duration. Anthropic's `7d` utilization
+  and BOTH per-window resets are reached by walking `AnthropicUnifiedQuota
+  ::extras` -- that struct is deliberately NOT widened, since it feeds the shared
+  ledger write path. The bare `anthropic-ratelimit-unified-reset` is never read:
+  it happens to equal `5h-reset` on every captured envelope, so pairing them
+  would pass unobserved, and a test pins the refusal. Codex converts its 0-100
+  percent to a fraction; strict where `UsageCapture::observe_codex_quota` is
+  loose (routing signal vs observability record), cross-referenced at both sites
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /

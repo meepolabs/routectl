@@ -45,5 +45,7 @@
 //! names the submodule it depends on, so the module a type lives in stays
 //! visible at every call site while the shape is still moving.
 
+pub mod curation;
 pub mod freshness;
+pub mod reduce;
 pub mod window;
