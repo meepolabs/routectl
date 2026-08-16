@@ -40,6 +40,7 @@ overlays merge, what's reserved.
 - [history_reasoning](#history_reasoning-reasoning-echo-back)
 - [Retry and fallback defaults](#retry-and-fallback-defaults)
 - [Proactive context-window gate (`[window_gate]`)](#proactive-context-window-gate-window_gate)
+- [Learned token-estimate correction (`[calibration]`)](#learned-token-estimate-correction-calibration)
 - [Quota-aware seat placement (`[seat_quota]`)](#quota-aware-seat-placement-seat_quota)
 
 **Caching and cost**
@@ -139,6 +140,9 @@ sections:
 
 [window_gate]         # proactive context-window gate kill switch
                       # (enabled). Optional; default on.
+
+[calibration]         # learned per-lane token-estimate correction kill
+                      # switch (enabled). Optional; default on.
 
 [seat_quota]          # quota-aware seat placement kill switch
                       # (enabled). Optional; default on.
@@ -345,6 +349,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
 | `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
 | `enabled`                      | `[window_gate]` global          | bool, default true; kill switch for the proactive context-window gate (see `[window_gate]`)       |
+| `enabled`                      | `[calibration]` global          | bool, default true; kill switch for the learned per-lane estimate correction (see `[calibration]`)|
 | `enabled`                      | `[seat_quota]` global           | bool, default true; kill switch for quota-aware seat placement (see `[seat_quota]`)               |
 | `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
 | `decay_hours`                  | `[capability]` global           | u64, default 48; hours a learned negative acts before a re-probe (see `[capability]`)             |
@@ -1279,6 +1284,109 @@ the first skipped target with the estimate, the figure the decision
 actually used, the target's catalog window, and the running skip total.
 Routectl-internal identifiers and catalog figures only -- never anything
 from the request body.
+
+## Learned token-estimate correction (`[calibration]`)
+
+The gate above compares its estimate against a target's catalog window,
+and that estimate is serialized bytes over four -- wrong per model, and
+wrong *differently* per model. routectl measures that per-model error
+from traffic it has already served: a request that completes
+successfully and whose upstream reported a nonzero prompt total
+contributes the estimate routectl used paired with that
+cache-inclusive total, and those pairs reduce to one multiplicative
+correction per lane. A lane is `(provider kind, served model nickname)`
+-- the nickname you declared under `[models.X]`, never the upstream wire
+id. A failed or partial request contributes nothing: there is no
+trustworthy pairing between what was estimated and what the upstream
+actually charged for.
+
+The correction has exactly ONE consumer: the proactive context-window
+gate's comparison. It never changes the bytes sent upstream, never
+changes the estimate figure persisted to the usage ledger, and never
+feeds the advisory trim or the reduction path. Above 1.0 it means the
+estimator under-counts this lane, so the corrected figure is larger and
+the gate is more willing to skip a small-window target; below 1.0 it
+means the estimator over-counts, so the gate is more willing to admit a
+target it would otherwise have skipped.
+
+The optional `[calibration]` block is the **global** kill switch. A
+missing block keeps the default: the correction enabled.
+
+```toml
+[calibration]
+# Master switch for applying the learned per-lane correction. Default true.
+enabled = true
+```
+
+- **`enabled`** (bool, default true) -- the master switch. When `false`
+  the context-window gate compares the raw, uncorrected estimate exactly
+  as it did before the correction existed: no lane is looked up and no
+  correction is applied.
+
+**Default on is safe because a cold lane corrects nothing.** A lane
+produces no correction until it has accumulated real evidence, so a
+fresh install behaves exactly as it would with the switch off. Every
+refusal collapses to the same uncorrected path: an unseen lane, a lane
+with too few recent samples, one whose samples are all too old, one
+whose distinct callers are too few, and one whose reduced ratio landed
+outside the sane band. That last case is **refused, not clamped** -- a
+ratio that extreme is evidence a lane is mis-keyed or fed garbage, not
+evidence of a genuinely extreme correction, and clamping it to the bound
+would let a mis-keyed lane still move a routing decision.
+
+**Off still collects.** Turning the switch off stops the correction from
+being APPLIED and nothing else. The gate keeps gating on the uncorrected
+estimate (the switch does not disable the gate -- that is
+[`[window_gate]`](#proactive-context-window-gate-window_gate)), routectl
+keeps recording evidence into the per-lane store and keeps persisting
+the estimate/actual pairs to the usage ledger, and the evidence already
+collected is retained. Switching back on therefore applies on the next
+request rather than after a re-learn period. The reverse pairing matters
+too: with `[window_gate] enabled = false` the correction is never
+consulted at all, because the gate returns the chain before it computes
+any estimate -- so turning the gate off already turns the correction off.
+
+**One field deliberately.** The reduction's sample floors (a minimum
+count of recent samples and a minimum count of distinct callers before a
+lane may produce a correction), the age bound past which a sample stops
+counting, and the sane band a reduced ratio must land inside are all
+**baked constants, not operator knobs**. A band tuned per deployment
+turns a routing decision into a support surface, and the fallback in
+every direction is the uncorrected estimate rather than a denial. The
+switch above is the whole operator surface; if a lane's correction
+misbehaves, the answer is off, not retuned.
+
+Two properties of the reduction are worth knowing even though neither is
+configurable. It groups samples by caller and takes a median of the
+per-caller medians, so one long-running conversation cannot define a
+lane's correction by its volume alone -- and because every request
+arriving without a session key shares a single caller group, a lane fed
+only keyless traffic never clears the distinct-caller floor and stays
+uncorrected. And the evidence survives a restart: the daemon warms the
+lane store from the usage ledger at startup (bounded to samples young
+enough to still count), while a hot reload carries the live in-memory
+store across instead of re-reading history.
+
+**Hot-reloadable.** `[calibration]` is classified alongside the other
+hot-reloadable sections
+(`crates/routectl-cli/src/config_classify.rs`): the flag is read per
+chain resolution, so a live config swap -- an editor save the daemon's
+file watcher picks up, or a `routectl config set calibration.enabled
+false` -- applies to the next request with no restart and no
+confirmation prompt. The lane store is preserved across that swap
+(lanes whose nickname the new config no longer declares are dropped).
+
+An unknown key inside the block fails config load rather than being
+silently ignored, so a typo is reported by `routectl config check`
+instead of leaving the correction quietly at its default.
+
+Whether a correction is moving a decision is observable in the gate's
+own throttled `window_gate_skip` WARN, which reports both the raw
+estimate and the corrected figure the decision actually used. They are
+equal on an uncorrected lane, and their divergence is the only way to
+see a learned correction move a skip. The startup warm logs its own
+tally: rows loaded, rows accepted, rows rejected, and how many lanes
+came back calibrated.
 
 ## Quota-aware seat placement (`[seat_quota]`)
 
