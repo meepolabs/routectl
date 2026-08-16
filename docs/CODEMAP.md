@@ -1657,6 +1657,29 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   carry-over) and keeps the store encapsulated. `CalibrationRebuildSummary` is
   `#[non_exhaustive]` with a `new` constructor, so a further tally field is not
   a breaking change
+- `src/quota/mod.rs` -- provider-agnostic normalized subscription-quota
+  vocabulary, `pub(crate)` (the shape is expected to reshape, and a `pub` item
+  in a baselined crate is a one-way door). No facade re-export: consumers name
+  the submodule
+- `src/quota/window.rs` -- the per-window value. `QuotaWindow` is an algebraic
+  `Unknown | Known { utilization, reset_at }`, so unknown is UNREPRESENTABLE as
+  a number and a reported `0.0` stays structurally distinct from no reading
+  (the RPM gate's `rpm_available.unwrap_or(f64::INFINITY)` convention is
+  deliberately NOT mirrored here). `Utilization` is a private-field newtype
+  whose `new` refuses non-finite and negative input and SATURATES above `1.0`
+  to `1.0` (never to `0.0`, which would invent headroom). `WindowRole`
+  (`Fast`/`Slow`) and `Billing` (`Unknown`/`Included`/`Overage`, a tri-state
+  because the shipped `is_overage()` conflates missing with known-benign).
+  Derives `Debug, Clone, PartialEq` only -- no `Default`, no serde, no
+  ordering, no `Display`
+- `src/quota/freshness.rs` -- value-level time correctness, stateless and pure.
+  `ObservationStamp` pairs the wall and monotonic clocks at the instant the
+  response metadata is read; `accept_reset` admits a reset only strictly after
+  the observation and no later than observation + window duration + tolerance
+  (`ResetRejection::Expired`/`Implausible`/`Overflow`, which rejects an
+  epoch-millis-as-seconds value at the door); `is_fresh` requires BOTH a
+  monotonic age ceiling and the window's own wall-clock reset, answering
+  not-fresh on any arithmetic it cannot perform
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per OAuth pool seat, `None` for the single-seat /
