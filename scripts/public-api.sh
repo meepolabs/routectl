@@ -89,6 +89,12 @@ assert_no_machine_paths() {
     return 0
 }
 
+# Writes a FRESH listing per crate: the surface goes to a temp file which then
+# REPLACES the baseline, so a baseline never accumulates across runs. A type
+# re-exported at the crate root is therefore legitimately listed once per public
+# path it is reachable through (see public-api/POLICY.md) -- those repeated
+# inherent-impl lines are correct output, not residue from an earlier run, and
+# hand-removing them just fails the next --check.
 generate_one() {
     local crate="$1"
     local out="$BASELINE_DIR/$crate.txt"

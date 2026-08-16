@@ -16,15 +16,74 @@
 # than from a filename pattern, so a newly added fragment is covered the
 # moment it is included -- nothing to remember to register.
 #
-# Exit codes: 0 = all fragments formatted, 1 = at least one is not, 2 = usage.
+# Exit codes: 0 = all fragments formatted, 1 = at least one is not, a path
+# escapes the repo, or an include! site cannot be parsed, 2 = usage.
+#
+# Properties a future edit must NOT regress (each is deliberate):
+#   - `set -euo pipefail`, and quoting throughout (`mapfile -t` plus
+#     `"${fragments[@]}"`) so a path with a space survives.
+#   - `cd "$REPO_ROOT"` runs BEFORE any rustfmt call, so the rustup shim
+#     resolves this repo's `rust-toolchain.toml` pin rather than a system
+#     rustfmt with different defaults.
+#   - `grep -r` (never `-R`) so symlinks are not followed into other trees.
+#   - Both sides of the repo-root comparison are PHYSICAL paths (`pwd -P` plus
+#     `physical_path`), so a symlinked checkout does not read as an escape.
+#     Portable by construction -- no `realpath -m`, which BSD/macOS lacks.
+#   - Every case this script can DETECT fails CLOSED: zero discovered fragments
+#     is a hard error rather than a vacuous pass, a path leaving the repo is
+#     refused before rustfmt sees it, and an `include!` the one-line parser
+#     cannot consume is refused rather than silently skipped. The parser is the
+#     honest limit of that guarantee: discovery is a grep, not a Rust parser, so
+#     a spelling nobody has thought of is caught by the not-consumed check only
+#     if it still contains the literal `include!` on some line.
+#   - rustfmt runs with `--check` only and its output is discarded, so this
+#     gate has no write primitive and no content-echo channel. Adding either
+#     (an in-place fix, or echoing stderr) makes the escape guard load-bearing
+#     rather than precautionary.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Both paths compared by the escape guard below must be PHYSICAL (symlinks
+# resolved) or the comparison is meaningless. `pwd` is logical by default, so a
+# symlinked checkout would keep the symlink here while the fragment side
+# resolved through it, and the prefix test could never match -- rejecting every
+# legitimate fragment. `pwd -P` on both sides is also portable, which matters:
+# this leg runs in a contributor pre-commit hook and the project ships macOS
+# builds, where `realpath -m` is not available (BSD realpath lacks `-m`).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
+# Physical path of $1 without requiring it to exist: resolve the deepest
+# existing ancestor with `cd -P`, then re-append the unresolved tail. Pure
+# bash + POSIX `cd`/`pwd`, so it behaves identically on GNU and BSD.
+physical_path() {
+    local target="$1" dir base
+    dir="$(dirname "$target")"
+    base="$(basename "$target")"
+    local tail="$base"
+    # Walk up until an existing directory is found, accumulating the tail.
+    while [[ ! -d "$dir" ]]; do
+        tail="$(basename "$dir")/$tail"
+        local parent
+        parent="$(dirname "$dir")"
+        # Defensive: dirname of "/" and of "." are themselves, so a path that
+        # never resolves would spin here.
+        [[ "$parent" == "$dir" ]] && break
+        dir="$parent"
+    done
+    if [[ -d "$dir" ]]; then
+        printf '%s/%s\n' "$(cd "$dir" && pwd -P)" "$tail"
+    else
+        printf '%s\n' "$target"
+    fi
+}
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    # Print the header block: every comment line after the shebang, stopping at
+    # the first non-comment line. Deliberately NOT a hardcoded line range -- one
+    # was here before and silently truncated this help mid-sentence the first
+    # time the header grew.
+    awk 'NR==1 && /^#!/ {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
     exit 2
 fi
 
@@ -63,6 +122,30 @@ collect_fragments() {
 
 mapfile -t fragments < <(collect_fragments)
 
+# FAIL CLOSED on an `include!` the one-line parser above cannot consume. rustc
+# accepts a path split with a line continuation --
+#   include!("frag\
+#   ment.rs");
+# -- which is legal Rust (verified by compiling one) and which the line-oriented
+# grep above never sees. Without this check such a fragment is silently NOT
+# checked while the gate reports success on its siblings: the exact vacuous pass
+# this leg exists to close, reintroduced through a different door.
+#
+# Every non-consumed occurrence in this repo today is a comment line, so this
+# lists zero and costs nothing until someone writes an exotic spelling.
+unparsed="$(
+    grep -rn --include='*.rs' -E 'include!' crates \
+        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*)' \
+        | grep -vE 'include!\("[^"]+\.rs"\)' || true
+)"
+if [[ -n "$unparsed" ]]; then
+    echo "fmt-fragments: found include! site(s) this script cannot parse, so it" >&2
+    echo "cannot prove they are formatted. Refusing to pass while blind to them." >&2
+    echo "Either spell the path on one line, or teach collect_fragments the form:" >&2
+    printf '%s\n' "$unparsed" >&2
+    exit 1
+fi
+
 if (( ${#fragments[@]} == 0 )); then
     # FAIL CLOSED. This repo has 25 `include!`d fragments; zero can only mean
     # discovery broke (a moved `crates/`, a grep behaviour change, a new
@@ -76,7 +159,22 @@ fi
 
 failed=()
 missing=()
+escaped=()
 for frag in "${fragments[@]}"; do
+    # Reject a resolved path that leaves the repo BEFORE rustfmt is handed it.
+    # `include!("../../../..//etc/passwd.rs")` is a legal relative path, so
+    # discovery will faithfully resolve one if a source file spells it. Today
+    # the blast radius is near nil (`--check` never writes and output goes to
+    # /dev/null), so this guards a FUTURE edit -- anyone who later echoes
+    # rustfmt's stderr or adds an in-place fix would otherwise turn a committed
+    # hostile path into a real primitive. `physical_path` resolves without
+    # requiring existence, so an escape is reported as an escape rather than
+    # being reclassified as merely missing.
+    abs="$(physical_path "$frag")"
+    if [[ "$abs" != "$REPO_ROOT" && "$abs" != "$REPO_ROOT"/* ]]; then
+        escaped+=("$frag")
+        continue
+    fi
     if [[ ! -f "$frag" ]]; then
         missing+=("$frag")
         continue
@@ -87,6 +185,14 @@ for frag in "${fragments[@]}"; do
 done
 
 printf 'fmt-fragments: checked %d include!d fragment(s)\n' "${#fragments[@]}"
+
+if (( ${#escaped[@]} )); then
+    echo
+    echo "include! targets that resolve OUTSIDE the repo root -- refusing to run"
+    echo "rustfmt on them. This is not a formatting problem: a source file in"
+    echo "crates/ spells an include! path that escapes $REPO_ROOT."
+    printf '  %s\n' "${escaped[@]}"
+fi
 
 if (( ${#missing[@]} )); then
     echo
@@ -109,7 +215,7 @@ if (( ${#failed[@]} )); then
     exit 1
 fi
 
-if (( ${#missing[@]} )); then
+if (( ${#missing[@]} || ${#escaped[@]} )); then
     exit 1
 fi
 

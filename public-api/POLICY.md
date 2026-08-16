@@ -54,6 +54,19 @@ change was intended.
   nightly toolchain pinned in `public-api.sh` (`PUBLIC_API_NIGHTLY`), so
   the surface listing is reproducible across machines.
 
+- **Re-exported types are listed once per public path -- do NOT
+  hand-deduplicate.** `cargo-public-api` emits an inherent-impl block once for
+  each public path a type is reachable through. `Router` is reachable both as
+  `routectl_router::router::Router` (`pub mod router`) and through the crate-root
+  re-export in `crates/routectl-router/src/lib.rs`, so its `carry_over_*` methods
+  appear twice in `routectl-router.txt`. That is deterministic, correct output,
+  not an append bug: `generate_one` in `public-api.sh` writes a fresh listing to
+  a temp file and `mv`s it over the baseline, so nothing accumulates. Editing the
+  duplicate lines out is wasted work -- the next regen restores them and
+  `--check` fails. The check is an exact `diff -u` over that deterministic
+  output, so a moved, renamed or removed entry still shows as -/+; tolerating
+  these duplicates costs no detection power.
+
 ## Coverage
 
 One baseline per library crate:
