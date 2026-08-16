@@ -29,11 +29,18 @@
 //! lands, every read misses, every lane reads as no-evidence, and no test
 //! built on hand-made keys can see it.
 //!
-//! So [`SeatKey`] has a private field and no public constructor. The only two
-//! ways to obtain one are the two functions below, and BOTH bottom out in
-//! `seat_pool::seat_identity`. There is no third way to name a key, which is
-//! what makes the two sides agreeing a property of the type rather than of
-//! whoever edits the call sites next.
+//! So [`SeatKey`] has a private field and no public constructor, and the two
+//! functions below are the only ways to obtain one. That much IS enforced: a
+//! model-scoped `state_key` cannot be passed where a seat key is expected.
+//!
+//! The read side re-derives through `seat_pool::seat_identity` itself. The write
+//! side wraps the identity a dispatch already derived through that same helper,
+//! because a `DispatchTarget` carries the derived identity and not the
+//! `SecretRef` it came from -- so its correctness rests on its CALLERS passing
+//! `DispatchMeta::served_seat`, which both production sites do. That residual is
+//! documented on the function rather than claimed away, and the live smoke is
+//! what closes it: only a real multi-model, multi-account pool proves the two
+//! sides agree.
 
 use routectl_auth::SecretRef;
 
@@ -65,17 +72,30 @@ pub fn seat_key_for_secret_ref(secret_ref: Option<&SecretRef>) -> Option<SeatKey
     crate::seat_pool::seat_identity(secret_ref).map(SeatKey)
 }
 
-/// The store key for the seat that actually SERVED, from the identity the
-/// dispatch target already carries -- the WRITE side.
+/// The store key for the seat that actually SERVED, from the identity a
+/// dispatch already derived -- the WRITE side.
 ///
-/// The caller passes `DispatchTarget`'s own served-seat identity, which the two
-/// seat-target builders set through `seat_identity`. So this side reaches the
-/// same bytes as [`seat_key_for_secret_ref`] through the same helper, one step
-/// earlier: neither function derives an identity of its own. A caller whose
-/// served seat is absent -- a pre-dispatch failure, a non-OAuth credential, a
-/// forwarded client credential -- has no account to key by and skips.
-pub fn seat_key_for_served_identity(identity: &str) -> SeatKey {
-    SeatKey(identity.to_string())
+/// # What this does and does not guarantee
+///
+/// It wraps bytes; it does not re-derive them. The two production call sites
+/// pass `DispatchMeta::served_seat`, which `mark_target` copies from
+/// `DispatchTarget::seat`, which both seat-target builders set through
+/// `seat_pool::seat_identity` -- so the write side reaches the same bytes as
+/// [`seat_key_for_secret_ref`] through the same helper, one step earlier.
+///
+/// But that chain is a property of the CALLERS, not of this signature: a
+/// `DispatchTarget` carries the derived identity and not the `SecretRef` it came
+/// from, so this side cannot re-derive from source without threading the ref
+/// through dispatch. A future caller passing a model-scoped `state_key` here
+/// would mint a write key no read ever matches, and the failure is silently
+/// green. Hence the name says `served_identity`: pass what a dispatch derived,
+/// never a key you assembled. [`SeatKey`]'s private field stops the reverse
+/// mistake -- a `state_key` cannot be used where a seat key is expected.
+///
+/// The live smoke is what closes this: it is the only check that the write and
+/// read sides agree on a real multi-model, multi-account pool.
+pub fn seat_key_for_served_identity(served_identity: &str) -> SeatKey {
+    SeatKey(served_identity.to_string())
 }
 
 #[cfg(test)]
