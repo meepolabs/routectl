@@ -22,7 +22,7 @@ use futures::StreamExt;
 use http::{HeaderMap, Method, StatusCode};
 use http_body_util::BodyExt;
 use routectl_cli::proxy::forward::{ForwardRequest, ForwardState, build_client, forward};
-use routectl_cli::proxy::metrics::{Leg, PathClass, ProxyMetrics};
+use routectl_cli::proxy::metrics::{Leg, PathClass, ProxyMetrics, ResultClass};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use wiremock::matchers::{method, path};
@@ -159,15 +159,29 @@ async fn returns_the_upstream_redirect_verbatim_instead_of_following_it() {
 
 #[tokio::test]
 async fn returns_clean_502_when_upstream_is_unreachable() {
-    // A loopback port nothing is listening on: connection refused, the
-    // canonical "unreachable" transport failure.
+    // Unreachability is produced by PRESENCE, not absence: the listener
+    // stays bound for the whole test, so no sibling test's ephemeral
+    // bind can claim the port and answer the request, and every
+    // connection it accepts is reset instead of served. Reserving a port
+    // by dropping a listener leaves it free for the taking in the window
+    // between the drop and the request.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let dead_port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let dead_addr = listener.local_addr().unwrap();
+
+    let resetter = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            // Closed without reading the request and without writing any
+            // response, so the peer's send fails at the transport level
+            // rather than parsing an orderly reply. Whether it observes a
+            // reset or an orderly close depends on scheduling; both are
+            // send errors, which is what the assertions below pin.
+            drop(socket);
+        }
+    });
 
     let state = test_state();
     let metrics = Arc::new(ProxyMetrics::new());
-    let upstream_base = reqwest::Url::parse(&format!("http://127.0.0.1:{dead_port}")).unwrap();
+    let upstream_base = reqwest::Url::parse(&format!("http://{dead_addr}")).unwrap();
 
     let response = forward(
         &state,
@@ -180,6 +194,22 @@ async fn returns_clean_502_when_upstream_is_unreachable() {
     .await;
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    // The 502 has to be the transport-failure one specifically: a 502
+    // booked as a client or server fault would mean the forwarder
+    // misattributed an unreachable upstream, and a 502 synthesized from
+    // an upstream response would carry a body.
+    assert_eq!(
+        metrics.request_count(
+            Leg::Inference,
+            ResultClass::Unreachable,
+            PathClass::Inference
+        ),
+        1
+    );
+    assert_eq!(metrics.requests_total(), 1);
+    assert!(collect_body(response).await.is_empty());
+
+    resetter.abort();
 }
 
 #[tokio::test]
