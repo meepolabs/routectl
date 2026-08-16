@@ -587,6 +587,21 @@ impl Router {
                             }
                         }
                         self.observe_capabilities(&req, &resp, target, meta, Instant::now());
+                        // Subscription-quota feed, the non-streaming half. The
+                        // reading rides on the assembled response, and this arm
+                        // is terminal (it returns immediately below), so the
+                        // feed fires exactly once per response. Keyed on the
+                        // seat that ACTUALLY served -- a fallback's reading
+                        // describes the credential that answered, not the home
+                        // one. The streaming half is armed at the stream arm.
+                        crate::quota::feed::feed_response(
+                            &self.quota_store,
+                            meta.served_seat
+                                .as_deref()
+                                .map(crate::quota::key::seat_key_for_served_identity)
+                                .as_ref(),
+                            &resp,
+                        );
                         return Ok(resp);
                     }
                     Err(mut e) => {
@@ -1353,6 +1368,21 @@ impl Router {
                             relabeled.boxed(),
                             state,
                             target.provider_kind,
+                            // Subscription-quota feed, the STREAMING half.
+                            // Streaming quota rides the FIRST canonical chunk
+                            // only, so it is lifted as the chunk passes through
+                            // the wrap -- before the caller renders it -- rather
+                            // than at end-of-stream, where it is already gone.
+                            // The feed disarms itself on the first chunk
+                            // carrying metadata, so it reads once per stream and
+                            // never per chunk. Keyed on the seat that ACTUALLY
+                            // served, exactly as the non-streaming arm is.
+                            crate::quota::feed::FirstChunkFeed::armed(
+                                self.quota_store.clone(),
+                                meta.served_seat
+                                    .as_deref()
+                                    .map(crate::quota::key::seat_key_for_served_identity),
+                            ),
                         ));
                     }
                     Err(mut e) => {
@@ -2155,10 +2185,17 @@ async fn run_with_timeout(
 /// accumulate toward the threshold (and a clean completion resets the
 /// counter). Consumer cancellation before any error is treated as success
 /// in both cases.
+///
+/// Also the streaming quota seam: `quota_feed` is offered every Ok chunk on
+/// its way through and takes the reading off the FIRST one carrying it, which
+/// is the only chunk that carries it. This wrap is where that happens because
+/// it is the last router-owned point before the caller consumes the stream --
+/// the reading is gone by end-of-stream.
 fn wrap_with_breaker_accounting(
     inner: BoxStream<'static, Result<ChatChunk>>,
     state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
     provider_kind: Option<&'static str>,
+    quota_feed: crate::quota::feed::FirstChunkFeed,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     use futures::stream::StreamExt as _;
     struct BreakerAccounting {
@@ -2214,13 +2251,15 @@ fn wrap_with_breaker_accounting(
     }
 
     let mut accounting = BreakerAccounting::new(state);
+    let mut quota_feed = quota_feed;
     let s = async_stream::stream! {
         let mut inner = inner;
         while let Some(item) = inner.next().await {
-            if let Err(e) = &item {
-                accounting.record_failure(LastOutcome::from_failure_class(
+            match &item {
+                Ok(chunk) => quota_feed.offer(chunk),
+                Err(e) => accounting.record_failure(LastOutcome::from_failure_class(
                     &classify(e, provider_kind).class,
-                ));
+                )),
             }
             yield item;
         }

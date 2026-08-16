@@ -46,6 +46,9 @@
 //! visible at every call site while the shape is still moving.
 
 pub mod curation;
+pub mod feed;
 pub mod freshness;
+pub mod key;
 pub mod reduce;
+pub mod store;
 pub mod window;

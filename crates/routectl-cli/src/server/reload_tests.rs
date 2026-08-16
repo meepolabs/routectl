@@ -987,3 +987,31 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
         "the prior router must stay installed on a rejected reload"
     );
 }
+
+/// Both reload paths must carry the per-seat quota readings onto the
+/// replacement router, and ONE missed site is silent: that path's config swap
+/// empties the store, and an empty store reads exactly as a fleet of seats that
+/// have not reported yet -- the cap-dormant fallback. No error, no warning, no
+/// symptom to distinguish it from health.
+///
+/// A structural guard because the property is about the WIRING, not about any
+/// one call: a unit test can only ever exercise the path it calls, so it would
+/// stay green against the other path being unwired. It follows the calibration
+/// carry-over's own guard, which pins the same property for the same reason.
+#[test]
+fn both_reload_paths_carry_the_quota_store_over() {
+    let reload_src = include_str!("reload.rs");
+
+    assert_eq!(
+        reload_src.matches("carry_over_quota_from").count(),
+        2,
+        "both reload paths must carry the per-seat quota readings onto the new \
+         router -- one-site-only silently empties the store on that path"
+    );
+    assert_eq!(
+        reload_src.matches("carry_over_calibration_from").count(),
+        reload_src.matches("carry_over_quota_from").count(),
+        "the quota carry-over must be wired at exactly the sites the sibling \
+         store carries at, so a future site added for one is added for both"
+    );
+}

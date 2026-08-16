@@ -108,7 +108,7 @@ fn known(window: &QuotaWindow, role: &str) -> (f64, SystemTime) {
 fn a_captured_anthropic_envelope_yields_both_windows_with_their_own_resets() {
     let observed = observed();
 
-    let snapshot = reduce_anthropic(&captured_anthropic(), &observed);
+    let snapshot = reduce_anthropic(&captured_anthropic(), &observed).snapshot;
 
     let (fast_fraction, fast_reset) = known(&snapshot.fast, "fast");
     let (slow_fraction, slow_reset) = known(&snapshot.slow, "slow");
@@ -141,7 +141,7 @@ fn the_bare_anthropic_reset_is_never_paired_to_the_five_hour_window() {
     );
 
     // Act
-    let snapshot = reduce_anthropic(&quota, &observed);
+    let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     // Assert
     assert_eq!(
@@ -173,7 +173,7 @@ fn a_milliseconds_scale_reset_produces_no_known_window() {
     }
 
     // Act
-    let snapshot = reduce_anthropic(&quota, &observed);
+    let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     // Assert
     assert_eq!(
@@ -190,7 +190,7 @@ fn a_malformed_utilization_drops_only_its_own_window() {
     let mut quota = captured_anthropic();
     quota.utilization = Some("not-a-number".into());
 
-    let snapshot = reduce_anthropic(&quota, &observed);
+    let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.fast, QuotaWindow::Unknown);
     let (slow_fraction, _) = known(&snapshot.slow, "slow");
@@ -208,7 +208,7 @@ fn every_window_malformed_yields_a_cap_dormant_snapshot() {
         }
     }
 
-    let snapshot = reduce_anthropic(&quota, &observed);
+    let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.fast, QuotaWindow::Unknown);
     assert_eq!(snapshot.slow, QuotaWindow::Unknown);
@@ -222,7 +222,7 @@ fn an_anthropic_family_with_no_resets_at_all_yields_no_known_window() {
         .extras
         .retain(|(key, _)| key != "5h-reset" && key != "7d-reset");
 
-    let snapshot = reduce_anthropic(&quota, &observed);
+    let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.fast, QuotaWindow::Unknown);
     assert_eq!(snapshot.slow, QuotaWindow::Unknown);
@@ -234,7 +234,7 @@ fn an_expired_reset_yields_no_known_window() {
     let observed =
         ObservationStamp::from_parts(epoch_secs(CAPTURED_5H_RESET_SECS + 60), Instant::now());
 
-    let snapshot = reduce_anthropic(&captured_anthropic(), &observed);
+    let snapshot = reduce_anthropic(&captured_anthropic(), &observed).snapshot;
 
     assert_eq!(snapshot.fast, QuotaWindow::Unknown);
 }
@@ -245,7 +245,7 @@ fn a_missing_representative_claim_reads_as_unknown_billing_not_included() {
     let mut quota = captured_anthropic();
     quota.representative_claim = None;
 
-    let snapshot = reduce_anthropic(&quota, &observed);
+    let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     assert_eq!(
         snapshot.billing,
@@ -260,7 +260,7 @@ fn an_overage_claim_reads_as_overage_billing() {
     let mut quota = captured_anthropic();
     quota.representative_claim = Some("overage".into());
 
-    let snapshot = reduce_anthropic(&quota, &observed);
+    let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.billing, Billing::Overage);
 }
@@ -269,7 +269,7 @@ fn an_overage_claim_reads_as_overage_billing() {
 fn a_captured_codex_envelope_yields_one_slow_window_with_fast_unknown() {
     let observed = codex_observed();
 
-    let snapshot = reduce_codex(&captured_codex(), &observed);
+    let snapshot = reduce_codex(&captured_codex(), &observed).snapshot;
 
     assert_eq!(
         snapshot.fast,
@@ -299,7 +299,7 @@ fn the_codex_percent_conversion_agrees_with_the_ledger_mapping() {
     let observed = codex_observed();
 
     // Act
-    let snapshot = reduce_codex(&captured_codex(), &observed);
+    let snapshot = reduce_codex(&captured_codex(), &observed).snapshot;
 
     // Assert
     let (fraction, reset) = known(&snapshot.slow, "slow");
@@ -322,7 +322,7 @@ fn an_unparseable_codex_percent_yields_a_cap_dormant_snapshot() {
     let mut quota = captured_codex();
     quota.primary_used_percent = Some("abc".into());
 
-    let snapshot = reduce_codex(&quota, &observed);
+    let snapshot = reduce_codex(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.fast, QuotaWindow::Unknown);
     assert_eq!(snapshot.slow, QuotaWindow::Unknown);
@@ -335,7 +335,7 @@ fn an_empty_codex_reset_yields_no_known_window() {
     let mut quota = captured_codex();
     quota.primary_reset_at = Some(String::new());
 
-    let snapshot = reduce_codex(&quota, &observed);
+    let snapshot = reduce_codex(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.slow, QuotaWindow::Unknown);
 }
@@ -346,7 +346,7 @@ fn a_codex_percent_above_one_hundred_saturates_to_exhausted() {
     let mut quota = captured_codex();
     quota.primary_used_percent = Some("140".into());
 
-    let snapshot = reduce_codex(&quota, &observed);
+    let snapshot = reduce_codex(&quota, &observed).snapshot;
 
     let (fraction, _) = known(&snapshot.slow, "slow");
     assert_eq!(
@@ -361,7 +361,7 @@ fn a_negative_codex_percent_is_refused_rather_than_clamped_to_empty() {
     let mut quota = captured_codex();
     quota.primary_used_percent = Some("-5".into());
 
-    let snapshot = reduce_codex(&quota, &observed);
+    let snapshot = reduce_codex(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.slow, QuotaWindow::Unknown);
 }
@@ -377,7 +377,7 @@ fn an_over_scale_codex_percent_saturates_to_exhausted_rather_than_unknown() {
     let mut quota = captured_codex();
     quota.primary_used_percent = Some("140".to_string());
 
-    let snapshot = reduce_codex(&quota, &codex_observed());
+    let snapshot = reduce_codex(&quota, &codex_observed()).snapshot;
 
     let QuotaWindow::Known { utilization, .. } = &snapshot.slow else {
         panic!("an over-scale percent must stay a Known reading, not collapse to Unknown");
@@ -395,7 +395,7 @@ fn an_uninterpretable_codex_percent_is_cap_dormant() {
     let mut quota = captured_codex();
     quota.primary_used_percent = Some("not-a-number".to_string());
 
-    let snapshot = reduce_codex(&quota, &codex_observed());
+    let snapshot = reduce_codex(&quota, &codex_observed()).snapshot;
 
     assert_eq!(snapshot.slow, QuotaWindow::Unknown);
 }
