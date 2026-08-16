@@ -2581,10 +2581,12 @@ pub struct ProviderRuntimePolicy {
     /// How dispatch picks among multiple OAuth seats configured for this
     /// provider's credential pool. `fill-first` (the default) drains one
     /// seat before moving to the next; `round-robin` spreads load across
-    /// seats; `sticky-least-loaded` pins each conversation to one seat for
+    /// seats, advancing the start seat per request;
+    /// `sticky-least-loaded` pins each conversation to one seat for
     /// prompt-cache affinity while balancing new conversations across seats
-    /// by load. Applied per request at dispatch time whenever the
-    /// provider's credential pool resolves to more than one seat.
+    /// by load, and is the only strategy quota-aware placement applies to.
+    /// Applied per request at dispatch time whenever the provider's
+    /// credential pool resolves to more than one seat.
     #[serde(default)]
     pub seat_selection: SeatSelection,
 }
@@ -2592,15 +2594,26 @@ pub struct ProviderRuntimePolicy {
 /// Per-provider seat-selection strategy for the OAuth credential pool.
 /// Default is `fill-first` so a single-seat provider (the common case)
 /// keeps its current behavior with no config.
+///
+/// Subscription-quota-aware placement and the session-affinity layer reach
+/// `sticky-least-loaded` ONLY. The other two variants keep their own contracts
+/// unchanged: neither pins a session nor reads a seat's remaining budget.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum SeatSelection {
     /// Drain one seat fully before advancing to the next.
+    ///
+    /// The drain IS the contract, not a shortcoming of it: holding one seat
+    /// keeps its prompt cache warm, and running that seat down until the
+    /// upstream refuses is the price of that locality. An operator wanting
+    /// budget-aware spreading picks `sticky-least-loaded` instead.
     #[default]
     FillFirst,
-    /// Rotate across seats to spread load.
+    /// Rotate across seats to spread load. The starting seat advances once per
+    /// REQUEST, so consecutive requests of one conversation land on different
+    /// seats.
     RoundRobin,
     /// Pin each conversation to one seat for prompt-cache affinity, and
     /// balance NEW conversations across seats by load. The contract: a
@@ -2612,6 +2625,11 @@ pub enum SeatSelection {
     /// The selection is a best-effort reorder of the walk: the per-seat
     /// dispatch gate and the fill-first fallback walk stay authoritative, so
     /// a stale or wrong pin only costs locality, never correctness.
+    ///
+    /// The ONLY variant subscription-quota-aware placement applies to: a birth
+    /// (and a keyless request, which mints no pin) ranks candidates by
+    /// remaining short-window budget when `[seat_quota]` is on and the evidence
+    /// suffices.
     StickyLeastLoaded,
 }
 

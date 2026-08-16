@@ -72,6 +72,12 @@ fn seat_key(label: Option<&str>) -> SeatKey {
 /// A three-seat `StickyLeastLoaded` pool on one Anthropic provider, with
 /// `seat_quota.enabled` as given.
 fn pooled_router(quota_enabled: bool) -> Router {
+    pooled_router_with_selection(SeatSelection::StickyLeastLoaded, quota_enabled)
+}
+
+/// A three-seat pool on one Anthropic provider under `selection`, with
+/// `seat_quota.enabled` as given.
+fn pooled_router_with_selection(selection: SeatSelection, quota_enabled: bool) -> Router {
     let mut seats: Vec<SeatTarget> = Vec::new();
     for label in SEAT_LABELS {
         let provider: Arc<dyn Provider> = Arc::new(SeatStub {
@@ -91,7 +97,7 @@ fn pooled_router(quota_enabled: bool) -> Router {
         SEAT_PROVIDER.to_string(),
         ProviderEntry::anthropic_api(format!("oauth://{SEAT_PROVIDER}")).with_runtime(
             ProviderRuntimePolicy {
-                seat_selection: SeatSelection::StickyLeastLoaded,
+                seat_selection: selection,
                 ..Default::default()
             },
         ),
@@ -497,4 +503,160 @@ fn a_keyless_walk_leads_with_the_emptiest_of_several_below_cap_seats() {
          not with whichever the fixed order happens to reach first"
     );
     assert_eq!(order.len(), 3, "every seat still follows the lead");
+}
+
+// ---- the strategy matrix: which selections the quota layer reaches ----
+
+/// Whether one `(selection, keyed?)` case mints an affinity pin and whether the
+/// quota partition ran for it.
+#[derive(Debug, PartialEq, Eq)]
+struct Engagement {
+    mints_pin: bool,
+    consults_quota: bool,
+}
+
+/// Resolve one chain on a fresh pool that has ONE strongly below-cap reading,
+/// and report what the selection engaged.
+///
+/// `consults_quota` is read from the placement counters rather than from the
+/// store: the counters are incremented only by `record_quota_placement`, which
+/// only the sticky paths call, and the seeded reading forces a decisive
+/// `below_cap` arm wherever the partition does run. A selection that never
+/// reaches the store therefore leaves every total at zero, and one that does
+/// cannot.
+fn engagement_of(selection: SeatSelection, keyed: bool) -> Engagement {
+    let router = pooled_router_with_selection(selection, true);
+    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+
+    let _ = router
+        .dispatch_chain("opus", if keyed { Some("S") } else { None })
+        .expect("chain resolves");
+
+    Engagement {
+        mints_pin: !router.sticky_pins.export_entries().is_empty(),
+        consults_quota: router.metrics.quota_placement_totals()
+            != QuotaPlacementTotals {
+                below_cap: 0,
+                all_capped: 0,
+                mixed_unknown: 0,
+                all_unknown: 0,
+            },
+    }
+}
+
+/// THE SETTLED SCOPE, stated per variant so widening it cannot pass silently.
+///
+/// Quota-aware placement and the affinity layer reach `StickyLeastLoaded` and
+/// nothing else. `FillFirst` and `RoundRobin` keep their own contracts:
+/// `FillFirst` drains one seat before advancing, which is the price of the cache
+/// locality an operator asked for by writing it, and `RoundRobin` spreads per
+/// request. Extending either to mint a pin or to read a budget is a
+/// product-visible contract change, and must fail here rather than land quietly.
+///
+/// Keyless `StickyLeastLoaded` mints no pin because there is no key to pin
+/// under; it still places by budget, because the only thing that outranks quota
+/// fairness is a warm prompt cache and a keyless request has none.
+#[test]
+fn only_sticky_least_loaded_mints_pins_and_reads_quota() {
+    let cases = [
+        (
+            SeatSelection::FillFirst,
+            true,
+            Engagement {
+                mints_pin: false,
+                consults_quota: false,
+            },
+        ),
+        (
+            SeatSelection::FillFirst,
+            false,
+            Engagement {
+                mints_pin: false,
+                consults_quota: false,
+            },
+        ),
+        (
+            SeatSelection::RoundRobin,
+            true,
+            Engagement {
+                mints_pin: false,
+                consults_quota: false,
+            },
+        ),
+        (
+            SeatSelection::RoundRobin,
+            false,
+            Engagement {
+                mints_pin: false,
+                consults_quota: false,
+            },
+        ),
+        (
+            SeatSelection::StickyLeastLoaded,
+            true,
+            Engagement {
+                mints_pin: true,
+                consults_quota: true,
+            },
+        ),
+        (
+            SeatSelection::StickyLeastLoaded,
+            false,
+            Engagement {
+                mints_pin: false,
+                consults_quota: true,
+            },
+        ),
+    ];
+
+    for (selection, keyed, expected) in cases {
+        assert_eq!(
+            engagement_of(selection, keyed),
+            expected,
+            "{selection:?} with{} a session key",
+            if keyed { "" } else { "out" }
+        );
+    }
+}
+
+#[test]
+fn fill_first_stays_at_seat_zero_with_a_reading_that_would_move_a_sticky_pool() {
+    // The same reading that leads a sticky walk with seat-c must leave a
+    // fill-first pool draining seat 0, request after request. Its contract is
+    // the drain order itself, not a placement.
+    let router = pooled_router_with_selection(SeatSelection::FillFirst, true);
+    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+
+    for _ in 0..3 {
+        assert_eq!(
+            chain_order(&router, "S"),
+            ["opus", "opus#seat-b", "opus#seat-c"]
+        );
+    }
+}
+
+#[test]
+fn round_robin_still_advances_per_request_with_quota_readings_present() {
+    // RoundRobin's contract is a per-REQUEST advance, not a per-session one, so
+    // repeated requests under one session key must keep rotating -- and a
+    // below-cap reading must not reorder the walk.
+    let router = pooled_router_with_selection(SeatSelection::RoundRobin, true);
+    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+
+    assert_eq!(
+        chain_order(&router, "S"),
+        ["opus", "opus#seat-b", "opus#seat-c"]
+    );
+    assert_eq!(
+        chain_order(&router, "S"),
+        ["opus#seat-b", "opus#seat-c", "opus"]
+    );
+    assert_eq!(
+        chain_order(&router, "S"),
+        ["opus#seat-c", "opus", "opus#seat-b"]
+    );
+    assert_eq!(
+        chain_order(&router, "S"),
+        ["opus", "opus#seat-b", "opus#seat-c"]
+    );
 }
