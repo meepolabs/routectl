@@ -8,10 +8,22 @@
 
 use super::*;
 
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
-fn reset_at() -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000)
+use super::super::freshness::{ObservationStamp, accept_reset};
+
+/// A reset that has genuinely passed `accept_reset`, since that is now the
+/// only way to name one -- the tests cannot fabricate a trusted window either.
+fn reset_at() -> ValidatedReset {
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let observed = ObservationStamp::from_parts(base, Instant::now());
+    accept_reset(
+        base + Duration::from_mins(1),
+        &observed,
+        Duration::from_hours(5),
+        Duration::from_mins(1),
+    )
+    .expect("a reset one minute into a five hour window is plausible")
 }
 
 fn known(raw: f64) -> QuotaWindow {

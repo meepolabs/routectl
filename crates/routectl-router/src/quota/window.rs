@@ -16,8 +16,17 @@
 //! private and [`Utilization::new`] is the only way in, so no call site can
 //! hold a utilization outside `[0.0, 1.0]` or a non-finite one -- and because
 //! there is no `Default`, no call site can hold "known 0%" it never observed.
+//!
+//! The reset instant carries it too, and for the same reason. `Known` demands
+//! a [`ValidatedReset`](super::freshness::ValidatedReset), which only
+//! [`accept_reset`](super::freshness::accept_reset) can mint, so the
+//! plausibility bound is unavoidable rather than advisory. An earlier draft of
+//! this type held a raw `SystemTime` and DOCUMENTED that it had already been
+//! validated -- which is precisely the shape of guarantee a later call site
+//! skips, and it would have re-admitted the milliseconds-as-seconds reading
+//! this module exists to refuse.
 
-use std::time::SystemTime;
+use super::freshness::ValidatedReset;
 
 /// A validated subscription-window utilization: finite, in `[0.0, 1.0]`,
 /// where `0.0` is an empty window and `1.0` is an exhausted one.
@@ -108,19 +117,29 @@ pub enum Billing {
 /// unpairable or implausible reading collapses to `Unknown` rather than
 /// failing the request, matching the source types' posture that a weird value
 /// never fails a request.
+///
+/// Both fields of `Known` are constrained BY TYPE rather than by convention:
+/// `Utilization` cannot hold a value outside `[0.0, 1.0]`, and
+/// [`ValidatedReset`](super::freshness::ValidatedReset) cannot be minted
+/// except by [`accept_reset`](super::freshness::accept_reset). So a reducer
+/// cannot assemble a trusted window around an unchecked reset -- notably a
+/// seconds-scale instant misparsed as milliseconds, which every expiry check
+/// reads as permanently valid. Documenting that the reset "was already
+/// validated" would have left exactly the gap a later call site skips.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuotaWindow {
     /// No trustworthy reading for this window. Carries no number, so no
     /// caller can accidentally rank on it.
     Unknown,
-    /// A reading routectl trusts, valid until `reset_at`.
+    /// A reading routectl trusts, valid until its reset.
     Known {
         /// How much of the window is consumed.
         utilization: Utilization,
-        /// Wall-clock instant at which this window resets, already validated
-        /// against the observation instant by
-        /// [`accept_reset`](super::freshness::accept_reset).
-        reset_at: SystemTime,
+        /// Wall-clock instant at which this window resets. Only obtainable
+        /// from [`accept_reset`](super::freshness::accept_reset), which is
+        /// what makes the plausibility bound unavoidable rather than
+        /// advisory.
+        reset_at: ValidatedReset,
     },
 }
 
