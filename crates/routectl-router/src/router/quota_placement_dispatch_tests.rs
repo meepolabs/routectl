@@ -470,3 +470,31 @@ fn the_selection_decision_vocabulary_is_unchanged_by_quota() {
         .collect();
     assert_eq!(stay, vec![Some("sticky_stay"), None, None]);
 }
+
+#[test]
+fn a_keyless_walk_leads_with_the_emptiest_of_several_below_cap_seats() {
+    // The single-seeded-seat test cannot tell "picks the below-cap seat" from
+    // "picks the MOST REMAINING below-cap seat". Three seats, all below cap,
+    // and the emptiest is deliberately NOT the one the fixed order would
+    // reach first.
+    let router = pooled_router(true);
+    seed_readings(
+        &router,
+        &[(None, 0.40), (Some("seat-b"), 0.05), (Some("seat-c"), 0.30)],
+    );
+
+    let order: Vec<String> = router
+        .dispatch_chain("opus", None)
+        .expect("chain resolves")
+        .into_iter()
+        .map(|t| t.state_key)
+        .collect();
+
+    assert_eq!(
+        order.first().map(String::as_str),
+        Some("opus#seat-b"),
+        "among several below-cap seats the walk must lead with the most remaining, \
+         not with whichever the fixed order happens to reach first"
+    );
+    assert_eq!(order.len(), 3, "every seat still follows the lead");
+}
