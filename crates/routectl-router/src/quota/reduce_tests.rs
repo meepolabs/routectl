@@ -45,9 +45,12 @@ fn observed() -> ObservationStamp {
     ObservationStamp::from_parts(epoch_secs(CAPTURED_5H_RESET_SECS - 3_600), Instant::now())
 }
 
-/// The captured Anthropic family as the shipped header parser produces it:
-/// `5h-utilization` typed, everything else -- both per-window resets and the
-/// 7d utilization -- in `extras`.
+/// The captured Anthropic family exactly as the shipped header parser produces
+/// it: `5h-utilization`, `status`, `overage-status`, `overage-utilization`,
+/// `representative-claim` and the bare `reset` in TYPED fields, and only what
+/// the parser leaves over -- both per-window resets and the 7d utilization --
+/// in `extras`. Placing a typed suffix in `extras` here would make every
+/// assertion below prove the wrong thing.
 fn captured_anthropic() -> AnthropicUnifiedQuota {
     let mut quota = AnthropicUnifiedQuota::default();
     quota.status = Some("allowed".into());
@@ -359,6 +362,40 @@ fn a_negative_codex_percent_is_refused_rather_than_clamped_to_empty() {
     quota.primary_used_percent = Some("-5".into());
 
     let snapshot = reduce_codex(&quota, &observed);
+
+    assert_eq!(snapshot.slow, QuotaWindow::Unknown);
+}
+
+#[test]
+fn an_over_scale_codex_percent_saturates_to_exhausted_rather_than_unknown() {
+    // The bound is not "refuse anything odd". An upstream reporting past its
+    // own limit is stating the window is SPENT, so it saturates to exhausted;
+    // treating it as no-information would hand the seat back its headroom,
+    // which is the direction that manufactures placement on a drained seat.
+    // The ledger's sibling mapping records the same value raw instead, and the
+    // module docs at both sites say so.
+    let mut quota = captured_codex();
+    quota.primary_used_percent = Some("140".to_string());
+
+    let snapshot = reduce_codex(&quota, &codex_observed());
+
+    let QuotaWindow::Known { utilization, .. } = &snapshot.slow else {
+        panic!("an over-scale percent must stay a Known reading, not collapse to Unknown");
+    };
+    assert!(
+        (utilization.fraction() - 1.0).abs() < f64::EPSILON,
+        "140 percent saturates to a full window, not to an empty one"
+    );
+}
+
+#[test]
+fn an_uninterpretable_codex_percent_is_cap_dormant() {
+    // The other half of the same boundary: a value that cannot be read at all
+    // yields no window, so placement falls back rather than acting on a guess.
+    let mut quota = captured_codex();
+    quota.primary_used_percent = Some("not-a-number".to_string());
+
+    let snapshot = reduce_codex(&quota, &codex_observed());
 
     assert_eq!(snapshot.slow, QuotaWindow::Unknown);
 }

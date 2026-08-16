@@ -15,11 +15,16 @@
 //! DELIBERATELY loose -- it admits Anthropic fractions well above 1.0 and
 //! Codex percentages far above 100 so that a weird upstream value is still
 //! RECORDED in the observability columns rather than silently dropped. These
-//! reducers produce a ROUTING signal instead, so they must be strict: a value
-//! they cannot trust becomes a cap-dormant `Unknown`, never a recorded oddity.
-//! Two sites converting the same percent can drift, which is why the sibling
-//! carries the matching note and why a test pins that both derive the same
-//! fraction from the same captured input.
+//! reducers produce a ROUTING signal instead, so they are bounded: a value
+//! they cannot interpret at all -- unparseable, non-finite, or negative --
+//! becomes a cap-dormant `Unknown` rather than a recorded oddity. A value that
+//! is merely OVER its scale is a different case and is not refused: a finite
+//! percent above 100 saturates to an exhausted `Known` window, because an
+//! upstream reporting past its own limit is telling routectl the window is
+//! spent, and reading that as "no information" would hand the seat back its
+//! headroom. Two sites converting the same percent can drift, which is why the
+//! sibling carries the matching note and why a test pins that both derive the
+//! same fraction from the same captured input.
 //!
 //! # Why the bare Anthropic `reset` is never read
 //!
@@ -68,13 +73,17 @@ pub struct QuotaSnapshot {
 
 /// Reduce Anthropic's unified quota family onto the normalized snapshot.
 ///
-/// The FAST window's utilization is the only value read from a typed field:
-/// the shipped header parser types `5h-utilization` as `utilization` and
-/// pushes every other suffix -- including `7d-utilization` and all three
-/// per-window resets -- into `extras`. So the rest is reached by walking
-/// `extras`. Widening that struct instead is out of scope by design: it feeds
-/// the shared ledger write path, which this derived-only reading must not
-/// disturb.
+/// `5h-utilization` is the only CAPACITY-WINDOW utilization the shipped header
+/// parser types (as `utilization`). It types five more suffixes -- `status`,
+/// `overage-status`, `overage-utilization`, `representative-claim` and the bare
+/// `reset` -- and pushes everything else, including `7d-utilization` and all
+/// three per-window resets, into `extras`. So this reducer reads the 7d
+/// utilization and every per-window reset by walking `extras`, and a fixture
+/// must place a suffix exactly where `assign_suffix` would put it or the test
+/// built on it proves the wrong thing.
+///
+/// Widening that struct instead is out of scope by design: it feeds the shared
+/// ledger write path, which this derived-only reading must not disturb.
 pub fn reduce_anthropic(
     quota: &AnthropicUnifiedQuota,
     observed: &ObservationStamp,

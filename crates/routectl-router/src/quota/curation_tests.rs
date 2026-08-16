@@ -10,16 +10,28 @@
 
 use super::*;
 
-/// Every row, for the whole-table invariants.
+/// Every row, read from the table ITSELF rather than by naming the providers
+/// currently in it. Enumerating known provider constants would let a row for a
+/// newly curated provider slip past every invariant below while these tests
+/// stayed green -- which is the opposite of a whole-table guard.
 fn all_rows() -> Vec<&'static CuratedWindow> {
-    rows_for(ANTHROPIC_PROVIDER_KIND)
-        .chain(rows_for(CODEX_PROVIDER_KIND))
-        .collect()
+    CURATED_WINDOWS.iter().collect()
+}
+
+/// Every provider kind the table actually curates, derived from the table.
+fn curated_kinds() -> Vec<&'static str> {
+    let mut kinds: Vec<&'static str> = CURATED_WINDOWS
+        .iter()
+        .map(|row| row.provider_kind)
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
 }
 
 #[test]
 fn no_provider_curates_two_rows_in_one_role() {
-    for kind in [ANTHROPIC_PROVIDER_KIND, CODEX_PROVIDER_KIND] {
+    for kind in curated_kinds() {
         for role in [WindowRole::Fast, WindowRole::Slow] {
             let matching = rows_for(kind).filter(|row| row.role == role).count();
 
@@ -34,7 +46,7 @@ fn no_provider_curates_two_rows_in_one_role() {
 
 #[test]
 fn no_provider_curates_two_rows_for_one_source_window() {
-    for kind in [ANTHROPIC_PROVIDER_KIND, CODEX_PROVIDER_KIND] {
+    for kind in curated_kinds() {
         let ids: Vec<&str> = rows_for(kind).map(|row| row.source_id).collect();
 
         for id in &ids {
