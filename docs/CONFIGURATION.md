@@ -1297,13 +1297,17 @@ over its budget runs to actual exhaustion and is rescued by the reactive
 path (an upstream refusal trips the per-seat breaker and the seat drops
 out of the dispatch filter), exactly as it is today.
 
-It is best-effort and cap-dormant by construction. A seat routectl has
-no trustworthy reading for never competes for a placement, so several
-cases resolve exactly as they did before quota placement existed: a fresh
-process before any response has been observed, a seat whose reading has
-lapsed past its own window, a provider routectl curates no short
-recovering window for (the Codex subscription egress is one -- it reports
-a seven-day window and no short one), and a pool where some seats are
+It is best-effort and cap-dormant by construction. An untrustworthy
+reading never NARROWS a placement -- a seat routectl has no fresh reading
+for is never preferred on quota grounds, and never counted as having
+budget it did not report. When the evidence is too thin to act on,
+placement falls back to the pre-quota capacity ranking and an unobserved
+seat can still be picked there, which is what makes these cases resolve
+exactly as they did before quota placement existed: a fresh process
+before any response has been observed, a seat whose reading has lapsed
+past its own window, a provider routectl curates no short recovering
+window for (the Codex subscription egress is one -- it reports a
+seven-day window and no short one), and a pool where some seats are
 observed and the rest are not.
 
 Concretely, among the seats the existing health and rate-limit filters
