@@ -5,8 +5,12 @@
 //! response's metadata was read, refusing a reset instant that cannot belong
 //! to the window it claims, and answering whether a stamped reading is still
 //! effective at read time. It holds no state -- the per-seat store and its
-//! merge rule are a separate concern -- so every function here is pure and
-//! every rejection is a value the caller can count.
+//! merge rule are a separate concern.
+//!
+//! `accept_reset` and `is_fresh` are pure, and every rejection is a value the
+//! caller can count. `ObservationStamp::now` is the one exception: it samples
+//! both system clocks, and a caller must invoke it where the response
+//! metadata is read. Nothing in this module stamps on a caller's behalf.
 //!
 //! # Why an implausible reset is refused rather than clamped
 //!
@@ -40,9 +44,9 @@ use std::time::{Duration, Instant, SystemTime};
 #[derive(Debug, Clone, Copy)]
 pub struct ObservationStamp {
     /// Wall clock at observation, comparable against an upstream reset.
-    pub wall: SystemTime,
+    wall: SystemTime,
     /// Monotonic clock at observation, for the age ceiling.
-    pub monotonic: Instant,
+    monotonic: Instant,
 }
 
 impl ObservationStamp {
@@ -51,11 +55,36 @@ impl ObservationStamp {
     /// Called where the response metadata is read, never later: a stamp taken
     /// downstream of the read would date the reading to when routectl got
     /// around to it rather than to when the upstream reported it.
+    ///
+    /// This is the ONLY production constructor, and the fields are private,
+    /// because the two clocks are only meaningful as a matched pair. A
+    /// hand-assembled stamp mixing a wall time from one instant with a
+    /// monotonic reading from another satisfies both of [`is_fresh`]'s
+    /// comparisons independently while representing no real instant, which
+    /// turns a fail-closed predicate into a permissive one.
     pub fn now() -> Self {
         Self {
             wall: SystemTime::now(),
             monotonic: Instant::now(),
         }
+    }
+
+    /// Wall clock at observation.
+    pub const fn wall(&self) -> SystemTime {
+        self.wall
+    }
+
+    /// Monotonic clock at observation.
+    pub const fn monotonic(&self) -> Instant {
+        self.monotonic
+    }
+
+    /// Build a stamp from explicit clock readings, for tests that need a
+    /// controlled instant. Test-only so production can reach a stamp solely
+    /// through [`ObservationStamp::now`].
+    #[cfg(test)]
+    pub const fn from_parts(wall: SystemTime, monotonic: Instant) -> Self {
+        Self { wall, monotonic }
     }
 }
 
@@ -79,6 +108,28 @@ pub enum ResetRejection {
     Overflow,
 }
 
+/// A reset instant that has PASSED [`accept_reset`], and the only way to name
+/// one.
+///
+/// The field is private and this module mints no other constructor, so a
+/// `QuotaWindow::Known` cannot be assembled from a raw `SystemTime` at all:
+/// the plausibility bound below is not a convention a later reducer is asked
+/// to remember, it is the only route to the type the variant demands. That
+/// distinction is the whole point of this module -- a documented "already
+/// validated" guarantee is exactly what a future call site skips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedReset {
+    at: SystemTime,
+}
+
+impl ValidatedReset {
+    /// The validated instant, for a freshness comparison. Takes `self` by
+    /// value; the type is `Copy` and a one-field wrapper.
+    pub const fn at(self) -> SystemTime {
+        self.at
+    }
+}
+
 /// Accept a reported reset instant for a window of `window_duration`, or
 /// refuse it with the reason.
 ///
@@ -91,7 +142,7 @@ pub fn accept_reset(
     observed: &ObservationStamp,
     window_duration: Duration,
     tolerance: Duration,
-) -> Result<SystemTime, ResetRejection> {
+) -> Result<ValidatedReset, ResetRejection> {
     if reset_at <= observed.wall {
         return Err(ResetRejection::Expired);
     }
@@ -104,7 +155,7 @@ pub fn accept_reset(
     if reset_at > latest_plausible {
         return Err(ResetRejection::Implausible);
     }
-    Ok(reset_at)
+    Ok(ValidatedReset { at: reset_at })
 }
 
 /// Whether a reading stamped at `observed` and resetting at `reset_at` is

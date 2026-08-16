@@ -1663,19 +1663,28 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the submodule
 - `src/quota/window.rs` -- the per-window value. `QuotaWindow` is an algebraic
   `Unknown | Known { utilization, reset_at }`, so unknown is UNREPRESENTABLE as
-  a number and a reported `0.0` stays structurally distinct from no reading
-  (the RPM gate's `rpm_available.unwrap_or(f64::INFINITY)` convention is
-  deliberately NOT mirrored here). `Utilization` is a private-field newtype
+  a number and a reported `0.0` stays structurally distinct from no reading.
+  BOTH `Known` fields are constrained by type rather than convention: the reset
+  is a `ValidatedReset`, mintable only by `accept_reset`, so a reducer cannot
+  assemble a trusted window around an unchecked instant. The RPM gate's
+  `rpm_available.unwrap_or(f64::INFINITY)` convention is deliberately NOT
+  mirrored here. `Utilization` is a private-field newtype
   whose `new` refuses non-finite and negative input and SATURATES above `1.0`
   to `1.0` (never to `0.0`, which would invent headroom). `WindowRole`
   (`Fast`/`Slow`) and `Billing` (`Unknown`/`Included`/`Overage`, a tri-state
   because the shipped `is_overage()` conflates missing with known-benign).
   Derives `Debug, Clone, PartialEq` only -- no `Default`, no serde, no
   ordering, no `Display`
-- `src/quota/freshness.rs` -- value-level time correctness, stateless and pure.
-  `ObservationStamp` pairs the wall and monotonic clocks at the instant the
-  response metadata is read; `accept_reset` admits a reset only strictly after
-  the observation and no later than observation + window duration + tolerance
+- `src/quota/freshness.rs` -- value-level time correctness, stateless.
+  `accept_reset` and `is_fresh` are pure; `ObservationStamp::now` samples both
+  clocks and is the only production constructor (fields private, since the two
+  readings are meaningful only as a matched pair -- a forged stamp satisfies
+  each freshness comparison independently while representing no real instant).
+  The stamp pairs both clocks at the instant the response metadata is read.
+  `accept_reset` returns a `ValidatedReset` whose private field makes the
+  plausibility bound the only route to a trusted reset, admitting one only
+  strictly after the observation and no later than observation + window
+  duration + tolerance
   (`ResetRejection::Expired`/`Implausible`/`Overflow`, which rejects an
   epoch-millis-as-seconds value at the door); `is_fresh` requires BOTH a
   monotonic age ceiling and the window's own wall-clock reset, answering
