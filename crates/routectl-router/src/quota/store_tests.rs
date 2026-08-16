@@ -310,7 +310,7 @@ fn an_older_observation_never_overwrites_a_newer_one() {
         ),
     );
 
-    let stored = store.observe(
+    store.observe(
         &seat(None),
         snapshot(
             earlier,
@@ -319,12 +319,18 @@ fn an_older_observation_never_overwrites_a_newer_one() {
         ),
     );
 
-    assert!(
-        !stored,
-        "a late arrival describing an earlier moment is dropped"
-    );
+    // Asserted on the STORED VALUE, not on a rejection flag: ordering is
+    // enforced per window, so an out-of-order arrival is dropped for the
+    // window it describes rather than by refusing the whole snapshot. A
+    // snapshot-level refusal would also throw away this arrival's OTHER
+    // windows, which may be the newest readings there are for them.
     let reading = store.reading_for(&seat(None), &later).expect("a reading");
-    assert_eq!(fraction_of(&reading.fast, "fast"), 0.40);
+    assert_eq!(
+        fraction_of(&reading.fast, "fast"),
+        0.40,
+        "the newer reading stands; the late arrival describing an earlier moment did not \
+         install itself over it"
+    );
 }
 
 /// The windows merge INDEPENDENTLY. An upstream that reports one window and
@@ -582,5 +588,98 @@ fn a_seat_the_new_config_dropped_is_not_carried_over() {
         after.is_empty(),
         "a retired seat's reading must not survive the rebuild, or a run of \
          reloads carries every past seat forward"
+    );
+}
+
+/// A late FAST reading must be judged against the FAST window's own stamp, not
+/// against whatever arrived most recently for the seat. Ordering per snapshot
+/// discards a genuinely newer reading for one window whenever a DIFFERENT
+/// window happened to be updated in between -- and the discarded value is the
+/// newest evidence that window has.
+#[test]
+fn a_late_window_reading_is_ordered_against_its_own_window_not_the_seat() {
+    let store = store();
+    let t1 = stamp_at(Duration::ZERO);
+    let t2 = stamp_at(Duration::from_mins(10));
+    let t3 = stamp_at(Duration::from_mins(20));
+
+    // T1: FAST known high.
+    store.observe(
+        &seat(None),
+        snapshot(
+            t1,
+            known(0.80, &t1, Duration::from_hours(4)),
+            QuotaWindow::Unknown,
+        ),
+    );
+    // T3: a response carrying only SLOW. FAST is preserved, and the seat's
+    // most recent arrival is now T3.
+    store.observe(
+        &seat(None),
+        snapshot(
+            t3,
+            QuotaWindow::Unknown,
+            known(0.10, &t3, Duration::from_hours(4)),
+        ),
+    );
+    // T2 FAST arrives late -- older than the seat's last arrival, but NEWER
+    // than the FAST reading actually stored.
+    store.observe(
+        &seat(None),
+        snapshot(
+            t2,
+            known(0.20, &t2, Duration::from_hours(4)),
+            QuotaWindow::Unknown,
+        ),
+    );
+
+    let reading = store.reading_for(&seat(None), &t3).expect("a reading");
+    assert_eq!(
+        fraction_of(&reading.fast, "fast"),
+        0.20,
+        "the T2 FAST reading is the newest FAST observation and must stand; judging it \
+         against the seat's T3 arrival would keep the stale T1 value"
+    );
+    assert_eq!(
+        fraction_of(&reading.slow, "slow"),
+        0.10,
+        "the SLOW reading is untouched by the late FAST arrival"
+    );
+}
+
+/// Billing ages on the same ceiling as a window. It has no reset of its own, so
+/// without the check a seat that reported overage and then went quiet keeps
+/// reporting overage forever while its windows correctly read Unknown -- a cost
+/// signal outliving the capacity signal it arrived beside.
+#[test]
+fn a_billing_state_past_the_age_ceiling_reads_unknown() {
+    let store = store();
+    let observed = stamp_at(Duration::ZERO);
+    store.observe(
+        &seat(None),
+        QuotaSnapshot {
+            observed,
+            fast: known(0.30, &observed, Duration::from_hours(4)),
+            slow: QuotaWindow::Unknown,
+            billing: Billing::Overage,
+        },
+    );
+
+    let fresh = store
+        .reading_for(&seat(None), &stamp_at(Duration::from_mins(5)))
+        .expect("a reading");
+    assert_eq!(fresh.billing, Billing::Overage, "still inside the ceiling");
+
+    let stale = store
+        .reading_for(
+            &seat(None),
+            &stamp_at(MAX_OBSERVATION_AGE + Duration::from_mins(1)),
+        )
+        .expect("a reading");
+    assert_eq!(
+        stale.billing,
+        Billing::Unknown,
+        "an aged-out billing state must not keep demoting a seat on evidence no longer \
+         in evidence"
     );
 }

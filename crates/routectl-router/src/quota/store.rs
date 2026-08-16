@@ -206,13 +206,25 @@ impl StoredWindow {
 
     /// This window merged with an incoming one observed at `observed`.
     ///
-    /// A `Known` incoming reading wins outright and brings its own stamp --
-    /// including when its utilization DECREASED, which is a window resetting and
-    /// not an anomaly to smooth. An `Unknown` incoming reading carries this
-    /// window forward UNCHANGED, keeping its original stamp, and only while it
-    /// is still effective; once it lapses the seat reads `Unknown` for that
-    /// window rather than at its last value.
+    /// Ordering is judged PER WINDOW, on the monotonic component: an incoming
+    /// reading older than the one already stored for THIS window is discarded
+    /// even when it arrived later, because responses complete out of order and a
+    /// late arrival describes an earlier moment. Judging that per snapshot
+    /// instead would let one window's newer reading be thrown away because a
+    /// DIFFERENT window had been updated in between -- the two windows are
+    /// merged independently and so can legitimately come from different
+    /// responses.
+    ///
+    /// A `Known` incoming reading otherwise wins outright and brings its own
+    /// stamp -- including when its utilization DECREASED, which is a window
+    /// resetting and not an anomaly to smooth. An `Unknown` incoming reading
+    /// carries this window forward UNCHANGED, keeping its original stamp, and
+    /// only while it is still effective; once it lapses the seat reads `Unknown`
+    /// for that window rather than at its last value.
     fn merged(&self, incoming: &QuotaWindow, observed: &ObservationStamp) -> Self {
+        if observed.monotonic() < self.observed.monotonic() {
+            return self.clone();
+        }
         match incoming {
             QuotaWindow::Known { .. } => Self {
                 window: incoming.clone(),
@@ -247,48 +259,69 @@ impl StoredReading {
         }
     }
 
-    /// This reading merged with `observed`, or `None` when `observed` is OLDER
-    /// than what is stored and must be discarded whole.
+    /// This reading merged with `observed`.
     ///
-    /// Ordering is judged on the MONOTONIC component, the reading that cannot
-    /// step backwards; a wall clock adjusted between two responses would
-    /// otherwise reorder them. Responses do complete out of order, and a late
-    /// arrival describes an earlier moment.
-    fn merged(&self, observed: &QuotaSnapshot) -> Option<Self> {
-        if observed.observed.monotonic() < self.latest.monotonic() {
-            return None;
-        }
-        Some(Self {
-            latest: observed.observed,
+    /// There is deliberately NO whole-snapshot reject. Ordering is enforced by
+    /// each part against its OWN stamp -- see [`StoredWindow::merged`] and
+    /// [`StoredReading::merged_billing`] -- because a snapshot-level gate throws
+    /// away a genuinely newer reading for one window whenever a different window
+    /// happened to be updated in between. Concretely: FAST known at T1, then a
+    /// response at T3 carrying only SLOW (which preserves FAST), then the FAST
+    /// reading stamped T2 arrives late; rejecting the whole T2 snapshot against a
+    /// snapshot-level T3 would keep the T1 FAST value even though T2 is the newest
+    /// FAST observation there is.
+    ///
+    /// `latest` therefore records the most recent arrival for diagnostics only.
+    /// It never ages a window and never gates one.
+    fn merged(&self, observed: &QuotaSnapshot) -> Self {
+        Self {
+            latest: if observed.observed.monotonic() < self.latest.monotonic() {
+                self.latest
+            } else {
+                observed.observed
+            },
             fast: self.fast.merged(&observed.fast, &observed.observed),
             slow: self.slow.merged(&observed.slow, &observed.observed),
             billing: self.merged_billing(observed),
-            billing_observed: observed.observed,
-        })
+            billing_observed: if observed.billing == super::window::Billing::Unknown
+                || observed.observed.monotonic() < self.billing_observed.monotonic()
+            {
+                self.billing_observed
+            } else {
+                observed.observed
+            },
+        }
     }
 
-    /// The billing state to keep. A known incoming state wins; an `Unknown`
-    /// incoming state preserves a known stored one only while the observation it
-    /// came from is itself within the age ceiling, and otherwise falls back to
-    /// `Unknown`.
+    /// The billing state to keep. A known incoming state wins unless it is older
+    /// than the stored one; an `Unknown` incoming state preserves a known stored
+    /// one only while the observation it came from is itself within the age
+    /// ceiling, and otherwise falls back to `Unknown`.
     ///
     /// Aged rather than expired, because billing is reported alongside the
     /// windows and has no reset of its own. An unknown incoming state is a
     /// missing header, never evidence a seat became cheaper.
     fn merged_billing(&self, observed: &QuotaSnapshot) -> super::window::Billing {
         if observed.billing != super::window::Billing::Unknown {
+            if observed.observed.monotonic() < self.billing_observed.monotonic() {
+                return self.billing.clone();
+            }
             return observed.billing.clone();
         }
-        let within_ceiling = observed
-            .observed
-            .monotonic()
-            .checked_duration_since(self.billing_observed.monotonic())
-            .is_some_and(|age| age <= MAX_OBSERVATION_AGE);
-        if within_ceiling {
+        if Self::within_ceiling(&self.billing_observed, &observed.observed) {
             self.billing.clone()
         } else {
             super::window::Billing::Unknown
         }
+    }
+
+    /// Whether `now` is within the monotonic age ceiling of `observed`. False
+    /// when the two cannot be ordered, so an unorderable pair ages out rather
+    /// than reading as fresh.
+    fn within_ceiling(observed: &ObservationStamp, now: &ObservationStamp) -> bool {
+        now.monotonic()
+            .checked_duration_since(observed.monotonic())
+            .is_some_and(|age| age <= MAX_OBSERVATION_AGE)
     }
 
     /// This reading as a snapshot read at `now`, every window past its bounds
@@ -298,7 +331,17 @@ impl StoredReading {
             observed: self.latest,
             fast: self.fast.effective(now),
             slow: self.slow.effective(now),
-            billing: self.billing.clone(),
+            // Billing ages on the SAME ceiling as a window. It has no reset of
+            // its own, so without this a seat that reported overage and then
+            // went quiet would keep reporting overage forever while its windows
+            // correctly read Unknown -- a stale cost signal outliving the
+            // capacity signal it arrived beside, which is the direction that
+            // demotes a seat on evidence no longer in evidence.
+            billing: if Self::within_ceiling(&self.billing_observed, now) {
+                self.billing.clone()
+            } else {
+                super::window::Billing::Unknown
+            },
         }
     }
 }
@@ -346,10 +389,7 @@ impl QuotaStore {
         }
         let mut guard = self.seats.lock();
         let merged = match guard.get(key) {
-            Some(stored) => match stored.merged(&observed) {
-                Some(merged) => merged,
-                None => return false,
-            },
+            Some(stored) => stored.merged(&observed),
             None => StoredReading::first(observed),
         };
         guard.insert(key.clone(), merged);
