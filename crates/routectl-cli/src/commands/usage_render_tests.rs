@@ -1409,6 +1409,121 @@ fn render_detail_omits_near_lossless_attribution_line_when_no_recorder_rows() {
     );
 }
 
+// --- cache-breakpoint decision render tests ------------------------------
+
+/// Insert a row carrying the v16 cache-decision columns. All three are
+/// `Option` so the NULL (pre-v16) shape is exercisable.
+fn cache_decision_row(
+    db: &UsageDb,
+    request_id: &str,
+    front: Option<&str>,
+    terminal: Option<&str>,
+    epoch: Option<i64>,
+) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             cache_front_decision, cache_terminal_decision, prefix_epoch_event) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', 'm', 'paid', \
+             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, ?2, ?3, ?4)",
+            rusqlite::params![request_id, front, terminal, epoch],
+        )
+        .expect("insert cache-decision row");
+}
+
+#[test]
+fn render_detail_shows_cache_breakpoint_and_prefix_epoch_lines() {
+    // Arrange: one row emitted at both regions, one declined at the terminal
+    // region, and distinct epoch events so the breakdown is unambiguous.
+    let (_dir, _path, db) = temp_db();
+    cache_decision_row(
+        &db,
+        "c1",
+        Some("auto_emitted"),
+        Some("auto_emitted"),
+        Some(0),
+    );
+    cache_decision_row(
+        &db,
+        "c2",
+        Some("auto_emitted"),
+        Some("auto_skipped:breakpoint_cap"),
+        Some(1),
+    );
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: emitted-of-decided per region, and the classified epoch breakdown.
+    assert!(
+        out.contains("cache-breakpoints: front 2/2 emitted  |  terminal 1/2 emitted"),
+        "detail output must surface the per-region decision counts: {out}"
+    );
+    assert!(
+        out.contains("prefix-epoch: 2 classified, stable=1 rewritten=1 reseeded=0"),
+        "detail output must surface the prefix-epoch breakdown: {out}"
+    );
+}
+
+#[test]
+fn render_non_detail_omits_cache_breakpoint_line() {
+    // Arrange: decisions exist, but the default table must not surface them.
+    let (_dir, _path, db) = temp_db();
+    cache_decision_row(
+        &db,
+        "c1",
+        Some("auto_emitted"),
+        Some("auto_emitted"),
+        Some(0),
+    );
+    let report = report_all(&db, &cost_config(), None, false);
+
+    // Act + Assert
+    let out = render_report(&report);
+    assert!(
+        !out.contains("cache-breakpoints"),
+        "the default (non-detail) table must omit the cache-breakpoint line: {out}"
+    );
+}
+
+#[test]
+fn render_detail_omits_cache_breakpoint_line_when_every_row_predates_the_columns() {
+    // Arrange: a row shaped like pre-v16 history -- all three columns NULL. It
+    // must not be counted as a decline, so no block renders at all.
+    let (_dir, _path, db) = temp_db();
+    cache_decision_row(&db, "old", None, None, None);
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act + Assert
+    let out = render_report(&report);
+    assert!(
+        !out.contains("cache-breakpoints"),
+        "undecided rows must not render as declines: {out}"
+    );
+}
+
+#[test]
+fn render_detail_omits_the_prefix_epoch_line_when_no_epoch_was_classified() {
+    // Arrange: a decided row with no comparable prior prefix, so no epoch event.
+    let (_dir, _path, db) = temp_db();
+    cache_decision_row(&db, "c1", Some("auto_emitted"), Some("auto_emitted"), None);
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act + Assert: the region line renders, the epoch line does not.
+    let out = render_report(&report);
+    assert!(
+        out.contains("cache-breakpoints"),
+        "region line renders: {out}"
+    );
+    assert!(
+        !out.contains("prefix-epoch"),
+        "no classified epoch -> no epoch line: {out}"
+    );
+}
+
 // --- k-calibration render tests ------------------------------------------
 
 /// Insert a calibration row: a request with an optional `would_trim_k_floor`

@@ -56,7 +56,14 @@ listed at the bottom of each crate.
   dispatch-path auto-emitter); `mutable_suffix_start` (the cache-safe
   mutable-tail boundary -- the message index strictly after the last caller
   breakpoint; `None` when the whole request is frozen; consumed by the context
-  reducer)
+  reducer); `front_breakpoint_slot` -> `Option<FrontSlot>`
+  (`LastSystemBlock{block_index} | LastCustomTool{tool_index}`, carrying the
+  resolved index so the injector never re-derives the rule; prefers System
+  because a tools-slot marker can be dropped during assembly; the System
+  anchor is the last WIRE-ELIGIBLE block per `system_block_is_wire_eligible` /
+  `eligible_system_block_index`, falling back to tools when every block is
+  blank; `None` for a flat-string system with no custom tool -- never lifts
+  `Text -> Blocks`), whose slot is never a message-part position
 - `src/context_reduction.rs` -- lossless, cache-safe JSON-whitespace minifier
   over a request's mutable message tail: `minify_json_whitespace` (custom byte
   lexer dropping insignificant whitespace outside string literals; lossless,
@@ -1133,7 +1140,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `api_key_ref()` exposes the primary key ref, `None` for Bedrock, so the
   usage CLI can detect `oauth://` subscription providers; `cache_capability()`
   fails closed for anthropic-api on a non-default base URL, plus
-  `auto_emit_top_level_breakpoint()`); the cfg(`bedrock`) `BedrockMantleConfig
+  `auto_emit_top_level_breakpoint()` and the per-block front-marker trio
+  `auto_emit_per_block_breakpoints()` / `per_block_breakpoints_enabled()`
+  (operator intent; kind-level default: true only for default-base
+  anthropic-api) / `supports_per_block_breakpoints()` (wire capability:
+  anthropic-api and Bedrock Converse only -- placement requires BOTH, so an
+  opt-in on a kind whose egress drops per-block markers stays inert)); the
+  cfg(`bedrock`) `BedrockMantleConfig
   { region, creds }` sub-config is reused verbatim across the mantle lanes --
   `bedrock_mantle: Option<BedrockMantleConfig>` on `AnthropicApi`,
   `OpenaiCompat`, and `OpenaiResponses` (its presence selects the Bedrock
@@ -1427,7 +1440,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `codex_identity_warnings` flags a chatgpt-oauth openai-responses provider
   whose `header_extras` overrides `version` or `user-agent` with a value
   diverging from the derived codex identity (the override still WINS --
-  advisory only)
+  advisory only); `per_block_breakpoint_warnings` flags an
+  `auto_emit_per_block_breakpoints` key on any entry whose egress cannot carry
+  a per-block marker (`supports_per_block_breakpoints` false: Bedrock
+  `api_shape = "invoke"`, openai-compat, openai-responses, gemini), where the
+  knob is inert (advisory only, never a load error), naming the shape for a
+  Bedrock entry and the kind otherwise via `inert_per_block_surface`
 - `src/factory/installation_id.rs` -- (cfg `openai-responses`) read-or-create
   the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
   `resolve_installation_id` adopts an existing valid file
@@ -1801,12 +1819,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `DispatchMeta::for_alias`/`mark_target`; `DispatchMeta` carries the additive
   capability ride-alongs `learned_capabilities` / `capability_observations` /
   `cleared_capabilities` plus the `replay_degradation` reasoning-replay
-  degradation record read once by the per-request WARN, and `served_seat` --
+  degradation record read once by the per-request WARN, `prefix_epoch_event` --
+  the prefix-rewrite detector's per-request classification (0 stable / 1
+  rewritten / 2 reseeded, `None` for a first-seen session or a request with no
+  session key) -- and `served_seat` --
   the credential identity of the target that ACTUALLY served, copied by
   `mark_target` from `DispatchTarget.seat` and left `None` on the
-  forwarded-credential path). Construction + hot-reload lifecycle: `new`,
+  forwarded-credential path -- and the per-marker auto-cache decisions
+  `cache_front_decision` / `cache_terminal_decision` beside the legacy
+  aggregate `cache_strategy`, which now carries the TERMINAL marker's
+  token). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
+  `carry_over_prefix_epochs_from` /
   `carry_over_calibration_from` / `carry_over_quota_from` /
   `carry_over_learned_from` reload carries +
   `install_catalog_overlay` (the
@@ -1832,8 +1857,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `overlays`) and `ALIAS_MAX_RECURSION_DEPTH` (consumed by `chain`), and
   declares the per-concern submodules: `dispatch`, `class_observe`, `chain`,
   `overlays`, `feature_filter`, `capability_learn`, `capability_observe`,
-  `capability_cleared`, `cache_plan`, `runtime_gate`, `sticky`,
-  `count_tokens`, `status`, `replay_repair`, `window_gate`
+  `capability_cleared`, `cache_plan`, `prefix_rewrite`, `runtime_gate`,
+  `sticky`, `count_tokens`, `status`, `replay_repair`, `window_gate`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -1881,11 +1906,20 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   four `DispatchMeta.reduction_strings_compressed`/`_skipped`/`_rejected` +
   `reduction_bytes_saved` counters -- additive across fallback-entry
   preparations, never re-counted by a same-target retry) runs after
-  overlays and before the auto-cache injection call
-  `maybe_apply_auto_cache_control` (gated by
-  `cache_plan::AutoCacheRequestPlan`, mapping `cache_plan::CacheInjection` ->
-  `DispatchMeta.cache_strategy`); both run on `complete`/`stream` only, never
-  `count_tokens`. Forwarded-credential handling:
+  overlays and before the TRANSACTIONAL auto-cache placement helper
+  `apply_auto_cache_placement` -- shared by both dispatch surfaces, gated by
+  `cache_plan::AutoCacheRequestPlan` plus the per-target `cache_target_gates`
+  (`CacheTargetGates`: terminal capability + switch, front wire-support +
+  switch), applying the FRONT per-block marker
+  (`place_front_marker` at the plan's resolved `FrontSlot`) and the TERMINAL
+  top-level marker to ONE candidate clone, validating once, then committing or
+  discarding whole (`shared_skip_reason` / `cap_skip` / `rollback_skip` fold the
+  per-marker reasons) and mapping `cache_plan::CacheDecision` ->
+  `DispatchMeta.cache_strategy` / `cache_front_decision` /
+  `cache_terminal_decision`; both run on `complete`/`stream` only, never
+  `count_tokens`. The same above-the-loop position also hosts the
+  once-per-client-request `prefix_rewrite::Router::observe_prefix_epoch` call on
+  both paths. Forwarded-credential handling:
   `missing_forwarded_bearer_error` refuses a `use_forwarded_credential` target
   with no client bearer BEFORE egress, `resolve_reported_model` keeps the
   client's requested model verbatim, and `forwarded_terminal_status` +
@@ -2044,9 +2078,43 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   mirroring `CapabilityLearnEvent` / `CapabilityObserveEvent`
 - `src/router/cache_plan.rs` -- the pure-read auto-cache request plan:
   `AutoCacheRequestPlan` (per-request frozen-floor / volatile-veto /
-  global-switch gate, built once) and `CacheInjection` (variants -> stable
-  `strategy_str()` decision tokens). The injection CALL
-  (`maybe_apply_auto_cache_control`) stays in the dispatch module
+  global-switch gate plus the `front_slot: Option<FrontSlot>` anchor fact
+  from `front_breakpoint_slot`, built once), `CacheInjection` (variants ->
+  stable `strategy_str()` decision tokens, incl.
+  `auto_skipped:no_placement_region` for a front marker with no anchor) and
+  `CacheDecision { front, terminal }` (the per-marker outcome pair). The
+  placement CALL (`apply_auto_cache_placement`) stays in the dispatch
+  module
+- `src/router/prefix_rewrite.rs` -- the pure prefix-rewrite detector:
+  `fingerprint_prefix` (FNV-1a over system + tools + `messages[0..len-1]`,
+  newest turn EXCLUDED because it grows every turn by construction, reusing
+  `context_trim::fnv1a_hash`) plus `PrefixRewriteStore`, a bounded
+  4096-session LRU behind a `parking_lot::Mutex` keyed by the inbound session
+  key ALONE (not the K-estimator triple -- a fallback hop must not mint a
+  phantom epoch) storing `(prefix_len, fingerprint, epoch, compactions)`.
+  `observe` classifies a turn into `EpochEvent` {Stable=0, Rewritten=1,
+  Reseeded=2}: a grown-or-equal prefix recomputes the fingerprint over the
+  OLD region and reads equality as pure append / mismatch as an in-epoch
+  rewrite (reseed + epoch++), while a SHORTENED prefix is recognized by
+  length alone as the compaction shape (reseed + compaction count, never a
+  rewrite verdict). Its own type: `k_estimator::shadow::ShadowEntry` is NOT
+  widened. Structurally disjoint from `usage_capture::is_cache_thrash` -- this
+  module fingerprints bytes (cause) and never reads cache usage (symptom).
+  Also owns the dispatch-path wiring: `Router::observe_prefix_epoch` (called
+  ONCE per client request above each chain loop, so no per-target state reaches
+  the emission path and the detector can never influence marker bytes) stamps
+  `DispatchMeta.prefix_epoch_event` and, on a rewrite only, emits the
+  `cache_prefix_rewritten_in_epoch` WARN via `warn_prefix_rewritten`
+  (`PREFIX_REWRITE_EVENT`) -- salted session-key hash + prev/current lengths +
+  epoch, deduped per-process by the `Router.prefix_rewrite_warned` latch. A
+  request with no session key records no state and no WARN. The store's
+  classification fingerprint runs OUTSIDE the LRU mutex (it serializes a whole
+  request history) and the commit re-checks the baseline it compared against,
+  re-running when a concurrent observation advanced it.
+  `carry_over_prefix_epochs_from` SHARES both `Arc`s -- the store and the WARN
+  latch -- rather than copying entries, so an observation racing the router swap
+  is neither lost nor reclassified against a stale baseline, and
+  once-per-process holds literally across a reload
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `gate_check`, the
   `record_success`/`record_failure`/`record_failure_opened`/`park_provider`/`release_probe_slot`
@@ -2702,6 +2770,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   windows the usage channel dropped nothing in (service-side `dropped_full` /
   `dropped_disabled` / `write_errors` flat); a nonzero `strings_rejected`
   signals a minifier defect, not traffic headroom
+- `src/query/cache_decision.rs` -- cache-breakpoint decision read query over the
+  v16 columns; exports `cache_decision_summary` + `CacheDecisionSummary`
+  (per-region decided/emitted pair plus the `prefix_epoch_event` breakdown).
+  Each region reports a decided/emitted PAIR rather than a rate: `COUNT(col)`
+  skips NULLs, so pre-v16 rows are excluded from the denominator instead of
+  counting as declines. The `auto_emitted` token and the three `PREFIX_EPOCH_*`
+  values are BOUND parameters, so a renamed token or renumbered constant cannot
+  silently desync from the SQL
 - `src/query/calibration.rs` -- token-estimate calibration evidence read for
   the router's boot warm rebuild; exports `read_calibration_samples_since` +
   `CalibrationSampleRow`. Admission mirrors the live write row for row --
@@ -2848,7 +2924,28 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   set is deliberately a NEW column rather than a revival of the write-stopped
   v3 `reduction_strategy` (NULL there means write-stopped to existing readers),
   and the token estimate stays derived on read (`bytes / 4`), never persisted,
-  so there is one source of truth
+  so there is one source of truth. v16 (`SCHEMA_VERSION = 16`) appends the
+  nullable cache-breakpoint decision set -- `cache_front_decision TEXT` /
+  `cache_terminal_decision TEXT` (the per-region auto-cache injection decision
+  for the TERMINAL dispatch target, drawn from the SAME contract-frozen
+  vocabulary the `cache_auto_decision` log emits: `auto_emitted`,
+  `caller_supplied`, `volatile_vetoed`, `auto_skipped:global_disabled` /
+  `:provider_disabled` / `:no_capability` / `:breakpoint_cap` /
+  `:validation_rolled_back` / `:no_placement_region`; the two regions are
+  independent, so a front skip does not suppress a terminal emit) plus
+  `prefix_epoch_event INTEGER` (the prefix-rewrite detector's classification,
+  mirroring `would_trim_shadow_misfire`'s advisory shape: 0 = stable,
+  1 = rewritten, 2 = reseeded) -- via `migrate_v15_to_v16` (guarded `ALTER
+  TABLE requests ADD COLUMN ...` x3, one transaction with the version bump,
+  same append-last shape whether created fresh at v16 or migrated from v15; no
+  backfill). `prefix_epoch_event` is NULL whenever there was no comparable
+  prior prefix to classify against -- no session key, the session's first
+  turn, the first turn after a process restart, or the first turn after
+  eviction from the detector's bounded store -- so NULL is an absence of
+  evidence, never a measured `stable`. Deliberately NO per-marker OUTCOME
+  column: providers report cache-write tokens only in aggregate, so
+  per-breakpoint economic attribution would be fabricated; the economic
+  outcome stays with `cache_write_5m` / `cache_read`
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
@@ -2985,9 +3082,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   sidecars `activation_tests.rs` (activation-recompute + audit-event tests,
   run on the current-thread runtime for the capture subscriber) and
   `reload_tests.rs` (reload-pipeline + coordinator tests, incl. the structural
-  guard that BOTH carry-over blocks carry the per-seat quota readings -- a
-  one-site-only carry silently empties that store on the missed path, and an
-  empty store reads exactly as the cap-dormant fallback)
+  guards that BOTH carry-over blocks carry the per-seat quota readings and the
+  per-session prefix-epoch baselines -- a one-site-only carry silently empties
+  that store on the missed path, and an empty store reads exactly as health)
 - `src/server/config_load.rs` -- effective-config load/parse/validate,
   re-exported at `server::` paths from `mod.rs`. The shared config loader
   splits into `parse_config_only` (version + legacy-mitm preflight + typed
@@ -4189,7 +4286,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   block (per-decision histogram, summed raw counters, read-time-derived
   `bytes/4` token estimate) which renders NO ratio and NO cost figure and
   always carries the usage-channel drop-counter validity caveat, and which
-  flags a nonzero rejected count as a minifier defect rather than headroom. Both the per-group and the footer
+  flags a nonzero rejected count as a minifier defect rather than headroom, plus
+  `render_cache_decisions`: the cache-breakpoint block (per-region
+  emitted-of-decided counts and the prefix-epoch stable/rewritten/reseeded
+  breakdown), suppressed entirely on a window with no decision and no
+  classified epoch. Both the per-group and the footer
   cache-hit-rate flow through ONE shared denominator rule --
   `cache_prompt_den` (`input + cache_read_billed + cache_write_5m +
   cache_write_1h`, the cache-INCLUSIVE prompt total, summed only over rows

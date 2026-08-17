@@ -155,6 +155,7 @@ fn rpm1_router(provider: Arc<dyn Provider>) -> Router {
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,

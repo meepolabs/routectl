@@ -105,6 +105,7 @@ fn openai_compat_entry() -> ProviderEntry {
         user_agent: None,
         cache_capability: None,
         auto_emit_top_level_breakpoint: None,
+        auto_emit_per_block_breakpoints: None,
         reduction_enabled: None,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: None,

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // The registry tempo now flows through `LearnedCapabilityRegistry::
 // from_capability_config`; `Duration` survives only for the router test
 // sidecars that build durations and reach it through `use super::*`.
@@ -36,6 +36,7 @@ mod count_tokens;
 mod dispatch;
 mod feature_filter;
 mod overlays;
+mod prefix_rewrite;
 mod replay_repair;
 mod runtime_gate;
 mod status;
@@ -167,6 +168,24 @@ pub struct Router {
     /// treats the first turn after a reload as `FirstSeen`, which is the
     /// safe default (no false misfire on a fresh fingerprint after a reload).
     shadow_store: Arc<crate::k_estimator::ShadowStore>,
+    /// In-process prefix-epoch store for the prefix-rewrite detector, keyed by
+    /// the inbound session key ALONE (see `prefix_rewrite`): the question is
+    /// whether the CLIENT rewrote its own bytes, which does not vary by
+    /// dispatch target, so triple keying would mint a phantom epoch on every
+    /// fallback hop.
+    ///
+    /// MUST survive a hot-reload (see `carry_over_prefix_epochs_from`). A wiped
+    /// store treats every live session's next turn as first-seen, and a
+    /// first-seen turn emits no classification at all -- so the loss shows up
+    /// as an absence of findings, which is indistinguishable from healthy
+    /// traffic. Restart is the bounded false-negative window the detector
+    /// accepts; a reload must not widen it.
+    ///
+    /// Carried by SHARING the `Arc` rather than copying entries: a request that
+    /// started against the outgoing Router observes into the same store the
+    /// incoming one reads, so an observation landing during the swap is neither
+    /// lost nor double-counted.
+    prefix_epoch_store: Arc<prefix_rewrite::PrefixRewriteStore>,
     /// Per-lane token-estimate correction evidence, keyed by
     /// `(provider_kind, served nickname)`. Read at the context-window gate's
     /// decision point to correct the estimate it compares, written
@@ -263,6 +282,18 @@ pub struct Router {
     /// warn-only diagnostic. Reset on a Router rebuild (re-warns once after a
     /// hot-reload), benign like the `round_robin` reset.
     volatile_prefix_warned: Mutex<HashSet<(PrefixComponent, VolatileKind)>>,
+    /// Edge-trigger dedup for the `cache_prefix_rewritten_in_epoch` advisory
+    /// WARN. A single latch, not a keyed set: the detector has one component,
+    /// so the first in-epoch rewrite ANY session shows warns and later ones
+    /// stay silent. Per-PROCESS rather than per-session for the same reason as
+    /// `volatile_prefix_warned`, and the `prefix_epoch_event` ledger column
+    /// carries the suppressed volume.
+    ///
+    /// Shared across a hot-reload alongside `prefix_epoch_store` (see
+    /// `carry_over_prefix_epochs_from`), so once-per-process holds through a
+    /// reload -- a per-Router latch would re-warn on every config reload and
+    /// turn a one-shot diagnostic into a reload-frequency signal.
+    prefix_rewrite_warned: Arc<AtomicBool>,
 }
 
 /// Lock-free router-side observability counters.
@@ -776,7 +807,21 @@ pub struct DispatchMeta {
     /// `CacheInjection::strategy_str`). `None` when no target was
     /// dispatched (count_tokens, unknown alias, or all entries
     /// gate-blocked before any injection point ran).
+    ///
+    /// Carries the TERMINAL marker's decision, so its meaning is
+    /// unchanged from before per-marker placement existed. The granular
+    /// truth lives in `cache_front_decision` / `cache_terminal_decision`.
     pub cache_strategy: Option<&'static str>,
+    /// Stable decision token for the FRONT auto-cache marker (a system
+    /// block or a custom tool definition) on the served target, from the
+    /// same `CacheInjection::strategy_str` vocabulary as
+    /// `cache_strategy`. `None` when no target was dispatched.
+    pub cache_front_decision: Option<&'static str>,
+    /// Stable decision token for the TERMINAL auto-cache marker (the
+    /// top-level `cache_control` field) on the served target, from the
+    /// same `CacheInjection::strategy_str` vocabulary. `None` when no
+    /// target was dispatched.
+    pub cache_terminal_decision: Option<&'static str>,
     /// Stable context-reduction decision token for the served target
     /// (see `reduction_strategy_token`). `None` when no target was
     /// dispatched (count_tokens, unknown alias, or all entries
@@ -847,6 +892,18 @@ pub struct DispatchMeta {
     /// when no session key was present, or when no would-cut candidate was
     /// proposed. Recording only -- the dispatched bytes are NEVER mutated.
     pub would_trim_shadow_misfire: Option<i64>,
+    /// Non-mutating prefix-rewrite detector classification for this client
+    /// request: `Some(0)` when the client's canonical prefix was unchanged or
+    /// grew by pure append (Stable), `Some(1)` when the old region's bytes
+    /// changed inside the epoch (Rewritten -- the client broke its own cache
+    /// prefix), `Some(2)` when the prefix shortened (Reseeded, the compaction
+    /// shape -- deliberately NOT a rewrite). `None` for a first-seen session
+    /// (no baseline to classify against, including the first turn after a
+    /// process restart) and when the request carried no session key. Recording
+    /// only -- the dispatched bytes are NEVER mutated, and the detector runs
+    /// once per client request above the chain loop so it adds no per-target
+    /// state.
+    pub prefix_epoch_event: Option<i64>,
     /// Non-mutating near-lossless attribution: freed tokens attributed to
     /// the dedup heuristic over the near-lossless scan window. `Some(0)` is
     /// a measured zero (the pass ran, found no exact-byte duplicates);
@@ -987,6 +1044,8 @@ impl DispatchMeta {
             served_seat: None,
             resolved_alias: alias.to_string(),
             cache_strategy: None,
+            cache_front_decision: None,
+            cache_terminal_decision: None,
             reduction_strategy: None,
             reduction_strings_compressed: None,
             reduction_strings_skipped: None,
@@ -997,6 +1056,7 @@ impl DispatchMeta {
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
             would_trim_shadow_misfire: None,
+            prefix_epoch_event: None,
             would_trim_dedup_tokens: None,
             would_trim_supersession_tokens: None,
             would_trim_path_units: None,
@@ -1275,6 +1335,7 @@ impl Router {
             crate::k_estimator::LedgerBackedK::new(k_session_store.clone()),
         );
         let shadow_store = Arc::new(crate::k_estimator::ShadowStore::default());
+        let prefix_epoch_store = Arc::new(prefix_rewrite::PrefixRewriteStore::new());
         let calibration_store = Arc::new(crate::calibration::CalibrationStore::default());
         let quota_store = Arc::new(crate::quota::store::QuotaStore::default());
         // Registry tempo comes from the `[capability]` knobs (hours ->
@@ -1305,6 +1366,7 @@ impl Router {
             k_session_store,
             k_estimator,
             shadow_store,
+            prefix_epoch_store,
             calibration_store,
             quota_store,
             learned_capabilities,
@@ -1316,6 +1378,7 @@ impl Router {
             metrics: RouterMetrics::default(),
             has_forwarded_provider,
             volatile_prefix_warned: Mutex::new(HashSet::new()),
+            prefix_rewrite_warned: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1483,6 +1546,31 @@ impl Router {
     pub fn carry_over_k_store_from(&mut self, previous: &Self) {
         self.k_session_store
             .import_entries(previous.k_session_store.export_entries());
+    }
+
+    /// Carry the previous Router's prefix-epoch detector state into this
+    /// freshly-built Router during a hot-reload.
+    ///
+    /// Mandatory, and the same silent-collapse shape as
+    /// `carry_over_k_store_from`: an emptied store makes every live session's
+    /// next turn first-seen, and a first-seen turn is deliberately
+    /// unclassified -- no event code, no WARN. So a dropped store does not
+    /// error and does not warn; the detector simply stops finding anything
+    /// until each session has taken two more turns, which reads exactly like
+    /// healthy traffic. A process restart accepts that window (bounded
+    /// false-negative, never a false positive); a config reload must not.
+    ///
+    /// Carried by SHARING the `Arc`s rather than copying entries -- both the
+    /// store and the WARN latch. Sharing rather than snapshotting is what makes
+    /// the carry-over safe against in-flight requests: a request that read the
+    /// outgoing Router observes into the same store the incoming one reads, so
+    /// an observation racing the swap is neither lost nor re-classified against
+    /// a stale baseline. Sharing the latch is what keeps the WARN
+    /// once-per-PROCESS: a fresh latch would re-warn on every reload, making
+    /// the line's frequency track reloads rather than rewrites.
+    pub fn carry_over_prefix_epochs_from(&mut self, previous: &Self) {
+        self.prefix_epoch_store = Arc::clone(&previous.prefix_epoch_store);
+        self.prefix_rewrite_warned = Arc::clone(&previous.prefix_rewrite_warned);
     }
 
     /// Carry the previous Router's per-lane token-estimate correction
@@ -1843,3 +1931,7 @@ mod quota_feed_dispatch_tests;
 #[cfg(test)]
 #[path = "quota_placement_dispatch_tests.rs"]
 mod quota_placement_dispatch_tests;
+
+#[cfg(test)]
+#[path = "prefix_rewrite_dispatch_tests.rs"]
+mod prefix_rewrite_dispatch_tests;

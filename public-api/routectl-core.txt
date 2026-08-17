@@ -49,6 +49,53 @@ impl<T> core::convert::From<T> for routectl_core::cache_control::BreakpointPosit
 pub fn routectl_core::cache_control::BreakpointPosition::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::cache_control::BreakpointPosition
 impl<T> tracing::instrument::WithSubscriber for routectl_core::cache_control::BreakpointPosition
+pub enum routectl_core::cache_control::FrontSlot
+pub routectl_core::cache_control::FrontSlot::LastCustomTool
+pub routectl_core::cache_control::FrontSlot::LastCustomTool::tool_index: usize
+pub routectl_core::cache_control::FrontSlot::LastSystemBlock
+pub routectl_core::cache_control::FrontSlot::LastSystemBlock::block_index: usize
+impl routectl_core::cache_control::FrontSlot
+pub const fn routectl_core::cache_control::FrontSlot::position(self) -> routectl_core::cache_control::BreakpointPosition
+impl core::clone::Clone for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::clone(&self) -> routectl_core::cache_control::FrontSlot
+impl core::cmp::Eq for routectl_core::cache_control::FrontSlot
+impl core::cmp::PartialEq for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::eq(&self, &routectl_core::cache_control::FrontSlot) -> bool
+impl core::fmt::Debug for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::cache_control::FrontSlot
+impl core::marker::StructuralPartialEq for routectl_core::cache_control::FrontSlot
+impl core::marker::Freeze for routectl_core::cache_control::FrontSlot
+impl core::marker::Send for routectl_core::cache_control::FrontSlot
+impl core::marker::Sync for routectl_core::cache_control::FrontSlot
+impl core::marker::Unpin for routectl_core::cache_control::FrontSlot
+impl core::marker::UnsafeUnpin for routectl_core::cache_control::FrontSlot
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::cache_control::FrontSlot
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::cache_control::FrontSlot
+impl<T, U> core::convert::Into<U> for routectl_core::cache_control::FrontSlot where U: core::convert::From<T>
+pub fn routectl_core::cache_control::FrontSlot::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::cache_control::FrontSlot where U: core::convert::Into<T>
+pub type routectl_core::cache_control::FrontSlot::Error = core::convert::Infallible
+pub fn routectl_core::cache_control::FrontSlot::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::cache_control::FrontSlot where U: core::convert::TryFrom<T>
+pub type routectl_core::cache_control::FrontSlot::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::cache_control::FrontSlot::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::cache_control::FrontSlot where T: core::clone::Clone
+pub type routectl_core::cache_control::FrontSlot::Owned = T
+pub fn routectl_core::cache_control::FrontSlot::clone_into(&self, &mut T)
+pub fn routectl_core::cache_control::FrontSlot::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::cache_control::FrontSlot where T: 'static + ?core::marker::Sized
+pub fn routectl_core::cache_control::FrontSlot::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::cache_control::FrontSlot where T: ?core::marker::Sized
+pub fn routectl_core::cache_control::FrontSlot::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::cache_control::FrontSlot where T: ?core::marker::Sized
+pub fn routectl_core::cache_control::FrontSlot::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::cache_control::FrontSlot where T: core::clone::Clone
+pub unsafe fn routectl_core::cache_control::FrontSlot::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::cache_control::FrontSlot
+impl<T> tracing::instrument::WithSubscriber for routectl_core::cache_control::FrontSlot
 pub struct routectl_core::cache_control::Breakpoint<'a>
 pub routectl_core::cache_control::Breakpoint::control: &'a routectl_core::cache_control::CacheControl
 pub routectl_core::cache_control::Breakpoint::position: routectl_core::cache_control::BreakpointPosition
@@ -204,7 +251,10 @@ pub fn routectl_core::cache_control::CacheBreakpointSource::cache_breakpoints(&s
 impl routectl_core::cache_control::CacheBreakpointSource for routectl_core::schema::ChatRequest
 pub fn routectl_core::schema::ChatRequest::cache_breakpoints(&self) -> alloc::vec::Vec<routectl_core::cache_control::OwnedBreakpoint>
 pub fn routectl_core::cache_control::compute_frozen_floor(&routectl_core::schema::ChatRequest) -> routectl_core::cache_control::FrozenFloor
+pub fn routectl_core::cache_control::eligible_system_block_index(&routectl_core::system_content::SystemContent) -> core::option::Option<usize>
+pub fn routectl_core::cache_control::front_breakpoint_slot(&routectl_core::schema::ChatRequest) -> core::option::Option<routectl_core::cache_control::FrontSlot>
 pub fn routectl_core::cache_control::mutable_suffix_start(&routectl_core::schema::ChatRequest) -> core::option::Option<usize>
+pub fn routectl_core::cache_control::system_block_is_wire_eligible(&routectl_core::system_content::SystemBlock) -> bool
 pub fn routectl_core::cache_control::validate(&[routectl_core::cache_control::Breakpoint<'_>]) -> routectl_core::error::Result<()>
 pub fn routectl_core::cache_control::validate_source<S: routectl_core::cache_control::CacheBreakpointSource>(&S) -> routectl_core::error::Result<()>
 pub mod routectl_core::capability
@@ -545,7 +595,7 @@ pub mod routectl_core::context_reduction
 #[non_exhaustive] pub enum routectl_core::context_reduction::ReductionOutcome
 pub routectl_core::context_reduction::ReductionOutcome::Applied(routectl_core::context_reduction::ReductionDelta)
 pub routectl_core::context_reduction::ReductionOutcome::NoMutableTail
-pub routectl_core::context_reduction::ReductionOutcome::NothingToStrip
+pub routectl_core::context_reduction::ReductionOutcome::NothingToStrip(routectl_core::context_reduction::ReductionDelta)
 impl core::clone::Clone for routectl_core::context_reduction::ReductionOutcome
 pub fn routectl_core::context_reduction::ReductionOutcome::clone(&self) -> routectl_core::context_reduction::ReductionOutcome
 impl core::cmp::Eq for routectl_core::context_reduction::ReductionOutcome
@@ -589,6 +639,8 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::context_reduction
 pub routectl_core::context_reduction::ReductionDelta::bytes_saved: usize
 pub routectl_core::context_reduction::ReductionDelta::est_tokens_saved: usize
 pub routectl_core::context_reduction::ReductionDelta::strings_minified: usize
+pub routectl_core::context_reduction::ReductionDelta::strings_rejected: usize
+pub routectl_core::context_reduction::ReductionDelta::strings_skipped: usize
 impl core::clone::Clone for routectl_core::context_reduction::ReductionDelta
 pub fn routectl_core::context_reduction::ReductionDelta::clone(&self) -> routectl_core::context_reduction::ReductionDelta
 impl core::cmp::Eq for routectl_core::context_reduction::ReductionDelta
@@ -2929,6 +2981,53 @@ impl<T> core::convert::From<T> for routectl_core::capability::FailurePhase
 pub fn routectl_core::capability::FailurePhase::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_core::capability::FailurePhase
 impl<T> tracing::instrument::WithSubscriber for routectl_core::capability::FailurePhase
+pub enum routectl_core::FrontSlot
+pub routectl_core::FrontSlot::LastCustomTool
+pub routectl_core::FrontSlot::LastCustomTool::tool_index: usize
+pub routectl_core::FrontSlot::LastSystemBlock
+pub routectl_core::FrontSlot::LastSystemBlock::block_index: usize
+impl routectl_core::cache_control::FrontSlot
+pub const fn routectl_core::cache_control::FrontSlot::position(self) -> routectl_core::cache_control::BreakpointPosition
+impl core::clone::Clone for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::clone(&self) -> routectl_core::cache_control::FrontSlot
+impl core::cmp::Eq for routectl_core::cache_control::FrontSlot
+impl core::cmp::PartialEq for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::eq(&self, &routectl_core::cache_control::FrontSlot) -> bool
+impl core::fmt::Debug for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_core::cache_control::FrontSlot
+impl core::marker::StructuralPartialEq for routectl_core::cache_control::FrontSlot
+impl core::marker::Freeze for routectl_core::cache_control::FrontSlot
+impl core::marker::Send for routectl_core::cache_control::FrontSlot
+impl core::marker::Sync for routectl_core::cache_control::FrontSlot
+impl core::marker::Unpin for routectl_core::cache_control::FrontSlot
+impl core::marker::UnsafeUnpin for routectl_core::cache_control::FrontSlot
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_core::cache_control::FrontSlot
+impl core::panic::unwind_safe::UnwindSafe for routectl_core::cache_control::FrontSlot
+impl<T, U> core::convert::Into<U> for routectl_core::cache_control::FrontSlot where U: core::convert::From<T>
+pub fn routectl_core::cache_control::FrontSlot::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_core::cache_control::FrontSlot where U: core::convert::Into<T>
+pub type routectl_core::cache_control::FrontSlot::Error = core::convert::Infallible
+pub fn routectl_core::cache_control::FrontSlot::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_core::cache_control::FrontSlot where U: core::convert::TryFrom<T>
+pub type routectl_core::cache_control::FrontSlot::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_core::cache_control::FrontSlot::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_core::cache_control::FrontSlot where T: core::clone::Clone
+pub type routectl_core::cache_control::FrontSlot::Owned = T
+pub fn routectl_core::cache_control::FrontSlot::clone_into(&self, &mut T)
+pub fn routectl_core::cache_control::FrontSlot::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_core::cache_control::FrontSlot where T: 'static + ?core::marker::Sized
+pub fn routectl_core::cache_control::FrontSlot::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_core::cache_control::FrontSlot where T: ?core::marker::Sized
+pub fn routectl_core::cache_control::FrontSlot::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_core::cache_control::FrontSlot where T: ?core::marker::Sized
+pub fn routectl_core::cache_control::FrontSlot::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_core::cache_control::FrontSlot where T: core::clone::Clone
+pub unsafe fn routectl_core::cache_control::FrontSlot::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_core::cache_control::FrontSlot
+pub fn routectl_core::cache_control::FrontSlot::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_core::cache_control::FrontSlot
+impl<T> tracing::instrument::WithSubscriber for routectl_core::cache_control::FrontSlot
 pub enum routectl_core::KnownContentPart
 pub routectl_core::KnownContentPart::Document
 pub routectl_core::KnownContentPart::Document::cache_control: core::option::Option<routectl_core::cache_control::CacheControl>
@@ -3240,7 +3339,7 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Reasoning
 #[non_exhaustive] pub enum routectl_core::ReductionOutcome
 pub routectl_core::ReductionOutcome::Applied(routectl_core::context_reduction::ReductionDelta)
 pub routectl_core::ReductionOutcome::NoMutableTail
-pub routectl_core::ReductionOutcome::NothingToStrip
+pub routectl_core::ReductionOutcome::NothingToStrip(routectl_core::context_reduction::ReductionDelta)
 impl core::clone::Clone for routectl_core::context_reduction::ReductionOutcome
 pub fn routectl_core::context_reduction::ReductionOutcome::clone(&self) -> routectl_core::context_reduction::ReductionOutcome
 impl core::cmp::Eq for routectl_core::context_reduction::ReductionOutcome
@@ -4740,6 +4839,8 @@ impl<T> tracing::instrument::WithSubscriber for routectl_core::schema::Reasoning
 pub routectl_core::ReductionDelta::bytes_saved: usize
 pub routectl_core::ReductionDelta::est_tokens_saved: usize
 pub routectl_core::ReductionDelta::strings_minified: usize
+pub routectl_core::ReductionDelta::strings_rejected: usize
+pub routectl_core::ReductionDelta::strings_skipped: usize
 impl core::clone::Clone for routectl_core::context_reduction::ReductionDelta
 pub fn routectl_core::context_reduction::ReductionDelta::clone(&self) -> routectl_core::context_reduction::ReductionDelta
 impl core::cmp::Eq for routectl_core::context_reduction::ReductionDelta
@@ -5338,7 +5439,9 @@ pub fn routectl_core::StaticToken::token<'life0, 'async_trait>(&'life0 self) -> 
 pub fn routectl_core::apply_json_minify(&mut routectl_core::schema::ChatRequest) -> routectl_core::context_reduction::ReductionOutcome
 pub fn routectl_core::compute_frozen_floor(&routectl_core::schema::ChatRequest) -> routectl_core::cache_control::FrozenFloor
 pub fn routectl_core::debug_upstream_error_body(&str, &str, u16, &str)
+pub fn routectl_core::eligible_system_block_index(&routectl_core::system_content::SystemContent) -> core::option::Option<usize>
 pub fn routectl_core::extract_upstream_message(&str) -> alloc::string::String
+pub fn routectl_core::front_breakpoint_slot(&routectl_core::schema::ChatRequest) -> core::option::Option<routectl_core::cache_control::FrontSlot>
 pub fn routectl_core::header_trace_enabled() -> bool
 pub fn routectl_core::headers_to_json<'a>(impl core::iter::traits::collect::IntoIterator<Item = (&'a str, &'a [u8])>) -> serde_json::value::Value
 pub fn routectl_core::init_log_overrides(core::option::Option<bool>, core::option::Option<usize>, core::option::Option<bool>)
@@ -5360,6 +5463,7 @@ pub fn routectl_core::sanitize_upstream_body_with_cap(&str, usize) -> alloc::str
 pub fn routectl_core::scan_caller_prefix_advisory(&routectl_core::schema::ChatRequest) -> routectl_core::CallerPrefixAdvisory
 pub fn routectl_core::scan_volatile(&routectl_core::schema::ChatRequest) -> routectl_core::VolatileReport
 pub fn routectl_core::scheme_of(core::option::Option<&str>) -> routectl_core::reasoning_format::ReplayScheme
+pub fn routectl_core::system_block_is_wire_eligible(&routectl_core::system_content::SystemBlock) -> bool
 pub fn routectl_core::trace_body_cap() -> usize
 pub fn routectl_core::trace_egress_body(&str, &serde_json::value::Value)
 pub fn routectl_core::trace_egress_headers(&str, &serde_json::value::Value)

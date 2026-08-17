@@ -87,6 +87,18 @@ impl TryFrom<&str> for Outcome {
     }
 }
 
+/// `prefix_epoch_event` value: the cacheable prefix was byte-identical to the
+/// prior turn's, so the upstream cache entry stayed usable.
+pub const PREFIX_EPOCH_STABLE: i64 = 0;
+
+/// `prefix_epoch_event` value: the cacheable prefix shifted turn-to-turn, so
+/// the upstream cache entry was invalidated.
+pub const PREFIX_EPOCH_REWRITTEN: i64 = 1;
+
+/// `prefix_epoch_event` value: a new prefix epoch was seeded for the session
+/// (no comparable prior prefix, or the stored one was deliberately replaced).
+pub const PREFIX_EPOCH_RESEEDED: i64 = 2;
+
 /// One persisted usage-accounting row. One field per capture column.
 ///
 /// Timestamps are epoch-millis UTC (`i64`). JSON-text columns are
@@ -291,6 +303,27 @@ pub struct UsageRecord {
     /// than persisted, so this column stays the single source of truth. Same
     /// aggregation rule as `reduction_strings_compressed`.
     pub reduction_bytes_saved: Option<u64>,
+    /// Cache-injection decision token for the FRONT placement region, drawn
+    /// from the contract-frozen `cache_auto_decision` log vocabulary
+    /// (`auto_emitted`, `caller_supplied`, `volatile_vetoed`, and the
+    /// `auto_skipped:*` reasons) -- one vocabulary across log and ledger.
+    /// `None` when no target was dispatched and on rows written before this
+    /// column existed.
+    ///
+    /// This is NOT the write-stopped legacy `strategy` DB column: on that one,
+    /// NULL means write-stopped.
+    pub cache_front_decision: Option<String>,
+    /// Cache-injection decision token for the TERMINAL placement region, same
+    /// vocabulary and same `None` semantics as `cache_front_decision`. Kept as
+    /// its own column because one token cannot express two regions.
+    pub cache_terminal_decision: Option<String>,
+    /// Prefix-rewrite epoch event for this request's session:
+    /// [`PREFIX_EPOCH_STABLE`] (the cacheable prefix was byte-identical to the
+    /// prior turn's), [`PREFIX_EPOCH_REWRITTEN`] (it shifted), or
+    /// [`PREFIX_EPOCH_RESEEDED`] (a new epoch was seeded). `None` when no
+    /// session key was present, so no epoch could be keyed. An INTEGER fact,
+    /// deliberately not a token -- same shape as `would_trim_shadow_misfire`.
+    pub prefix_epoch_event: Option<i64>,
 
     // TIMING
     /// End-to-end request latency, milliseconds.
@@ -461,6 +494,9 @@ mod tests {
             reduction_strings_skipped: Some(2),
             reduction_strings_rejected: Some(1),
             reduction_bytes_saved: Some(512),
+            cache_front_decision: Some("auto_emitted".to_string()),
+            cache_terminal_decision: Some("auto_skipped:breakpoint_cap".to_string()),
+            prefix_epoch_event: Some(1),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -533,6 +569,9 @@ mod tests {
             reduction_strings_skipped: None,
             reduction_strings_rejected: None,
             reduction_bytes_saved: None,
+            cache_front_decision: None,
+            cache_terminal_decision: None,
+            prefix_epoch_event: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

@@ -13,7 +13,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -247,7 +247,40 @@ CREATE TABLE IF NOT EXISTS requests (
     reduction_strings_compressed INTEGER,
     reduction_strings_skipped INTEGER,
     reduction_strings_rejected INTEGER,
-    reduction_bytes_saved INTEGER
+    reduction_bytes_saved INTEGER,
+
+    -- CACHE-BREAKPOINT DECISIONS (v16): the per-request cache-injection
+    -- decision at each of the two placement regions, plus the prefix-rewrite
+    -- epoch event. `cache_front_decision` / `cache_terminal_decision` carry the
+    -- SAME token vocabulary the `cache_auto_decision` log emits
+    -- (`auto_emitted`, `caller_supplied`, `volatile_vetoed`,
+    -- `auto_skipped:global_disabled`, `auto_skipped:provider_disabled`,
+    -- `auto_skipped:no_capability`, `auto_skipped:breakpoint_cap`,
+    -- `auto_skipped:validation_rolled_back`, `auto_skipped:no_placement_region`)
+    -- -- one contract-frozen vocabulary across log and ledger, never the
+    -- write-stopped v1 `strategy` column above.
+    --
+    -- `prefix_epoch_event` is an INTEGER fact mirroring
+    -- `would_trim_shadow_misfire`'s shape: 0 = stable (the cacheable prefix was
+    -- byte-identical to the prior turn's), 1 = rewritten (the prefix shifted),
+    -- 2 = reseeded (a new epoch was seeded for the session). NULL whenever there
+    -- was no comparable prior prefix to classify against: no session key, the
+    -- session's first turn, the first turn after a process restart, or the first
+    -- turn after the session was evicted from the detector's bounded store.
+    -- NULL is therefore an ABSENCE of evidence, never a measured `stable`.
+    --
+    -- There is deliberately NO per-marker OUTCOME column: providers report
+    -- cache-write tokens only in aggregate, so per-breakpoint economic
+    -- attribution would be fabricated. The economic outcome stays with
+    -- `cache_write_5m` / `cache_read`.
+    --
+    -- Appended last so these columns land in the same ordinal position
+    -- whether the DB was created fresh at v16 or migrated from v15 via
+    -- `ALTER TABLE ... ADD COLUMN` (which always appends). No backfill --
+    -- older rows stay NULL.
+    cache_front_decision TEXT,
+    cache_terminal_decision TEXT,
+    prefix_epoch_event INTEGER
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

@@ -10,7 +10,10 @@
 //! dimensions (input / cache_read / cache_write_*) do not double-count
 //! cached tokens. Both capture sites (`observe_response`,
 //! `observe_chunk`) must agree, and the None-vs-Some(0) contract must
-//! survive the subtraction.
+//! survive the subtraction. The cache-decision columns additionally carry
+//! one END-TO-END test that dispatches through a real Router, so the
+//! persisted tokens are pinned to what the router decided rather than to a
+//! hand-built meta.
 
 use super::*;
 use routectl_core::schema::CacheCreation;
@@ -1794,6 +1797,400 @@ async fn streaming_reduction_observation_matches_the_completion_path() {
             Some(2),
             Some(4_096)
         )
+    );
+}
+
+// -------- observe_meta: cache-placement decisions + prefix epoch ----------
+//
+// The two per-marker decision tokens and the prefix-epoch code ride the
+// dispatch meta and land in their own typed ledger columns. Like the
+// reduction columns above they carry a closed-set token and an INTEGER
+// fact only -- never payload bytes.
+
+/// The persisted cache-decision columns of the `calib-row` request, in
+/// schema order: front decision, terminal decision, prefix epoch event.
+type PersistedCacheDecision = (Option<String>, Option<String>, Option<i64>);
+
+fn persisted_cache_decision(path: &std::path::Path) -> PersistedCacheDecision {
+    let conn = rusqlite::Connection::open(path).expect("read open");
+    conn.query_row(
+        "SELECT cache_front_decision, cache_terminal_decision, \
+         prefix_epoch_event FROM requests WHERE request_id='calib-row'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .expect("row")
+}
+
+/// A router-built meta carrying both marker decisions and an epoch code.
+async fn meta_with_cache_decisions() -> routectl_router::DispatchMeta {
+    let mut meta = any_dispatch_meta().await;
+    meta.cache_front_decision = Some("auto_emitted");
+    meta.cache_terminal_decision = Some("auto_emitted");
+    meta.prefix_epoch_event = Some(routectl_usage::PREFIX_EPOCH_REWRITTEN);
+    meta
+}
+
+#[test]
+fn draft_leaves_every_cache_decision_column_null() {
+    // Arrange / Act: a pre-dispatch draft, before any observe_meta.
+    let (cap, _w, _dir) = capture();
+
+    // Assert: NULL rather than a fabricated token -- a row that never
+    // dispatched made no placement decision.
+    assert_eq!(cap.record.cache_front_decision, None);
+    assert_eq!(cap.record.cache_terminal_decision, None);
+    assert_eq!(cap.record.prefix_epoch_event, None);
+}
+
+#[tokio::test]
+async fn observe_meta_copies_both_decision_tokens_and_the_epoch_code() {
+    // Arrange: a front marker that found no region, a terminal marker that
+    // emitted -- the independent-skip shape.
+    let mut meta = meta_with_cache_decisions().await;
+    meta.cache_front_decision = Some("auto_skipped:no_placement_region");
+    meta.prefix_epoch_event = Some(routectl_usage::PREFIX_EPOCH_STABLE);
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+
+    // Assert: tokens copied verbatim, epoch code preserved.
+    assert_eq!(
+        cap.record.cache_front_decision.as_deref(),
+        Some("auto_skipped:no_placement_region")
+    );
+    assert_eq!(
+        cap.record.cache_terminal_decision.as_deref(),
+        Some("auto_emitted")
+    );
+    assert_eq!(
+        cap.record.prefix_epoch_event,
+        Some(routectl_usage::PREFIX_EPOCH_STABLE)
+    );
+}
+
+#[tokio::test]
+async fn observe_meta_leaves_cache_decision_columns_null_when_placement_never_ran() {
+    // Arrange: the shape a count_tokens / unknown-alias / all-gate-blocked
+    // dispatch leaves -- no placement step, no session key for the detector.
+    let mut meta = any_dispatch_meta().await;
+    meta.cache_front_decision = None;
+    meta.cache_terminal_decision = None;
+    meta.prefix_epoch_event = None;
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+
+    // Assert: absence stays absence -- never coerced to a token or 0.
+    assert_eq!(cap.record.cache_front_decision, None);
+    assert_eq!(cap.record.cache_terminal_decision, None);
+    assert_eq!(cap.record.prefix_epoch_event, None);
+}
+
+#[tokio::test]
+async fn cache_decisions_round_trip_on_the_success_path() {
+    // Arrange
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let meta = meta_with_cache_decisions().await;
+    let resp = response_with_cache(Some(1000), Some(600), Some(300), None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(
+        persisted_cache_decision(&path),
+        (
+            Some("auto_emitted".to_string()),
+            Some("auto_emitted".to_string()),
+            Some(routectl_usage::PREFIX_EPOCH_REWRITTEN)
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_skipped_front_marker_persists_its_token_rather_than_null() {
+    // Arrange: flat-string system, no typed tool -- the accepted coverage
+    // gap whose SIZE this column exists to measure, so it must be a token.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let mut meta = meta_with_cache_decisions().await;
+    meta.cache_front_decision = Some("auto_skipped:no_placement_region");
+    meta.prefix_epoch_event = Some(routectl_usage::PREFIX_EPOCH_RESEEDED);
+    let resp = response_with_cache(Some(1000), Some(600), Some(300), None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(
+        persisted_cache_decision(&path),
+        (
+            Some("auto_skipped:no_placement_region".to_string()),
+            Some("auto_emitted".to_string()),
+            Some(routectl_usage::PREFIX_EPOCH_RESEEDED)
+        )
+    );
+}
+
+#[tokio::test]
+async fn cache_decisions_round_trip_on_the_all_failed_path() {
+    // Arrange: placement ran during the chain walk, then every fallback
+    // entry failed -- the decision is still what the dispatch measured.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let mut meta = meta_with_cache_decisions().await;
+    meta.cache_terminal_decision = Some("auto_skipped:validation_rolled_back");
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_error(&Error::upstream("p", 503, ""));
+    cap.finalize(Outcome::UpstreamError);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(
+        persisted_cache_decision(&path),
+        (
+            Some("auto_emitted".to_string()),
+            Some("auto_skipped:validation_rolled_back".to_string()),
+            Some(routectl_usage::PREFIX_EPOCH_REWRITTEN)
+        )
+    );
+}
+
+#[tokio::test]
+async fn streaming_cache_decision_observation_matches_the_completion_path() {
+    // Arrange: the same meta, observed over a stream instead of a response.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let meta = meta_with_cache_decisions().await;
+    let chunk = chunk_with_cache(Some(1000), Some(600), Some(300), None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_chunk(&chunk);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: parity with the completion path -- the observation comes from
+    // the dispatch meta, so the egress shape cannot perturb it.
+    assert_eq!(
+        persisted_cache_decision(&path),
+        (
+            Some("auto_emitted".to_string()),
+            Some("auto_emitted".to_string()),
+            Some(routectl_usage::PREFIX_EPOCH_REWRITTEN)
+        )
+    );
+}
+
+/// A `Provider` that serves every request with a fixed usage-bearing
+/// response. Only the ROUTER's decisions are under test here, so the double
+/// does not need to inspect what it was handed.
+struct ServingProvider;
+
+#[async_trait::async_trait]
+impl routectl_core::Provider for ServingProvider {
+    fn id(&self) -> &'static str {
+        "serving"
+    }
+    fn normalize_request(
+        &self,
+        _: &routectl_core::ChatRequest,
+    ) -> Result<serde_json::Value, Error> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse, Error> {
+        Err(Error::normalize_response("serving", "unused"))
+    }
+    async fn complete(&self, req: routectl_core::ChatRequest) -> Result<ChatResponse, Error> {
+        Ok(ChatResponse {
+            id: "ok".into(),
+            model: req.model,
+            created: 0,
+            choices: vec![Choice {
+                logprobs: None,
+                index: 0,
+                message: Message {
+                    refusal: None,
+                    role: Role::Assistant,
+                    content: MessageContent::Text("ok".into()),
+                    reasoning: None,
+                    reasoning_details: Vec::new(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+                matched_stop_sequence: None,
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                total_tokens: 1050,
+                cache_read_input_tokens: Some(600),
+                cache_creation_input_tokens: Some(300),
+                ..Default::default()
+            }),
+            routectl_provider: None,
+            extras: Default::default(),
+            upstream_meta: None,
+        })
+    }
+    async fn stream(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> Result<futures::stream::BoxStream<'static, Result<ChatChunk, Error>>, Error> {
+        Err(Error::upstream("serving", 501, "unused"))
+    }
+}
+
+/// A router over ONE anthropic-api target, which is the kind whose egress
+/// carries both the per-block front marker and the top-level terminal marker --
+/// so a clean request actually emits at both regions rather than recording a
+/// capability skip.
+fn capable_anthropic_router() -> routectl_router::Router {
+    use routectl_router::{AliasValue, Config, ProviderEntry, ResolvedModel, Router};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let mut providers = BTreeMap::new();
+    providers.insert("p".to_string(), ProviderEntry::anthropic_api("literal:k"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        ..Default::default()
+    });
+
+    let mut router = Router::new(config);
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "m".to_string(),
+        Arc::new(ResolvedModel::new(
+            "m",
+            "p",
+            Arc::new(ServingProvider),
+            "upstream-model",
+        )),
+    );
+    router.install_resolved_models(models);
+    router
+}
+
+/// A request on the shared session key, carrying `history` as its messages. The
+/// system prompt is a BLOCK list so the front marker has a placement anchor,
+/// and is byte-identical across turns so any prefix change is attributable to
+/// the message history alone.
+fn session_req(history: &[&str]) -> routectl_core::ChatRequest {
+    use routectl_core::{SystemBlock, SystemContent};
+
+    let mut req = routectl_core::ChatRequest {
+        model: "a".to_string(),
+        messages: history
+            .iter()
+            .map(|text| Message {
+                role: Role::User,
+                content: MessageContent::Text((*text).into()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                refusal: None,
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        system: Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "stable system prompt".into(),
+            cache_control: None,
+            citations: None,
+        }])),
+        ..Default::default()
+    };
+    req.routectl_internal.inbound_session_key = Some("sess-usage-join".to_string());
+    req
+}
+
+#[tokio::test]
+async fn a_real_dispatch_persists_the_strategy_tokens_and_epoch_code_it_produced() {
+    // The synthetic tests above hand `observe_meta` a hand-built meta, so they
+    // pin the copy but not the JOIN: nothing proves the router's own
+    // `strategy_str()` tokens and prefix-epoch code are what reaches the ledger.
+    // This one dispatches for real through a capturing provider, on a capable
+    // anthropic-api target so front + terminal actually emit, and takes TWO
+    // turns on one session key so the second turn carries a classified epoch.
+    // Arrange
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+
+    let router = capable_anthropic_router();
+    let first = session_req(&["a", "b", "c"]);
+    router
+        .complete_with_options(first, Default::default())
+        .await
+        .result
+        .expect("first turn serves");
+
+    // Act: the second turn rewrites message 0, so the detector classifies it.
+    let second = session_req(&["REWRITTEN", "b", "c"]);
+    let dispatched = router
+        .complete_with_options(second.clone(), Default::default())
+        .await;
+    let resp = dispatched.result.expect("second turn serves");
+    // The router's own decision, before capture touches it: the assertion below
+    // is a JOIN check, so it must be anchored to what dispatch actually
+    // produced rather than to a constant this test chose.
+    let decided = (
+        dispatched.meta.cache_front_decision,
+        dispatched.meta.cache_terminal_decision,
+        dispatched.meta.prefix_epoch_event,
+    );
+    assert_eq!(
+        decided,
+        (
+            Some("auto_emitted"),
+            Some("auto_emitted"),
+            Some(routectl_usage::PREFIX_EPOCH_REWRITTEN)
+        ),
+        "the rig must produce a real emit at both regions and a classified epoch",
+    );
+    let mut cap = UsageCapture::new(
+        build_usage_draft("anthropic", &second, "calib-row".to_string()),
+        handle.clone(),
+        "ingress-1".to_string(),
+    );
+    cap.observe_meta(&dispatched.meta, 0, 0);
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: the persisted row carries the tokens the ROUTER decided -- the
+    // same triple, read back out of SQLite rather than out of the meta.
+    let (front, terminal, epoch) = persisted_cache_decision(&db_path);
+    assert_eq!(
+        (front.as_deref(), terminal.as_deref(), epoch),
+        decided,
+        "the ledger row must carry the dispatch's own strategy tokens and epoch code",
     );
 }
 

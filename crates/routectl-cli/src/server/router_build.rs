@@ -97,6 +97,12 @@ pub async fn build_router_from_config_with_overlay(
         tracing::warn!(warning = %warning, "codex identity warning");
     }
 
+    // `auto_emit_per_block_breakpoints` is inert on Bedrock Invoke (the
+    // knob gates the Converse cachePoint surface). Advisory only.
+    for warning in routectl_router::per_block_breakpoint_warnings(&config) {
+        tracing::warn!(warning = %warning, "per-block breakpoint warning");
+    }
+
     // Reject malformed `[registry]` glob keys at startup so query-time
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;

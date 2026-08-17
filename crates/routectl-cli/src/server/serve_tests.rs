@@ -865,5 +865,8 @@ fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
         reduction_strings_skipped: None,
         reduction_strings_rejected: None,
         reduction_bytes_saved: None,
+        cache_front_decision: None,
+        cache_terminal_decision: None,
+        prefix_epoch_event: None,
     }
 }

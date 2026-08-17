@@ -19,9 +19,10 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    AggRow, BucketSpec, GroupKey, KCalibration, NearLosslessAttributionSummary, OpenError,
-    QueryError, QuotaSnapshot, Rates, ReductionSummary, RowCost, ShadowMisfireSummary, UsageDb,
-    WouldTrimSummary, aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
+    AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
+    NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, Rates, ReductionSummary,
+    RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate, cache_decision_summary,
+    estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
     near_lossless_attribution_summary, open_readonly, reduction_summary, shadow_misfire_summary,
     ttfbs, would_trim_summary,
 };
@@ -476,6 +477,10 @@ pub struct WindowReport {
     /// surfaced under `--detail`). Its ratios hold only for windows the usage
     /// channel dropped nothing in -- the rendered block carries that caveat.
     pub reduction: ReductionSummary,
+    /// Cache-breakpoint decision summary over the window (per-region decided /
+    /// emitted counts plus the prefix-epoch breakdown; only populated and
+    /// surfaced under `--detail`).
+    pub cache_decision: CacheDecisionSummary,
 }
 
 /// True iff `provider` is a managed-OAuth subscription provider: its
@@ -774,6 +779,13 @@ pub fn build_window_report(
         ReductionSummary::default()
     };
 
+    // Cache-breakpoint decisions: only queried (and surfaced) under --detail.
+    let cache_decision = if detail {
+        cache_decision_summary(db, bounds.from_ms, bounds.to_ms)?
+    } else {
+        CacheDecisionSummary::default()
+    };
+
     let mut display_rows: Vec<DisplayRow> = groups
         .into_iter()
         .map(|(label, acc)| finalize_row(label, acc, &ttft))
@@ -802,6 +814,7 @@ pub fn build_window_report(
         shadow_misfire,
         near_lossless_attribution,
         reduction,
+        cache_decision,
     })
 }
 
@@ -1086,6 +1099,7 @@ pub fn render_report(report: &WindowReport) -> String {
         out.push_str(&render_would_trim(report));
         out.push_str(&render_shadow_misfire(report));
         out.push_str(&render_reduction(report));
+        out.push_str(&render_cache_decisions(report));
     }
     for q in &report.quota {
         out.push_str(&render_quota(q));
@@ -1255,6 +1269,32 @@ fn render_reduction(report: &WindowReport) -> String {
     out
 }
 
+/// Two-line cache-breakpoint decision summary: the per-region decided /
+/// emitted counts and the prefix-epoch event breakdown. Emitted only under
+/// `--detail`, and only when the window carries at least one decision or one
+/// classified epoch, so a window with no cache activity stays uncluttered.
+///
+/// Each region reports emitted-of-decided rather than a bare rate: rows written
+/// before the columns existed carry no decision, and folding them into a
+/// denominator would understate the emit share on a mixed-history window.
+fn render_cache_decisions(report: &WindowReport) -> String {
+    let c = &report.cache_decision;
+    if c.front_decided == 0 && c.terminal_decided == 0 && c.epoch_classified == 0 {
+        return String::new();
+    }
+    let mut out = format!(
+        "cache-breakpoints: front {}/{} emitted  |  terminal {}/{} emitted\n",
+        c.front_emitted, c.front_decided, c.terminal_emitted, c.terminal_decided,
+    );
+    if c.epoch_classified > 0 {
+        out.push_str(&format!(
+            "  prefix-epoch: {} classified, stable={} rewritten={} reseeded={}\n",
+            c.epoch_classified, c.epoch_stable, c.epoch_rewritten, c.epoch_reseeded,
+        ));
+    }
+    out
+}
+
 /// Left-align column 0, right-align the rest, padded to the widest cell in
 /// each column. ASCII spaces only.
 fn render_table(rows: &[Vec<String>]) -> String {
@@ -1335,7 +1375,8 @@ const LEGEND: &str = concat!(
     "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
     "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools,\n",
     "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied),\n",
-    "                and a reduction line (lossless-minifier outcomes actually applied; counts, not rates)",
+    "                a reduction line (lossless-minifier outcomes actually applied; counts, not rates),\n",
+    "                and a cache-breakpoint line (per-region injection decisions + prefix-epoch events)",
 );
 
 // --- k-calibration report -----------------------------------------------

@@ -433,6 +433,7 @@ mod bedrock_validation_tests {
             anthropic_beta: Vec::new(),
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime: Default::default(),
         }
@@ -462,6 +463,7 @@ mod bedrock_validation_tests {
             anthropic_beta: vec!["future-flag-2026-12-31".into()],
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime,
         }
@@ -581,6 +583,7 @@ mod bedrock_validation_tests {
                 anthropic_beta: Vec::new(),
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                auto_emit_per_block_breakpoints: None,
                 reduction_enabled: None,
                 runtime: Default::default(),
             },
@@ -2665,6 +2668,140 @@ mod codex_version_validation_tests {
              auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n",
         );
         assert!(codex_identity_warnings(&config).is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "bedrock"))]
+mod per_block_breakpoint_warning_tests {
+    //! Tests for `per_block_breakpoint_warnings`: the
+    //! `auto_emit_per_block_breakpoints` key is inert on any surface whose
+    //! egress cannot carry a per-block marker (Bedrock Invoke,
+    //! openai-compat, openai-responses, gemini), which earns an advisory
+    //! WARN rather than a load error.
+
+    use super::collect_config_validation;
+    use crate::config::Config;
+    use crate::per_block_breakpoint_warnings;
+
+    fn parse(toml_text: &str) -> Config {
+        toml::from_str(toml_text).expect("fixture must parse")
+    }
+
+    fn bedrock_toml(api_shape: &str, key_line: &str) -> String {
+        format!(
+            "[providers.b]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
+             api_shape = \"{api_shape}\"\ncreds = {{ kind = \"default-chain\" }}\n{key_line}"
+        )
+    }
+
+    #[test]
+    fn key_on_invoke_warns_and_does_not_error() {
+        let config = parse(&bedrock_toml(
+            "invoke",
+            "auto_emit_per_block_breakpoints = true\n",
+        ));
+
+        let warnings = per_block_breakpoint_warnings(&config);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("auto_emit_per_block_breakpoints") && w.contains("invoke")),
+            "the key on api_shape = invoke must warn: {warnings:?}"
+        );
+        assert!(
+            collect_config_validation(&config).errors.is_empty(),
+            "the key must be inert, never a load error"
+        );
+    }
+
+    /// `false` is just as inert on Invoke as `true`, so presence -- not
+    /// the value -- is what the warning keys off.
+    #[test]
+    fn key_set_false_on_invoke_still_warns() {
+        let config = parse(&bedrock_toml(
+            "invoke",
+            "auto_emit_per_block_breakpoints = false\n",
+        ));
+        assert_eq!(per_block_breakpoint_warnings(&config).len(), 1);
+    }
+
+    #[test]
+    fn key_on_converse_does_not_warn() {
+        let config = parse(&bedrock_toml(
+            "converse",
+            "auto_emit_per_block_breakpoints = true\n",
+        ));
+        assert!(
+            per_block_breakpoint_warnings(&config).is_empty(),
+            "the knob is live on Converse"
+        );
+    }
+
+    #[test]
+    fn omitted_key_on_invoke_does_not_warn() {
+        let config = parse(&bedrock_toml("invoke", ""));
+        assert!(per_block_breakpoint_warnings(&config).is_empty());
+    }
+
+    /// anthropic-api is a per-block-SUPPORTED surface, so the knob is live
+    /// there and must stay silent.
+    #[test]
+    fn key_on_a_non_bedrock_kind_does_not_warn() {
+        let config = parse(
+            "[providers.a]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
+             auto_emit_per_block_breakpoints = true\n",
+        );
+        assert!(per_block_breakpoint_warnings(&config).is_empty());
+    }
+
+    /// The knob is equally inert on any kind whose egress cannot carry a
+    /// per-block marker, not just Bedrock Invoke: an operator who sets it
+    /// on openai-compat gets the same advisory rather than silence.
+    #[test]
+    fn key_on_an_unsupported_non_bedrock_kind_warns() {
+        let config = parse(
+            "[providers.o]\nkind = \"openai-compat\"\nbase_url = \"https://example.com/v1\"\n\
+             api_key_ref = \"literal:k\"\nauto_emit_per_block_breakpoints = true\n",
+        );
+        let warnings = per_block_breakpoint_warnings(&config);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("auto_emit_per_block_breakpoints")
+                    && w.contains("openai-compat")),
+            "an opted-in openai-compat entry must warn that the key is inert: {warnings:?}"
+        );
+        assert!(
+            collect_config_validation(&config).errors.is_empty(),
+            "the key must stay inert, never a load error"
+        );
+    }
+
+    /// An omitted key never warns, on any kind -- presence is the trigger.
+    #[test]
+    fn omitted_key_on_an_unsupported_kind_does_not_warn() {
+        let config = parse(
+            "[providers.o]\nkind = \"openai-compat\"\nbase_url = \"https://example.com/v1\"\n\
+             api_key_ref = \"literal:k\"\n",
+        );
+        assert!(per_block_breakpoint_warnings(&config).is_empty());
+    }
+
+    /// The advisory rides the aggregate validator's `warnings` channel so
+    /// both the serve boot path and `config check` surface it.
+    #[test]
+    fn warning_surfaces_through_collect_config_validation() {
+        let config = parse(&bedrock_toml(
+            "invoke",
+            "auto_emit_per_block_breakpoints = true\n",
+        ));
+        assert!(
+            collect_config_validation(&config)
+                .warnings
+                .iter()
+                .any(|w| w.contains("auto_emit_per_block_breakpoints")),
+            "the advisory must reach the aggregate validation warnings"
+        );
     }
 }
 

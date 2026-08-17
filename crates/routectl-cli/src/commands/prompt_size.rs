@@ -33,7 +33,7 @@ const BYTES_PER_TOKEN_ESTIMATE: usize = 4;
 
 /// How auto-emit would behave for this request against the resolved target.
 /// Mirrors the router's dispatch-path decision (see
-/// `maybe_apply_auto_cache_control` in routectl-router); only the request-
+/// `apply_auto_cache_placement` in routectl-router); only the request-
 /// level subset that an offline projection can determine is modeled here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoEmitProjection {

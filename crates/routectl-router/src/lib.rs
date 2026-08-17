@@ -145,10 +145,10 @@ pub use factory::validate_provider_openai_mantle;
 pub use factory::{
     BuildOptions, ConfigValidation, apply_catalog_overlay, build_provider,
     build_provider_with_options, build_resolved_models, class_policy_warnings,
-    codex_identity_warnings, collect_config_validation, resolved_codex_version,
-    validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
-    validate_codex_version, validate_mitm_config, validate_provider_credential_sources,
-    validate_reasoning_defaults, validate_registry_patterns,
+    codex_identity_warnings, collect_config_validation, per_block_breakpoint_warnings,
+    resolved_codex_version, validate_alias_chain_targets, validate_alias_patterns,
+    validate_class_policy, validate_codex_version, validate_mitm_config,
+    validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

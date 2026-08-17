@@ -131,6 +131,57 @@ pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
     warnings
 }
 
+/// Advisory (never fatal) load-time check on the per-block cache
+/// breakpoint surface: warn when `auto_emit_per_block_breakpoints` is set
+/// on an entry whose EGRESS cannot carry a per-block marker
+/// (`ProviderEntry::supports_per_block_breakpoints` is false). The key
+/// parses and the entry loads, but the value changes nothing either way --
+/// placement gates on wire support, so an opt-in there is inert rather than
+/// honored.
+///
+/// Covers Bedrock `api_shape = "invoke"` (no front-marker path; its egress
+/// lowers the TOP-LEVEL marker itself), `openai-compat` (the egress DROPS a
+/// per-block marker, and 400s under `strict_translation`), and the
+/// server-side-caching kinds `openai-responses` / `gemini`. Silent on
+/// `anthropic-api` and Bedrock Converse, where the knob is live.
+pub fn per_block_breakpoint_warnings(config: &crate::config::Config) -> Vec<String> {
+    config
+        .providers
+        .iter()
+        .filter(|(_, entry)| {
+            entry.auto_emit_per_block_breakpoints().is_some()
+                && !entry.supports_per_block_breakpoints()
+        })
+        .map(|(provider_name, entry)| {
+            format!(
+                "[providers.{provider_name}] auto_emit_per_block_breakpoints has no effect on \
+                 {}: that egress cannot carry a per-block cache marker, so the key is inert. The \
+                 knob gates front-marker emission on anthropic-api and on Bedrock api_shape = \
+                 \"converse\" only. Remove the key.",
+                inert_per_block_surface(entry),
+            )
+        })
+        .collect()
+}
+
+/// Name the surface the inert key sits on, for
+/// [`per_block_breakpoint_warnings`]. A Bedrock entry is named by its
+/// `api_shape` (the shape, not the kind, is what decides per-block support
+/// there, and naming `bedrock` alone would read as if no Bedrock entry
+/// supported the knob); every other kind is named by its `kind` token.
+fn inert_per_block_surface(entry: &ProviderEntry) -> String {
+    #[cfg(feature = "bedrock")]
+    if let ProviderEntry::Bedrock { api_shape, .. } = entry {
+        use crate::config::BedrockApiShapeConfig;
+        let shape = match api_shape {
+            BedrockApiShapeConfig::Invoke => "invoke",
+            BedrockApiShapeConfig::Converse => "converse",
+        };
+        return format!("api_shape = \"{shape}\"");
+    }
+    format!("kind = \"{}\"", entry.kind_str())
+}
+
 /// Advisory (never fatal) load-time check on the codex identity surface:
 /// warn when a chatgpt-oauth openai-responses provider overrides the
 /// `version` or `user-agent` identity header via `header_extras` with a

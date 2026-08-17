@@ -570,17 +570,21 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.reduction_strings_skipped,
             r.reduction_strings_rejected,
             r.reduction_bytes_saved,
+            r.cache_front_decision,
+            r.cache_terminal_decision,
+            r.prefix_epoch_event,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?61` positions match the params list above.
+/// `schema.rs` exactly; `?1..?64` positions match the params list above.
 /// The DDL's three write-stopped legacy decision columns are absent from
 /// this list on purpose -- an omitted nullable column stores NULL. That
 /// includes `reduction_strategy`: the current context-reduction outcome
 /// lands in `reduction_decision`, so a NULL in the legacy column keeps
-/// meaning write-stopped.
+/// meaning write-stopped. Same for `strategy`: the cache-injection decisions
+/// land in `cache_front_decision` / `cache_terminal_decision`.
 const INSERT_SQL: &str = "\
 INSERT OR IGNORE INTO requests (
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
@@ -612,7 +616,10 @@ INSERT OR IGNORE INTO requests (
     reduction_strings_compressed,
     reduction_strings_skipped,
     reduction_strings_rejected,
-    reduction_bytes_saved
+    reduction_bytes_saved,
+    cache_front_decision,
+    cache_terminal_decision,
+    prefix_epoch_event
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -643,7 +650,10 @@ INSERT OR IGNORE INTO requests (
     ?58,
     ?59,
     ?60,
-    ?61
+    ?61,
+    ?62,
+    ?63,
+    ?64
 )";
 
 #[cfg(test)]
@@ -720,6 +730,9 @@ mod tests {
             reduction_strings_skipped: None,
             reduction_strings_rejected: None,
             reduction_bytes_saved: None,
+            cache_front_decision: None,
+            cache_terminal_decision: None,
+            prefix_epoch_event: None,
         }
     }
 
@@ -994,6 +1007,72 @@ mod tests {
             legacy, None,
             "legacy reduction_strategy must stay write-stopped"
         );
+    }
+
+    /// The v16 decision set binds at the three LAST column positions and must
+    /// land in the NEW `cache_front_decision` / `cache_terminal_decision`
+    /// columns while the write-stopped v1 `strategy` column stays NULL.
+    ///
+    /// Distinct values are set at an EARLY (`input_tokens`), a MIDDLE
+    /// (`would_trim_shadow_misfire`) and the three TAIL positions, and all five
+    /// are asserted together: appending placeholders shifts every later index
+    /// if the VALUES list and the params list ever disagree, and a shift is
+    /// only detectable when the surrounding columns carry values distinct from
+    /// each other.
+    #[tokio::test]
+    async fn try_send_writes_cache_decisions_without_shifting_earlier_columns() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let mut rec = record("rt-v16");
+        rec.input_tokens = Some(7_101);
+        rec.would_trim_shadow_misfire = Some(1);
+        rec.cache_front_decision = Some("auto_emitted".to_string());
+        rec.cache_terminal_decision = Some("auto_skipped:breakpoint_cap".to_string());
+        rec.prefix_epoch_event = Some(2);
+
+        // Act
+        handle.try_send(rec);
+        assert!(wait_persisted(handle.counters(), 1), "row not persisted");
+        writer.shutdown();
+
+        // Assert
+        let conn = Connection::open(&path).expect("read");
+        let (input_tokens, misfire, front, terminal, epoch, legacy): (
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT input_tokens, would_trim_shadow_misfire, cache_front_decision, \
+                 cache_terminal_decision, prefix_epoch_event, strategy \
+                 FROM requests WHERE request_id='rt-v16'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("row");
+        assert_eq!(input_tokens, 7_101);
+        assert_eq!(misfire, 1);
+        assert_eq!(front, Some("auto_emitted".to_string()));
+        assert_eq!(
+            terminal,
+            Some("auto_skipped:breakpoint_cap".to_string()),
+            "the two placement regions must not collapse into one value"
+        );
+        assert_eq!(epoch, 2);
+        assert_eq!(legacy, None, "legacy strategy must stay write-stopped");
     }
 
     #[test]
