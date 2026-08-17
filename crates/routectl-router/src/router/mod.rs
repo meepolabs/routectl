@@ -157,11 +157,13 @@ pub struct Router {
     /// `k_session_store` `Arc`, so a sample recorded into the store is
     /// immediately visible to the next `estimate(...)` call.
     ///
-    /// No carry-over field of its own: a hot-reload constructs a fresh
-    /// store + a fresh estimator (the estimator points at the fresh store),
-    /// then `carry_over_k_store_from` populates the fresh store from the
-    /// previous router's entries -- so the fresh estimator transparently
-    /// sees the carried samples.
+    /// No carry-over field of its own: `carry_over_k_store_from` replaces
+    /// both `k_session_store` (with the previous Router's shared `Arc`) and
+    /// this field (with a fresh [`crate::k_estimator::LedgerBackedK`] bound
+    /// to that same shared `Arc`). The rebind is REQUIRED -- without it this
+    /// field would keep pointing at the fresh Router's own store, which the
+    /// carry-over is in the process of discarding, and every `estimate(...)`
+    /// call would read an empty map.
     k_estimator: Arc<dyn crate::k_estimator::KEstimator>,
     /// In-process session-keyed last-fingerprint store for the shadow misfire
     /// monitor. Keyed by the same (session, provider_kind, model) triple as
@@ -1615,13 +1617,24 @@ impl Router {
     /// the store -- exactly the failure mode the sticky-pin carry-over was
     /// added to prevent, applied to the same key space.
     ///
-    /// Entries are replayed in LRU order (least-recently-used first) so the
-    /// destination map preserves the source's recency ordering. A scattered
-    /// (e.g. HashMap-iteration-order) carry-over would race the eviction
-    /// frontier across the rebuild.
+    /// Carried by SHARING the `Arc` rather than copying entries, the same fix
+    /// `carry_over_prefix_epochs_from` applies to the prefix-epoch store: a
+    /// snapshot-and-reimport has a window between the export and the new
+    /// Router's publish where a sample recorded through the outgoing Router
+    /// (a response completing late) would land only in the store this
+    /// carry-over is about to discard. Sharing the store means both Routers'
+    /// writes land on the same map, so a sample racing the swap is neither
+    /// lost nor written to a copy nobody reads.
+    ///
+    /// The estimator is rebound over the shared store for the same reason:
+    /// `k_estimator` was constructed against this (fresh, about-to-be-
+    /// discarded) Router's own store, so leaving it as-is would read an
+    /// empty map even after the store field itself is shared.
     pub fn carry_over_k_store_from(&mut self, previous: &Self) {
-        self.k_session_store
-            .import_entries(previous.k_session_store.export_entries());
+        self.k_session_store = Arc::clone(&previous.k_session_store);
+        self.k_estimator = Arc::new(crate::k_estimator::LedgerBackedK::new(Arc::clone(
+            &self.k_session_store,
+        )));
     }
 
     /// Carry the previous Router's prefix-epoch detector state into this

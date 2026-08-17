@@ -1714,8 +1714,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `KSessionKey` (session_key, provider_kind, model) so K never bleeds across
   providers or models inside one session; `KSessionWindow` is a bounded ring
   of `Sample { ts, observed_reuse }` capped at `SAMPLES_PER_WINDOW`.
-  `export_entries` / `import_entries` are the LRU-order-preserving carry-over
-  seam for a Router rebuild
+  `export_entries` / `import_entries` back the boot warm-rebuild path and
+  tests; `Router::carry_over_k_store_from` shares the store `Arc` directly
+  (not these) so a sample recorded through the outgoing Router during the
+  swap window is never lost
 - `src/k_estimator/rebuild.rs` -- boot warm rebuild of `KSessionStore` from
   the usage ledger so a fresh process does not start every estimate at
   `Cold`. Owns the `LedgerReader` dependency-inversion seam (the usage crate

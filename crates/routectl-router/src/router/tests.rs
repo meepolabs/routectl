@@ -502,61 +502,25 @@ fn carry_over_sticky_from_preserves_pins() {
 }
 
 #[test]
-fn carry_over_k_store_from_preserves_windows_and_lru_order() {
+fn carry_over_k_store_from_shares_the_store_arc() {
     // Regression guard for the silent-collapse trap, K-store edition: a
-    // hot-reload must NOT drop per-session K windows, and it must keep
-    // their LRU ordering so the destination's eviction frontier matches
-    // what the source would have evicted next.
-    use crate::k_estimator::{KSessionKey, KSessionWindow, Sample};
-    use std::time::{Duration, UNIX_EPOCH};
-
-    fn key(session: &str) -> KSessionKey {
-        KSessionKey {
-            session_key: session.into(),
-            provider_kind: "anthropic-api".into(),
-            model: "opus".into(),
-        }
-    }
-
-    fn sample(secs: u64, reused: bool) -> Sample {
-        Sample {
-            ts: UNIX_EPOCH + Duration::from_secs(secs),
-            observed_reuse: reused,
-        }
-    }
-
-    // Arrange: insert A, B, C in that order, then touch A so the source's
-    // LRU order is [B (LRU), C, A (MRU)].
+    // hot-reload must NOT drop per-session K windows. The carry-over shares
+    // the outgoing Router's store Arc rather than snapshotting it (see
+    // `carry_over_k_store_from`'s doc comment for why); LRU-order
+    // preservation under Arc-sharing is covered at the store level
+    // (`k_session_store_export_returns_lru_order` in `k_estimator::store`).
     let config = Arc::new(Config::default());
     let before = Router::new(config.clone());
-    let mut win_a = KSessionWindow::new();
-    win_a.push(sample(1, true));
-    let mut win_b = KSessionWindow::new();
-    win_b.push(sample(2, false));
-    let mut win_c = KSessionWindow::new();
-    win_c.push(sample(3, true));
-    before.k_session_store.put(key("A"), win_a.clone());
-    before.k_session_store.put(key("B"), win_b.clone());
-    before.k_session_store.put(key("C"), win_c.clone());
-    let _ = before.k_session_store.get(&key("A"));
-
     let mut after = Router::new(config);
 
     // Act
     after.carry_over_k_store_from(&before);
 
-    // Assert: every entry survived AND the LRU order matches the source.
-    // A scattered carry-over (e.g. HashMap iteration order) would pass
-    // the per-key survival check but fail this ordering one.
-    let entries = after.k_session_store.export_entries();
-    let observed_keys: Vec<&KSessionKey> = entries.iter().map(|(k, _)| k).collect();
-    assert_eq!(
-        observed_keys,
-        vec![&key("B"), &key("C"), &key("A")],
-        "carry_over_k_store_from must preserve LRU recency order",
+    // Assert: the store handle itself is shared, not copied.
+    assert!(
+        Arc::ptr_eq(&after.k_session_store, &before.k_session_store),
+        "carry_over_k_store_from must share the store Arc, not snapshot it",
     );
-    let observed_windows: Vec<&KSessionWindow> = entries.iter().map(|(_, w)| w).collect();
-    assert_eq!(observed_windows, vec![&win_b, &win_c, &win_a]);
 }
 
 #[test]
@@ -1235,12 +1199,14 @@ fn record_k_sample_skips_keyless_and_records_keyed() {
     assert_eq!(reuse, vec![true, false]);
 }
 
-/// A fresh router's `k_estimator` reads the store entries imported by
-/// `carry_over_k_store_from`: the estimator field needs no carry-over of
-/// its own because the constructor points it at the same store the
-/// carry-over populates. Builds a `Calibrated`-sized window in the source,
-/// carries it over, and proves the new router's estimator returns a
-/// non-cold estimate for the carried triple.
+/// `carry_over_k_store_from` rebinds `k_estimator` over the shared store:
+/// the freshly-built router's estimator was constructed against its OWN
+/// (about-to-be-discarded) store, so the carry-over must repoint it at the
+/// shared one or the estimator silently keeps reading an empty map even
+/// though `k_session_store` itself is now shared. Builds a
+/// `Calibrated`-sized window in the source, carries it over, and proves the
+/// new router's estimator returns a non-cold estimate for the carried
+/// triple.
 #[test]
 fn carried_store_is_read_by_new_routers_estimator() {
     use crate::k_estimator::{Confidence, KQuery, KSessionKey, KSessionWindow, Sample};
@@ -1270,8 +1236,8 @@ fn carried_store_is_read_by_new_routers_estimator() {
     let before = Router::new(config.clone());
     before.k_session_store.put(key, window);
 
-    // Act: a freshly-built router imports the source's entries, then its
-    // OWN estimator (pointed at its own store at construction) is queried.
+    // Act: a freshly-built router shares the source's store, then its
+    // rebound estimator is queried.
     let mut after = Router::new(config);
     after.carry_over_k_store_from(&before);
     let estimate = after.k_estimator.estimate(&KQuery {
@@ -1289,6 +1255,58 @@ fn carried_store_is_read_by_new_routers_estimator() {
         "new router's estimator must read the carried-over store",
     );
     assert!(estimate.samples >= 12);
+}
+
+#[test]
+fn carry_over_k_store_from_makes_a_swap_window_sample_visible() {
+    // Regression guard for the snapshot-copy race: a response that completes
+    // AFTER `carry_over_k_store_from` runs but BEFORE the new Router is
+    // published still holds a reference to the OUTGOING Router. Under a
+    // copy-based carry-over that late sample lands only in the store the
+    // swap discards; under a shared store it lands in the same map the new
+    // Router reads. Exercises both the shared store directly and the
+    // rebound estimator, so a regression in either the field-share or the
+    // estimator rebind fails this test.
+    use crate::k_estimator::{Confidence, KQuery};
+    use std::time::SystemTime;
+
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    let mut after = Router::new(config);
+
+    // Act: carry over first, exactly as the hot-reload coordinator does
+    // before publishing the new Router...
+    after.carry_over_k_store_from(&before);
+
+    // ...then a request still in flight against the OUTGOING router records
+    // its sample after the carry-over ran.
+    let now = SystemTime::now();
+    for _ in 0..12 {
+        before.record_k_sample(Some("late-sess"), "anthropic-api", "opus", 7, now);
+    }
+
+    // Assert: the shared store already reflects the late sample.
+    assert!(
+        !after.k_session_store.is_empty(),
+        "a sample recorded on the outgoing router after carry-over must \
+             land in the store the new router reads",
+    );
+
+    // Assert: the new router's OWN estimator (rebound by the carry-over)
+    // reads it too, not just the raw store.
+    let estimate = after.k_estimator.estimate(&KQuery {
+        session_key: Some("late-sess"),
+        provider_kind: "anthropic-api",
+        model: "opus",
+        ttl: std::time::Duration::from_mins(5),
+        now,
+    });
+    assert_eq!(
+        estimate.confidence,
+        Confidence::Calibrated,
+        "the new router's estimator must observe a swap-window sample \
+             recorded through the outgoing router after carry-over",
+    );
 }
 
 /// The `would_trim_k_floor_for_meta` truth table, one assertion per row.
