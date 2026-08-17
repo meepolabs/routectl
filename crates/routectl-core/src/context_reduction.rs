@@ -224,20 +224,11 @@ struct DeltaCounts {
 }
 
 impl DeltaCounts {
-    /// Classify one candidate target into the tallies. Non-string targets are
-    /// structured Values, already whitespace-free on the wire, so they count
-    /// as skipped rather than rejected.
-    fn classify(&mut self, target: &Value) {
-        let Value::String(s) = target else {
-            self.strings_skipped += 1;
-            return;
-        };
-        self.count_outcome(classify_json_string(s), s.len());
-    }
-
     /// Fold one classification into the tallies. `original_len` is the
-    /// candidate's byte length, used only by the compressed arm.
-    fn count_outcome(&mut self, outcome: StringMinifyOutcome, original_len: usize) {
+    /// candidate's byte length, used only by the compressed arm. Borrows the
+    /// outcome so the caller keeps ownership of a compacted form the mutating
+    /// pass still needs.
+    const fn count_outcome(&mut self, outcome: &StringMinifyOutcome, original_len: usize) {
         match outcome {
             StringMinifyOutcome::Compressed(minified) => {
                 self.bytes_saved += original_len - minified.len();
@@ -259,15 +250,75 @@ impl DeltaCounts {
     }
 }
 
-/// Apply the compacted form to one target if it has one. Pure application:
-/// the tallies come from the read-only scan, which classified this same
-/// target, so this must never count.
-fn minify_string_target(target: &mut Value) {
-    let Value::String(s) = target else {
-        return;
-    };
-    let outcome = classify_json_string(s);
-    apply_outcome(target, outcome);
+/// The read-only scan's output: the pass tallies plus the compacted forms it
+/// already computed, each tagged with its target's ordinal among the tail's
+/// candidate targets.
+///
+/// Carrying the compacted forms is what keeps every target to a single JSON
+/// parse: the mutating pass writes what the scan produced instead of
+/// classifying the same string again.
+#[derive(Default)]
+struct MinifyPlan {
+    counts: DeltaCounts,
+    /// Ascending by ordinal, and only ever compressed classifications. Left
+    /// empty by a pass that changes nothing, so the no-op path still
+    /// allocates nothing.
+    writes: Vec<(usize, StringMinifyOutcome)>,
+    /// Candidate targets classified so far -- the ordinal the next one takes.
+    seen: usize,
+}
+
+impl MinifyPlan {
+    /// Classify one candidate target into the tallies and, when it can be
+    /// compacted, record the compacted form for the mutating pass. Non-string
+    /// targets are structured Values, already whitespace-free on the wire, so
+    /// they count as skipped rather than rejected.
+    fn classify(&mut self, target: &Value) {
+        let ordinal = self.seen;
+        self.seen += 1;
+
+        let Value::String(s) = target else {
+            self.counts.count_outcome(&StringMinifyOutcome::Skipped, 0);
+            return;
+        };
+        let outcome = classify_json_string(s);
+        self.counts.count_outcome(&outcome, s.len());
+        if matches!(outcome, StringMinifyOutcome::Compressed(_)) {
+            self.writes.push((ordinal, outcome));
+        }
+    }
+}
+
+/// Walks the tail's candidate targets in the SAME navigation order the scan
+/// used, handing each the classification the scan recorded for it.
+///
+/// Positional by ordinal rather than by address, because the scan reads
+/// through shared references and the mutation runs after `Arc::make_mut` has
+/// possibly moved the buffer.
+struct PlanApplier {
+    remaining: std::iter::Peekable<std::vec::IntoIter<(usize, StringMinifyOutcome)>>,
+    seen: usize,
+}
+
+impl PlanApplier {
+    fn new(writes: Vec<(usize, StringMinifyOutcome)>) -> Self {
+        Self {
+            remaining: writes.into_iter().peekable(),
+            seen: 0,
+        }
+    }
+
+    /// Consume the next ordinal and, if the plan holds a classification for
+    /// it, write it onto `target`. Ordinals with no plan entry -- non-string
+    /// targets, permanent ceilings, guard rejections -- leave the target's
+    /// bytes untouched.
+    fn apply_next(&mut self, target: &mut Value) {
+        let ordinal = self.seen;
+        self.seen += 1;
+        if let Some((_, outcome)) = self.remaining.next_if(|(i, _)| *i == ordinal) {
+            apply_outcome(target, outcome);
+        }
+    }
 }
 
 /// Write a classification's compacted form back onto its target. Every other
@@ -300,27 +351,28 @@ const fn known_part_target(part: &ContentPart) -> Option<&Value> {
 }
 
 /// Read-only scan of one message: classify every candidate target into
-/// `counts` without touching the request.
+/// `plan` without touching the request.
 ///
 /// This is the pass's ONLY tally site, for both outcomes. It must navigate
-/// exactly the target set [`minify_message_targets`] mutates -- the counts
-/// would otherwise describe a different set of strings than the one the
-/// mutation touched.
-fn scan_message_targets(message: &Message, counts: &mut DeltaCounts) {
+/// exactly the target set [`minify_message_targets`] mutates, in the same
+/// order -- the counts would otherwise describe a different set of strings
+/// than the one the mutation touched, and the plan's ordinals would address
+/// the wrong targets.
+fn scan_message_targets(message: &Message, plan: &mut MinifyPlan) {
     if let MessageContent::Parts(parts) = &message.content {
         for target in parts.iter().filter_map(known_part_target) {
-            counts.classify(target);
+            plan.classify(target);
         }
     }
 
     if let Some(tool_calls) = message.tool_calls.as_ref() {
         for target in tool_calls.iter().filter_map(tool_call_arguments) {
-            counts.classify(target);
+            plan.classify(target);
         }
     }
 }
 
-/// Apply the compacted form to every target of one message in place.
+/// Apply the scanned plan to every target of one message in place.
 ///
 /// The OpenAI Chat Completions shape carries assistant tool calls on the
 /// separate `Message.tool_calls` field as untyped Values shaped
@@ -328,7 +380,7 @@ fn scan_message_targets(message: &Message, counts: &mut DeltaCounts) {
 /// The `arguments` value is a STRING that may carry pretty-printed JSON
 /// whitespace shipped every turn -- the same minify target as the Anthropic
 /// content-part path.
-fn minify_message_targets(message: &mut Message) {
+fn minify_message_targets(message: &mut Message, applier: &mut PlanApplier) {
     if let MessageContent::Parts(parts) = &mut message.content {
         for part in parts.iter_mut() {
             let ContentPart::Known(known) = part else {
@@ -339,7 +391,7 @@ fn minify_message_targets(message: &mut Message) {
                 KnownContentPart::ToolUse { input, .. } => input,
                 _ => continue,
             };
-            minify_string_target(target);
+            applier.apply_next(target);
         }
     }
 
@@ -351,7 +403,7 @@ fn minify_message_targets(message: &mut Message) {
             else {
                 continue;
             };
-            minify_string_target(arguments);
+            applier.apply_next(arguments);
         }
     }
 }
@@ -367,11 +419,12 @@ fn minify_message_targets(message: &mut Message) {
 /// anything before `start` are never touched.
 ///
 /// Plan-first: the tail is scanned read-only to build the classification
-/// ledger, and `Arc::make_mut` is reached for only when that ledger shows at
-/// least one target provably changes -- so the common nothing-to-strip
-/// request does not pay a message-buffer copy against the CoW seam
-/// documented on [`ChatRequest::messages`]. Both outcomes carry the ledger,
-/// so skip / reject counts survive the no-op path.
+/// ledger AND the compacted form of every target that provably changes;
+/// `Arc::make_mut` is reached for only when that ledger is non-empty -- so
+/// the common nothing-to-strip request does not pay a message-buffer copy
+/// against the CoW seam documented on [`ChatRequest::messages`]. Both
+/// outcomes carry the ledger, so skip / reject counts survive the no-op
+/// path, and no target is ever parsed twice.
 ///
 /// Fail-closed: a per-string minify failure simply skips that string (the
 /// original is kept); the function never panics. Returns
@@ -384,18 +437,19 @@ pub fn apply_json_minify(req: &mut ChatRequest) -> ReductionOutcome {
         None => return ReductionOutcome::NoMutableTail,
     };
 
-    let mut counts = DeltaCounts::default();
+    let mut plan = MinifyPlan::default();
     for message in req.messages.iter().skip(start) {
-        scan_message_targets(message, &mut counts);
+        scan_message_targets(message, &mut plan);
     }
-    let delta = counts.into_delta();
+    let delta = plan.counts.into_delta();
 
-    if delta.strings_minified == 0 {
+    if plan.writes.is_empty() {
         return ReductionOutcome::NothingToStrip(delta);
     }
 
+    let mut applier = PlanApplier::new(plan.writes);
     for message in Arc::make_mut(&mut req.messages).iter_mut().skip(start) {
-        minify_message_targets(message);
+        minify_message_targets(message, &mut applier);
     }
 
     ReductionOutcome::Applied(delta)
@@ -1206,6 +1260,159 @@ mod tests {
         assert_eq!(first_tool_call_arguments(&req), &json!("{\"args\":2}"));
     }
 
+    // --- scan-to-mutation plan alignment ---
+
+    #[test]
+    fn applies_each_compacted_form_to_its_own_target_across_a_mixed_tail() {
+        // Arrange: the plan addresses targets by ordinal, so a tail that
+        // interleaves compactable and non-compactable targets -- across the
+        // parts / tool_calls navigation boundary AND across messages -- is
+        // what catches an off-by-one. Each compactable target carries a
+        // DISTINCT payload, so a misapplied write shows up as the wrong
+        // document on the wrong target rather than merely the wrong length.
+        let part_pretty = "{\n  \"part\": 1\n}";
+        let call_pretty = "{\n  \"call\": 2\n}";
+        let later_pretty = "{\n  \"later\": 3\n}";
+        let prose = "not json at all";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                Message {
+                    refusal: None,
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Known(KnownContentPart::ToolResult {
+                            tool_use_id: "toolu_skip".into(),
+                            content: json!(prose),
+                            is_error: None,
+                            cache_control: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::ToolUse {
+                            id: "toolu_1".into(),
+                            name: "search".into(),
+                            input: json!(part_pretty),
+                            cache_control: None,
+                        }),
+                    ]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![
+                        json!({"function": {"name": "structured", "arguments": {"q": "x"}}}),
+                        json!({"function": {"name": "pretty", "arguments": call_pretty}}),
+                    ]),
+                },
+                tool_result_msg(json!(later_pretty), None),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        match outcome {
+            ReductionOutcome::Applied(delta) => {
+                assert_eq!(delta.strings_minified, 3);
+                assert_eq!(delta.strings_skipped, 2);
+                assert_eq!(delta.strings_rejected, 0);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+
+        let MessageContent::Parts(parts) = &req.messages[0].content else {
+            panic!("expected parts");
+        };
+        let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &parts[0] else {
+            panic!("expected tool_result");
+        };
+        assert_eq!(content, &json!(prose), "skipped target must keep its bytes");
+        let ContentPart::Known(KnownContentPart::ToolUse { input, .. }) = &parts[1] else {
+            panic!("expected tool_use");
+        };
+        assert_eq!(input, &json!("{\"part\":1}"));
+
+        let calls = req.messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(
+            calls[0].get("function").unwrap().get("arguments").unwrap(),
+            &json!({"q": "x"}),
+            "structured target must stay structured"
+        );
+        assert_eq!(
+            calls[1].get("function").unwrap().get("arguments").unwrap(),
+            &json!("{\"call\":2}")
+        );
+
+        let MessageContent::Parts(later) = &req.messages[1].content else {
+            panic!("expected parts");
+        };
+        let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &later[0] else {
+            panic!("expected tool_result");
+        };
+        assert_eq!(content, &json!("{\"later\":3}"));
+    }
+
+    #[test]
+    fn frozen_prefix_targets_never_shift_the_plan_ordinals() {
+        // Arrange: the scan starts at `start`, so a frozen prefix holding its
+        // own compactable target contributes no ordinal. Were the mutation to
+        // count from message 0 instead, the tail's write would land on the
+        // wrong target -- or on the frozen bytes.
+        let frozen_pretty = "{\n  \"frozen\": 1\n}";
+        let tail_pretty = "{\n  \"tail\": 2\n}";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                tool_result_msg(json!(frozen_pretty), Some(CacheControl::ephemeral_5m())),
+                tool_result_msg(json!(tail_pretty), None),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        match outcome {
+            ReductionOutcome::Applied(delta) => assert_eq!(delta.strings_minified, 1),
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        let MessageContent::Parts(frozen) = &req.messages[0].content else {
+            panic!("expected parts");
+        };
+        let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &frozen[0] else {
+            panic!("expected tool_result");
+        };
+        assert_eq!(content, &json!(frozen_pretty));
+        let MessageContent::Parts(tail) = &req.messages[1].content else {
+            panic!("expected parts");
+        };
+        let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &tail[0] else {
+            panic!("expected tool_result");
+        };
+        assert_eq!(content, &json!("{\"tail\":2}"));
+    }
+
+    #[test]
+    fn a_plan_with_no_writes_leaves_every_target_untouched() {
+        // Arrange: the applier is the mutation's sole write path, so an empty
+        // plan must be a no-op even when driven over targets that WOULD
+        // compact -- the property that keeps the mutation from re-deriving
+        // anything the scan did not sanction.
+        let pretty = "{ \"a\": 1 }";
+        let mut target = Value::String(pretty.to_string());
+        let mut applier = PlanApplier::new(vec![]);
+
+        // Act
+        applier.apply_next(&mut target);
+
+        // Assert
+        assert_eq!(target, json!(pretty));
+    }
+
     // --- copy-on-write: the no-op pass must not clone the message buffer ---
 
     #[test]
@@ -1634,7 +1841,7 @@ mod tests {
         let mut counts = DeltaCounts::default();
 
         // Act
-        counts.count_outcome(accept_if_lossless(&original, "{\"a\":2}".to_string()), 7);
+        counts.count_outcome(&accept_if_lossless(&original, "{\"a\":2}".to_string()), 7);
         let delta = counts.into_delta();
 
         // Assert

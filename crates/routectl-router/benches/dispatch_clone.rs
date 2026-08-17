@@ -82,6 +82,23 @@ const MAX_BODY_CHUNKS: usize = 4;
 /// 32 MiB variant would silently enlarge all of them.
 const MAX_BODY_PROFILE: &str = "max_body";
 
+/// Mutable-tail payload size of the compactable fixture. Two orders of
+/// magnitude below the maximum body on purpose: the Applied outcome always
+/// deep-copies the message buffer and criterion holds a whole batch of
+/// inputs at once, so a 32 MiB tail here would price the allocator rather
+/// than the minifier.
+const APPLIED_TAIL_BYTES: usize = 256 * 1024;
+
+/// Number of tool-result messages the compactable payload is split across.
+const APPLIED_CHUNKS: usize = 4;
+
+/// Approximate serialized cost of one pretty-printed array element
+/// (indent + quoted word + comma + newline), used to size a chunk.
+const PRETTY_ELEMENT_BYTES: usize = 14;
+
+/// The profile token of the compactable fixture.
+const APPLIED_PROFILE: &str = "applied_body";
+
 /// One tool-result message whose content is a JSON-text target.
 fn tool_result_message(content: Value) -> Message {
     Message {
@@ -121,6 +138,36 @@ fn max_body_request() -> ChatRequest {
             let compact = serde_json::to_string(&Value::Array(vec![Value::String(text)]))
                 .expect("bench fixture: max-body chunk serializes");
             tool_result_message(Value::String(compact))
+        })
+        .collect();
+
+    ChatRequest {
+        model: "claude-opus-4-7".into(),
+        messages: messages.into(),
+        max_tokens: Some(4096),
+        ..Default::default()
+    }
+}
+
+/// A request whose whole mutable tail is pretty-printed JSON text -- the
+/// Applied outcome, where every target both classifies as compressible and
+/// is written back.
+///
+/// Each chunk is a pretty-printed JSON array of single words, so the
+/// structural whitespace the minifier strips dominates the payload and the
+/// mutating pass has real work to do on every target.
+fn applied_body_request() -> ChatRequest {
+    let elements_per_chunk = APPLIED_TAIL_BYTES / APPLIED_CHUNKS / PRETTY_ELEMENT_BYTES;
+    let messages: Vec<Message> = (0..APPLIED_CHUNKS)
+        .map(|chunk| {
+            let array = Value::Array(
+                (0..elements_per_chunk)
+                    .map(|i| Value::String(WORDS[(chunk + i) % WORDS.len()].to_owned()))
+                    .collect(),
+            );
+            let pretty = serde_json::to_string_pretty(&array)
+                .expect("bench fixture: applied-body chunk serializes");
+            tool_result_message(Value::String(pretty))
         })
         .collect();
 
@@ -176,6 +223,19 @@ fn assert_nothing_to_strip(profile: &str, req: &ChatRequest) {
     );
 }
 
+/// Pin the compactable fixture to the Applied outcome before sampling, for
+/// the same reason [`assert_nothing_to_strip`] pins its own: a fixture that
+/// drifted into a no-op would keep producing numbers for a path it no
+/// longer exercises.
+fn assert_applied(profile: &str, req: &ChatRequest) {
+    let mut probe = req.clone();
+    let outcome = apply_json_minify(&mut probe);
+    assert!(
+        matches!(outcome, ReductionOutcome::Applied(_)),
+        "reduction fixture {profile} must exercise the applied path, got {outcome:?}"
+    );
+}
+
 fn main() {
     let fixtures: Vec<(SpectrumProfile, BenchFixture)> =
         CLONE_PROFILES.iter().map(|p| (*p, p.generate())).collect();
@@ -192,6 +252,7 @@ fn main() {
             max_body_request(),
         )))
         .collect();
+    let applied = applied_body_request();
 
     let mut cases: Vec<BenchCase> = Vec::new();
     for (profile, fx) in &fixtures {
@@ -228,6 +289,18 @@ fn main() {
             },
         ));
     }
+
+    // The applied path has no forced-copy pair: it always takes the copy,
+    // so there is nothing to compare against. Its subject is the classify
+    // work per target, which the shipped path performs once.
+    assert_applied(APPLIED_PROFILE, &applied);
+    cases.push(BenchCase::new_batched(
+        format!("reduction_minify_applied__{APPLIED_PROFILE}__na"),
+        || applied.clone(),
+        |mut attempt: ChatRequest| {
+            black_box(apply_json_minify(&mut attempt));
+        },
+    ));
 
     #[cfg(feature = "dhat")]
     if bench_alloc::dhat_profile_mode() {
