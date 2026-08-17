@@ -1610,6 +1610,193 @@ fn observe_quota_truncates_multibyte_extras_value_on_a_char_boundary() {
     );
 }
 
+// -------- observe_meta: context-reduction decision + counters -------------
+//
+// The decision token and the four counters ride the dispatch meta and land
+// in their own typed ledger columns. They carry counts and a closed-set
+// token only -- never payload bytes -- so the assertions below pin both the
+// values AND the absence of any content column.
+
+/// The persisted reduction columns of the `calib-row` request, in schema
+/// order: decision, compressed, skipped, rejected, bytes_saved.
+type PersistedReduction = (
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+fn persisted_reduction(path: &std::path::Path) -> PersistedReduction {
+    let conn = rusqlite::Connection::open(path).expect("read open");
+    conn.query_row(
+        "SELECT reduction_decision, reduction_strings_compressed, \
+         reduction_strings_skipped, reduction_strings_rejected, \
+         reduction_bytes_saved FROM requests WHERE request_id='calib-row'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )
+    .expect("row")
+}
+
+/// A router-built meta carrying a populated reduction decision + counters.
+async fn meta_with_reduction() -> routectl_router::DispatchMeta {
+    let mut meta = any_dispatch_meta().await;
+    meta.reduction_strategy = Some("applied");
+    meta.reduction_strings_compressed = Some(7);
+    meta.reduction_strings_skipped = Some(3);
+    meta.reduction_strings_rejected = Some(2);
+    meta.reduction_bytes_saved = Some(4_096);
+    meta
+}
+
+#[test]
+fn draft_leaves_every_reduction_column_null() {
+    // Arrange / Act: a pre-dispatch draft, before any observe_meta.
+    let (cap, _w, _dir) = capture();
+
+    // Assert: NULL rather than a fabricated zero -- a row that never
+    // dispatched has no measured reduction outcome.
+    assert_eq!(cap.record.reduction_decision, None);
+    assert_eq!(cap.record.reduction_strings_compressed, None);
+    assert_eq!(cap.record.reduction_strings_skipped, None);
+    assert_eq!(cap.record.reduction_strings_rejected, None);
+    assert_eq!(cap.record.reduction_bytes_saved, None);
+}
+
+#[tokio::test]
+async fn observe_meta_copies_the_decision_and_all_four_counters() {
+    // Arrange
+    let mut meta = meta_with_reduction().await;
+    meta.reduction_strategy = Some("skipped:nothing-to-strip");
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+
+    // Assert: the token vocabulary is copied verbatim, counters intact.
+    assert_eq!(
+        cap.record.reduction_decision.as_deref(),
+        Some("skipped:nothing-to-strip")
+    );
+    assert_eq!(cap.record.reduction_strings_compressed, Some(7));
+    assert_eq!(cap.record.reduction_strings_skipped, Some(3));
+    assert_eq!(cap.record.reduction_strings_rejected, Some(2));
+    assert_eq!(cap.record.reduction_bytes_saved, Some(4_096));
+}
+
+#[tokio::test]
+async fn observe_meta_leaves_reduction_columns_null_when_no_target_ran_reduction() {
+    // Arrange: a meta whose reduction never ran -- no decision token, no
+    // counters (the shape a count_tokens / unknown-alias / all-gate-blocked
+    // dispatch leaves).
+    let mut meta = any_dispatch_meta().await;
+    meta.reduction_strategy = None;
+    meta.reduction_strings_compressed = None;
+    meta.reduction_strings_skipped = None;
+    meta.reduction_strings_rejected = None;
+    meta.reduction_bytes_saved = None;
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+
+    // Assert: absence stays absence -- never coerced to Some(0)/"".
+    assert_eq!(cap.record.reduction_decision, None);
+    assert_eq!(cap.record.reduction_strings_compressed, None);
+    assert_eq!(cap.record.reduction_strings_skipped, None);
+    assert_eq!(cap.record.reduction_strings_rejected, None);
+    assert_eq!(cap.record.reduction_bytes_saved, None);
+}
+
+#[tokio::test]
+async fn reduction_decision_and_counters_round_trip_on_the_success_path() {
+    // Arrange
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let meta = meta_with_reduction().await;
+    let resp = response_with_cache(Some(1000), Some(600), Some(300), None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_response(&resp);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert
+    assert_eq!(
+        persisted_reduction(&path),
+        (
+            Some("applied".to_string()),
+            Some(7),
+            Some(3),
+            Some(2),
+            Some(4_096)
+        )
+    );
+}
+
+#[tokio::test]
+async fn reduction_decision_and_counters_round_trip_on_the_all_failed_path() {
+    // Arrange: the reduction happened during the chain walk, then every
+    // fallback entry failed -- the evidence pair is refused for such a row,
+    // but the reduction observation is still what the dispatch measured.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let mut meta = meta_with_reduction().await;
+    meta.calib_estimated_tokens = Some(9_500);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_error(&Error::upstream("p", 503, ""));
+    cap.finalize(Outcome::UpstreamError);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: unaffected by the calibration refusal on the same row.
+    assert_eq!(
+        persisted_reduction(&path),
+        (
+            Some("applied".to_string()),
+            Some(7),
+            Some(3),
+            Some(2),
+            Some(4_096)
+        )
+    );
+    assert_eq!(persisted_evidence_pair(&path), (None, None));
+}
+
+#[tokio::test]
+async fn streaming_reduction_observation_matches_the_completion_path() {
+    // Arrange: the same meta, observed over a stream instead of a response.
+    let (mut cap, handle, writer, _dir, path) = capture_over_a_readable_db();
+    let meta = meta_with_reduction().await;
+    let chunk = chunk_with_cache(Some(1000), Some(600), Some(300), None);
+
+    // Act
+    cap.observe_meta(&meta, 0, 0);
+    cap.observe_chunk(&chunk);
+    cap.finalize(Outcome::Ok);
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(handle);
+    writer.shutdown();
+
+    // Assert: parity with the completion path -- the observation comes from
+    // the dispatch meta, so the egress shape cannot perturb it.
+    assert_eq!(
+        persisted_reduction(&path),
+        (
+            Some("applied".to_string()),
+            Some(7),
+            Some(3),
+            Some(2),
+            Some(4_096)
+        )
+    );
+}
+
 #[test]
 fn observe_quota_maps_non_empty_extras_into_json_object() {
     // Arrange: forward-compat `extras` pairs must land as a JSON object

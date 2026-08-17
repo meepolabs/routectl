@@ -33,20 +33,34 @@ use serde_json::Value;
 
 use crate::cache_control::mutable_suffix_start;
 use crate::content_part::{ContentPart, KnownContentPart};
-use crate::schema::{ChatRequest, MessageContent};
+use crate::schema::{ChatRequest, Message, MessageContent};
 
 /// Divisor for the rough bytes-to-tokens estimate. Four bytes per token is
 /// the conventional English-text heuristic; good enough for an
 /// operator-facing "tokens saved" signal, not a billing figure.
 const BYTES_PER_TOKEN_ESTIMATE: usize = 4;
 
-/// How much a minify pass removed. A small owned outcome record the router
-/// maps to operator-facing strings.
+/// The classification ledger for one minify pass: how much was removed and
+/// how every other candidate target was accounted for. Produced for BOTH the
+/// applied and the nothing-to-strip outcomes, so a counter consumer never has
+/// to reconstruct classifications from a bare outcome. A small owned record
+/// the router maps to operator-facing strings.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReductionDelta {
     /// Number of JSON-valued strings that were compacted.
     pub strings_minified: usize,
+    /// Number of candidate targets left untouched because they were not
+    /// JSON text or were already whitespace-free (a permanent ceiling: no
+    /// transform can shrink them).
+    pub strings_skipped: usize,
+    /// Number of targets that parsed as JSON but were declined by the
+    /// re-parse equality guard. A FAIL-CLOSED INVARIANT ALARM, not a
+    /// headroom signal: with the current minifier this count is structurally
+    /// unreachable, so a nonzero value means the guard caught a rewrite that
+    /// changed meaning -- a minifier defect to investigate. Headroom is
+    /// `strings_skipped` plus the outcome histogram.
+    pub strings_rejected: usize,
     /// Total bytes removed across all compacted strings.
     pub bytes_saved: usize,
     /// Rough token-savings estimate (`bytes_saved / 4`).
@@ -59,13 +73,73 @@ pub struct ReductionDelta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReductionOutcome {
     /// There is no mutable tail to operate on (every message is frozen by a
-    /// caller `cache_control` marker, or there are no messages).
+    /// caller `cache_control` marker, or there are no messages). No candidate
+    /// target was ever examined, so there is no classification to report.
     NoMutableTail,
     /// A mutable tail exists but nothing was minified; the request is
-    /// byte-identical to its input.
-    NothingToStrip,
+    /// byte-identical to its input. Still carries the pass's classification
+    /// ledger -- `strings_minified` and `bytes_saved` are zero, while
+    /// `strings_skipped` / `strings_rejected` account for every target the
+    /// tail did hold.
+    NothingToStrip(ReductionDelta),
     /// At least one JSON-valued string was compacted.
     Applied(ReductionDelta),
+}
+
+/// Classification of a single candidate string. Distinguishing the two
+/// no-op reasons is deliberate: `Skipped` is a permanent ceiling (nothing
+/// could ever shrink these bytes) whereas `Rejected` is a fail-closed
+/// invariant alarm -- the equality guard caught a rewrite that changed
+/// meaning, which this minifier can never legitimately produce.
+enum StringMinifyOutcome {
+    /// Valid JSON, strictly shorter, and provably equal after re-parse.
+    Compressed(String),
+    /// Not JSON text, or already whitespace-free.
+    Skipped,
+    /// Parsed as JSON, but the re-parse equality guard declined the result.
+    /// Structurally unreachable for input this lexer handles; reaching it
+    /// means a minifier defect.
+    Rejected,
+}
+
+/// Classify `s` and, when it can be safely compacted, carry the compacted
+/// form. Sole owner of the three losslessness guards; every counting and
+/// mutating path funnels through it so guard semantics cannot diverge.
+fn classify_json_string(s: &str) -> StringMinifyOutcome {
+    // Guard (a): non-JSON text has semantic whitespace (source code, logs,
+    // prose) -- never touch it.
+    let Ok(original) = serde_json::from_str::<Value>(s) else {
+        return StringMinifyOutcome::Skipped;
+    };
+
+    let Some(minified) = strip_insignificant_whitespace(s) else {
+        return StringMinifyOutcome::Skipped;
+    };
+
+    // Guard (c): nothing stripped (already compact) -- signal no-op.
+    if minified.len() >= s.len() {
+        return StringMinifyOutcome::Skipped;
+    }
+
+    // Guard (b): the result must parse AND equal the original parsed Value.
+    accept_if_lossless(&original, minified)
+}
+
+/// Guard (b) in isolation: accept `candidate` as a lossless rewrite of
+/// `original` only when it re-parses to an equal `Value`, else decline it.
+///
+/// Split out of `classify_json_string` so the rejection arm -- structurally
+/// unreachable through public input, because the lexer only ever drops
+/// insignificant whitespace -- is still exercisable with a deliberately
+/// unequal pair.
+fn accept_if_lossless(original: &Value, candidate: String) -> StringMinifyOutcome {
+    let Ok(reparsed) = serde_json::from_str::<Value>(&candidate) else {
+        return StringMinifyOutcome::Rejected;
+    };
+    if reparsed != *original {
+        return StringMinifyOutcome::Rejected;
+    }
+    StringMinifyOutcome::Compressed(candidate)
 }
 
 /// Strip insignificant whitespace from a JSON document held as a string.
@@ -84,24 +158,10 @@ pub enum ReductionOutcome {
 /// document is never reparsed-and-reserialized.
 #[must_use]
 pub fn minify_json_whitespace(s: &str) -> Option<String> {
-    // Guard (a): non-JSON text has semantic whitespace (source code, logs,
-    // prose) -- never touch it.
-    let original: Value = serde_json::from_str(s).ok()?;
-
-    let minified = strip_insignificant_whitespace(s)?;
-
-    // Guard (c): nothing stripped (already compact) -- signal no-op.
-    if minified.len() >= s.len() {
-        return None;
+    match classify_json_string(s) {
+        StringMinifyOutcome::Compressed(minified) => Some(minified),
+        StringMinifyOutcome::Skipped | StringMinifyOutcome::Rejected => None,
     }
-
-    // Guard (b): the result must parse AND equal the original parsed Value.
-    let reparsed: Value = serde_json::from_str(&minified).ok()?;
-    if reparsed != original {
-        return None;
-    }
-
-    Some(minified)
 }
 
 /// The whitespace-only lexer. Pure string transform; correctness of the
@@ -154,42 +214,145 @@ fn strip_insignificant_whitespace(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Minify a single JSON-valued `Value::String` target in place, bumping the
-/// running counters on success. Non-string targets and minify failures are
-/// left untouched (fail-closed).
-fn minify_string_target(target: &mut Value, strings_minified: &mut usize, bytes_saved: &mut usize) {
-    if let Value::String(s) = target
-        && let Some(minified) = minify_json_whitespace(s)
-    {
-        *bytes_saved += s.len() - minified.len();
-        *strings_minified += 1;
+/// Running tallies for one `apply_json_minify` pass.
+#[derive(Default)]
+struct DeltaCounts {
+    strings_minified: usize,
+    strings_skipped: usize,
+    strings_rejected: usize,
+    bytes_saved: usize,
+}
+
+impl DeltaCounts {
+    /// Classify one candidate target into the tallies. Non-string targets are
+    /// structured Values, already whitespace-free on the wire, so they count
+    /// as skipped rather than rejected.
+    fn classify(&mut self, target: &Value) {
+        let Value::String(s) = target else {
+            self.strings_skipped += 1;
+            return;
+        };
+        self.count_outcome(classify_json_string(s), s.len());
+    }
+
+    /// Fold one classification into the tallies. `original_len` is the
+    /// candidate's byte length, used only by the compressed arm.
+    fn count_outcome(&mut self, outcome: StringMinifyOutcome, original_len: usize) {
+        match outcome {
+            StringMinifyOutcome::Compressed(minified) => {
+                self.bytes_saved += original_len - minified.len();
+                self.strings_minified += 1;
+            }
+            StringMinifyOutcome::Skipped => self.strings_skipped += 1,
+            StringMinifyOutcome::Rejected => self.strings_rejected += 1,
+        }
+    }
+
+    const fn into_delta(self) -> ReductionDelta {
+        ReductionDelta {
+            strings_minified: self.strings_minified,
+            strings_skipped: self.strings_skipped,
+            strings_rejected: self.strings_rejected,
+            bytes_saved: self.bytes_saved,
+            est_tokens_saved: self.bytes_saved / BYTES_PER_TOKEN_ESTIMATE,
+        }
+    }
+}
+
+/// Apply the compacted form to one target if it has one. Pure application:
+/// the tallies come from the read-only scan, which classified this same
+/// target, so this must never count.
+fn minify_string_target(target: &mut Value) {
+    let Value::String(s) = target else {
+        return;
+    };
+    let outcome = classify_json_string(s);
+    apply_outcome(target, outcome);
+}
+
+/// Write a classification's compacted form back onto its target. Every other
+/// classification -- including a guard rejection -- leaves the target's bytes
+/// exactly as they were.
+fn apply_outcome(target: &mut Value, outcome: StringMinifyOutcome) {
+    if let StringMinifyOutcome::Compressed(minified) = outcome {
         *target = Value::String(minified);
     }
 }
 
-/// Minify the stringified `function.arguments` of each OpenAI-shape tool_call.
+/// The `function.arguments` string of an OpenAI-shape tool_call, if the call
+/// is shaped well enough to carry one. A malformed call or a non-function
+/// type simply has no target; every navigation step is fallible.
+fn tool_call_arguments(call: &Value) -> Option<&Value> {
+    call.get("function")?.get("arguments")
+}
+
+/// The minify target of an Anthropic-shape content part, if it has one.
+/// `ContentPart::Other`, thinking blocks, and text blocks have none.
+const fn known_part_target(part: &ContentPart) -> Option<&Value> {
+    let ContentPart::Known(known) = part else {
+        return None;
+    };
+    match known {
+        KnownContentPart::ToolResult { content, .. } => Some(content),
+        KnownContentPart::ToolUse { input, .. } => Some(input),
+        _ => None,
+    }
+}
+
+/// Read-only scan of one message: classify every candidate target into
+/// `counts` without touching the request.
+///
+/// This is the pass's ONLY tally site, for both outcomes. It must navigate
+/// exactly the target set [`minify_message_targets`] mutates -- the counts
+/// would otherwise describe a different set of strings than the one the
+/// mutation touched.
+fn scan_message_targets(message: &Message, counts: &mut DeltaCounts) {
+    if let MessageContent::Parts(parts) = &message.content {
+        for target in parts.iter().filter_map(known_part_target) {
+            counts.classify(target);
+        }
+    }
+
+    if let Some(tool_calls) = message.tool_calls.as_ref() {
+        for target in tool_calls.iter().filter_map(tool_call_arguments) {
+            counts.classify(target);
+        }
+    }
+}
+
+/// Apply the compacted form to every target of one message in place.
 ///
 /// The OpenAI Chat Completions shape carries assistant tool calls on the
 /// separate `Message.tool_calls` field as untyped Values shaped
 /// `{"id":..,"type":"function","function":{"name":..,"arguments":"<json>"}}`.
 /// The `arguments` value is a STRING that may carry pretty-printed JSON
 /// whitespace shipped every turn -- the same minify target as the Anthropic
-/// content-part path. A tool_call may be malformed or a non-function type, so
-/// every navigation step is fallible: a missing `function`/`arguments` key or
-/// a non-string `arguments` is skipped, never unwrapped.
-fn minify_tool_call_arguments(
-    tool_calls: &mut [Value],
-    strings_minified: &mut usize,
-    bytes_saved: &mut usize,
-) {
-    for call in tool_calls {
-        let Some(arguments) = call
-            .get_mut("function")
-            .and_then(|f| f.get_mut("arguments"))
-        else {
-            continue;
-        };
-        minify_string_target(arguments, strings_minified, bytes_saved);
+/// content-part path.
+fn minify_message_targets(message: &mut Message) {
+    if let MessageContent::Parts(parts) = &mut message.content {
+        for part in parts.iter_mut() {
+            let ContentPart::Known(known) = part else {
+                continue;
+            };
+            let target = match known {
+                KnownContentPart::ToolResult { content, .. } => content,
+                KnownContentPart::ToolUse { input, .. } => input,
+                _ => continue,
+            };
+            minify_string_target(target);
+        }
+    }
+
+    if let Some(tool_calls) = message.tool_calls.as_mut() {
+        for call in tool_calls.iter_mut() {
+            let Some(arguments) = call
+                .get_mut("function")
+                .and_then(|f| f.get_mut("arguments"))
+            else {
+                continue;
+            };
+            minify_string_target(arguments);
+        }
     }
 }
 
@@ -203,10 +366,17 @@ fn minify_tool_call_arguments(
 /// Structured (non-string) Values, `ContentPart::Other`, thinking blocks, and
 /// anything before `start` are never touched.
 ///
+/// Plan-first: the tail is scanned read-only to build the classification
+/// ledger, and `Arc::make_mut` is reached for only when that ledger shows at
+/// least one target provably changes -- so the common nothing-to-strip
+/// request does not pay a message-buffer copy against the CoW seam
+/// documented on [`ChatRequest::messages`]. Both outcomes carry the ledger,
+/// so skip / reject counts survive the no-op path.
+///
 /// Fail-closed: a per-string minify failure simply skips that string (the
-/// original is kept); the function never panics. Returns `NothingToStrip`
-/// when no string was changed (request byte-identical), else
-/// `Applied(delta)`.
+/// original is kept); the function never panics. Returns
+/// `NothingToStrip(delta)` when no string was changed (request
+/// byte-identical), else `Applied(delta)`.
 #[must_use]
 pub fn apply_json_minify(req: &mut ChatRequest) -> ReductionOutcome {
     let start = match mutable_suffix_start(req) {
@@ -214,38 +384,21 @@ pub fn apply_json_minify(req: &mut ChatRequest) -> ReductionOutcome {
         None => return ReductionOutcome::NoMutableTail,
     };
 
-    let mut strings_minified = 0usize;
-    let mut bytes_saved = 0usize;
+    let mut counts = DeltaCounts::default();
+    for message in req.messages.iter().skip(start) {
+        scan_message_targets(message, &mut counts);
+    }
+    let delta = counts.into_delta();
+
+    if delta.strings_minified == 0 {
+        return ReductionOutcome::NothingToStrip(delta);
+    }
 
     for message in Arc::make_mut(&mut req.messages).iter_mut().skip(start) {
-        if let MessageContent::Parts(parts) = &mut message.content {
-            for part in parts.iter_mut() {
-                let ContentPart::Known(known) = part else {
-                    continue;
-                };
-                let target = match known {
-                    KnownContentPart::ToolResult { content, .. } => content,
-                    KnownContentPart::ToolUse { input, .. } => input,
-                    _ => continue,
-                };
-                minify_string_target(target, &mut strings_minified, &mut bytes_saved);
-            }
-        }
-
-        if let Some(tool_calls) = message.tool_calls.as_mut() {
-            minify_tool_call_arguments(tool_calls, &mut strings_minified, &mut bytes_saved);
-        }
+        minify_message_targets(message);
     }
 
-    if strings_minified == 0 {
-        return ReductionOutcome::NothingToStrip;
-    }
-
-    ReductionOutcome::Applied(ReductionDelta {
-        strings_minified,
-        bytes_saved,
-        est_tokens_saved: bytes_saved / BYTES_PER_TOKEN_ESTIMATE,
-    })
+    ReductionOutcome::Applied(delta)
 }
 
 #[cfg(test)]
@@ -586,7 +739,7 @@ mod tests {
         assert_eq!(content, &json!(pretty));
         // The marker sits on message 0; start = 1; message 1 has no JSON
         // string to strip, so the whole request is byte-identical.
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         let after = serde_json::to_value(&req).unwrap();
         assert_eq!(before, after);
     }
@@ -639,7 +792,7 @@ mod tests {
         let outcome = apply_json_minify(&mut req);
 
         // Assert
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
 
@@ -658,7 +811,7 @@ mod tests {
         let outcome = apply_json_minify(&mut req);
 
         // Assert
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
 
@@ -825,7 +978,7 @@ mod tests {
         let outcome = apply_json_minify(&mut req);
 
         // Assert: nothing in the tail to strip, frozen prefix byte-identical.
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         assert_eq!(first_tool_call_arguments(&req), &json!(pretty));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
@@ -907,7 +1060,7 @@ mod tests {
         let outcome = apply_json_minify(&mut req);
 
         // Assert
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
 
@@ -926,7 +1079,7 @@ mod tests {
         let outcome = apply_json_minify(&mut req);
 
         // Assert
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
 
@@ -959,7 +1112,7 @@ mod tests {
         let outcome = apply_json_minify(&mut req);
 
         // Assert
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
 
@@ -991,7 +1144,7 @@ mod tests {
         let outcome = apply_json_minify(&mut req);
 
         // Assert
-        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
 
@@ -1051,5 +1204,444 @@ mod tests {
         };
         assert_eq!(input, &json!("{\"input\":1}"));
         assert_eq!(first_tool_call_arguments(&req), &json!("{\"args\":2}"));
+    }
+
+    // --- copy-on-write: the no-op pass must not clone the message buffer ---
+
+    #[test]
+    fn apply_no_op_preserves_the_shared_message_buffer_allocation() {
+        // Arrange: a shared-refcount buffer (the dispatch path clones the
+        // request per fallback entry) whose mutable tail has nothing to
+        // strip -- the pre-scan must short-circuit before `Arc::make_mut`.
+        let messages: Arc<[Message]> =
+            vec![tool_result_msg(json!("just some text output"), None)].into();
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: Arc::clone(&messages),
+            ..Default::default()
+        };
+        assert_eq!(Arc::strong_count(&messages), 2);
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: same allocation, still shared, no deep copy paid -- and the
+        // classification survives the short-circuit (the counters must be
+        // readable without the mutating pass ever running).
+        let ReductionOutcome::NothingToStrip(delta) = &outcome else {
+            panic!("expected NothingToStrip, got {outcome:?}");
+        };
+        assert_eq!(delta.strings_minified, 0);
+        assert_eq!(delta.bytes_saved, 0);
+        assert_eq!(delta.strings_skipped, 1);
+        assert_eq!(delta.strings_rejected, 0);
+        assert!(Arc::ptr_eq(&messages, &req.messages));
+        assert_eq!(Arc::strong_count(&messages), 2);
+    }
+
+    #[test]
+    fn apply_no_op_preserves_shared_buffer_when_tail_is_already_compact() {
+        // Arrange: valid JSON, already whitespace-free -- the other no-op
+        // reason. Must also short-circuit.
+        let messages: Arc<[Message]> =
+            vec![tool_result_msg(json!("{\"a\":1,\"b\":[2,3]}"), None)].into();
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: Arc::clone(&messages),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
+        assert!(Arc::ptr_eq(&messages, &req.messages));
+    }
+
+    #[test]
+    fn apply_over_shared_buffer_leaves_other_clone_pristine_when_compacting() {
+        // Arrange: the compacting path DOES copy, and the other holder of the
+        // buffer must keep its original bytes (the CoW contract).
+        let pretty = "{\n  \"rows\": [1, 2, 3]\n}";
+        let messages: Arc<[Message]> = vec![tool_result_msg(json!(pretty), None)].into();
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: Arc::clone(&messages),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: request compacted, the shared original untouched.
+        assert!(matches!(outcome, ReductionOutcome::Applied(_)));
+        assert!(!Arc::ptr_eq(&messages, &req.messages));
+        let MessageContent::Parts(parts) = &messages[0].content else {
+            panic!("expected parts");
+        };
+        let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &parts[0] else {
+            panic!("expected tool_result");
+        };
+        assert_eq!(content, &json!(pretty));
+    }
+
+    // --- skip vs reject classification ---
+
+    #[test]
+    fn nothing_to_strip_still_reports_every_target_classification() {
+        // Arrange: a tail with NO compactable target at all -- a structured
+        // Value, plain prose, and already-compact JSON. The counters are the
+        // per-dispatch accounting, so they must be reported for this dispatch
+        // too, not discarded because no mutation happened.
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                tool_result_msg(json!({"structured": true}), None),
+                tool_result_msg(json!("plain prose output"), None),
+                tool_result_msg(json!("{\"already\":\"compact\"}"), None),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: all three accounted for as skipped, bytes untouched.
+        let ReductionOutcome::NothingToStrip(delta) = &outcome else {
+            panic!("expected NothingToStrip, got {outcome:?}");
+        };
+        assert_eq!(delta.strings_minified, 0);
+        assert_eq!(delta.bytes_saved, 0);
+        assert_eq!(delta.est_tokens_saved, 0);
+        assert_eq!(delta.strings_skipped, 3);
+        assert_eq!(delta.strings_rejected, 0);
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn nothing_to_strip_counts_tool_call_arguments_targets_too() {
+        // Arrange: the OpenAI-shape target set must be classified on the
+        // no-op path as well, not just the Anthropic content parts.
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![tool_calls_msg(json!("{\"q\":\"x\"}"), None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        let ReductionOutcome::NothingToStrip(delta) = &outcome else {
+            panic!("expected NothingToStrip, got {outcome:?}");
+        };
+        assert_eq!(delta.strings_skipped, 1);
+        assert_eq!(delta.strings_minified, 0);
+    }
+
+    #[test]
+    fn no_mutable_tail_examines_no_targets() {
+        // Arrange: the frozen-prefix outcome carries no ledger by design --
+        // no candidate target was ever examined, so a zeroed delta would be
+        // indistinguishable from "a tail with nothing in it".
+        let pretty = "{\n  \"a\": 1\n}";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![tool_result_msg(json!(pretty), None)].into(),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            ..Default::default()
+        };
+
+        // Act / Assert
+        assert_eq!(apply_json_minify(&mut req), ReductionOutcome::NoMutableTail);
+    }
+
+    #[test]
+    fn nothing_to_strip_never_counts_frozen_prefix_targets() {
+        // Arrange: message 0 is frozen by a caller marker and holds a pretty
+        // (compactable) tool_result; message 1 is the mutable tail and holds
+        // prose. Only the tail is a candidate, so the ledger must show
+        // exactly one skipped target -- counting the frozen pretty one would
+        // both overstate the skip count and imply the minifier looked at
+        // bytes it must never touch.
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                tool_result_msg(
+                    json!("{\n  \"frozen\": 1\n}"),
+                    Some(CacheControl::ephemeral_5m()),
+                ),
+                tool_result_msg(json!("plain prose"), None),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        let ReductionOutcome::NothingToStrip(delta) = &outcome else {
+            panic!("expected NothingToStrip, got {outcome:?}");
+        };
+        assert_eq!(delta.strings_skipped, 1);
+        assert_eq!(delta.strings_minified, 0);
+    }
+
+    #[test]
+    fn classify_skips_non_json_prose() {
+        // Arrange / Act / Assert: whitespace is semantic, permanent ceiling.
+        assert!(matches!(
+            classify_json_string("hello   world"),
+            StringMinifyOutcome::Skipped
+        ));
+    }
+
+    #[test]
+    fn classify_skips_already_compact_json() {
+        // Arrange / Act / Assert
+        assert!(matches!(
+            classify_json_string("{\"a\":1}"),
+            StringMinifyOutcome::Skipped
+        ));
+    }
+
+    #[test]
+    fn classify_compresses_pretty_json() {
+        // Arrange / Act / Assert
+        assert!(matches!(
+            classify_json_string("{ \"a\": 1 }"),
+            StringMinifyOutcome::Compressed(_)
+        ));
+    }
+
+    #[test]
+    fn apply_counts_non_string_target_as_skipped_not_rejected() {
+        // Arrange: one compactable string (so the pass runs) plus a
+        // structured Value target and a plain-prose target, both of which
+        // are permanent ceilings, not invariant alarms.
+        let pretty = "{\n  \"rows\": [1, 2]\n}";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                tool_result_msg(json!(pretty), None),
+                tool_result_msg(json!({"structured": true}), None),
+                tool_result_msg(json!("plain prose output"), None),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        match outcome {
+            ReductionOutcome::Applied(delta) => {
+                assert_eq!(delta.strings_minified, 1);
+                assert_eq!(delta.strings_skipped, 2);
+                assert_eq!(delta.strings_rejected, 0);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_counts_already_compact_sibling_as_skipped() {
+        // Arrange: a compactable target beside an already-compact one.
+        let pretty = "{\n  \"a\": 1\n}";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                tool_result_msg(json!(pretty), None),
+                tool_result_msg(json!("{\"b\":2}"), None),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        match outcome {
+            ReductionOutcome::Applied(delta) => {
+                assert_eq!(delta.strings_minified, 1);
+                assert_eq!(delta.strings_skipped, 1);
+                assert_eq!(delta.strings_rejected, 0);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_est_tokens_saved_stays_bytes_over_four() {
+        // Arrange: est_tokens_saved semantics are unchanged by the widening.
+        let pretty = "{\n    \"key\": \"value\",\n    \"n\": 1\n}";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![tool_result_msg(json!(pretty), None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        match outcome {
+            ReductionOutcome::Applied(delta) => {
+                assert_eq!(delta.est_tokens_saved, delta.bytes_saved / 4);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+    }
+
+    // --- guard rejection preserves bytes ---
+
+    #[test]
+    fn guard_declined_string_leaves_request_bytes_identical() {
+        // Arrange: an unterminated string literal. The document is not valid
+        // JSON, so guard (a) declines it before the lexer runs -- had it
+        // reached the lexer, the structural whitespace would have been
+        // dropped and the shorter result would still be invalid, which is
+        // what guard (b) exists to catch.
+        let hostile = "{  \"k\": \"unterminated";
+        assert!(matches!(
+            classify_json_string(hostile),
+            StringMinifyOutcome::Skipped
+        ));
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![tool_result_msg(json!(hostile), None)].into(),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: bytes preserved exactly, nothing applied.
+        assert!(matches!(outcome, ReductionOutcome::NothingToStrip(_)));
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn guard_declined_string_beside_a_compacted_one_keeps_its_bytes() {
+        // Arrange: the declining path must preserve its own bytes even when
+        // the mutating pass DOES run for a sibling target.
+        let hostile = "{  \"k\": \"unterminated";
+        let pretty = "{\n  \"ok\": 1\n}";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                tool_result_msg(json!(pretty), None),
+                tool_result_msg(json!(hostile), None),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: exactly one compacted; the declined target byte-identical.
+        match outcome {
+            ReductionOutcome::Applied(delta) => {
+                assert_eq!(delta.strings_minified, 1);
+                assert_eq!(delta.strings_skipped, 1);
+                assert_eq!(delta.strings_rejected, 0);
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        let MessageContent::Parts(parts) = &req.messages[1].content else {
+            panic!("expected parts");
+        };
+        let ContentPart::Known(KnownContentPart::ToolResult { content, .. }) = &parts[0] else {
+            panic!("expected tool_result");
+        };
+        assert_eq!(content, &json!(hostile), "declined bytes must survive");
+    }
+
+    #[test]
+    fn valid_json_is_never_rejected_by_the_equality_guard() {
+        // Arrange: `strings_rejected` is a fail-closed invariant alarm, so its
+        // meaning depends on guard (b) never firing for input this lexer
+        // handles -- it drops only ASCII whitespace outside string literals
+        // and is escape-aware, so the compacted form always re-parses equal. A
+        // nonzero `strings_rejected` in production would therefore mean a
+        // real lexer defect, not ordinary traffic.
+        let corpus = [
+            "{ \"a\": 1.0, \"b\": [true, false, null] }",
+            "{ \"a\": 1, \"a\": 2 }",
+            "{ \"k\": \"he said \\\"hi\\\"\" }",
+            "{ \"k\": \"\\\\\" }",
+            "{ \"k\": \"a  b\\n\\tc\" }",
+            "[\n  { \"id\": 1 },\n  { \"id\": 2 }\n]",
+            "{ \"unicode\": \"caf\\u00e9 \\ud83d\\ude00\" }",
+            "{ \"big\": 12345678901234567890, \"exp\": 1e10 }",
+        ];
+
+        for doc in corpus {
+            // Act
+            let outcome = classify_json_string(doc);
+
+            // Assert
+            assert!(
+                !matches!(outcome, StringMinifyOutcome::Rejected),
+                "equality guard unexpectedly declined valid JSON: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn equality_guard_rejects_an_unequal_candidate_and_preserves_the_target_bytes() {
+        // Arrange: the guard's rejection arm cannot be reached through public
+        // input (the lexer only ever drops insignificant whitespace), so drive
+        // it directly with a candidate that parses but means something else.
+        let original: Value = serde_json::from_str("{\"a\":1}").unwrap();
+        let mut target = Value::String("{\"a\":1}".to_string());
+        let before = target.clone();
+
+        // Act
+        let outcome = accept_if_lossless(&original, "{\"a\":2}".to_string());
+        let rejected = matches!(outcome, StringMinifyOutcome::Rejected);
+        apply_outcome(&mut target, outcome);
+
+        // Assert: declined, and the target's bytes are untouched.
+        assert!(rejected, "an unequal candidate must be declined");
+        assert_eq!(target, before, "a rejected candidate must not be written");
+    }
+
+    #[test]
+    fn equality_guard_rejects_an_unparseable_candidate() {
+        // Arrange / Act / Assert: a candidate that does not re-parse at all is
+        // the guard's other rejection arm.
+        let original: Value = serde_json::from_str("{\"a\":1}").unwrap();
+        assert!(matches!(
+            accept_if_lossless(&original, "{\"a\":".to_string()),
+            StringMinifyOutcome::Rejected
+        ));
+    }
+
+    #[test]
+    fn a_rejected_classification_accumulates_into_strings_rejected() {
+        // Arrange: the delta path must route a rejection to its own counter,
+        // leaving bytes_saved and the other tallies at zero.
+        let original: Value = serde_json::from_str("{\"a\":1}").unwrap();
+        let mut counts = DeltaCounts::default();
+
+        // Act
+        counts.count_outcome(accept_if_lossless(&original, "{\"a\":2}".to_string()), 7);
+        let delta = counts.into_delta();
+
+        // Assert
+        assert_eq!(delta.strings_rejected, 1);
+        assert_eq!(delta.strings_minified, 0);
+        assert_eq!(delta.strings_skipped, 0);
+        assert_eq!(delta.bytes_saved, 0);
+        assert_eq!(delta.est_tokens_saved, 0);
     }
 }

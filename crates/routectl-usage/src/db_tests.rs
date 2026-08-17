@@ -1580,7 +1580,126 @@ fn v13_to_v14_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
     assert!(has_column(&migrated, "calib_prompt_tokens"));
 }
 
-/// Pins the physical `requests` DDL shape: 59 columns, in this exact
+/// The `requests` DDL as it stood before the v15 reduction set was appended:
+/// the current DDL truncated right after the last v14 column. Derived from the
+/// live constant rather than hand-copied so it cannot silently diverge from the
+/// real prior shape.
+fn requests_ddl_without_reduction_columns() -> String {
+    const LAST_V14_COLUMN: &str = "    calib_prompt_tokens INTEGER,";
+    let (head, tail) = CREATE_REQUESTS_TABLE
+        .split_once(LAST_V14_COLUMN)
+        .expect("current DDL still ends its v14 column set with calib_prompt_tokens");
+    assert!(
+        tail.contains("reduction_decision") && tail.contains("reduction_bytes_saved"),
+        "the reduction set must be the trailing appended block"
+    );
+    format!("{head}    calib_prompt_tokens INTEGER\n)")
+}
+
+/// A v14 DB (created before the reduction set existed) must migrate to v15
+/// with a schema PHYSICALLY IDENTICAL to a fresh v15 DB -- same columns, same
+/// declared types, same null-ability, same order. Any pre-existing row survives
+/// with all five columns NULL (no backfill), the write-stopped legacy
+/// `reduction_strategy` column is left alone, and a second pass is a no-op.
+#[test]
+fn v14_to_v15_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
+    // Arrange: a genuine v14-shaped `requests` table (the full current DDL
+    // minus the five appended columns) carrying a pre-migration row.
+    let (_migrated_dir, migrated_path) = temp_db_path();
+    let migrated = Connection::open(&migrated_path).expect("raw open");
+    migrated
+        .execute_batch(&requests_ddl_without_reduction_columns())
+        .expect("build v14 requests table");
+    migrated
+        .execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('schema_version', '14');
+             INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, input_tokens, \
+                 calib_prompt_tokens) \
+                 VALUES (1, 2, 'pre-reduction-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, \
+                 1, 0, 100, 700);
+             PRAGMA user_version = 14;",
+        )
+        .expect("seed v14 db");
+    assert_eq!(user_version(&migrated), 14);
+    let has_column = |c: &Connection, name: &str| -> bool {
+        c.prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name=?1")
+            .expect("prepare")
+            .exists([name])
+            .expect("query")
+    };
+    assert!(
+        !has_column(&migrated, "reduction_decision"),
+        "sanity: the v14 table carries none of the reduction columns"
+    );
+    assert!(
+        has_column(&migrated, "reduction_strategy"),
+        "sanity: the v14 table still carries the write-stopped legacy column"
+    );
+
+    // Act
+    let version = migrate_to_current(&migrated, 0).expect("migrate v14->v15");
+
+    // Assert: version landed, and the pre-migration row survives with its
+    // prior columns intact and all five new ones NULL.
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(user_version(&migrated), SCHEMA_VERSION);
+    let (input_tokens, prompt, decision): (Option<i64>, Option<i64>, Option<String>) = migrated
+        .query_row(
+            "SELECT input_tokens, calib_prompt_tokens, reduction_decision \
+             FROM requests WHERE request_id='pre-reduction-row'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("old row survives");
+    let (compressed, skipped, rejected, bytes_saved): (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    ) = migrated
+        .query_row(
+            "SELECT reduction_strings_compressed, reduction_strings_skipped, \
+             reduction_strings_rejected, reduction_bytes_saved \
+             FROM requests WHERE request_id='pre-reduction-row'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .expect("old row survives");
+    assert_eq!(input_tokens, Some(100));
+    assert_eq!(prompt, Some(700));
+    assert!(decision.is_none(), "no backfill of reduction_decision");
+    assert!(compressed.is_none(), "no backfill of strings_compressed");
+    assert!(skipped.is_none(), "no backfill of strings_skipped");
+    assert!(rejected.is_none(), "no backfill of strings_rejected");
+    assert!(bytes_saved.is_none(), "no backfill of bytes_saved");
+    let meta_version: String = migrated
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("meta schema_version");
+    assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+
+    // Assert: the migrated shape is indistinguishable from a fresh one.
+    let (_fresh_dir, fresh_path) = temp_db_path();
+    let fresh = open(&fresh_path).expect("open fresh db");
+    assert_eq!(
+        table_shape(&migrated, "requests"),
+        table_shape(fresh.conn(), "requests"),
+        "a migrated v14 DB must be indistinguishable from a fresh v15 DB"
+    );
+
+    // Idempotent: a second pass over an already-current DB is a no-op.
+    let again = migrate_to_current(&migrated, 0).expect("re-run migrate");
+    assert_eq!(again, SCHEMA_VERSION);
+    assert!(has_column(&migrated, "reduction_bytes_saved"));
+}
+
+/// Pins the physical `requests` DDL shape: 64 columns, in this exact
 /// order, with this exact null-ability. The set intentionally EXCEEDS the
 /// `UsageRecord` field set by three write-stopped legacy columns
 /// (`strategy`, `reduction_strategy`, `selection_decision`), which the DDL
@@ -1651,6 +1770,11 @@ fn requests_columns_match_physical_schema() {
         ("resolved_class", false),
         ("calib_estimated_tokens", false),
         ("calib_prompt_tokens", false),
+        ("reduction_decision", false),
+        ("reduction_strings_compressed", false),
+        ("reduction_strings_skipped", false),
+        ("reduction_strings_rejected", false),
+        ("reduction_bytes_saved", false),
     ];
 
     let (_dir, path) = temp_db_path();

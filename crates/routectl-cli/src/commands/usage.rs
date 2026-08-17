@@ -20,10 +20,10 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 use routectl_router::Config;
 use routectl_usage::{
     AggRow, BucketSpec, GroupKey, KCalibration, NearLosslessAttributionSummary, OpenError,
-    QueryError, QuotaSnapshot, Rates, RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary,
-    aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
-    near_lossless_attribution_summary, open_readonly, shadow_misfire_summary, ttfbs,
-    would_trim_summary,
+    QueryError, QuotaSnapshot, Rates, ReductionSummary, RowCost, ShadowMisfireSummary, UsageDb,
+    WouldTrimSummary, aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
+    near_lossless_attribution_summary, open_readonly, reduction_summary, shadow_misfire_summary,
+    ttfbs, would_trim_summary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -472,6 +472,10 @@ pub struct WindowReport {
     /// only populated and surfaced under `--detail`). Restricted at the
     /// query layer to `would_trim_recorder_version IS NOT NULL`.
     pub near_lossless_attribution: NearLosslessAttributionSummary,
+    /// Lossless-minifier outcome summary over the window (only populated and
+    /// surfaced under `--detail`). Its ratios hold only for windows the usage
+    /// channel dropped nothing in -- the rendered block carries that caveat.
+    pub reduction: ReductionSummary,
 }
 
 /// True iff `provider` is a managed-OAuth subscription provider: its
@@ -762,6 +766,14 @@ pub fn build_window_report(
         NearLosslessAttributionSummary::default()
     };
 
+    // Lossless-minifier outcome summary: only queried (and surfaced) under
+    // --detail.
+    let reduction = if detail {
+        reduction_summary(db, bounds.from_ms, bounds.to_ms)?
+    } else {
+        ReductionSummary::default()
+    };
+
     let mut display_rows: Vec<DisplayRow> = groups
         .into_iter()
         .map(|(label, acc)| finalize_row(label, acc, &ttft))
@@ -789,6 +801,7 @@ pub fn build_window_report(
         would_trim,
         shadow_misfire,
         near_lossless_attribution,
+        reduction,
     })
 }
 
@@ -1072,6 +1085,7 @@ pub fn render_report(report: &WindowReport) -> String {
         out.push_str(&render_latency_summary(report));
         out.push_str(&render_would_trim(report));
         out.push_str(&render_shadow_misfire(report));
+        out.push_str(&render_reduction(report));
     }
     for q in &report.quota {
         out.push_str(&render_quota(q));
@@ -1187,6 +1201,60 @@ fn render_shadow_misfire(report: &WindowReport) -> String {
     )
 }
 
+/// The validity caveat carried by every rendered reduction block. The
+/// counters are recorded through the lossy usage channel, and this read
+/// surface cannot observe that channel's drop counters (they are
+/// process-lifetime atomics in the running service, not ledger columns). So
+/// the block reports COUNTS SEEN only -- no ratio, no share, no cost figure --
+/// and names the counters an operator must check flat before drawing any
+/// proportional conclusion from a window.
+const REDUCTION_VALIDITY_NOTE: &str = "  validity: counts observed, not a rate -- \
+a ratio or cost claim needs the service's usage-channel dropped_full / \
+dropped_disabled / write_errors counters flat across the window\n";
+
+/// The lossless-minifier outcome block: the per-decision request histogram,
+/// the summed raw effect counters, the read-time-derived token estimate, and
+/// the drop-counter validity caveat. Emitted only under `--detail`, and only
+/// when some request in the window carried an outcome.
+///
+/// Deliberately renders no ratio and no cost figure (see
+/// [`REDUCTION_VALIDITY_NOTE`]). `est_tokens` is derived here from the summed
+/// bytes and is never persisted.
+///
+/// A nonzero `strings_rejected` gets its own line: with the current minifier
+/// that count is structurally unreachable, so a nonzero value means the
+/// re-parse equality guard declined a rewrite -- a minifier defect to
+/// investigate, NOT traffic headroom for a more capable transform.
+fn render_reduction(report: &WindowReport) -> String {
+    let r = &report.reduction;
+    if r.decided_requests == 0 {
+        return String::new();
+    }
+    let histogram = r
+        .decisions
+        .iter()
+        .map(|(token, count)| format!("{token}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = format!(
+        "reduction: {} reqs decided  |  {histogram}\n  saved {} bytes (~{} est tokens, bytes/4)  |  strings compressed={} skipped={}\n",
+        r.decided_requests,
+        human_count(r.bytes_saved),
+        human_count(r.est_tokens_saved()),
+        r.strings_compressed,
+        r.strings_skipped,
+    );
+    if r.strings_rejected > 0 {
+        out.push_str(&format!(
+            "  rejected={} -- the re-parse equality guard declined a rewrite; \
+             investigate the minifier, this is not traffic headroom\n",
+            r.strings_rejected,
+        ));
+    }
+    out.push_str(REDUCTION_VALIDITY_NOTE);
+    out
+}
+
 /// Left-align column 0, right-align the rest, padded to the widest cell in
 /// each column. ASCII spaces only.
 fn render_table(rows: &[Vec<String>]) -> String {
@@ -1266,7 +1334,8 @@ const LEGEND: &str = concat!(
     "  \"n/a (sub)\" = managed subscription (see quota)\n",
     "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
     "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools,\n",
-    "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied)",
+    "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied),\n",
+    "                and a reduction line (lossless-minifier outcomes actually applied; counts, not rates)",
 );
 
 // --- k-calibration report -----------------------------------------------

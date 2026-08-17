@@ -860,5 +860,10 @@ fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
         would_trim_context_fraction: None,
         calib_estimated_tokens: None,
         calib_prompt_tokens: None,
+        reduction_decision: None,
+        reduction_strings_compressed: None,
+        reduction_strings_skipped: None,
+        reduction_strings_rejected: None,
+        reduction_bytes_saved: None,
     }
 }

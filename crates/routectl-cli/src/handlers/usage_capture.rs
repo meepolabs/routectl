@@ -86,6 +86,11 @@ pub(crate) fn build_usage_draft(
         would_trim_context_fraction: None,
         calib_estimated_tokens: None,
         calib_prompt_tokens: None,
+        reduction_decision: None,
+        reduction_strings_compressed: None,
+        reduction_strings_skipped: None,
+        reduction_strings_rejected: None,
+        reduction_bytes_saved: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -441,6 +446,13 @@ impl UsageCapture {
         self.record.would_trim_raw_marks = meta.would_trim_raw_marks.clone();
         self.record.would_trim_context_fraction = meta.would_trim_context_fraction;
         self.record.calib_estimated_tokens = meta.calib_estimated_tokens;
+        // Counts and the decision token only -- the counters carry no
+        // payload bytes, so nothing from a request body reaches the ledger.
+        self.record.reduction_decision = meta.reduction_strategy.map(str::to_string);
+        self.record.reduction_strings_compressed = meta.reduction_strings_compressed;
+        self.record.reduction_strings_skipped = meta.reduction_strings_skipped;
+        self.record.reduction_strings_rejected = meta.reduction_strings_rejected;
+        self.record.reduction_bytes_saved = meta.reduction_bytes_saved;
         self.drain_capability_events(meta, catalog_version, overlay_revision);
     }
 

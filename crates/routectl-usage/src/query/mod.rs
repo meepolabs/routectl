@@ -5,6 +5,7 @@ mod calibration;
 mod capability;
 mod deadline;
 mod grouped;
+mod reduction;
 mod would_trim;
 
 pub use aggregate::{
@@ -19,6 +20,7 @@ pub use grouped::{
     BucketSpec, CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
     QuerySpec, QueryTotals, RowCost, SeriesBucket, query,
 };
+pub use reduction::{ReductionSummary, reduction_summary};
 pub use would_trim::{
     KCalibration, NearLosslessAttributionSummary, ReuseSampleRow, ShadowMisfireSummary,
     WouldTrimSummary, k_calibration_summary, near_lossless_attribution_summary,

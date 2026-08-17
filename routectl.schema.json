@@ -1660,11 +1660,11 @@
     },
     "ReductionConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[reduction]` config block. Global policy for the\ndispatch-path token-reduction feature. A missing `[reduction]` table\ndeserializes to `ReductionConfig::default()` (reduction disabled), and\nthe per-field `#[serde(default)]` keeps an omitted key disabled too.\n\nThis is the GLOBAL switch; each `[providers.X]` entry carries an\noptional `reduction_enabled` override consulted only when the global\nswitch is on. The effective decision a later dispatch task will consume:\nreduction applies when the global `enabled == true` AND the provider\noverride is not explicitly `Some(false)`. A provider `None` inherits\nthe global setting.\n\n`#[non_exhaustive]` so later tactic sub-configs are non-breaking\nadditions to the Rust API. `#[serde(deny_unknown_fields)]` is the\ncomplementary wire-side choice (matching `CacheConfig`): unknown TOML\nkeys are rejected so a typo surfaces at config-load time rather than\nbeing silently ignored. The two do not conflict -- a config naming a\nfuture field simply requires a binary new enough to know that field.",
+      "description": "Operator-facing `[reduction]` config block. Global policy for the\ndispatch-path token-reduction feature. A missing `[reduction]` table\ndeserializes to `ReductionConfig::default()` (reduction enabled), and\nthe per-field `#[serde(default)]` keeps an omitted key enabled too.\n\nThis is the GLOBAL switch; each `[providers.X]` entry carries an\noptional `reduction_enabled` override consulted only when the global\nswitch is on. The effective decision a later dispatch task will consume:\nreduction applies when the global `enabled == true` AND the provider\noverride is not explicitly `Some(false)`. A provider `None` inherits\nthe global setting.\n\n`#[non_exhaustive]` so later tactic sub-configs are non-breaking\nadditions to the Rust API. `#[serde(deny_unknown_fields)]` is the\ncomplementary wire-side choice (matching `CacheConfig`): unknown TOML\nkeys are rejected so a typo surfaces at config-load time rather than\nbeing silently ignored. The two do not conflict -- a config naming a\nfuture field simply requires a binary new enough to know that field.",
       "properties": {
         "enabled": {
-          "default": false,
-          "description": "Master switch for the dispatch-path token-reduction feature.\nDefault off (reduction is opt-in): `bool::default()` is `false`,\nand the derived `Default` keeps reduction disabled.",
+          "default": true,
+          "description": "Master switch for the dispatch-path token-reduction feature.\nDefault on: reduction applies unless the operator turns it off\nglobally or per provider.",
           "type": "boolean"
         }
       },
@@ -2072,9 +2072,9 @@
     "reduction": {
       "$ref": "#/$defs/ReductionConfig",
       "default": {
-        "enabled": false
+        "enabled": true
       },
-      "description": "Operator-facing `[reduction]` block. Global switch for the\ndispatch-path token-reduction feature. A missing block keeps the\ndefault: reduction disabled."
+      "description": "Operator-facing `[reduction]` block. Global switch for the\ndispatch-path token-reduction feature. A missing block keeps the\ndefault: reduction enabled."
     },
     "registry": {
       "additionalProperties": {

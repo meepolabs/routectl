@@ -988,6 +988,215 @@ async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
     );
 }
 
+/// Minimal on-disk config text with `[reduction] enabled` set explicitly, so
+/// a reload's reduction value is stated rather than inherited from the schema
+/// default.
+#[cfg(test)]
+fn reduction_config_text(enabled: bool) -> String {
+    format!(
+        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+         [reduction]\nenabled = {enabled}\n"
+    )
+}
+
+/// A reload that FLIPS `[reduction] enabled` stamps the before/after pair on
+/// the success line, and a reload that leaves it alone omits both fields --
+/// the operator's proof that a kill-switch flip actually landed, without
+/// adding noise to every ordinary reload.
+///
+/// Drives `handle_config_reload` directly (no `tokio::spawn`) under
+/// `with_capture` so the thread-local capture subscriber sees the event.
+/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
+/// `routectl_router::overlay_default_path()`, so it joins the same
+/// XDG-pinning group as its siblings above.
+#[tokio::test]
+#[serial_test::serial]
+async fn reduction_flip_is_stamped_on_the_reload_success_log() {
+    // Arrange: a live config with reduction ON and an on-disk candidate
+    // that turns it OFF.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, reduction_config_text(false)).unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    config.reduction.enabled = true;
+    let config = Arc::new(config);
+    let (usage, _writer) = build_usage_writer(&config);
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .unwrap();
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+
+    // Act 1: reload against the flipping candidate. `Box::pin` keeps the
+    // future off this test's stack frame (clippy's large-futures lint).
+    let (flip_result, flip_events) =
+        routectl_testkit::with_capture(Box::pin(handle_config_reload(
+            Some(&cfg_path),
+            &config,
+            secrets.clone(),
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+        )))
+        .await;
+    let (flipped_config, _) = flip_result.expect("the flipping reload must apply");
+    assert!(!flipped_config.reduction.enabled);
+
+    // Act 2: reload again from the ALREADY-flipped config -- same file, so
+    // the value does not change this time.
+    let (steady_result, steady_events) =
+        routectl_testkit::with_capture(Box::pin(handle_config_reload(
+            Some(&cfg_path),
+            &flipped_config,
+            secrets,
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+        )))
+        .await;
+    steady_result.expect("the no-change reload must apply");
+
+    // Assert: the flip stamped both fields; the no-change reload stamped
+    // neither, on the SAME success message.
+    let success_message = "config reloaded; router rebuilt and swapped";
+    let flip_line = flip_events
+        .iter()
+        .find(|e| e.message == success_message)
+        .expect("the flipping reload must log the success line");
+    assert_eq!(flip_line.field("reduction_enabled_before"), Some("true"));
+    assert_eq!(flip_line.field("reduction_enabled_after"), Some("false"));
+
+    let steady_line = steady_events
+        .iter()
+        .find(|e| e.message == success_message)
+        .expect("the no-change reload must log the success line");
+    assert_eq!(
+        steady_line.field("reduction_enabled_before"),
+        None,
+        "an unchanged reduction value must not stamp the transition fields"
+    );
+    assert_eq!(steady_line.field("reduction_enabled_after"), None);
+}
+
+/// Same shape as `reduction_config_text` but with an unknown `[server]` field
+/// (`prt`, a typo of `port`), so `deny_unknown_fields` refuses the candidate at
+/// parse time.
+#[cfg(test)]
+fn reduction_config_text_unparseable(enabled: bool) -> String {
+    format!(
+        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\nprt = 8080\n\n\
+         [reduction]\nenabled = {enabled}\n"
+    )
+}
+
+/// An unparseable candidate that would turn `[reduction] enabled` OFF is
+/// DECLINED with a logged reason, and the live reduction state survives it.
+///
+/// This is the deterministic half of the rejection contract. The
+/// integration-level
+/// `tests/hot_reload.rs::failed_reload_keeps_old_reduction_state` proves the
+/// live egress bytes stay compacted, but it cannot see the reload's log line:
+/// there the reload runs on a spawned server task, and thread-local tracing
+/// capture does not reach spawned tasks. The validation-failure WARN is what
+/// distinguishes a reload that was ATTEMPTED and declined from one that never
+/// fired at all, so it is asserted here.
+///
+/// The WARN is captured off `read_parse_validate_config` driven DIRECTLY rather
+/// than off `handle_config_reload`: the reload runs that loader on
+/// `spawn_blocking`, so its events land on a pool thread the thread-local
+/// capture subscriber cannot see. Both are exercised -- the loader for the log,
+/// the reload for the state it leaves behind.
+///
+/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
+/// `routectl_router::overlay_default_path()`, so it joins the same XDG-pinning
+/// group as its siblings.
+#[tokio::test]
+#[serial_test::serial]
+async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
+    // Arrange: a live config with reduction ON, and an on-disk candidate that
+    // would turn it OFF but cannot parse.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, reduction_config_text_unparseable(false)).unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    config.reduction.enabled = true;
+    let config = Arc::new(config);
+    let (usage, _writer) = build_usage_writer(&config);
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .unwrap();
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let router_before = swap.load_full();
+
+    // Act 1: the loader, driven synchronously so the thread-local capture
+    // subscriber sees its WARN. In production `handle_config_reload` runs this
+    // same function on `spawn_blocking`, which is exactly why the log is not
+    // observable from the reload future itself.
+    let mut loaded = None;
+    let events = routectl_testkit::capture_events(|| {
+        loaded = Some(read_parse_validate_config(&cfg_path));
+    });
+    assert!(
+        loaded.expect("the loader ran").is_none(),
+        "an unparseable candidate must not load"
+    );
+
+    // Act 2: the full reload against that same candidate. `Box::pin` keeps the
+    // large future off this test's stack frame (clippy's large-futures lint).
+    let result = Box::pin(handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+    ))
+    .await;
+
+    // Assert: the decline is on the record, carrying the loader's own reason --
+    // proof the candidate was READ rather than never seen. The offending field
+    // NAME is scrubbed by `parse_error_redaction` (a mistyped key can carry a
+    // secret), so the stable tells are the unknown-field class plus the
+    // did-you-mean hint.
+    let failure = events
+        .iter()
+        .find(|e| e.message == "config reload failed; keeping previous config")
+        .expect("a rejected reload must log its failure");
+    assert_eq!(failure.level, tracing::Level::WARN);
+    let error = failure
+        .field("error")
+        .expect("the failure line must carry the loader error");
+    assert!(
+        error.contains("unknown field") && error.contains("did you mean `port`?"),
+        "the logged reason must identify the rejection, got: {error}"
+    );
+
+    // The live state survives: reload declined, same router installed,
+    // reduction still ON.
+    assert!(
+        result.is_none(),
+        "an unparseable candidate must reject the reload"
+    );
+    let router_after = swap.load_full();
+    assert!(
+        Arc::ptr_eq(&router_before, &router_after),
+        "the prior router must stay installed on a rejected reload"
+    );
+    assert!(
+        router_after.config.reduction.enabled,
+        "a rejected reload must not flip the live reduction kill switch"
+    );
+}
+
 /// Both reload paths must carry the per-seat quota readings onto the
 /// replacement router, and ONE missed site is silent: that path's config swap
 /// empties the store, and an empty store reads exactly as a fleet of seats that

@@ -46,6 +46,7 @@ overlays merge, what's reserved.
 **Caching and cost**
 - [Prompt-cache auto-emission (`[cache]`)](#prompt-cache-auto-emission-cache)
 - [Context reduction (`[reduction]`)](#context-reduction-reduction)
+  ([kill switch + recovery](#kill-switch-reduction-enabled-is-the-live-off-switch))
 - [Steady-state advisory trim (`[trim]`)](#steady-state-advisory-trim-trim)
 - [Pricing registry](#pricing-registry-registrypatternpricing)
 - [Catalog: prompt-cache economics](#catalog-prompt-cache-economics-routectl-catalog)
@@ -130,7 +131,7 @@ sections:
                       # default on.
 
 [reduction]           # dispatch-time context-reduction policy
-                      # (enabled). Optional; default off.
+                      # (enabled). Optional; default on.
 
 [trim]                # steady-state advisory-trim knobs (trigger_tokens,
                       # clear_at_least_tokens, head_keep_messages,
@@ -342,7 +343,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
 | `auto_emit_top_level_breakpoint` | `[providers.X]`               | `Option<bool>`, default None (inherits global); `false` disables auto-cache for this provider     |
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
-| `enabled`                      | `[reduction]` global            | bool, default false; master switch for dispatch-path context reduction (see `[reduction]`)        |
+| `enabled`                      | `[reduction]` global            | bool, default true; master switch for dispatch-path context reduction (see `[reduction]`)         |
 | `reduction_enabled`            | `[providers.X]`                 | `Option<bool>`, default None (inherits global); `false` disables reduction for this provider      |
 | `trigger_tokens`               | `[trim]` global                 | u64, default 100000; see `[trim]`                                                                 |
 | `clear_at_least_tokens`        | `[trim]` global                 | u64, default 20000; see `[trim]`                                                                  |
@@ -2620,18 +2621,18 @@ The transform is **lossless** and **cache-safe**:
   inside a JSON-valued string survives to the model, so that string is
   the sole target.
 
-Reduction is applied to completions and streaming. It is **opt-in**
-(default off).
+Reduction is applied to completions and streaming. It is **on by
+default**; an operator opts out globally or per provider.
 
 The optional `[reduction]` block is the **global** master switch. A
-missing block keeps the default: reduction disabled.
+missing block keeps the default: reduction enabled.
 
 ```toml
 [reduction]
 # Master switch for dispatch-path context reduction (whitespace-only
 # minify of JSON-valued string tool content in the mutable tail).
-# Default false.
-enabled = true
+# Default true; set false to opt out.
+enabled = false
 ```
 
 ### Per-provider switch
@@ -2668,6 +2669,97 @@ outcome that surfaces anywhere. A request whose reduction was skipped
 `reduction_strategy` column is write-stopped (retained in the schema, NULL
 for every row written by this version onward). See
 [LOGGING.md](LOGGING.md).
+
+### Kill switch: `[reduction] enabled` is the live off switch
+
+`[reduction] enabled` is hot-reloadable, and it IS the kill switch. There
+is no separate emergency knob: setting it to `false` and letting the
+running daemon reload turns the reducer off without a restart.
+
+- **Scope** -- the global switch governs every provider. A per-provider
+  `reduction_enabled = false` narrows reduction for one provider; only the
+  global switch turns the whole transform off.
+- **Effect on the next request** -- each HTTP handler pins ONE router
+  snapshot at request entry and dispatch reads the reduction switch off
+  that snapshot. So the first request admitted after the swap egresses
+  byte-identical passthrough bytes.
+- **In-flight requests keep the old state** -- a request admitted BEFORE
+  the swap uses its pinned snapshot for its WHOLE fallback chain, so a
+  chain entry prepared after the flip still reduces. This is documented
+  behavior, not a defect: pinning is what keeps one request's bytes
+  self-consistent across retries and fallbacks. In-flight requests drain
+  in seconds; the switch is immediate for everything admitted after it.
+- **A rejected reload changes nothing** -- if the candidate config fails
+  parse or validation, the running router (and its reduction state) stays
+  live and the daemon logs a WARN naming the failure. The switch does not
+  half-apply.
+- **One-time cache churn is expected in BOTH directions.** Reduction runs
+  before auto-cache, so a session whose prefix was cached with the other
+  setting re-writes its cache once after the flip, then is stable (the
+  reducer is deterministic). That is churn, not corruption.
+
+#### Recovery runbook
+
+Run these in order; stop as soon as the transition log confirms the flip.
+
+1. **Write the config.** Set `enabled = false` under `[reduction]` in
+   `config.toml` (or `routectl config set reduction.enabled false`). Any
+   editor works: the watcher handles atomic-rename writes.
+2. **Verify the transition log.** Watch the daemon log for the reload
+   success line carrying the before/after pair:
+
+   ```bash
+   ROUTECTL_LOG=routectl_cli::server=info ./routectl serve
+   # config reloaded; router rebuilt and swapped ...
+   #   reduction_enabled_before=true reduction_enabled_after=false
+   ```
+
+   Those two fields appear ONLY when the value actually changed, so their
+   presence is the confirmation that the flip landed. See
+   [LOGGING.md](LOGGING.md), "Config-reload transition fields".
+3. **SIGHUP if the watcher did not fire.** No reload line at all means the
+   filesystem event was missed, not that the config was rejected. Send
+   `SIGHUP` to the daemon to drive the same reload coordinator directly:
+
+   ```bash
+   kill -HUP <routectl-pid>
+   ```
+
+4. **Restart if reload validation repeatedly fails.** A WARN naming a
+   parse or validation error means the candidate config is bad -- fix what
+   the message names first. If a config that `routectl config check`
+   accepts still fails to reload, restart the daemon; a cold start runs the
+   same loader with no prior state to carry over.
+
+#### Independence from advisory trim (`[trim]`)
+
+The lossless minifier's switch and the advisory trimmer's controls are
+SEPARATE mechanisms and never share a switch:
+
+- `[reduction] enabled` is the **global master switch for the lossless
+  minifier**, and each `[providers.X] reduction_enabled` is a per-provider
+  override of that one transform.
+- The advisory trimmer's live-cut switch, when trimming gains one, is a
+  NEW key under `[trim]` -- distinct from `[reduction] enabled` and from
+  every per-provider `reduction_enabled`.
+
+This is deliberate. Killing a risky lossy cut must not silently kill the
+safe lossless minifier, and all four on/off combinations stay legal:
+
+| `[reduction]` lossless | lossy trim cut | Meaning |
+|---|---|---|
+| on | on | Both transforms active. |
+| on | off | Minify only; trimming stays advisory (observations still recorded). |
+| off | on | Lossy cut without the minifier. |
+| off | off | Neither transform mutates a request. |
+
+Two consequences follow directly, and neither may be traded away:
+
+- A provider's lossless opt-out (`reduction_enabled = false`) must NOT
+  disable lossy trimming for that provider.
+- Disabling lossy mutation must NOT suppress advisory trim observations --
+  the would-trim recorder is a measurement surface, independent of whether
+  anything acts on it.
 
 ## Steady-state advisory trim (`[trim]`)
 

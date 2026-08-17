@@ -53,8 +53,8 @@ impl Default for CacheConfig {
 
 /// Operator-facing `[reduction]` config block. Global policy for the
 /// dispatch-path token-reduction feature. A missing `[reduction]` table
-/// deserializes to `ReductionConfig::default()` (reduction disabled), and
-/// the per-field `#[serde(default)]` keeps an omitted key disabled too.
+/// deserializes to `ReductionConfig::default()` (reduction enabled), and
+/// the per-field `#[serde(default)]` keeps an omitted key enabled too.
 ///
 /// This is the GLOBAL switch; each `[providers.X]` entry carries an
 /// optional `reduction_enabled` override consulted only when the global
@@ -69,15 +69,21 @@ impl Default for CacheConfig {
 /// keys are rejected so a typo surfaces at config-load time rather than
 /// being silently ignored. The two do not conflict -- a config naming a
 /// future field simply requires a binary new enough to know that field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ReductionConfig {
     /// Master switch for the dispatch-path token-reduction feature.
-    /// Default off (reduction is opt-in): `bool::default()` is `false`,
-    /// and the derived `Default` keeps reduction disabled.
-    #[serde(default)]
+    /// Default on: reduction applies unless the operator turns it off
+    /// globally or per provider.
+    #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for ReductionConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Operator-facing `[capability]` config block. Kill switch plus tempo

@@ -134,6 +134,19 @@ list with more narrative.
   `structured-outputs-2025-12-15` already had. One-way: the body's field
   adds the flag, and a caller-supplied flag with no matching field is
   passed through untouched. Forwarded and API-key lanes are unchanged.
+- **BEHAVIOR CHANGE: `[reduction] enabled` now defaults to `true`.**
+  Dispatch-path context reduction (whitespace-only minify of
+  JSON-valued string tool content in the mutable message tail) was
+  opt-in; it is now on unless an operator turns it off. A config with
+  no `[reduction]` block, an empty block, or the key omitted gets
+  reduction; `enabled = false` still opts out globally, and a
+  per-provider `reduction_enabled = false` still opts out that
+  provider. The config schema version is unchanged and no migration
+  runs -- the flip comes from the parse-time default, so fresh and
+  existing installs pick it up identically. Expect one transient on
+  upgrade: reduction runs before auto-cache, so any prefix previously
+  cached in its unreduced form re-writes once against the new bytes,
+  after which cache reads stabilize.
 
 ### Fixed
 

@@ -782,6 +782,33 @@ pub struct DispatchMeta {
     /// dispatched (count_tokens, unknown alias, or all entries
     /// gate-blocked before any reduction point ran).
     pub reduction_strategy: Option<&'static str>,
+    /// Context-reduction counter: strings the minifier actually rewrote.
+    /// Aggregated across the fallback-entry preparations of this chain walk
+    /// (a same-target network retry reuses the prepared request and never
+    /// re-counts). `Some(0)` is a measured zero (reduction ran, rewrote
+    /// nothing); `None` means no dispatched target ran reduction. A raw
+    /// count, never a rate or an average -- ratios are reconstructed
+    /// offline by summing the counters.
+    pub reduction_strings_compressed: Option<u64>,
+    /// Context-reduction counter: candidate strings left untouched because
+    /// they were non-JSON or already compact. Same aggregation and
+    /// `Some(0)` / `None` semantics as `reduction_strings_compressed`. A
+    /// raw count.
+    pub reduction_strings_skipped: Option<u64>,
+    /// Context-reduction counter: strings that parsed as JSON but which the
+    /// re-parse equality guard declined to replace. Distinct from
+    /// `reduction_strings_skipped`: a skip is a permanent ceiling, a reject
+    /// is a fail-closed invariant alarm -- structurally unreachable with the
+    /// current minifier, so a nonzero count means a minifier defect, never
+    /// traffic headroom. Same aggregation and `Some(0)` / `None` semantics.
+    /// A raw count.
+    pub reduction_strings_rejected: Option<u64>,
+    /// Context-reduction counter: bytes removed from the PREPARED outbound
+    /// payloads of this chain walk -- payload bytes, never billed tokens
+    /// and never a token estimate (any token figure is derived downstream
+    /// from this raw count). Same aggregation and `Some(0)` / `None`
+    /// semantics as `reduction_strings_compressed`.
+    pub reduction_bytes_saved: Option<u64>,
     /// Stable seat-selection decision token for the served target's home
     /// seat (see `push_seat_targets` for the fixed vocabulary). `None` for
     /// non-sticky / single-seat pools, non-pooled aliases, and when no
@@ -961,6 +988,10 @@ impl DispatchMeta {
             resolved_alias: alias.to_string(),
             cache_strategy: None,
             reduction_strategy: None,
+            reduction_strings_compressed: None,
+            reduction_strings_skipped: None,
+            reduction_strings_rejected: None,
+            reduction_bytes_saved: None,
             selection_decision: None,
             would_trim_tokens: None,
             would_trim_break_even_k: None,

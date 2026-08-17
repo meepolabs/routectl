@@ -139,7 +139,7 @@ pub struct Config {
 
     /// Operator-facing `[reduction]` block. Global switch for the
     /// dispatch-path token-reduction feature. A missing block keeps the
-    /// default: reduction disabled.
+    /// default: reduction enabled.
     #[serde(default)]
     pub reduction: ReductionConfig,
 

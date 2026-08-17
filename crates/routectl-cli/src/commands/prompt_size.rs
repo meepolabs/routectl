@@ -713,10 +713,10 @@ fn describe_reduction(outcome: &ReductionOutcome, enabled: bool) -> String {
             "reduction disabled in config ([reduction] enabled = false); no mutable tail to reduce"
                 .to_string()
         }
-        ReductionOutcome::NothingToStrip if enabled => {
+        ReductionOutcome::NothingToStrip(_) if enabled => {
             "mutable tail present but nothing to strip (already compact / non-JSON)".to_string()
         }
-        ReductionOutcome::NothingToStrip => {
+        ReductionOutcome::NothingToStrip(_) => {
             "reduction disabled in config ([reduction] enabled = false); nothing to strip (already compact / non-JSON)".to_string()
         }
         // `ReductionOutcome` is `#[non_exhaustive]` in another crate, so this

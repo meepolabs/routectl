@@ -565,14 +565,22 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.resolved_class,
             r.calib_estimated_tokens,
             r.calib_prompt_tokens,
+            r.reduction_decision,
+            r.reduction_strings_compressed,
+            r.reduction_strings_skipped,
+            r.reduction_strings_rejected,
+            r.reduction_bytes_saved,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?56` positions match the params list above.
+/// `schema.rs` exactly; `?1..?61` positions match the params list above.
 /// The DDL's three write-stopped legacy decision columns are absent from
-/// this list on purpose -- an omitted nullable column stores NULL.
+/// this list on purpose -- an omitted nullable column stores NULL. That
+/// includes `reduction_strategy`: the current context-reduction outcome
+/// lands in `reduction_decision`, so a NULL in the legacy column keeps
+/// meaning write-stopped.
 const INSERT_SQL: &str = "\
 INSERT OR IGNORE INTO requests (
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
@@ -599,7 +607,12 @@ INSERT OR IGNORE INTO requests (
     would_trim_context_fraction,
     resolved_class,
     calib_estimated_tokens,
-    calib_prompt_tokens
+    calib_prompt_tokens,
+    reduction_decision,
+    reduction_strings_compressed,
+    reduction_strings_skipped,
+    reduction_strings_rejected,
+    reduction_bytes_saved
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -625,7 +638,12 @@ INSERT OR IGNORE INTO requests (
     ?53,
     ?54,
     ?55,
-    ?56
+    ?56,
+    ?57,
+    ?58,
+    ?59,
+    ?60,
+    ?61
 )";
 
 #[cfg(test)]
@@ -697,6 +715,11 @@ mod tests {
             would_trim_context_fraction: None,
             calib_estimated_tokens: None,
             calib_prompt_tokens: None,
+            reduction_decision: None,
+            reduction_strings_compressed: None,
+            reduction_strings_skipped: None,
+            reduction_strings_rejected: None,
+            reduction_bytes_saved: None,
         }
     }
 
@@ -910,6 +933,67 @@ mod tests {
             .expect("row");
         assert_eq!(estimated, 48_120);
         assert_eq!(prompt, 51_003);
+    }
+
+    /// The v15 reduction set binds at the five LAST column positions and must
+    /// land in the NEW `reduction_decision` column while the write-stopped v3
+    /// `reduction_strategy` column stays NULL. Distinct counter values catch a
+    /// placeholder shift at the tail; the NULL assertion fails loudly if a
+    /// future change ever re-points the outcome token at the legacy column.
+    #[tokio::test]
+    async fn try_send_writes_reduction_decision_and_leaves_reduction_strategy_null() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let mut rec = record("rt-v15");
+        rec.reduction_decision = Some("applied".to_string());
+        rec.reduction_strings_compressed = Some(11);
+        rec.reduction_strings_skipped = Some(22);
+        rec.reduction_strings_rejected = Some(33);
+        rec.reduction_bytes_saved = Some(44_444);
+
+        // Act
+        handle.try_send(rec);
+        assert!(wait_persisted(handle.counters(), 1), "row not persisted");
+        writer.shutdown();
+
+        // Assert
+        let conn = Connection::open(&path).expect("read");
+        let (decision, compressed, skipped, rejected, bytes_saved, legacy): (
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT reduction_decision, reduction_strings_compressed, \
+                 reduction_strings_skipped, reduction_strings_rejected, \
+                 reduction_bytes_saved, reduction_strategy \
+                 FROM requests WHERE request_id='rt-v15'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("row");
+        assert_eq!(decision, Some("applied".to_string()));
+        assert_eq!(compressed, 11);
+        assert_eq!(skipped, 22);
+        assert_eq!(rejected, 33);
+        assert_eq!(bytes_saved, 44_444);
+        assert_eq!(
+            legacy, None,
+            "legacy reduction_strategy must stay write-stopped"
+        );
     }
 
     #[test]
