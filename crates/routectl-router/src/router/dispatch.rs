@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result,
     cache_control::{MAX_BREAKPOINTS, validate_source},
-    context_reduction::{ReductionOutcome, apply_json_minify},
+    context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
     failure_class::{
         ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify, classify_with_attempt,
     },
@@ -356,35 +356,14 @@ impl Router {
                 }
             }
             let provider_cfg = self.config.providers.get(provider_name);
-            // Context reduction: runs strictly AFTER overlays and strictly
-            // BEFORE auto-cache so any auto-emitted breakpoint covers the
-            // REDUCED bytes. `apply_json_minify` computes the caller frozen
-            // floor itself (off this pre-auto-emit clone) and only touches
-            // the mutable tail; it fails closed (no mutation on any doubt).
-            // Effective only when the global switch is on AND the provider
-            // did not explicitly opt out (`None` inherits the global).
-            let reduction_effective = self.config.reduction.enabled
-                && provider_cfg.and_then(crate::config::ProviderEntry::reduction_enabled)
-                    != Some(false);
-            let reduction_outcome = if reduction_effective {
-                Some(apply_json_minify(&mut attempt_req))
-            } else {
-                None
-            };
-            let reduction_token =
-                reduction_strategy_token(reduction_effective, reduction_outcome.as_ref());
-            meta.reduction_strategy = Some(reduction_token);
-            if let Some(ReductionOutcome::Applied(delta)) = &reduction_outcome {
-                tracing::debug!(
-                    provider = %provider_name,
-                    model = %model,
-                    strategy = reduction_token,
-                    strings_minified = delta.strings_minified,
-                    bytes_saved = delta.bytes_saved,
-                    est_tokens_saved = delta.est_tokens_saved,
-                    "context_reduction",
-                );
-            }
+            apply_context_reduction(
+                &self.config,
+                provider_cfg,
+                provider_name,
+                model,
+                &mut attempt_req,
+                meta,
+            );
             // Auto-cache: maybe inject a top-level cache_control breakpoint
             // on THIS per-attempt clone, after overlays (the last
             // dispatch-time touch of cache_control) and before the retry
@@ -1128,32 +1107,14 @@ impl Router {
                 }
             }
             let provider_cfg = self.config.providers.get(provider_name);
-            // Context reduction: see `complete_inner`. Runs after overlays
-            // and before auto-cache so the auto-emitted breakpoint covers the
-            // reduced bytes. Effective only when global on AND provider not
-            // explicitly off. `apply_json_minify` fails closed.
-            let reduction_effective = self.config.reduction.enabled
-                && provider_cfg.and_then(crate::config::ProviderEntry::reduction_enabled)
-                    != Some(false);
-            let reduction_outcome = if reduction_effective {
-                Some(apply_json_minify(&mut attempt_req))
-            } else {
-                None
-            };
-            let reduction_token =
-                reduction_strategy_token(reduction_effective, reduction_outcome.as_ref());
-            meta.reduction_strategy = Some(reduction_token);
-            if let Some(ReductionOutcome::Applied(delta)) = &reduction_outcome {
-                tracing::debug!(
-                    provider = %provider_name,
-                    model = %model,
-                    strategy = reduction_token,
-                    strings_minified = delta.strings_minified,
-                    bytes_saved = delta.bytes_saved,
-                    est_tokens_saved = delta.est_tokens_saved,
-                    "context_reduction",
-                );
-            }
+            apply_context_reduction(
+                &self.config,
+                provider_cfg,
+                provider_name,
+                model,
+                &mut attempt_req,
+                meta,
+            );
             // Auto-cache: see `complete_inner`. Same once-vs-per-attempt
             // split; injected on this clone after overlays, before the
             // inner loop. Original `req` is never mutated.
@@ -2035,6 +1996,86 @@ pub(super) fn would_trim_k_floor_for_meta(
     }
 }
 
+/// Run context reduction for one dispatch attempt: decide effectiveness,
+/// minify, stamp `meta.reduction_strategy`, accumulate the counter ledger,
+/// and emit the `context_reduction` debug log. Shared by the completion and
+/// streaming dispatch paths so both stay byte-identical and observe
+/// identically.
+///
+/// Must be called AFTER overlays and strictly BEFORE auto-cache so any
+/// auto-emitted breakpoint covers the REDUCED bytes. `apply_json_minify`
+/// computes the caller frozen floor itself (off this pre-auto-emit clone) and
+/// only touches the mutable tail; it fails closed (no mutation on any doubt).
+/// Effective only when the global switch is on AND the provider did not
+/// explicitly opt out (`None` inherits the global).
+///
+/// Call site invariant: ONCE per chain-entry preparation, OUTSIDE the
+/// same-target retry loop. A retry re-sends the request this call prepared,
+/// so counting inside that loop would bill the same removed bytes twice;
+/// walking to the next fallback entry prepares a fresh clone, which is a
+/// genuinely new measurement and aggregates.
+fn apply_context_reduction(
+    config: &crate::config::Config,
+    provider_cfg: Option<&crate::config::ProviderEntry>,
+    provider_name: &str,
+    model: &str,
+    attempt_req: &mut ChatRequest,
+    meta: &mut DispatchMeta,
+) {
+    let effective = config.reduction.enabled
+        && provider_cfg.and_then(crate::config::ProviderEntry::reduction_enabled) != Some(false);
+    let outcome = if effective {
+        Some(apply_json_minify(attempt_req))
+    } else {
+        None
+    };
+    let token = reduction_strategy_token(effective, outcome.as_ref());
+    meta.reduction_strategy = Some(token);
+    // Both payload-carrying outcomes describe a pass that actually examined
+    // the tail, so both feed the ledger: `NothingToStrip` is a measured zero
+    // for `strings_minified` / `bytes_saved` while still accounting for every
+    // skipped and rejected target. `NoMutableTail` examined nothing and a
+    // disabled pass never ran, so neither contributes -- the counters stay
+    // `None` unless some dispatched target reduced.
+    if let Some(ReductionOutcome::Applied(delta) | ReductionOutcome::NothingToStrip(delta)) =
+        &outcome
+    {
+        accumulate_reduction_counters(meta, delta);
+    }
+    if let Some(ReductionOutcome::Applied(delta)) = &outcome {
+        tracing::debug!(
+            provider = %provider_name,
+            model = %model,
+            strategy = token,
+            strings_minified = delta.strings_minified,
+            bytes_saved = delta.bytes_saved,
+            est_tokens_saved = delta.est_tokens_saved,
+            "context_reduction",
+        );
+    }
+}
+
+/// Fold one reduction pass's ledger into `meta`'s four counters.
+///
+/// Additive across the fallback-entry preparations of one chain walk: a
+/// `None` counter initializes from zero (so the first contributing entry
+/// leaves a measured value, including a measured `Some(0)`), and later
+/// entries saturate on top. Saturation over wrap keeps a counter monotone
+/// under any pathological chain length -- a pinned ceiling is readable
+/// evidence, a wrapped count is a lie.
+fn accumulate_reduction_counters(meta: &mut DispatchMeta, delta: &ReductionDelta) {
+    fn add(slot: &mut Option<u64>, n: usize) {
+        *slot = Some(slot.unwrap_or(0).saturating_add(n as u64));
+    }
+    add(
+        &mut meta.reduction_strings_compressed,
+        delta.strings_minified,
+    );
+    add(&mut meta.reduction_strings_skipped, delta.strings_skipped);
+    add(&mut meta.reduction_strings_rejected, delta.strings_rejected);
+    add(&mut meta.reduction_bytes_saved, delta.bytes_saved);
+}
+
 /// Map a context-reduction decision to its stable operator-facing token.
 /// These tokens are a CONTRACT (recorded in the usage DB and emitted in the
 /// `context_reduction` log): do not rename or repurpose them, only add new
@@ -2046,7 +2087,7 @@ pub(super) fn would_trim_k_floor_for_meta(
 /// | reduction not effective            | `skipped:disabled`        |
 /// | `ReductionOutcome::Applied`        | `applied`                 |
 /// | `ReductionOutcome::NoMutableTail`  | `skipped:no-tail`         |
-/// | `ReductionOutcome::NothingToStrip` | `skipped:nothing-to-strip`|
+/// | `ReductionOutcome::NothingToStrip(_)` | `skipped:nothing-to-strip`|
 /// | unrecognized future outcome        | `skipped:unknown`         |
 ///
 /// `effective == false` short-circuits to `skipped:disabled` WITHOUT calling
@@ -2061,7 +2102,7 @@ pub(super) const fn reduction_strategy_token(
     match outcome {
         Some(ReductionOutcome::Applied(_)) => "applied",
         Some(ReductionOutcome::NoMutableTail) => "skipped:no-tail",
-        Some(ReductionOutcome::NothingToStrip) => "skipped:nothing-to-strip",
+        Some(ReductionOutcome::NothingToStrip(_)) => "skipped:nothing-to-strip",
         // `ReductionOutcome` is `#[non_exhaustive]`; a future variant we do
         // not yet map means reduction RAN but produced an outcome this build
         // does not recognize -- which is distinct from "disabled", so record

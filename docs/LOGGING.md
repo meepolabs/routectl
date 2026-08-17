@@ -23,6 +23,7 @@ The first half is for operators (filtering, triage, redaction); the
   [prompt-cache auto-emission](#prompt-cache-auto-emission-log-shapes),
   [activation inventory](#auto-activation-inventory-audit-events),
   [context reduction](#context-reduction-log-shapes),
+  [config-reload transitions](#config-reload-transition-fields),
   [stream first-activity](#stream-first-activity-mark),
   [capability intelligence](#capability-intelligence-events)
 
@@ -598,6 +599,40 @@ persisted:
 Only `applied` emits a `context_reduction` log line; the `skipped:*`
 tokens produce no log line and, since the ledger column is write-stopped,
 leave no record at all.
+
+## Config-reload transition fields
+
+Every applied hot reload logs one INFO line on target
+`routectl_cli::server::reload`:
+
+```
+config reloaded; router rebuilt and swapped path=... trigger=config change
+```
+
+`[reduction] enabled` is the operator's live kill switch for the
+dispatch-path reducer (see CONFIGURATION.md, "Context reduction"), so a
+reload that CHANGED it adds a before/after pair to that same line:
+
+| Field                      | Meaning                                                              |
+|----------------------------|----------------------------------------------------------------------|
+| `reduction_enabled_before` | The `[reduction] enabled` value the outgoing config carried.          |
+| `reduction_enabled_after`  | The value the freshly-loaded config carries (now live).               |
+
+Both fields are emitted TOGETHER and ONLY when the value changed. A
+reload that left `[reduction] enabled` alone logs the line without them,
+so their presence is itself the signal that a flip landed:
+
+```
+config reloaded; router rebuilt and swapped path=~/.config/routectl/config.toml \
+  trigger=config change reduction_enabled_before=true reduction_enabled_after=false
+```
+
+The line is the operator's confirmation that the intended transition took
+effect. Absence of both fields after a config write that was meant to flip
+the switch means the reload applied a config whose value was already what
+the file now says -- or that the reload never fired at all (which logs no
+success line). CONFIGURATION.md, "Context reduction", carries the recovery
+runbook that uses this line.
 
 ## Stream first-activity mark
 

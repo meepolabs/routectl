@@ -1568,3 +1568,561 @@ async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
         "with the kill switch OFF, the learned negative no longer de-prioritizes A",
     );
 }
+
+// -----------------------------------------------------------------
+// Context-reduction kill switch (`[reduction] enabled`) flip E2E
+// -----------------------------------------------------------------
+
+/// The pretty (whitespace-laden) JSON document the probe request ships as a
+/// stringified `function.arguments`. The reducer's ONLY legal effect on this
+/// request is compacting exactly this string, which is what makes a
+/// full-body byte comparison across the flip a sound oracle.
+const PRETTY_ARGUMENTS: &str = "{\n  \"query\": \"rust\",\n  \"limit\": 10\n}";
+
+/// What `PRETTY_ARGUMENTS` minifies to. Written out rather than derived so a
+/// silent change in the minifier cannot move both sides of the assertion.
+const COMPACT_ARGUMENTS: &str = "{\"query\":\"rust\",\"limit\":10}";
+
+/// How long `failed_reload_keeps_old_reduction_state` holds the unparseable
+/// candidate on disk, re-issuing the write on the `RESTIMULUS_INTERVAL`
+/// cadence. Spans several intervals so the rejected write is delivered
+/// repeatedly rather than once, and each delivery is checked.
+const REJECT_HOLD_WINDOW: Duration = Duration::from_secs(4);
+
+/// Single-provider config with `[reduction] enabled` set explicitly.
+///
+/// The value is ALWAYS written, never left to the schema default, so the
+/// test states the enablement it asserts on and stays correct whichever way
+/// the shipped default points. `marker_alias`, when set, adds a second alias
+/// whose appearance on `/v1/models` signals the reloaded config went live.
+fn reduction_config(upstream_uri: &str, enabled: bool, marker_alias: Option<&str>) -> String {
+    let key_ref = common::file_ref("test-key");
+    let marker = marker_alias.map_or_else(String::new, |a| format!("{a} = \"m_up\"\n"));
+    format!(
+        r#"
+version = 3
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[reduction]
+enabled = {enabled}
+
+[providers.up]
+kind = "openai-compat"
+base_url = "{upstream_uri}"
+api_key_ref = "{key_ref}"
+
+[models.m_up]
+provider = "up"
+upstream = "upstream-model"
+
+[aliases]
+reduce-me = "m_up"
+{marker}"#
+    )
+}
+
+/// Same shape as `reduction_config` but with an unknown `[server]` field
+/// (`prt`, a typo of `port`) so `deny_unknown_fields` rejects the candidate
+/// at parse time -- the reload never applies and the running router keeps
+/// whatever `[reduction] enabled` it was built with.
+///
+/// `marker_alias` is the rejection ORACLE: it is an alias the candidate would
+/// publish if it were ever accepted. Because the candidate cannot parse, that
+/// alias must never surface on `/v1/models` no matter how many times the
+/// write is delivered.
+fn reduction_config_unparseable(upstream_uri: &str, enabled: bool, marker_alias: &str) -> String {
+    let key_ref = common::file_ref("test-key");
+    format!(
+        r#"
+version = 3
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+prt = 8080
+
+[reduction]
+enabled = {enabled}
+
+[providers.up]
+kind = "openai-compat"
+base_url = "{upstream_uri}"
+api_key_ref = "{key_ref}"
+
+[models.m_up]
+provider = "up"
+upstream = "upstream-model"
+
+[aliases]
+reduce-me = "m_up"
+{marker_alias} = "m_up"
+"#
+    )
+}
+
+/// Two-entry fallback chain (`chain = ["m_a", "m_b"]`) with `[reduction]
+/// enabled` set explicitly. A is dialed first and fails; B is the tail that
+/// serves the request. `max_attempts = 1` plus `[retry.classes.server-error]
+/// retry = 0` keeps A to exactly ONE dial, so a slow A costs its delay once.
+fn reduction_chain_config(a_url: &str, b_url: &str, enabled: bool, marker_alias: &str) -> String {
+    let key_ref = common::file_ref("test-key");
+    format!(
+        r#"
+version = 3
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[retry]
+max_attempts = 1
+initial_backoff_ms = 0
+jitter_ms = 0
+
+[retry.classes.server-error]
+retry = 0
+
+[reduction]
+enabled = {enabled}
+
+[providers.prov_a]
+kind = "openai-compat"
+base_url = "{a_url}"
+api_key_ref = "{key_ref}"
+
+[providers.prov_b]
+kind = "openai-compat"
+base_url = "{b_url}"
+api_key_ref = "{key_ref}"
+
+[models.m_a]
+provider = "prov_a"
+upstream = "upstream-model"
+
+[models.m_b]
+provider = "prov_b"
+upstream = "upstream-model"
+
+[aliases]
+chain = ["m_a", "m_b"]
+{marker_alias} = "m_b"
+"#
+    )
+}
+
+/// POST one `/v1/chat/completions` carrying an assistant turn whose
+/// stringified `function.arguments` is `PRETTY_ARGUMENTS` -- the reducer's
+/// target. No `cache_control` anywhere, so the whole message list is the
+/// mutable tail. `max_tokens` is above `probe_max_tokens` (default 1) so the
+/// request is never treated as an availability probe (a probe fast-fails
+/// instead of walking the fallback chain).
+async fn post_reduction_probe(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+) -> reqwest::StatusCode {
+    let body = json!({
+        "model": alias,
+        "max_tokens": 50,
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "search", "arguments": PRETTY_ARGUMENTS}
+            }]}
+        ]
+    });
+    let resp = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .expect("post /v1/chat/completions");
+    resp.status()
+}
+
+/// The raw body bytes of the LAST request this upstream received, as a
+/// string. The egress body is what the reduction assertions are about, so
+/// the oracle is the transmitted bytes rather than any router-side signal.
+async fn last_request_body(server: &MockServer) -> String {
+    let requests = server
+        .received_requests()
+        .await
+        .expect("recording enabled on the mock upstream");
+    let last = requests.last().expect("upstream received a request");
+    String::from_utf8(last.body.clone()).expect("upstream body is utf-8")
+}
+
+/// The stringified `function.arguments` of the first tool_call in the first
+/// message that carries one, read out of a transmitted egress body.
+fn egress_tool_call_arguments(body: &str) -> String {
+    let parsed: Value = serde_json::from_str(body).expect("egress body is JSON");
+    parsed["messages"]
+        .as_array()
+        .expect("egress body carries a messages array")
+        .iter()
+        .find_map(|m| m.get("tool_calls"))
+        .and_then(|calls| calls.get(0))
+        .and_then(|call| call.get("function"))
+        .and_then(|f| f.get("arguments"))
+        .and_then(Value::as_str)
+        .expect("egress body carries a stringified function.arguments")
+        .to_string()
+}
+
+/// An openai upstream at `POST /chat/completions` that always succeeds,
+/// after `delay` (zero for an immediate answer). The delay is a tokio sleep
+/// inside wiremock, so it holds the request open without blocking the
+/// current-thread test runtime.
+async fn reduction_upstream_ok(delay: Duration) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock_path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(openai_ok_body())
+                .set_delay(delay),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// An openai upstream at `POST /chat/completions` that answers 500 after
+/// `delay` -- a `server-error` class, which falls back to the chain tail.
+async fn reduction_upstream_slow_500(delay: Duration) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock_path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_body_json(json!({"error": {"message": "boom"}}))
+                .set_delay(delay),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Flipping `[reduction] enabled` to false live is the kill switch: the very
+/// next admitted request egresses BYTE-IDENTICAL passthrough bytes.
+///
+/// Enabled-state behavior is OBSERVED FIRST (the pretty `function.arguments`
+/// reaches the upstream compacted) so the test asserts a real transition,
+/// not a state that was already off. The flip is then driven by the
+/// idempotent restimulus loop (`poll_alias_with_restimulus`) rather than a
+/// single write, because the watcher's inotify watch arms asynchronously
+/// after `/health` already answers, so a lone write can race ahead of the
+/// armed watch and be silently lost.
+///
+/// The post-flip oracle is the FULL egress body, not just the arguments
+/// field: substituting the compact string back into the pre-flip body must
+/// reproduce the post-flip body byte-for-byte. That pins passthrough as
+/// "nothing else about the transmitted bytes moved either", which an
+/// arguments-only comparison cannot show.
+#[tokio::test]
+async fn reduction_kill_switch_flip_yields_byte_identical_passthrough() {
+    // Arrange: reduction ON, one upstream that records what it receives.
+    let up = reduction_upstream_ok(Duration::ZERO).await;
+    let (base_url, dir) =
+        spawn_server_with_config_text(&reduction_config(&up.uri(), true, None)).await;
+    let config_path = dir.path().join("config.toml");
+    let client = reqwest::Client::new();
+
+    // Observe enabled-state behavior FIRST: the pretty arguments arrive
+    // upstream compacted.
+    let status = post_reduction_probe(&client, &base_url, "reduce-me").await;
+    assert!(status.is_success(), "the upstream serves the probe");
+    let reduced_body = last_request_body(&up).await;
+    assert_eq!(
+        egress_tool_call_arguments(&reduced_body),
+        COMPACT_ARGUMENTS,
+        "with reduction ON the pretty arguments must reach the upstream compacted",
+    );
+
+    // Act: flip the kill switch OFF, polling the marker alias until the
+    // reloaded config is live.
+    let disabled = reduction_config(&up.uri(), false, Some("reduction-off"));
+    assert!(
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            disabled.as_bytes(),
+            "reduction-off",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "the reduction-disabled config did not go live within {RELOAD_WAIT_CEILING:?}",
+    );
+
+    // Assert: the next admitted request passes the pretty arguments through
+    // verbatim, and the transmitted bytes differ from the reduced ones in
+    // exactly that one string and nothing else.
+    let status = post_reduction_probe(&client, &base_url, "reduce-me").await;
+    assert!(
+        status.is_success(),
+        "the upstream serves the post-flip probe"
+    );
+    let passthrough_body = last_request_body(&up).await;
+    assert_eq!(
+        egress_tool_call_arguments(&passthrough_body),
+        PRETTY_ARGUMENTS,
+        "with reduction OFF the pretty arguments must egress byte-identical",
+    );
+    let compact_encoded =
+        serde_json::to_string(COMPACT_ARGUMENTS).expect("encode compact arguments");
+    let pretty_encoded = serde_json::to_string(PRETTY_ARGUMENTS).expect("encode pretty arguments");
+    assert_eq!(
+        reduced_body.replace(&compact_encoded, &pretty_encoded),
+        passthrough_body,
+        "the kill switch must change ONLY the minified string, nothing else in the egress bytes",
+    );
+}
+
+/// How long the first chain entry holds the in-flight request open. The
+/// pinning window: the reduction-disabling reload must land INSIDE it, and
+/// the fallback preparation for the chain tail happens at its end. Wide
+/// enough that a reload on a loaded box lands with room to spare.
+const PIN_HOLD: Duration = Duration::from_secs(15);
+
+/// Ceiling for the flip to go live while the request above is held. Bounded
+/// strictly below `PIN_HOLD` so the ordering the test claims is enforced
+/// rather than assumed: if the reload were slower than this the test fails
+/// loudly instead of passing for the wrong reason (a fallback that happened
+/// before the swap would satisfy an old-state assertion vacuously).
+const PIN_FLIP_CEILING: Duration = Duration::from_secs(6);
+
+/// In-flight semantics: a request admitted BEFORE the swap uses the OLD
+/// router snapshot for its WHOLE fallback chain, so a reduction flip landing
+/// mid-request does not change bytes already in that request's chain -- even
+/// for a chain entry prepared after the swap.
+///
+/// The rig makes that observable: chain entry A holds the request open for
+/// `PIN_HOLD` and then 500s (a `server-error`, which falls back); the kill
+/// switch is flipped OFF while A holds; the chain tail B is prepared and
+/// dialed only AFTER the swap. B's received bytes must still be REDUCED --
+/// the pinned old snapshot governs.
+///
+/// Ordering is enforced, not assumed: A is confirmed dialed (the request is
+/// admitted and pinned) before the flip is written, and the flip is required
+/// to go live within `PIN_FLIP_CEILING` -- strictly less than `PIN_HOLD`, so
+/// the swap provably precedes B's preparation.
+#[tokio::test]
+async fn request_pinned_before_the_swap_keeps_old_reduction_state() {
+    // Arrange: reduction ON; A holds then fails, B is the clean tail.
+    let a = reduction_upstream_slow_500(PIN_HOLD).await;
+    let b = reduction_upstream_ok(Duration::ZERO).await;
+    let (base_url, dir) = spawn_server_with_config_text(&reduction_chain_config(
+        &a.uri(),
+        &b.uri(),
+        true,
+        "pinned-off",
+    ))
+    .await;
+    let config_path = dir.path().join("config.toml");
+    let client = reqwest::Client::new();
+
+    // Act 1: issue the request on a background task; it will sit in A for
+    // PIN_HOLD before falling back to B.
+    let in_flight = {
+        let client = client.clone();
+        let base_url = base_url.clone();
+        tokio::spawn(async move { post_reduction_probe(&client, &base_url, "chain").await })
+    };
+
+    // Rendezvous: A has been dialed, so the request is admitted and its
+    // router snapshot is pinned. Only now is the flip written.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && mock_hits(&a).await == 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        mock_hits(&a).await,
+        1,
+        "the request must be admitted and dialed at chain entry A before the flip",
+    );
+
+    // Act 2: flip the kill switch OFF and require it live well inside the
+    // window A is holding the request open for.
+    let disabled = reduction_chain_config(&a.uri(), &b.uri(), false, "pinned-off");
+    assert!(
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            disabled.as_bytes(),
+            "pinned-off",
+            PIN_FLIP_CEILING,
+        )
+        .await,
+        "the flip had to go live within {PIN_FLIP_CEILING:?} for the pinning ordering to hold",
+    );
+
+    // Assert: the in-flight request completes off the chain tail, and the
+    // bytes B received are still REDUCED -- the pinned old snapshot governed
+    // a fallback entry prepared after the swap.
+    let status = in_flight.await.expect("in-flight request task");
+    assert!(
+        status.is_success(),
+        "the chain tail B must serve the held request, got {status}",
+    );
+    assert_eq!(mock_hits(&b).await, 1, "B served exactly the held request");
+    assert_eq!(
+        egress_tool_call_arguments(&last_request_body(&b).await),
+        COMPACT_ARGUMENTS,
+        "a request pinned before the swap must keep old reduction state for its whole chain",
+    );
+
+    // Cross-check that the flip really is live for requests admitted AFTER
+    // the swap -- otherwise the assertion above could hold because the flip
+    // never applied at all.
+    let status = post_reduction_probe(&client, &base_url, "chain").await;
+    assert!(status.is_success(), "the post-swap request is served");
+    assert_eq!(
+        egress_tool_call_arguments(&last_request_body(&b).await),
+        PRETTY_ARGUMENTS,
+        "a request admitted after the swap must see the disabled reduction state",
+    );
+}
+
+/// Re-issue an atomic rewrite of `config_path` with `contents` on the
+/// `RESTIMULUS_INTERVAL` cadence for `window`, failing the moment `id`
+/// surfaces on `/v1/models`.
+///
+/// The inverse of `poll_alias_with_restimulus`: that one waits for an alias a
+/// VALID candidate should publish, this one holds a candidate that must NEVER
+/// publish one and watches for the alias as a rejection oracle. Same
+/// re-issuing rationale -- a single write can race ahead of the asynchronously
+/// armed inotify watch and be dropped with no fs-event re-delivery, so
+/// repeated identical writes are what make the stimulus reliable rather than
+/// best-effort.
+async fn hold_rejected_candidate(
+    base_url: &str,
+    config_path: &Path,
+    contents: &[u8],
+    id: &str,
+    window: Duration,
+) {
+    let deadline = Instant::now() + window;
+    write_atomic(config_path, contents);
+    let mut last_write = Instant::now();
+    while Instant::now() < deadline {
+        assert!(
+            !list_model_ids(base_url).await.iter().any(|s| s == id),
+            "the unparseable candidate's alias `{id}` surfaced, so the reload was APPLIED",
+        );
+        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
+            write_atomic(config_path, contents);
+            last_write = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A reload candidate that would disable reduction but FAILS validation
+/// leaves the live state untouched: the running router keeps reduction ON
+/// and the next request still egresses compacted bytes. Same rejection seam
+/// as `unknown_field_reload_rejected_old_router_stays_live` -- an unknown
+/// `[server]` field -- asserted on the reduction behavior instead of the
+/// alias table.
+///
+/// Non-vacuity, three guards, because a never-observed write and a declined
+/// reload are otherwise indistinguishable from the outside:
+///
+/// 1. Reduction is OBSERVED live first (the pretty `function.arguments`
+///    reaches the upstream compacted), so this asserts a real transition
+///    rather than a state that was already off.
+/// 2. The watch is proven ARMED AND DELIVERING on both sides of the rejected
+///    window, by landing a valid marker config before and after it. A dropped
+///    event cannot explain a green run: the pipeline demonstrably processes
+///    writes to this path across the window.
+/// 3. The rejected candidate carries a marker alias it WOULD publish if
+///    accepted, and `hold_rejected_candidate` re-issues the write on the
+///    restimulus cadence while asserting that alias never surfaces. The
+///    candidate is therefore delivered repeatedly, and every delivery is
+///    declined.
+///
+/// What this level cannot observe is the validation-failure LOG line: the
+/// reload runs on a spawned server task, which thread-local tracing capture
+/// does not reach. That half is pinned deterministically by
+/// `server::reload_tests::unparseable_candidate_logs_its_rejection_and_keeps_reduction_on`,
+/// which drives `handle_config_reload` directly under capture.
+#[tokio::test]
+async fn failed_reload_keeps_old_reduction_state() {
+    // Arrange: reduction ON.
+    let up = reduction_upstream_ok(Duration::ZERO).await;
+    let (base_url, dir) =
+        spawn_server_with_config_text(&reduction_config(&up.uri(), true, None)).await;
+    let config_path = dir.path().join("config.toml");
+    let client = reqwest::Client::new();
+
+    // Guard 2 (first half): land a valid marker config. Its alias surfacing
+    // proves the inotify watch is armed and a reload really does fire on a
+    // write to this path.
+    let armed = reduction_config(&up.uri(), true, Some("watch-armed"));
+    assert!(
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            armed.as_bytes(),
+            "watch-armed",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "the watch never armed: the marker config did not go live within {RELOAD_WAIT_CEILING:?}",
+    );
+
+    // Guard 1: reduction is live in the router this reload will be rejected
+    // against.
+    let status = post_reduction_probe(&client, &base_url, "reduce-me").await;
+    assert!(
+        status.is_success(),
+        "the upstream serves the baseline probe"
+    );
+    assert_eq!(
+        egress_tool_call_arguments(&last_request_body(&up).await),
+        COMPACT_ARGUMENTS,
+        "reduction must be live before the rejected reload is written",
+    );
+
+    // Act + guard 3: hold the reduction-disabling, unparseable candidate on
+    // disk across several restimulus cycles. `reject-marker` is the alias it
+    // would publish if the reload were ever applied.
+    hold_rejected_candidate(
+        &base_url,
+        &config_path,
+        reduction_config_unparseable(&up.uri(), false, "reject-marker").as_bytes(),
+        "reject-marker",
+        REJECT_HOLD_WINDOW,
+    )
+    .await;
+
+    // Assert: the rejected candidate never took effect -- reduction is still
+    // ON, so the pretty arguments still reach the upstream compacted.
+    let status = post_reduction_probe(&client, &base_url, "reduce-me").await;
+    assert!(status.is_success(), "the upstream serves the probe");
+    assert_eq!(
+        egress_tool_call_arguments(&last_request_body(&up).await),
+        COMPACT_ARGUMENTS,
+        "a rejected reload must keep the previous reduction state live",
+    );
+
+    // Guard 2 (second half): a valid marker config still goes live, so the
+    // reload pipeline was processing writes to this path throughout -- the
+    // green run above is a rejection, not a dead watcher.
+    let after = reduction_config(&up.uri(), true, Some("post-reject"));
+    assert!(
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            after.as_bytes(),
+            "post-reject",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "no reload landed after the rejected candidate, so the watcher was not delivering",
+    );
+}

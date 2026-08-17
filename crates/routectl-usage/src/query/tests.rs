@@ -448,5 +448,6 @@ fn aggregate_client_disconnect_pre_dispatch_counts_model_null_rows_only() {
 }
 
 include!("summary_reader_tests.rs");
+include!("reduction_tests.rs");
 include!("window_metrics_tests.rs");
 include!("calibration_and_errors_tests.rs");

@@ -260,6 +260,37 @@ pub struct UsageRecord {
     /// frequently-absent per-TTL split is), so any such reconstruction runs
     /// short on most cache-reusing rows and biases a learned factor low.
     pub calib_prompt_tokens: Option<u64>,
+    /// Lossless-minifier outcome token for this request, drawn from the SAME
+    /// vocabulary the dispatch log emits (`applied`, `skipped:disabled`,
+    /// `skipped:no-tail`, `skipped:nothing-to-strip`, `skipped:unknown`) --
+    /// one vocabulary across log and ledger. Records the TERMINAL dispatch
+    /// target's outcome. `None` when no target was dispatched and on rows
+    /// written before this column existed.
+    ///
+    /// This is NOT the write-stopped legacy `reduction_strategy` DB column: on
+    /// that one, NULL means write-stopped.
+    pub reduction_decision: Option<String>,
+    /// Strings the lossless minifier actually rewrote, aggregated across every
+    /// fallback-entry preparation for this request (a same-target network
+    /// retry reuses the prepared request and never re-counts). `None` when no
+    /// target was dispatched.
+    pub reduction_strings_compressed: Option<u64>,
+    /// Candidate strings left untouched because they were non-JSON or already
+    /// compact. Deliberately separate from `reduction_strings_rejected`:
+    /// a skip is a permanent ceiling, a rejection is an invariant alarm. Same
+    /// aggregation rule as `reduction_strings_compressed`.
+    pub reduction_strings_skipped: Option<u64>,
+    /// Candidate strings that parsed as JSON but whose re-parse equality guard
+    /// declined the rewrite. A FAIL-CLOSED INVARIANT ALARM: structurally
+    /// unreachable with the current minifier, so a nonzero value means a
+    /// minifier defect to investigate rather than traffic headroom. Same
+    /// aggregation rule as `reduction_strings_compressed`.
+    pub reduction_strings_rejected: Option<u64>,
+    /// Exact bytes removed from the prepared outbound payloads, NOT billed
+    /// tokens. The token estimate is `bytes / 4` and is derived on read rather
+    /// than persisted, so this column stays the single source of truth. Same
+    /// aggregation rule as `reduction_strings_compressed`.
+    pub reduction_bytes_saved: Option<u64>,
 
     // TIMING
     /// End-to-end request latency, milliseconds.
@@ -425,6 +456,11 @@ mod tests {
             would_trim_context_fraction: Some(0.25),
             calib_estimated_tokens: Some(9_500),
             calib_prompt_tokens: Some(10_000),
+            reduction_decision: Some("applied".to_string()),
+            reduction_strings_compressed: Some(4),
+            reduction_strings_skipped: Some(2),
+            reduction_strings_rejected: Some(1),
+            reduction_bytes_saved: Some(512),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -492,6 +528,11 @@ mod tests {
             would_trim_context_fraction: None,
             calib_estimated_tokens: None,
             calib_prompt_tokens: None,
+            reduction_decision: None,
+            reduction_strings_compressed: None,
+            reduction_strings_skipped: None,
+            reduction_strings_rejected: None,
+            reduction_bytes_saved: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

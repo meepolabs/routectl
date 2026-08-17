@@ -654,9 +654,9 @@ cache_capability = { supports_top_level_cache_control = true, cache_hit_observab
 }
 
 /// An omitted `[reduction]` block deserializes to the default:
-/// reduction disabled.
+/// reduction enabled.
 #[test]
-fn reduction_omitted_block_defaults_disabled() {
+fn reduction_omitted_block_defaults_enabled() {
     // Arrange: a config with no [reduction] table at all.
     let toml_text = r#"
 [providers.openai]
@@ -668,10 +668,49 @@ api_key_ref = "literal:k"
     // Act
     let cfg: Config = toml::from_str(toml_text).expect("parse without reduction block");
 
-    // Assert: omitted block == default == disabled.
+    // Assert: omitted block == default == enabled.
+    assert!(
+        cfg.reduction.enabled,
+        "omitted [reduction] must default to enabled"
+    );
+}
+
+/// A present-but-empty `[reduction]` block leaves `enabled` at the field
+/// default (true), and an explicit `enabled = false` still deserializes
+/// false and survives a serialize/re-parse round trip.
+#[test]
+fn reduction_empty_block_enabled_and_explicit_false_round_trips() {
+    // Arrange + Act: block present, key omitted.
+    let empty_block = r"
+[reduction]
+";
+    let cfg: Config = toml::from_str(empty_block).expect("parse empty reduction block");
+
+    // Assert
+    assert!(
+        cfg.reduction.enabled,
+        "empty [reduction] block must leave enabled at the field default (true)"
+    );
+
+    // Arrange + Act: explicit opt-out.
+    let disabled = r"
+[reduction]
+enabled = false
+";
+    let cfg: Config = toml::from_str(disabled).expect("parse disabled reduction block");
+
+    // Assert
     assert!(
         !cfg.reduction.enabled,
-        "omitted [reduction] must default to disabled"
+        "enabled = false must parse to false"
+    );
+
+    // Round-trip: serialize, re-parse, still false.
+    let serialized = toml::to_string(&cfg).expect("serialize");
+    let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
+    assert!(
+        !cfg_out.reduction.enabled,
+        "explicit opt-out must survive a serialize/re-parse round trip"
     );
 }
 
@@ -704,14 +743,15 @@ bogus = 1
     );
 }
 
-/// `ReductionConfig::default()` yields disabled (reduction is opt-in).
+/// `ReductionConfig::default()` yields enabled (reduction is on unless
+/// opted out).
 #[test]
-fn reduction_config_default_is_disabled() {
+fn reduction_config_default_is_enabled() {
     // Arrange + Act
     let cfg = ReductionConfig::default();
 
     // Assert
-    assert!(!cfg.enabled, "ReductionConfig::default() must be disabled");
+    assert!(cfg.enabled, "ReductionConfig::default() must be enabled");
 }
 
 /// The per-provider `reduction_enabled()` accessor returns `None` when

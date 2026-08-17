@@ -1874,8 +1874,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   it already computes, so the evidence lands on every dispatched attempt
   rather than only on trim-triggering ones (last-writer-wins across a chain
   walk leaves the served attempt's estimate). The
-  dispatch-path context reducer (`apply_json_minify`,
-  `reduction_strategy_token` -> `DispatchMeta.reduction_strategy`) runs after
+  dispatch-path context reducer (`apply_context_reduction`, the single helper
+  both the completion and streaming loops call: `apply_json_minify` +
+  `reduction_strategy_token` -> `DispatchMeta.reduction_strategy`, plus
+  `accumulate_reduction_counters` folding the pass's `ReductionDelta` into the
+  four `DispatchMeta.reduction_strings_compressed`/`_skipped`/`_rejected` +
+  `reduction_bytes_saved` counters -- additive across fallback-entry
+  preparations, never re-counted by a same-target retry) runs after
   overlays and before the auto-cache injection call
   `maybe_apply_auto_cache_control` (gated by
   `cache_plan::AutoCacheRequestPlan`, mapping `cache_plan::CacheInjection` ->
@@ -2621,7 +2626,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   carries the kind PERSISTED with the row so each era of a re-kinded provider
   prices by what it was, and a surface reporting at the kind-agnostic grain
   coalesces the partitions back together after pricing), `AggRow` and re-exports
-  the whole read-side surface from the five submodules so every symbol stays at
+  the whole read-side surface from its submodules so every symbol stays at
   `routectl_usage::` unchanged
 - `src/query/deadline.rs` -- `DeadlineGuard::install(db, deadline)`: the
   reusable connection-level read deadline (SQLite progress handler re-checked
@@ -2685,6 +2690,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ShadowMisfireSummary`, `NearLosslessAttributionSummary`, `KCalibration`,
   `ReuseSampleRow`); carries the COALESCE zero-row guards so a SUM/CASE over
   an empty ledger reads as 0 rather than erroring
+- `src/query/reduction.rs` -- lossless-minifier (context-reduction) outcome
+  read query; exports `reduction_summary` + `ReductionSummary` (per-decision
+  request histogram over the OPEN `reduction_decision` token vocabulary plus
+  the four summed raw counters). Restricted to `reduction_decision IS NOT
+  NULL` so pre-column history and no-target rows never dilute the histogram; a
+  NULL counter inside a decided row contributes 0. `est_tokens_saved()` is a
+  read-time derivation (`bytes_saved / 4`), deliberately never a field and
+  never persisted, so `reduction_bytes_saved` stays the single source of
+  truth. VALIDITY: ratios and cost claims off this summary hold only for
+  windows the usage channel dropped nothing in (service-side `dropped_full` /
+  `dropped_disabled` / `write_errors` flat); a nonzero `strings_rejected`
+  signals a minifier defect, not traffic headroom
 - `src/query/calibration.rs` -- token-estimate calibration evidence read for
   the router's boot warm rebuild; exports `read_calibration_samples_since` +
   `CalibrationSampleRow`. Admission mirrors the live write row for row --
@@ -2813,7 +2830,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   deliberately NOT derived from `input_tokens + cache_read + cache_write_*`:
   `input_tokens` is the cache-EXCLUSIVE residual whose subtraction uses the
   aggregate cache-creation total, which is not persisted -- a derivation runs
-  short on most cache-reusing rows
+  short on most cache-reusing rows. v15 (`SCHEMA_VERSION = 15`) appends the
+  nullable context-reduction outcome set -- `reduction_decision TEXT` (the
+  lossless-minifier outcome token for the TERMINAL dispatch target, drawn from
+  the SAME vocabulary the dispatch log emits: `applied`, `skipped:disabled`,
+  `skipped:no-tail`, `skipped:nothing-to-strip`, `skipped:unknown`) plus the
+  four effect counters `reduction_strings_compressed` /
+  `reduction_strings_skipped` / `reduction_strings_rejected` (skip and reject
+  kept separate: a skip is a permanent ceiling, a rejection is a fail-closed
+  invariant alarm signalling a minifier defect) / `reduction_bytes_saved`
+  (exact prepared-payload bytes
+  removed, never billed tokens; counters aggregate across fallback-entry
+  preparations, and a same-target network retry reuses the prepared request so
+  never re-counts) -- via `migrate_v14_to_v15` (guarded `ALTER TABLE requests
+  ADD COLUMN ...` x5, one transaction with the version bump, same append-last
+  shape whether created fresh at v15 or migrated from v14; no backfill). The
+  set is deliberately a NEW column rather than a revival of the write-stopped
+  v3 `reduction_strategy` (NULL there means write-stopped to existing readers),
+  and the token estimate stays derived on read (`bytes / 4`), never persisted,
+  so there is one source of truth
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
@@ -4149,7 +4184,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   config, so re-kinding a provider in place cannot reprice history; a row whose
   kind is absent AND that reported nonzero reasoning fails CLOSED as
   `Unpriced` rather than guessing a structure. `--detail` adds cache-write split + nearest-rank p95/max latency
-  + wall-time + server-tool counts. Both the per-group and the footer
+  + wall-time + server-tool counts, plus the advisory would-trim / shadow /
+  near-lossless blocks and `render_reduction`: the lossless-minifier outcome
+  block (per-decision histogram, summed raw counters, read-time-derived
+  `bytes/4` token estimate) which renders NO ratio and NO cost figure and
+  always carries the usage-channel drop-counter validity caveat, and which
+  flags a nonzero rejected count as a minifier defect rather than headroom. Both the per-group and the footer
   cache-hit-rate flow through ONE shared denominator rule --
   `cache_prompt_den` (`input + cache_read_billed + cache_write_5m +
   cache_write_1h`, the cache-INCLUSIVE prompt total, summed only over rows

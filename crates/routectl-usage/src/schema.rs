@@ -13,7 +13,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -214,7 +214,40 @@ CREATE TABLE IF NOT EXISTS requests (
     -- `ALTER TABLE ... ADD COLUMN` (which always appends). No backfill --
     -- older rows stay NULL.
     calib_estimated_tokens INTEGER,
-    calib_prompt_tokens INTEGER
+    calib_prompt_tokens INTEGER,
+
+    -- CONTEXT-REDUCTION OUTCOME (v15): the per-request lossless-minifier
+    -- outcome and its four effect counters, persisted for every dispatched
+    -- request. `reduction_decision` carries the SAME token vocabulary the
+    -- dispatch log emits (`applied`, `skipped:disabled`, `skipped:no-tail`,
+    -- `skipped:nothing-to-strip`, `skipped:unknown`) and records the TERMINAL
+    -- target's outcome; the four counters aggregate across fallback-entry
+    -- preparations (a same-target network retry reuses the prepared request
+    -- and never re-counts). `reduction_strings_skipped` counts targets left
+    -- untouched (non-JSON or already compact); `reduction_strings_rejected`
+    -- counts targets that parsed as JSON but whose re-parse equality guard
+    -- declined -- the two are deliberately separate because a skip is a
+    -- permanent ceiling while a rejection is a fail-closed invariant alarm
+    -- (structurally unreachable with the current minifier, so nonzero means a
+    -- minifier defect, not traffic headroom).
+    -- `reduction_bytes_saved` is exact bytes removed from prepared outbound
+    -- payloads, NOT billed tokens; the token estimate is derived on read
+    -- (bytes / 4) and is deliberately never persisted, so there is one source
+    -- of truth.
+    --
+    -- This is a NEW column, not the write-stopped v3 `reduction_strategy`
+    -- above: NULL there means write-stopped to existing readers, and reusing
+    -- the name would make historical and current rows indistinguishable.
+    --
+    -- Appended last so these columns land in the same ordinal position
+    -- whether the DB was created fresh at v15 or migrated from v14 via
+    -- `ALTER TABLE ... ADD COLUMN` (which always appends). No backfill --
+    -- older rows stay NULL.
+    reduction_decision TEXT,
+    reduction_strings_compressed INTEGER,
+    reduction_strings_skipped INTEGER,
+    reduction_strings_rejected INTEGER,
+    reduction_bytes_saved INTEGER
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

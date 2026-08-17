@@ -424,6 +424,50 @@ fn migrate_v13_to_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v14 -> v15 step atomically: add the five nullable
+/// context-reduction outcome columns (`reduction_decision`, the
+/// dispatch-log-vocabulary outcome token, plus the four effect counters
+/// `reduction_strings_compressed` / `reduction_strings_skipped` /
+/// `reduction_strings_rejected` / `reduction_bytes_saved`), bump `PRAGMA
+/// user_version` to 15, and update the human-readable `meta.schema_version`
+/// row. All in one transaction so a crash mid-step rolls back rather than
+/// landing a column-without-version state. Existing rows survive with every
+/// new column NULL -- no backfill.
+///
+/// The v3 `reduction_strategy` column is deliberately untouched: it stays
+/// write-stopped, and `reduction_decision` is a distinct column so a reader
+/// can tell a historical row from a current one.
+///
+/// On a FRESH DB the v0 -> v1 step created `requests` from the current schema,
+/// which already carries every column. The loop still enters this arm
+/// (v0->v1 stamps user_version=1, not SCHEMA_VERSION), so guard each
+/// `ADD COLUMN` against a pre-existing column to keep the fresh path safe.
+fn migrate_v14_to_v15(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if !column_exists(&tx, "requests", "reduction_decision")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN reduction_decision TEXT")?;
+    }
+    if !column_exists(&tx, "requests", "reduction_strings_compressed")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN reduction_strings_compressed INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "reduction_strings_skipped")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN reduction_strings_skipped INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "reduction_strings_rejected")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN reduction_strings_rejected INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "reduction_bytes_saved")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN reduction_bytes_saved INTEGER")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 15")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "15"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -482,6 +526,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             11 => migrate_v11_to_v12(conn)?,
             12 => migrate_v12_to_v13(conn)?,
             13 => migrate_v13_to_v14(conn)?,
+            14 => migrate_v14_to_v15(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
