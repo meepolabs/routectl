@@ -1692,6 +1692,44 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   carry-over) and keeps the store encapsulated. `CalibrationRebuildSummary` is
   `#[non_exhaustive]` with a `new` constructor, so a further tally field is not
   a breaking change
+- `src/k_estimator/mod.rs` -- per-session cache-reuse tracker feeding the cost
+  gate's advisory output. Ships the contract: the `KEstimator` trait
+  (`estimate(&KQuery) -> KEstimate`), the borrowed `KQuery` (session_key,
+  provider_kind, model, ttl, now), the bracketed `KEstimate`
+  (k_floor/k_point/k_ceiling/samples/confidence/source), and the
+  `Confidence` (Cold/Low/Calibrated) and `EstimateSource`
+  (LiveLedger/RebuildOnly/ColdDefault) enums. Only `k_floor` may gate a live
+  cut; point and ceiling are advisory-only
+- `src/k_estimator/default_impl.rs` -- `LedgerBackedK`, the default
+  `KEstimator` over a shared `KSessionStore`. Per-turn Bernoulli-hazard model
+  (not the earlier TTL-gap-run percentile one): `p_hat = successes / n`
+  drives the geometric horizon `E[K] = p / (1 - p)`; the floor comes from the
+  Wilson one-sided LOWER bound on `p`, the ceiling from the Wilson UPPER
+  bound, both via the isolated pure `wilson_bound` core. Bounds evidence by
+  age (`now - ttl`) without splitting on TTL gaps, and forces the floor to 0
+  below `CALIBRATED_MIN_TRIALS` (a thin sample must never authorize a cut)
+- `src/k_estimator/store.rs` -- `KSessionStore`, the session-keyed in-memory
+  cache of `KSessionWindow` samples, sibling to `seat_pool::StickyPins` (same
+  bounded `parking_lot::Mutex<lru::LruCache>` shape). Keyed by
+  `KSessionKey` (session_key, provider_kind, model) so K never bleeds across
+  providers or models inside one session; `KSessionWindow` is a bounded ring
+  of `Sample { ts, observed_reuse }` capped at `SAMPLES_PER_WINDOW`.
+  `export_entries` / `import_entries` are the LRU-order-preserving carry-over
+  seam for a Router rebuild
+- `src/k_estimator/rebuild.rs` -- boot warm rebuild of `KSessionStore` from
+  the usage ledger so a fresh process does not start every estimate at
+  `Cold`. Owns the `LedgerReader` dependency-inversion seam (the usage crate
+  is a leaf this crate does not depend on; a concrete reader is injected by
+  the binary that owns both) plus `LedgerSampleRow`. `rebuild_into` groups
+  ledger rows by triple, sorts each group oldest-first, and derives the
+  reuse boolean as `cache_read > 0` -- the router owns that definition, not
+  the reader
+- `src/k_estimator/shadow.rs` -- `ShadowStore`, the session-keyed shadow
+  misfire monitor, independent from but identity-matched to `KSessionStore`.
+  Recording only, never mutates a dispatched request: `record_and_compare`
+  compares a turn's trimmed-prefix fingerprint against the last stored one
+  for the triple and returns `FirstSeen` / `Stable` / `Misfire`, where a
+  `Misfire` is the canary that a real cut would break the upstream cache
 - `src/quota/mod.rs` -- provider-agnostic normalized subscription-quota
   vocabulary, `pub(crate)` (the shape is expected to reshape, and a `pub` item
   in a baselined crate is a one-way door). No facade re-export: consumers name
