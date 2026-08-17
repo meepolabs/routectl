@@ -1082,6 +1082,242 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
     assert_eq!(steady_line.field("reduction_enabled_after"), None);
 }
 
+/// Minimal on-disk config text with `[cache] k_gated_emission` set explicitly,
+/// so a reload's value for the break-even emission gate is stated rather than
+/// inherited from the schema default (which is `false`).
+#[cfg(test)]
+fn k_gated_emission_config_text(enabled: bool) -> String {
+    format!(
+        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+         [cache]\nk_gated_emission = {enabled}\n"
+    )
+}
+
+/// A reload that FLIPS `[cache] k_gated_emission` stamps its own before/after
+/// pair on the success line, and a reload that leaves it alone omits both --
+/// the same contract the reduction kill switch carries, for the switch that
+/// governs whether break-even-gated suppression withholds cache markers.
+///
+/// The reduction pair must stay absent throughout: the two switches are
+/// independent failure domains, so one flipping must not stamp the other's
+/// fields.
+///
+/// Drives `handle_config_reload` directly (no `tokio::spawn`) under
+/// `with_capture` so the thread-local capture subscriber sees the event.
+/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
+/// `routectl_router::overlay_default_path()`, so it joins the same
+/// XDG-pinning group as its siblings above.
+#[tokio::test]
+#[serial_test::serial]
+async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
+    // Arrange: a live config with the gate OFF (the shipped default) and an
+    // on-disk candidate that turns it ON.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(&cfg_path, k_gated_emission_config_text(true)).unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    assert!(
+        !config.cache.k_gated_emission,
+        "the shipped default must be off, so the flip below is a real transition"
+    );
+    let (usage, _writer) = build_usage_writer(&config);
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .unwrap();
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+
+    // Act 1: reload against the flipping candidate. `Box::pin` keeps the
+    // future off this test's stack frame (clippy's large-futures lint).
+    let (flip_result, flip_events) =
+        routectl_testkit::with_capture(Box::pin(handle_config_reload(
+            Some(&cfg_path),
+            &config,
+            secrets.clone(),
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+        )))
+        .await;
+    let (flipped_config, _) = flip_result.expect("the flipping reload must apply");
+    assert!(flipped_config.cache.k_gated_emission);
+
+    // Act 2: reload again from the ALREADY-flipped config -- same file, so
+    // the value does not change this time.
+    let (steady_result, steady_events) =
+        routectl_testkit::with_capture(Box::pin(handle_config_reload(
+            Some(&cfg_path),
+            &flipped_config,
+            secrets,
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+        )))
+        .await;
+    steady_result.expect("the no-change reload must apply");
+
+    // Assert: the flip stamped both fields; the no-change reload stamped
+    // neither, on the SAME success message.
+    let success_message = "config reloaded; router rebuilt and swapped";
+    let flip_line = flip_events
+        .iter()
+        .find(|e| e.message == success_message)
+        .expect("the flipping reload must log the success line");
+    assert_eq!(flip_line.field("k_gated_emission_before"), Some("false"));
+    assert_eq!(flip_line.field("k_gated_emission_after"), Some("true"));
+    assert_eq!(
+        flip_line.field("reduction_enabled_before"),
+        None,
+        "an unchanged reduction value must not ride along with the cache flip"
+    );
+
+    let steady_line = steady_events
+        .iter()
+        .find(|e| e.message == success_message)
+        .expect("the no-change reload must log the success line");
+    assert_eq!(
+        steady_line.field("k_gated_emission_before"),
+        None,
+        "an unchanged k_gated_emission value must not stamp the transition fields"
+    );
+    assert_eq!(steady_line.field("k_gated_emission_after"), None);
+}
+
+/// A candidate that would turn `[cache] k_gated_emission` ON but cannot parse
+/// logs NO success line at all, so the transition fields never appear for a
+/// transition that did not happen, and the live gate stays off.
+///
+/// The failure path is the one an operator reads under pressure: a stamped
+/// `k_gated_emission_after=true` on a reload that was declined would assert a
+/// live suppression gate that is not in fact armed.
+///
+/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
+/// `routectl_router::overlay_default_path()`, so it joins the same XDG-pinning
+/// group as its siblings.
+#[tokio::test]
+#[serial_test::serial]
+async fn failed_reload_logs_no_k_gated_emission_transition() {
+    // Arrange: a live config with the gate OFF and an unparseable candidate
+    // that would turn it ON.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\nprt = 8080\n\n\
+         [cache]\nk_gated_emission = true\n",
+    )
+    .unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    let (usage, _writer) = build_usage_writer(&config);
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .unwrap();
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let router_before = swap.load_full();
+
+    // Act: the full reload against that candidate. `Box::pin` keeps the large
+    // future off this test's stack frame (clippy's large-futures lint).
+    let (result, events) = routectl_testkit::with_capture(Box::pin(handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+    )))
+    .await;
+
+    // Assert: declined, no success line, prior router retained, gate still off.
+    assert!(
+        result.is_none(),
+        "an unparseable candidate must reject the reload"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.message == "config reloaded; router rebuilt and swapped"),
+        "a failed reload must log no success line, hence no transition fields"
+    );
+    let router_after = swap.load_full();
+    assert!(
+        Arc::ptr_eq(&router_before, &router_after),
+        "the prior router must stay installed on a rejected reload"
+    );
+    assert!(
+        !router_after.config.cache.k_gated_emission,
+        "a rejected reload must not arm the break-even emission gate"
+    );
+}
+
+/// A reload that flips BOTH kill switches at once stamps all four transition
+/// fields on the one success line -- the arm an operator hits when recovering
+/// from a bad rollout by reverting a config that changed both.
+///
+/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
+/// `routectl_router::overlay_default_path()`, so it joins the same XDG-pinning
+/// group as its siblings.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_reload_flipping_both_switches_stamps_both_pairs() {
+    // Arrange: live reduction ON and the cache gate OFF; the candidate
+    // inverts both.
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        "version = 3\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+         [reduction]\nenabled = false\n\n[cache]\nk_gated_emission = true\n",
+    )
+    .unwrap();
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut config);
+    config.reduction.enabled = true;
+    let config = Arc::new(config);
+    let (usage, _writer) = build_usage_writer(&config);
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+            .await
+            .unwrap();
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+
+    // Act. `Box::pin` keeps the large future off this test's stack frame
+    // (clippy's large-futures lint).
+    let (result, events) = routectl_testkit::with_capture(Box::pin(handle_config_reload(
+        Some(&cfg_path),
+        &config,
+        secrets,
+        &swap,
+        &usage,
+        ReloadTrigger::ConfigFile,
+    )))
+    .await;
+    result.expect("the flipping reload must apply");
+
+    // Assert: one line, four fields.
+    let line = events
+        .iter()
+        .find(|e| e.message == "config reloaded; router rebuilt and swapped")
+        .expect("the flipping reload must log the success line");
+    assert_eq!(line.field("reduction_enabled_before"), Some("true"));
+    assert_eq!(line.field("reduction_enabled_after"), Some("false"));
+    assert_eq!(line.field("k_gated_emission_before"), Some("false"));
+    assert_eq!(line.field("k_gated_emission_after"), Some("true"));
+}
+
 /// Same shape as `reduction_config_text` but with an unknown `[server]` field
 /// (`prt`, a typo of `port`), so `deny_unknown_fields` refuses the candidate at
 /// parse time.

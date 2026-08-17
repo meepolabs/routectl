@@ -1094,6 +1094,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ActivationState` is a read-only newtype over a `BTreeMap<String,
   ActivationEntry>` (iter/get/len/is_empty; no mutation surface, honoring the
   immutability invariant); growth types are `#[non_exhaustive]`
+- `src/alloc_probe.rs` -- TEST-ONLY (`#[cfg(test)]`) `#[global_allocator]`
+  installed by `lib.rs`: `ProbeAllocator` forwards to `System` and tallies
+  allocations in THREAD-LOCAL cells, so `count_allocs(f) -> (T, u64)` can
+  assert a hot-path predicate's short-circuit allocates nothing without a
+  parallel test's allocations landing in the tally. Deliberately not the
+  process-global-atomic shape `routectl-testkit::bench_alloc` uses for benches
 - `src/anthropic_family.rs` -- purely lexical classification of an upstream
   model id as Anthropic-family: `anthropic_family(&str) -> AnthropicFamily
   {Yes, No, Unknown}`. Strips at most ONE leading routing-prefix segment
@@ -1156,7 +1162,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`reported_model: Option<String>` response model-label echo override,
   `visible_routectl_provider: bool` default true); `AliasValue`, `ServerAuth`,
   `RegistryEntry`/`PricingConfig` pricing table; `CacheConfig` (global
-  `[cache]`: `auto_emit_top_level_breakpoint: bool`, default true) and
+  `[cache]`: `auto_emit_top_level_breakpoint: bool`, default true;
+  `k_gated_emission: bool`, default FALSE -- the hot-reloadable switch for
+  withholding auto-emitted markers below the emission break-even) and
   `CacheCapability` (`supports_top_level_cache_control` +
   `cache_hit_observable`, conservative `for_provider_kind` per-kind defaults
   incl. `gemini` -> implicit prefix cache) with per-`ProviderEntry` overrides;
@@ -1632,7 +1640,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `strategy_str()` returning stable append-only ledger tokens
   (`cost_gate:keep` / `cost_gate:break` / `cost_gate:free_break`).
   `KeepReason` and `PrefixReductionCandidate` are also `#[non_exhaustive]`;
-  `f32` row multipliers are widened to `f64` for the arithmetic. Imports ONLY
+  `f32` row multipliers are widened to `f64` for the arithmetic.
+  `emission_break_even_k(row) -> Option<f64>` is the separate EMISSION-side
+  sibling: it prices placing a breakpoint over 1 write + `K` reads, so it
+  needs no candidate and no token counts -- `K* = (wm-1)/(1-rm)` (~0.278 at
+  wm=1.25/rm=0.1, ~1.11 at wm=2.0), and `None` means NEVER SUPPRESS
+  (`row.auto_cacher`, `wm <= 1.0`, or a degenerate `rm >= 1.0`). Imports ONLY
   the pricing row + std -- no Config/Router/provider/async
 - `src/calibration/mod.rs` -- learned per-lane correction of the router's token
   estimate; re-exports `Factor` + `CalibrationStore` / `LaneKey` / `cohort_of`
@@ -1892,7 +1905,25 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `routectl::feature_unsupported` INFO via `emit_feature_unsupported` on a
   lift, and bumps the `RouterMetrics` counters. Would-trim recording lives
   here with the loop: `record_would_trim` + `would_trim_k_floor_for_meta` +
-  `record_near_lossless_marks` (`NEAR_LOSSLESS_RECORDER_VERSION`).
+  `record_near_lossless_marks` (`NEAR_LOSSLESS_RECORDER_VERSION`). The K
+  triple itself is derived in ONE place: `k_query_key(session_key,
+  provider_kind, served_model) -> KQueryKey`, projected to the read side via
+  `KQueryKey::query(ttl, now)` (a `k_estimator::KQuery`) and to the write side
+  via `KQueryKey::store_key()` (a `k_estimator::KSessionKey`, `None` when
+  keyless) -- so `record_would_trim`'s consult and `Router::record_k_sample`'s
+  write cannot drift apart, and the model dimension is the served nickname on
+  both. `may_suppress(estimate)` is the shared `Confidence::Calibrated` gate
+  (a `Low` estimate has its `k_floor` clamped to 0.0, so no caller may compare
+  the number without it). `Router::k_emission_suppressed(plan, target,
+  session_key)` is the K-gated emission consult built on the same two helpers:
+  called once per chain entry above the retry loop, it short-circuits
+  (`[cache] k_gated_emission` off -> caller breakpoints -> global auto-emit off
+  -> keyless -> no nickname) before allocating anything, then compares the
+  Calibrated `k_floor` against `cost_gate::emission_break_even_k` for the
+  target's priced row and returns a `k_suppressed: bool` that
+  `apply_auto_cache_placement` checks immediately after `shared_skip_reason`,
+  withholding BOTH markers as `auto_skipped:k_below_break_even`. No new store:
+  suppression is sticky because a suppressed session observes no reuse.
   `record_would_trim` additionally stamps
   `DispatchMeta.calib_estimated_tokens` -- the token-estimate calibration
   numerator -- BEFORE its `trigger_tokens` early return, reusing the estimate
@@ -2081,8 +2112,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   global-switch gate plus the `front_slot: Option<FrontSlot>` anchor fact
   from `front_breakpoint_slot`, built once), `CacheInjection` (variants ->
   stable `strategy_str()` decision tokens, incl.
-  `auto_skipped:no_placement_region` for a front marker with no anchor) and
-  `CacheDecision { front, terminal }` (the per-marker outcome pair). The
+  `auto_skipped:no_placement_region` for a front marker with no anchor and
+  `auto_skipped:k_below_break_even` for the K-gated emission verdict) and
+  `CacheDecision { front, terminal }` (the per-marker outcome pair). Byte
+  identity is documented per-TARGET, not per-request: a session-derived
+  verdict is deliberately NOT a plan field. The
   placement CALL (`apply_auto_cache_placement`) stays in the dispatch
   module
 - `src/router/prefix_rewrite.rs` -- the pure prefix-rewrite detector:
@@ -2777,7 +2811,27 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   skips NULLs, so pre-v16 rows are excluded from the denominator instead of
   counting as declines. The `auto_emitted` token and the three `PREFIX_EPOCH_*`
   values are BOUND parameters, so a renamed token or renumbered constant cannot
-  silently desync from the SQL
+  silently desync from the SQL. ALSO exports the bounded suppressed-session
+  finder `suppressed_sessions` + `SuppressedSessions` /
+  `SuppressedSessionRow` / `SUPPRESSED_SESSION_CAP`: the window's
+  `(session, provider_kind, model)` triples whose rows carried
+  `auto_skipped:k_below_break_even`, with a per-triple suppressed-REQUEST count
+  (an `OR` across the two decision columns selects a doubly-marked row once, so
+  front + terminal suppression is one withheld request), first/last suppression
+  instants, newest-last-suppression-first ordering with the raw triple as the
+  tiebreak, a fixed cap, and a `truncated` flag proven by requesting one row
+  past the cap. Rows missing any part of the triple are excluded (the estimator
+  keys on the whole triple). It is the DETECTION surface for a session wrongly
+  latched off caching -- that loss accrues at HTTP 200 with every health signal
+  green, so it is bounded by find-time. VALIDITY: sessions seen, never a rate --
+  same drop-counter caveat as `reduction.rs`
+- `src/query/session_ref.rs` -- `session_ref`: per-process salted digest
+  (`OnceLock<RandomState>` + `hash_one`) of a ledger session key, so a read
+  query can report session IDENTITY without handing a raw client-supplied key
+  to a renderer. Same construction and guarantee as the router's
+  `log_hash::salted_log_hash`, duplicated rather than imported because this
+  crate is a leaf; never a fingerprint, nothing may persist one or compare one
+  across runs
 - `src/query/calibration.rs` -- token-estimate calibration evidence read for
   the router's boot warm rebuild; exports `read_calibration_samples_since` +
   `CalibrationSampleRow`. Admission mirrors the live write row for row --
@@ -3072,7 +3126,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `try_send_capability_event`), and emit the restart-required diff via
   `config_classify::collect_restart_required_changes` --
   bind/listener-auth/body-limit, the three `[log]` knobs, `usage.db_path`, and
-  `[mitm]` all restart-required since their listeners/state are startup-only)
+  `[mitm]` all restart-required since their listeners/state are startup-only;
+  the success line stamps a before/after pair per kill switch that FLIPPED
+  (`[reduction] enabled`, `[cache] k_gated_emission`), single-sourcing the
+  message text through a local macro so every arm is byte-identical)
   or `handle_credentials_reload` -> `rebuild_router_for_seat_change`
   (seat-set-gated rebuild off the unchanged config + the coordinator's current
   overlay, which the replacement Router both merges and retains). `apply_activation` (+ `gather_probes` /
@@ -4290,7 +4347,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `render_cache_decisions`: the cache-breakpoint block (per-region
   emitted-of-decided counts and the prefix-epoch stable/rewritten/reseeded
   breakdown), suppressed entirely on a window with no decision and no
-  classified epoch. Both the per-group and the footer
+  classified epoch, plus `render_suppressed_sessions`: the K-suppressed-session
+  finder block (one line per triple with the opaque per-process session
+  reference -- never the raw session key -- the provider kind, the model, the
+  suppressed-request count and both suppression instants), newest first, with a
+  cap-hit truncation line and the same drop-counter validity caveat, suppressed
+  entirely on a window with no suppression. Both the per-group and the footer
   cache-hit-rate flow through ONE shared denominator rule --
   `cache_prompt_den` (`input + cache_read_billed + cache_write_5m +
   cache_write_1h`, the cache-INCLUSIVE prompt total, summed only over rows

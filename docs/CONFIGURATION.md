@@ -45,6 +45,7 @@ overlays merge, what's reserved.
 
 **Caching and cost**
 - [Prompt-cache auto-emission (`[cache]`)](#prompt-cache-auto-emission-cache)
+  ([break-even emission gate](#break-even-emission-gate-k_gated_emission))
 - [Context reduction (`[reduction]`)](#context-reduction-reduction)
   ([kill switch + recovery](#kill-switch-reduction-enabled-is-the-live-off-switch))
 - [Steady-state advisory trim (`[trim]`)](#steady-state-advisory-trim-trim)
@@ -127,8 +128,10 @@ sections:
 [retry]               # workspace-wide retry + fallback policy
 
 [cache]               # prompt-cache auto-emission policy
-                      # (auto_emit_top_level_breakpoint). Optional;
-                      # default on.
+                      # (auto_emit_top_level_breakpoint,
+                      # normalize_tools, k_gated_emission). Optional;
+                      # emission and normalization default on, the
+                      # break-even emission gate defaults off.
 
 [reduction]           # dispatch-time context-reduction policy
                       # (enabled). Optional; default on.
@@ -341,6 +344,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
 | `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
+| `k_gated_emission`             | `[cache]` global                | bool, default **false**; when true, withholds auto-emitted markers on a session whose measured reuse sits below the marker's break-even (see `[cache]`) |
 | `auto_emit_top_level_breakpoint` | `[providers.X]`               | `Option<bool>`, default None (inherits global); `false` disables auto-cache for this provider     |
 | `auto_emit_per_block_breakpoints` | `[providers.X]`              | `Option<bool>`, default None (-> per-kind default: true for default-base `anthropic-api`, false elsewhere); gates the per-block FRONT marker only, and is inert on kinds whose egress cannot carry one |
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
@@ -2440,7 +2444,8 @@ skipped entirely whenever the caller already supplied any breakpoint
 is re-validated before dispatch and rolled back on any doubt.
 
 The optional `[cache]` block is the **global** master switch. A missing
-block keeps the default: auto-emit enabled.
+block keeps the default: auto-emit enabled, and the break-even emission
+gate off.
 
 ```toml
 [cache]
@@ -2451,6 +2456,10 @@ auto_emit_top_level_breakpoint = true
 # path so a random client tool order can still hit the prompt cache.
 # Default true.
 normalize_tools = true
+# Withhold auto-emitted markers on a session whose measured per-turn
+# reuse sits below the marker's break-even point. Default FALSE -- see
+# "Break-even emission gate" below before turning it on.
+k_gated_emission = false
 ```
 
 Auto-emit applies to completions and streaming. It is **not** applied to
@@ -2640,6 +2649,113 @@ normalize_tools = false
 ```
 
 A missing `[cache]` block keeps the default: normalization enabled.
+
+### Break-even emission gate (`k_gated_emission`)
+
+`k_gated_emission` (bool, **default false**) is the master switch for
+withholding an auto-emitted cache marker on a session whose *measured*
+per-turn reuse is too low for the marker to pay for itself. It is a
+cost knob only: with it on, an affected request goes out uncached and
+still returns a correct HTTP 200. Nothing about the response changes.
+
+```toml
+[cache]
+# Opt in to withholding markers on measurably low-reuse sessions.
+# Default false.
+k_gated_emission = true
+```
+
+It is hot-reloadable, like the rest of `[cache]`: write the value and
+let the running daemon reload, no restart. A reload that CHANGED it
+stamps `k_gated_emission_before` / `k_gated_emission_after` on the reload
+success line, and stamps neither when the value was already what the
+file says -- so the pair's presence is the confirmation that the flip
+landed. A reload that fails parse or validation keeps the previous
+config and logs no success line at all, so the gate never half-applies.
+See [LOGGING.md](LOGGING.md), "Config-reload transition fields".
+
+Turning it back off restores the ungated emission behavior immediately
+for everything admitted after the swap, and the reuse evidence keeps
+accumulating while the switch is off -- so enabling it later does not
+start from a cold estimator.
+
+#### When suppression fires: the K\* arithmetic
+
+Emitting a marker trades a one-time write premium for a per-read
+discount. Over one write plus `K` subsequent reads of that prefix, with
+`C` the cost of the same prefix sent uncached, `Wm` the tier's write
+multiplier and `Rm` its read multiplier:
+
+```
+no marker:    (1 + K) * C * 1.0
+with marker:  C*Wm + K * C * Rm
+
+marker wins iff  Wm + K*Rm < 1 + K
+              -> K* = (Wm - 1) / (1 - Rm)
+```
+
+`C` cancels, so the threshold depends only on the tier's multipliers --
+no token counting, no prefix size. `K*` is the reuse count at which the
+marker breaks even; suppression fires only when the session's *measured*
+reuse floor sits below it.
+
+| Tier                            | `Wm`  | `Rm` | `K*`   |
+|---------------------------------|-------|------|--------|
+| Anthropic / Bedrock 5-minute    | 1.25  | 0.10 | ~0.278 |
+| Anthropic / Bedrock 1-hour      | 2.0   | 0.10 | ~1.11  |
+| Any server-side auto-cacher     | (exempt) | -- | never suppress |
+
+Two conditions exempt a tier from suppression regardless of `K*`. A
+server-side auto-cacher is exempt by an explicit flag check, not by its
+`Wm` -- these providers cache for free, so a marker is never withheld on
+economic grounds even though a row like `openai-responses` carries a
+`Wm` of 1.25. Separately, a `Wm` of 1.0 or below means the write carries
+no premium, so no reuse is needed to justify it and suppression cannot
+fire there either.
+
+**Read the 5-minute number as the operating point: `K*` of ~0.278 means
+suppression should almost never fire.** It takes a session whose
+lower-confidence-bound reuse estimate sits below roughly a quarter of a
+reuse per turn -- a near-all-miss session, which is exactly the
+write-premium-for-nothing case the gate exists to stop. Reuse evidence
+also has to be *calibrated* before it can suppress at all: a thin-sampled
+session reads as low-confidence and always emits. If suppression fires
+broadly on your traffic with the switch on, the estimate or its keying is
+wrong, not the traffic -- turn the switch back off and treat it as a bug
+report.
+
+#### Why the default is off
+
+Three reasons, in weight order:
+
+1. **Stale evidence predates the caching it is measuring.** Front-marker
+   emission is recent. Every reuse window recorded before it shipped
+   describes a world with LESS caching in it, so a large share of
+   otherwise-calibrated windows read as all-miss for *structural*
+   reasons rather than economic ones. Turning suppression on at upgrade
+   time would withhold markers from sessions on evidence gathered before
+   those sessions could have cached at all. Default-off is the whole
+   mitigation: the windows re-fill under emission first.
+2. **The calibration threshold is provisional.** A window is treated as
+   calibrated after 8 samples, a value documented in the estimator as
+   provisional and not yet tuned by the calibration harness. The
+   estimator-coverage bar for acting on reuse evidence is not met yet.
+3. **A wrong-low estimate costs money at HTTP 200.** The estimator is
+   deliberately biased low -- correct when the number authorizes a
+   destructive trim, wrong when it withholds a beneficial marker. A
+   false suppression produces no error, no latency change, and no alert:
+   just a higher bill. Regret is bounded only by how fast it is noticed
+   and this switch is flipped back.
+
+Default-off makes an upgrade a no-op on live traffic. You are not blind
+before flipping it: routectl already WARNs on cache thrash -- sessions
+recording an auto-emitted marker with cache writes and no reads, i.e.
+precisely the sessions paying the write premium for nothing (see
+[LOGGING.md](LOGGING.md)). Read that warning first; it tells you whether
+there is anything for this gate to suppress.
+
+There is no per-provider override. The global switch already restores the
+previous behavior instantly, and a narrower knob has no stated need.
 
 ## Learned capability tempo (`[capability]`)
 

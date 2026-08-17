@@ -21,10 +21,10 @@ use routectl_router::Config;
 use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
     NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, Rates, ReductionSummary,
-    RowCost, ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate, cache_decision_summary,
-    estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
-    near_lossless_attribution_summary, open_readonly, reduction_summary, shadow_misfire_summary,
-    ttfbs, would_trim_summary,
+    RowCost, SUPPRESSED_SESSION_CAP, ShadowMisfireSummary, SuppressedSessions, UsageDb,
+    WouldTrimSummary, aggregate, cache_decision_summary, estimate_cost_tokens,
+    k_calibration_summary, latest_quota_by_seat, near_lossless_attribution_summary, open_readonly,
+    reduction_summary, shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -481,6 +481,11 @@ pub struct WindowReport {
     /// emitted counts plus the prefix-epoch breakdown; only populated and
     /// surfaced under `--detail`).
     pub cache_decision: CacheDecisionSummary,
+    /// The window's K-suppressed `(session, provider_kind, model)` triples,
+    /// bounded and newest-first (only populated and surfaced under `--detail`).
+    /// The detection surface for a session wrongly latched off caching, whose
+    /// cost accrues at HTTP 200 with every health signal green.
+    pub suppressed_sessions: SuppressedSessions,
 }
 
 /// True iff `provider` is a managed-OAuth subscription provider: its
@@ -786,6 +791,13 @@ pub fn build_window_report(
         CacheDecisionSummary::default()
     };
 
+    // K-suppressed sessions: only queried (and surfaced) under --detail.
+    let suppressed = if detail {
+        suppressed_sessions(db, bounds.from_ms, bounds.to_ms)?
+    } else {
+        SuppressedSessions::default()
+    };
+
     let mut display_rows: Vec<DisplayRow> = groups
         .into_iter()
         .map(|(label, acc)| finalize_row(label, acc, &ttft))
@@ -815,6 +827,7 @@ pub fn build_window_report(
         near_lossless_attribution,
         reduction,
         cache_decision,
+        suppressed_sessions: suppressed,
     })
 }
 
@@ -1100,6 +1113,7 @@ pub fn render_report(report: &WindowReport) -> String {
         out.push_str(&render_shadow_misfire(report));
         out.push_str(&render_reduction(report));
         out.push_str(&render_cache_decisions(report));
+        out.push_str(&render_suppressed_sessions(report));
     }
     for q in &report.quota {
         out.push_str(&render_quota(q));
@@ -1295,6 +1309,73 @@ fn render_cache_decisions(report: &WindowReport) -> String {
     out
 }
 
+/// Timestamp format for a suppression instant: local, to the second. An
+/// operator reading the finder is correlating with service logs and with a
+/// kill-switch flip, so the seconds matter and the date must be unambiguous.
+const SUPPRESSION_TS_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
+/// Format a `ts_start` epoch-ms as a local timestamp. Falls back to the raw
+/// millisecond value when the instant is not representable locally, so the
+/// row still identifies its window position.
+fn format_suppression_ts(ts_ms: i64) -> String {
+    Local.timestamp_millis_opt(ts_ms).single().map_or_else(
+        || ts_ms.to_string(),
+        |dt| dt.format(SUPPRESSION_TS_FORMAT).to_string(),
+    )
+}
+
+/// The K-suppression finder's validity caveat. Same shape and the same three
+/// counters as [`REDUCTION_VALIDITY_NOTE`]: the finder reports what the ledger
+/// recorded, and a window the usage channel dropped records in under-reports
+/// both the triple list and each count by an unknown amount.
+const SUPPRESSED_SESSIONS_VALIDITY_NOTE: &str = "  validity: sessions seen, not a rate -- \
+a ratio or cost claim needs the service's usage-channel dropped_full / \
+dropped_disabled / write_errors counters flat across the window\n";
+
+/// The K-suppressed-session finder block: one line per
+/// `(session, provider_kind, model)` triple that had a marker withheld on
+/// economic grounds, newest suppression first, plus the drop-counter validity
+/// caveat. Emitted only under `--detail`, and only when the window carries at
+/// least one suppression, so an ordinary window stays uncluttered.
+///
+/// This block exists to make a latched session FINDABLE rather than merely
+/// counted: a wrong suppression keeps paying uncached prices at HTTP 200 with
+/// every availability, latency, and error signal green, so the loss is bounded
+/// only by how fast the session is located and the kill switch thrown.
+///
+/// `session` renders the opaque per-process reference, never the raw
+/// client-supplied session key.
+fn render_suppressed_sessions(report: &WindowReport) -> String {
+    let found = &report.suppressed_sessions;
+    if found.rows.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "k-suppressed sessions: {} (session, provider_kind, model) triples with a \
+         marker withheld below break-even\n",
+        found.rows.len(),
+    );
+    for row in &found.rows {
+        out.push_str(&format!(
+            "  session={:016x} kind={} model={} reqs={} first={} last={}\n",
+            row.session_ref,
+            row.provider_kind,
+            row.model,
+            row.suppressed_requests,
+            format_suppression_ts(row.first_suppressed_ms),
+            format_suppression_ts(row.last_suppressed_ms),
+        ));
+    }
+    if found.truncated {
+        out.push_str(&format!(
+            "  ... more triples than the {SUPPRESSED_SESSION_CAP}-row cap; \
+             showing the newest by last suppression\n",
+        ));
+    }
+    out.push_str(SUPPRESSED_SESSIONS_VALIDITY_NOTE);
+    out
+}
+
 /// Left-align column 0, right-align the rest, padded to the widest cell in
 /// each column. ASCII spaces only.
 fn render_table(rows: &[Vec<String>]) -> String {
@@ -1376,7 +1457,8 @@ const LEGEND: &str = concat!(
     "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools,\n",
     "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied),\n",
     "                a reduction line (lossless-minifier outcomes actually applied; counts, not rates),\n",
-    "                and a cache-breakpoint line (per-region injection decisions + prefix-epoch events)",
+    "                and a cache-breakpoint line (per-region injection decisions + prefix-epoch events),\n",
+    "                and a k-suppressed-session finder (triples whose cache marker was withheld below break-even)",
 );
 
 // --- k-calibration report -----------------------------------------------

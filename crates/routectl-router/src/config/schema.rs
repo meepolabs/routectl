@@ -19,7 +19,9 @@ use super::Config;
 /// Operator-facing `[cache]` config block. Global policy for the
 /// dispatch-path auto-cache feature. A missing `[cache]` table
 /// deserializes to `CacheConfig::default()` (auto-emit enabled), and the
-/// per-field `#[serde(default)]` keeps an omitted key enabled too.
+/// per-field `#[serde(default)]` gives an omitted key that same default --
+/// on for the two emission/normalization switches, off for
+/// `k_gated_emission`.
 ///
 /// This is the GLOBAL kill-switch; each `[providers.X]` entry carries an
 /// optional `auto_emit_top_level_breakpoint` override consulted only when
@@ -40,6 +42,14 @@ pub struct CacheConfig {
     /// restores verbatim tool order.
     #[serde(default = "default_true")]
     pub normalize_tools: bool,
+    /// Master switch for withholding auto-emitted cache breakpoints on a
+    /// session whose measured per-turn reuse sits below the marker's
+    /// break-even point. Default OFF: K windows recorded before front-marker
+    /// emission shipped describe a world with less caching, so acting on them
+    /// would suppress emission on evidence that predates the caching, and a
+    /// wrong suppression costs money at HTTP 200 with no error signal.
+    #[serde(default)]
+    pub k_gated_emission: bool,
 }
 
 impl Default for CacheConfig {
@@ -47,6 +57,7 @@ impl Default for CacheConfig {
         Self {
             auto_emit_top_level_breakpoint: true,
             normalize_tools: true,
+            k_gated_emission: false,
         }
     }
 }

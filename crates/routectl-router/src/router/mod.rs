@@ -46,6 +46,7 @@ pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_learn::CapabilityLearnEvent;
 pub use capability_observe::CapabilityObserveEvent;
 pub use dispatch::class_debits;
+use dispatch::k_query_key;
 #[cfg(test)]
 use feature_filter::FilterSource;
 use feature_filter::{StripDecision, catalog_capabilities};
@@ -1749,9 +1750,12 @@ impl Router {
     /// carry no session identity and are not tracked: there is no stable
     /// triple to accumulate against, so the call is a no-op rather than
     /// keyed on an empty string. A keyed request builds the
-    /// (session, provider_kind, model) triple and appends a sample whose
-    /// `observed_reuse` is `cache_read > 0` (the router owns the reuse
-    /// definition, mirroring the ledger rebuild).
+    /// (session, provider_kind, model) triple through the shared
+    /// `k_query_key` derivation -- the same one the read side projects its
+    /// query from -- and appends a sample whose `observed_reuse` is
+    /// `cache_read > 0` (the router owns the reuse definition, mirroring the
+    /// ledger rebuild). `model` is the served NICKNAME, matching the read
+    /// side's model dimension.
     ///
     /// This is a single mutex lock plus a small push; it must never fail,
     /// panic, or meaningfully slow the request, so it returns nothing and
@@ -1764,13 +1768,8 @@ impl Router {
         cache_read: u64,
         ts: std::time::SystemTime,
     ) {
-        let Some(session_key) = session_key else {
+        let Some(key) = k_query_key(session_key, Some(provider_kind), model).store_key() else {
             return;
-        };
-        let key = crate::k_estimator::KSessionKey {
-            session_key: session_key.to_string(),
-            provider_kind: provider_kind.to_string(),
-            model: model.to_string(),
         };
         self.k_session_store.record_sample(
             key,

@@ -118,7 +118,12 @@ fn triggering_req() -> ChatRequest {
 /// (`record_k_sample` on `meta.served_model`). ~2/3 hits gives a
 /// strictly-interior reuse rate so the calibrated floor is non-trivially
 /// positive rather than an all-miss zero.
+///
+/// The samples are timestamped in the last few seconds because the estimator
+/// counts only samples inside the query's TTL window, and the query under
+/// test runs on the real dispatch clock.
 fn record_calibrated_samples(router: &Router) {
+    let base = SystemTime::now() - Duration::from_secs(30);
     for i in 0..12u64 {
         let cache_read = u64::from(i % 3 != 0);
         router.record_k_sample(
@@ -126,7 +131,7 @@ fn record_calibrated_samples(router: &Router) {
             PROVIDER_KIND,
             SERVED_MODEL,
             cache_read,
-            UNIX_EPOCH + Duration::from_secs(i * 10_000),
+            base + Duration::from_secs(i),
         );
     }
 }
@@ -244,4 +249,141 @@ fn record_would_trim_folds_missing_baked_row_to_no_break_even() {
         meta.would_trim_break_even_k, None,
         "a Missing catalog row must record K* = None",
     );
+}
+
+#[test]
+fn k_query_key_projects_the_same_triple_to_both_sides() {
+    let derived = super::k_query_key(Some(SESSION), Some(PROVIDER_KIND), SERVED_MODEL);
+
+    let query = derived.query(Duration::from_mins(5), UNIX_EPOCH);
+    let store_key = derived
+        .store_key()
+        .expect("a keyed request has a store key");
+
+    assert_eq!(query.session_key, Some(store_key.session_key.as_str()));
+    assert_eq!(query.provider_kind, store_key.provider_kind);
+    assert_eq!(query.model, store_key.model);
+    assert_eq!(
+        store_key,
+        key(SERVED_MODEL),
+        "the derived write key must equal the served-model triple",
+    );
+    assert_ne!(
+        store_key,
+        key(UPSTREAM),
+        "the model dimension is the nickname, never the upstream wire id",
+    );
+}
+
+#[test]
+fn k_query_key_is_deterministic_across_calls() {
+    let first = super::k_query_key(Some(SESSION), Some(PROVIDER_KIND), SERVED_MODEL);
+    let second = super::k_query_key(Some(SESSION), Some(PROVIDER_KIND), SERVED_MODEL);
+
+    assert_eq!(first.store_key(), second.store_key());
+
+    let a = first.query(Duration::from_mins(5), UNIX_EPOCH);
+    let b = second.query(Duration::from_mins(5), UNIX_EPOCH);
+    assert_eq!(
+        (a.session_key, a.provider_kind, a.model),
+        (b.session_key, b.provider_kind, b.model),
+    );
+}
+
+#[test]
+fn k_query_key_normalizes_absent_provider_kind_and_skips_keyless_writes() {
+    let no_kind = super::k_query_key(Some(SESSION), None, SERVED_MODEL);
+    assert_eq!(
+        no_kind
+            .query(Duration::from_mins(5), UNIX_EPOCH)
+            .provider_kind,
+        "",
+        "an unstamped provider kind reads deterministically under the empty token",
+    );
+    assert_eq!(
+        no_kind
+            .store_key()
+            .expect("a keyed request has a store key")
+            .provider_kind,
+        "",
+    );
+
+    let keyless = super::k_query_key(None, Some(PROVIDER_KIND), SERVED_MODEL);
+    assert_eq!(
+        keyless
+            .query(Duration::from_mins(5), UNIX_EPOCH)
+            .session_key,
+        None,
+        "a keyless read carries no session and is Cold by construction",
+    );
+    assert_eq!(
+        keyless.store_key(),
+        None,
+        "a keyless request has no triple to accumulate against",
+    );
+}
+
+/// The write the ingress path performs and the read the dispatch path
+/// performs must land on ONE window. Pinned end-to-end through the shared
+/// helper: a sample written under the derived store key is visible to the
+/// estimator queried through the derived query.
+#[test]
+fn derived_write_key_and_derived_query_address_one_window() {
+    let router = Router::new(Arc::new(Config::default()));
+    record_calibrated_samples(&router);
+
+    let derived = super::k_query_key(Some(SESSION), Some(PROVIDER_KIND), SERVED_MODEL);
+
+    assert!(
+        router
+            .k_session_store
+            .get(&derived.store_key().expect("keyed"))
+            .is_some(),
+        "the derived write key must address the window record_k_sample wrote",
+    );
+    assert_eq!(
+        router
+            .k_estimator
+            .estimate(&derived.query(Duration::from_mins(5), SystemTime::now()))
+            .confidence,
+        crate::k_estimator::Confidence::Calibrated,
+        "the derived query must read that same window, not a cold miss",
+    );
+}
+
+/// `may_suppress` gates on the confidence CLASS, never on the numeric floor:
+/// `Low` force-clamps `k_floor` to 0.0 and `Cold` reports an all-zero
+/// default, so a numeric compare would read either clamp as evidence of no
+/// reuse.
+#[test]
+fn may_suppress_is_true_only_for_calibrated() {
+    use crate::k_estimator::{Confidence, EstimateSource, KEstimate};
+
+    fn estimate(k_floor: f64, samples: u32, confidence: Confidence) -> KEstimate {
+        KEstimate {
+            k_floor,
+            k_point: k_floor,
+            k_ceiling: k_floor,
+            samples,
+            confidence,
+            source: if confidence == Confidence::Cold {
+                EstimateSource::ColdDefault
+            } else {
+                EstimateSource::LiveLedger
+            },
+        }
+    }
+
+    // Calibrated authorizes acting on the floor, whatever its value -- a
+    // measured 0.0 is real evidence of no reuse, unlike a clamped one.
+    let calibrated_zero = estimate(0.0, 16, Confidence::Calibrated);
+    let calibrated_high = estimate(9.0, 16, Confidence::Calibrated);
+    assert!(super::may_suppress(&calibrated_zero));
+    assert!(super::may_suppress(&calibrated_high));
+
+    // Low: the floor is clamped to 0.0 by the thin-sample rule, which a
+    // numeric compare would mistake for a measured no-reuse session.
+    assert!(!super::may_suppress(&estimate(0.0, 3, Confidence::Low)));
+    // Cold: no samples at all.
+    assert!(!super::may_suppress(&estimate(0.0, 0, Confidence::Cold)));
 }

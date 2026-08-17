@@ -1244,16 +1244,19 @@ fn record_k_sample_skips_keyless_and_records_keyed() {
 #[test]
 fn carried_store_is_read_by_new_routers_estimator() {
     use crate::k_estimator::{Confidence, KQuery, KSessionKey, KSessionWindow, Sample};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime};
 
-    // Arrange: enough TTL-separated runs in the source store that the
-    // estimator classifies the triple as `Calibrated` (>= 8 runs). Each
-    // run is one reuse hit separated from the next by more than the TTL.
+    // Arrange: enough samples in the source store that the estimator
+    // classifies the triple as `Calibrated` (>= CALIBRATED_MIN_TRIALS
+    // trials). They are timestamped inside the TTL window of the query
+    // below, which runs on the real dispatch clock: the estimator counts
+    // only samples younger than the queried TTL.
     let ttl = Duration::from_mins(5);
+    let base = SystemTime::now() - Duration::from_secs(30);
     let mut window = KSessionWindow::new();
     for i in 0..12u64 {
         window.push(Sample {
-            ts: UNIX_EPOCH + Duration::from_secs(i * 10_000),
+            ts: base + Duration::from_secs(i),
             observed_reuse: true,
         });
     }

@@ -978,4 +978,5 @@ fn build_output_normal_returns_window_blocks_not_calibration_report() {
 // THIS module via include!, so the helpers above stay in scope.
 include!("usage_render_tests.rs");
 include!("usage_reduction_render_tests.rs");
+include!("usage_suppressed_render_tests.rs");
 include!("usage_era_pricing_tests.rs");

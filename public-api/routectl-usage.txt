@@ -1469,6 +1469,100 @@ impl<T> core::convert::From<T> for routectl_usage::ShadowMisfireSummary
 pub fn routectl_usage::ShadowMisfireSummary::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::ShadowMisfireSummary
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::ShadowMisfireSummary
+pub struct routectl_usage::SuppressedSessionRow
+pub routectl_usage::SuppressedSessionRow::first_suppressed_ms: i64
+pub routectl_usage::SuppressedSessionRow::last_suppressed_ms: i64
+pub routectl_usage::SuppressedSessionRow::model: alloc::string::String
+pub routectl_usage::SuppressedSessionRow::provider_kind: alloc::string::String
+pub routectl_usage::SuppressedSessionRow::session_ref: u64
+pub routectl_usage::SuppressedSessionRow::suppressed_requests: i64
+impl core::clone::Clone for routectl_usage::SuppressedSessionRow
+pub fn routectl_usage::SuppressedSessionRow::clone(&self) -> routectl_usage::SuppressedSessionRow
+impl core::cmp::Eq for routectl_usage::SuppressedSessionRow
+impl core::cmp::PartialEq for routectl_usage::SuppressedSessionRow
+pub fn routectl_usage::SuppressedSessionRow::eq(&self, &routectl_usage::SuppressedSessionRow) -> bool
+impl core::fmt::Debug for routectl_usage::SuppressedSessionRow
+pub fn routectl_usage::SuppressedSessionRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::SuppressedSessionRow
+impl core::marker::Freeze for routectl_usage::SuppressedSessionRow
+impl core::marker::Send for routectl_usage::SuppressedSessionRow
+impl core::marker::Sync for routectl_usage::SuppressedSessionRow
+impl core::marker::Unpin for routectl_usage::SuppressedSessionRow
+impl core::marker::UnsafeUnpin for routectl_usage::SuppressedSessionRow
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::SuppressedSessionRow
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::SuppressedSessionRow
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::SuppressedSessionRow where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessionRow::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::SuppressedSessionRow where U: core::convert::From<T>
+pub fn routectl_usage::SuppressedSessionRow::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::SuppressedSessionRow where U: core::convert::Into<T>
+pub type routectl_usage::SuppressedSessionRow::Error = core::convert::Infallible
+pub fn routectl_usage::SuppressedSessionRow::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::SuppressedSessionRow where U: core::convert::TryFrom<T>
+pub type routectl_usage::SuppressedSessionRow::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::SuppressedSessionRow::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::SuppressedSessionRow where T: core::clone::Clone
+pub type routectl_usage::SuppressedSessionRow::Owned = T
+pub fn routectl_usage::SuppressedSessionRow::clone_into(&self, &mut T)
+pub fn routectl_usage::SuppressedSessionRow::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::SuppressedSessionRow where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessionRow::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::SuppressedSessionRow where T: ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessionRow::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::SuppressedSessionRow where T: ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessionRow::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::SuppressedSessionRow where T: core::clone::Clone
+pub unsafe fn routectl_usage::SuppressedSessionRow::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::SuppressedSessionRow
+pub fn routectl_usage::SuppressedSessionRow::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::SuppressedSessionRow
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::SuppressedSessionRow
+pub struct routectl_usage::SuppressedSessions
+pub routectl_usage::SuppressedSessions::rows: alloc::vec::Vec<routectl_usage::SuppressedSessionRow>
+pub routectl_usage::SuppressedSessions::truncated: bool
+impl core::clone::Clone for routectl_usage::SuppressedSessions
+pub fn routectl_usage::SuppressedSessions::clone(&self) -> routectl_usage::SuppressedSessions
+impl core::cmp::Eq for routectl_usage::SuppressedSessions
+impl core::cmp::PartialEq for routectl_usage::SuppressedSessions
+pub fn routectl_usage::SuppressedSessions::eq(&self, &routectl_usage::SuppressedSessions) -> bool
+impl core::default::Default for routectl_usage::SuppressedSessions
+pub fn routectl_usage::SuppressedSessions::default() -> routectl_usage::SuppressedSessions
+impl core::fmt::Debug for routectl_usage::SuppressedSessions
+pub fn routectl_usage::SuppressedSessions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::SuppressedSessions
+impl core::marker::Freeze for routectl_usage::SuppressedSessions
+impl core::marker::Send for routectl_usage::SuppressedSessions
+impl core::marker::Sync for routectl_usage::SuppressedSessions
+impl core::marker::Unpin for routectl_usage::SuppressedSessions
+impl core::marker::UnsafeUnpin for routectl_usage::SuppressedSessions
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::SuppressedSessions
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::SuppressedSessions
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::SuppressedSessions where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessions::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::SuppressedSessions where U: core::convert::From<T>
+pub fn routectl_usage::SuppressedSessions::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::SuppressedSessions where U: core::convert::Into<T>
+pub type routectl_usage::SuppressedSessions::Error = core::convert::Infallible
+pub fn routectl_usage::SuppressedSessions::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::SuppressedSessions where U: core::convert::TryFrom<T>
+pub type routectl_usage::SuppressedSessions::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::SuppressedSessions::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::SuppressedSessions where T: core::clone::Clone
+pub type routectl_usage::SuppressedSessions::Owned = T
+pub fn routectl_usage::SuppressedSessions::clone_into(&self, &mut T)
+pub fn routectl_usage::SuppressedSessions::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::SuppressedSessions where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessions::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::SuppressedSessions where T: ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessions::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::SuppressedSessions where T: ?core::marker::Sized
+pub fn routectl_usage::SuppressedSessions::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::SuppressedSessions where T: core::clone::Clone
+pub unsafe fn routectl_usage::SuppressedSessions::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::SuppressedSessions
+pub fn routectl_usage::SuppressedSessions::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::SuppressedSessions
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::SuppressedSessions
 pub struct routectl_usage::TombstoneRow
 pub routectl_usage::TombstoneRow::catalog_version: core::option::Option<i64>
 pub routectl_usage::TombstoneRow::overlay_revision: core::option::Option<i64>
@@ -1774,6 +1868,7 @@ pub const routectl_usage::PREFIX_EPOCH_RESEEDED: i64
 pub const routectl_usage::PREFIX_EPOCH_REWRITTEN: i64
 pub const routectl_usage::PREFIX_EPOCH_STABLE: i64
 pub const routectl_usage::SCHEMA_VERSION: i64
+pub const routectl_usage::SUPPRESSED_SESSION_CAP: usize
 pub fn routectl_usage::aggregate(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<routectl_usage::AggRow>, routectl_usage::QueryError>
 pub fn routectl_usage::cache_decision_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::CacheDecisionSummary, routectl_usage::QueryError>
 pub fn routectl_usage::earliest_ts_start(&routectl_usage::UsageDb, i64) -> core::result::Result<core::option::Option<i64>, routectl_usage::QueryError>
@@ -1794,6 +1889,7 @@ pub fn routectl_usage::read_capability_events_after(&rusqlite::Connection, i64, 
 pub fn routectl_usage::read_reuse_samples_since(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::ReuseSampleRow>>
 pub fn routectl_usage::reduction_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::ReductionSummary, routectl_usage::QueryError>
 pub fn routectl_usage::shadow_misfire_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::ShadowMisfireSummary, routectl_usage::QueryError>
+pub fn routectl_usage::suppressed_sessions(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::SuppressedSessions, routectl_usage::QueryError>
 pub fn routectl_usage::ttfbs(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, i64)>, routectl_usage::QueryError>
 pub fn routectl_usage::would_trim_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::WouldTrimSummary, routectl_usage::QueryError>
 pub type routectl_usage::QueryTotals = routectl_usage::QueryMetrics

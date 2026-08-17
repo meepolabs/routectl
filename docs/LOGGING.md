@@ -663,17 +663,24 @@ config reloaded; router rebuilt and swapped path=... trigger=config change
 ```
 
 `[reduction] enabled` is the operator's live kill switch for the
-dispatch-path reducer (see CONFIGURATION.md, "Context reduction"), so a
-reload that CHANGED it adds a before/after pair to that same line:
+dispatch-path reducer (see CONFIGURATION.md, "Context reduction"), and
+`[cache] k_gated_emission` is the live kill switch for break-even-gated
+cache-marker suppression (see CONFIGURATION.md, "Break-even emission
+gate"), so a reload that CHANGED either adds that switch's before/after
+pair to the same line:
 
 | Field                      | Meaning                                                              |
 |----------------------------|----------------------------------------------------------------------|
 | `reduction_enabled_before` | The `[reduction] enabled` value the outgoing config carried.          |
 | `reduction_enabled_after`  | The value the freshly-loaded config carries (now live).               |
+| `k_gated_emission_before`  | The `[cache] k_gated_emission` value the outgoing config carried.     |
+| `k_gated_emission_after`   | The value the freshly-loaded config carries (now live).               |
 
-Both fields are emitted TOGETHER and ONLY when the value changed. A
-reload that left `[reduction] enabled` alone logs the line without them,
-so their presence is itself the signal that a flip landed:
+Each pair is emitted TOGETHER and ONLY when that switch's value changed.
+The two pairs are independent: a reload that flips one leaves the other's
+fields absent, and a reload that flips both stamps all four. A reload
+that left both alone logs the line without any of them, so a pair's
+presence is itself the signal that that flip landed:
 
 ```
 config reloaded; router rebuilt and swapped path=~/.config/routectl/config.toml \
@@ -681,10 +688,12 @@ config reloaded; router rebuilt and swapped path=~/.config/routectl/config.toml 
 ```
 
 The line is the operator's confirmation that the intended transition took
-effect. Absence of both fields after a config write that was meant to flip
-the switch means the reload applied a config whose value was already what
+effect. Absence of a pair after a config write that was meant to flip
+that switch means the reload applied a config whose value was already what
 the file now says -- or that the reload never fired at all (which logs no
-success line). CONFIGURATION.md, "Context reduction", carries the recovery
+success line). A reload that FAILED parse or validation also logs no
+success line, so a declined candidate can never stamp a transition it did
+not make. CONFIGURATION.md, "Context reduction", carries the recovery
 runbook that uses this line.
 
 ## Stream first-activity mark

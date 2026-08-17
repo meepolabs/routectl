@@ -7,12 +7,16 @@ mod capability;
 mod deadline;
 mod grouped;
 mod reduction;
+mod session_ref;
 mod would_trim;
 
 pub use aggregate::{
     QuotaSnapshot, aggregate, earliest_ts_start, errors_by_class, latest_quota_by_seat, ttfbs,
 };
-pub use cache_decision::{CacheDecisionSummary, cache_decision_summary};
+pub use cache_decision::{
+    CacheDecisionSummary, SUPPRESSED_SESSION_CAP, SuppressedSessionRow, SuppressedSessions,
+    cache_decision_summary, suppressed_sessions,
+};
 pub use calibration::{CalibrationSampleRow, read_calibration_samples_since};
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,
