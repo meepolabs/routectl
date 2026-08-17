@@ -3,8 +3,10 @@
 //! Each test boots a server via `serve_on_listener` against a
 //! `tempfile::tempdir`-rooted config.toml and credentials.json so
 //! the operator's real `$XDG_CONFIG_HOME` is never touched.
-//! Polling-based timing (50 ms intervals up to ~3 s) keeps the
-//! suite fast and platform-jitter tolerant; no fixed sleeps.
+//! Polling-based timing (50 ms intervals under generous ceilings)
+//! keeps the suite fast and platform-jitter tolerant; a fs-event
+//! stimulus is always re-issued on the restimulus cadence rather
+//! than written once and slept on (see `poll_alias_with_restimulus`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,8 +26,8 @@ mod common;
 /// tracing signal is not observable from the test thread; the observable
 /// is the alias table itself, polled at 50 ms until it flips. The bound
 /// is generous so a busy CI box under parallel release load cannot flake
-/// -- `wait_for_alias` returns the instant the alias appears, so the
-/// happy path pays only the real reload latency, never the ceiling.
+/// -- `poll_alias_with_restimulus` returns the instant the alias appears, so
+/// the happy path pays only the real reload latency, never the ceiling.
 const RELOAD_WAIT_CEILING: Duration = Duration::from_secs(30);
 
 // -----------------------------------------------------------------
@@ -134,21 +136,6 @@ fn write_atomic(path: &Path, contents: &[u8]) {
     tmp.persist(path).unwrap();
 }
 
-/// Poll `/v1/models` until `id` appears (or `max_wait` elapses).
-/// Returns true when found, false on timeout. 50 ms polling cadence
-/// keeps the test fast.
-async fn wait_for_alias(base_url: &str, id: &str, max_wait: Duration) -> bool {
-    let deadline = Instant::now() + max_wait;
-    while Instant::now() < deadline {
-        let ids = list_model_ids(base_url).await;
-        if ids.iter().any(|s| s == id) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
 /// Cadence at which `poll_alias_with_restimulus` re-issues its rewrite.
 /// Comfortably wider than `DEBOUNCE_MS` (250 ms in file_watch.rs) so each
 /// re-write is seen as a distinct event once the watch is armed, and much
@@ -160,15 +147,25 @@ const RESTIMULUS_INTERVAL: Duration = Duration::from_secs(1);
 /// rewrite of `config_path` with `contents`, until the alias surfaces
 /// (returns true) or `max_wait` elapses (returns false).
 ///
-/// The watcher's inotify watch is armed on notify's background
+/// A write to a watched path is NOT reliably delivered to the watcher, and
+/// the loss is not confined to a startup window. The best-understood case is
+/// watch arming: the inotify watch is armed on notify's background
 /// event-loop thread AFTER `spawn_watcher` returns -- `debouncer.watch()`
 /// only enqueues the `add_watch`, it does not block on it (this is why the
-/// file_watch.rs unit tests interpose a `SETTLE_MS` sleep before their
-/// first mutation). The server answers `/health` before that watch is
-/// live, so a single write issued the instant the server comes up can land
-/// ahead of the armed watch and be dropped -- there is no fs-event
-/// re-delivery, so the reload simply never fires. Under heavy parallel
-/// release load that arming window widens past any fixed sleep.
+/// file_watch.rs unit tests interpose a `SETTLE_MS` sleep before their first
+/// mutation), and the server answers `/health` before that watch is live. But
+/// a single write has also been observed never delivered LONG AFTER the watch
+/// was provably armed -- with an earlier marker config on the same path
+/// already reloaded. Atomic-rename delivery through debouncing is best-effort
+/// at every point in a server's life, not just at boot.
+///
+/// There is no fs-event re-delivery, so a dropped event means the reload
+/// simply never fires: a bare write plus a fixed sleep can observe NOTHING
+/// and still pass whenever the assertion's expected outcome coincides with
+/// "no reload happened". Re-issuing the write is therefore the only reliable
+/// stimulus, and a test whose expected outcome IS "nothing changes" needs a
+/// separate proof that the watch is delivering (see the both-sides marker
+/// guard in `failed_reload_keeps_old_reduction_state`).
 ///
 /// Re-writing the SAME contents each interval makes the stimulus
 /// self-healing without changing observed behavior: the reload path is
@@ -199,9 +196,89 @@ async fn poll_alias_with_restimulus(
     false
 }
 
-// -----------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------
+/// `config_text_with_alias` plus a second `marker` alias sharing the same
+/// model. The marker is a watch-delivery proof for tests whose candidate must
+/// be REJECTED: a VALID config carrying it lands on the watched path before
+/// and after the rejected window, so the alias table itself shows the reload
+/// pipeline was processing writes to that path throughout.
+fn config_text_with_alias_and_marker(alias: &str, marker: &str) -> String {
+    format!("{}{marker} = \"gpt-4o\"\n", config_text_with_alias(alias))
+}
+
+/// Land a VALID config publishing `stable` plus `marker` and wait for `marker`
+/// to surface on `/v1/models`.
+///
+/// This is the half a rejected-reload test cannot do without: "the candidate
+/// was declined" and "the write was never delivered" produce the identical
+/// observation, so the watch has to be proven live independently. Run on BOTH
+/// sides of the rejected window, it bounds the window with demonstrated
+/// delivery rather than assuming it.
+async fn prove_watch_delivering(base_url: &str, config_path: &Path, stable: &str, marker: &str) {
+    let armed = config_text_with_alias_and_marker(stable, marker);
+    assert!(
+        poll_alias_with_restimulus(
+            base_url,
+            config_path,
+            armed.as_bytes(),
+            marker,
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "the watch is not delivering: marker alias `{marker}` did not surface within {RELOAD_WAIT_CEILING:?}",
+    );
+}
+
+/// How long a rejected-candidate test holds its candidate on disk, re-issuing
+/// the write on the `RESTIMULUS_INTERVAL` cadence. Spans several intervals so
+/// the rejected write is delivered repeatedly rather than once, and each
+/// delivery is checked.
+const REJECT_HOLD_WINDOW: Duration = Duration::from_secs(4);
+
+/// Re-issue an atomic rewrite of `config_path` with a candidate that must be
+/// REJECTED, on the `RESTIMULUS_INTERVAL` cadence for `window`, failing the
+/// moment the live alias table shows the reload was applied: `never` is an
+/// alias the candidate would publish if accepted, `keep` an alias only the
+/// PRIOR config publishes.
+///
+/// The inverse of `poll_alias_with_restimulus`: that one waits for an alias a
+/// valid candidate should publish, this one holds a candidate that must never
+/// change the live table and watches for any sign that it did. Same re-issuing
+/// rationale -- a single write can be dropped with no fs-event re-delivery, so
+/// repeated identical writes are what make the stimulus reliable rather than
+/// best-effort. Pair it with `prove_watch_delivering` on both sides: repeated
+/// delivery alone does not prove any of the writes landed.
+async fn hold_rejected_candidate(
+    base_url: &str,
+    config_path: &Path,
+    contents: &[u8],
+    never: Option<&str>,
+    keep: Option<&str>,
+    window: Duration,
+) {
+    let deadline = Instant::now() + window;
+    write_atomic(config_path, contents);
+    let mut last_write = Instant::now();
+    while Instant::now() < deadline {
+        let ids = list_model_ids(base_url).await;
+        if let Some(never) = never {
+            assert!(
+                !ids.iter().any(|s| s == never),
+                "the rejected candidate's alias `{never}` surfaced, so the reload was APPLIED: {ids:?}",
+            );
+        }
+        if let Some(keep) = keep {
+            assert!(
+                ids.iter().any(|s| s == keep),
+                "the prior config's alias `{keep}` vanished, so the rejected reload took effect: {ids:?}",
+            );
+        }
+        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
+            write_atomic(config_path, contents);
+            last_write = Instant::now();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 /// Writing a new config.toml triggers a hot-reload; the new alias
 /// surfaces on `/v1/models`. The stimulus is re-issued on each poll
@@ -240,43 +317,69 @@ async fn file_write_triggers_config_reload() {
 /// A truncated / structurally-broken TOML rewrite must NOT swap
 /// the running config. The existing alias stays live; the broken
 /// content is rejected at parse time.
+///
+/// Because the expected outcome is "nothing changes", a dropped write would
+/// satisfy the assertion vacuously. So the watch is proven delivering on both
+/// sides of the rejected window (`prove_watch_delivering`) and the broken
+/// content is re-issued on the restimulus cadence throughout it, with the
+/// surviving alias re-checked on every delivery.
 #[tokio::test]
 async fn partial_write_keeps_old_config() {
     let (base_url, config_path, _dir) = spawn_watched_server("stable-alias").await;
 
-    // Act: write a truncated TOML (missing closing brace, dangling
-    // section header).
-    write_atomic(&config_path, b"[server\nhost = \"127.0.0.1\"\nport = 0\n");
+    prove_watch_delivering(&base_url, &config_path, "stable-alias", "partial-armed").await;
 
-    // Give the watcher + reload coordinator time to react. Even
-    // after debounce + parse, the old alias must still be present.
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Act: hold a truncated TOML (missing closing brace, dangling section
+    // header) on disk across several restimulus cycles. Even after debounce +
+    // parse, the old alias must still be present on every delivery.
+    hold_rejected_candidate(
+        &base_url,
+        &config_path,
+        b"[server\nhost = \"127.0.0.1\"\nport = 0\n",
+        None,
+        Some("stable-alias"),
+        REJECT_HOLD_WINDOW,
+    )
+    .await;
 
     let ids = list_model_ids(&base_url).await;
     assert!(
         ids.iter().any(|s| s == "stable-alias"),
         "old alias must remain after a parse-rejected reload: {ids:?}"
     );
+
+    prove_watch_delivering(&base_url, &config_path, "stable-alias", "partial-post").await;
 }
 
 /// Valid-UTF8 but non-TOML content also must be rejected, with the
 /// existing alias preserved. Same surface as `partial_write_keeps_old_config`
 /// but exercises the toml::from_str error path with content the
-/// reader cannot recover from.
+/// reader cannot recover from. Same both-sides delivery proof, for the same
+/// reason: "rejected" and "never delivered" look identical from outside.
 #[tokio::test]
 async fn invalid_toml_keeps_old_config() {
     let (base_url, config_path, _dir) = spawn_watched_server("durable-alias").await;
 
-    // Act: garbage that parses as utf-8 but not as TOML.
-    write_atomic(&config_path, b"<<<not toml at all>>>\n!@#$%^\n");
+    prove_watch_delivering(&base_url, &config_path, "durable-alias", "invalid-armed").await;
 
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Act: hold garbage that parses as utf-8 but not as TOML.
+    hold_rejected_candidate(
+        &base_url,
+        &config_path,
+        b"<<<not toml at all>>>\n!@#$%^\n",
+        None,
+        Some("durable-alias"),
+        REJECT_HOLD_WINDOW,
+    )
+    .await;
 
     let ids = list_model_ids(&base_url).await;
     assert!(
         ids.iter().any(|s| s == "durable-alias"),
         "old alias must remain after an invalid-toml reload attempt: {ids:?}"
     );
+
+    prove_watch_delivering(&base_url, &config_path, "durable-alias", "invalid-post").await;
 }
 
 /// A config text identical to `config_text_with_alias` except it also
@@ -348,16 +451,32 @@ fn class_policy_reject_surfaces_through_load_effective_config() {
 /// candidate names a DIFFERENT alias than the running config so a
 /// wrongly-applied reload is distinguishable from a correctly-rejected
 /// one (both configs are otherwise syntactically valid).
+///
+/// Delivery is proven on both sides of the rejected window
+/// (`prove_watch_delivering`) and the candidate is re-issued on the restimulus
+/// cadence throughout it -- without that, a write the watcher never saw would
+/// satisfy "the old alias is still live" for entirely the wrong reason.
 #[tokio::test]
 async fn feature_unsupported_class_override_rejected_old_router_stays_live() {
     let (base_url, config_path, _dir) = spawn_watched_server("class-policy-stable").await;
 
-    write_atomic(
+    prove_watch_delivering(
+        &base_url,
+        &config_path,
+        "class-policy-stable",
+        "class-policy-armed",
+    )
+    .await;
+
+    hold_rejected_candidate(
+        &base_url,
         &config_path,
         config_text_with_reserved_class_override("class-policy-rejected").as_bytes(),
-    );
-
-    tokio::time::sleep(Duration::from_millis(800)).await;
+        Some("class-policy-rejected"),
+        Some("class-policy-stable"),
+        REJECT_HOLD_WINDOW,
+    )
+    .await;
 
     let ids = list_model_ids(&base_url).await;
     assert!(
@@ -368,6 +487,14 @@ async fn feature_unsupported_class_override_rejected_old_router_stays_live() {
         !ids.iter().any(|s| s == "class-policy-rejected"),
         "the rejected candidate's alias must never surface: {ids:?}"
     );
+
+    prove_watch_delivering(
+        &base_url,
+        &config_path,
+        "class-policy-stable",
+        "class-policy-post",
+    )
+    .await;
 }
 
 // -----------------------------------------------------------------
@@ -435,17 +562,24 @@ fn unknown_field_suggestion_surfaces_through_load_effective_config() {
 /// rejected at parse time (the loader logs a structured warn and keeps the
 /// prior config, exactly like `partial_write_keeps_old_config` and the
 /// class-policy reject above). The old alias stays visible on `/v1/models`
-/// and the candidate's alias never surfaces.
+/// and the candidate's alias never surfaces. Delivery is proven on both sides
+/// of the rejected window and the candidate is re-issued on the restimulus
+/// cadence throughout it, so an undelivered write cannot pass for a rejection.
 #[tokio::test]
 async fn unknown_field_reload_rejected_old_router_stays_live() {
     let (base_url, config_path, _dir) = spawn_watched_server("field-stable").await;
 
-    write_atomic(
+    prove_watch_delivering(&base_url, &config_path, "field-stable", "field-armed").await;
+
+    hold_rejected_candidate(
+        &base_url,
         &config_path,
         config_text_with_unknown_server_field("field-rejected").as_bytes(),
-    );
-
-    tokio::time::sleep(Duration::from_millis(800)).await;
+        Some("field-rejected"),
+        Some("field-stable"),
+        REJECT_HOLD_WINDOW,
+    )
+    .await;
 
     let ids = list_model_ids(&base_url).await;
     assert!(
@@ -456,6 +590,8 @@ async fn unknown_field_reload_rejected_old_router_stays_live() {
         !ids.iter().any(|s| s == "field-rejected"),
         "the rejected candidate's alias must never surface: {ids:?}"
     );
+
+    prove_watch_delivering(&base_url, &config_path, "field-stable", "field-post").await;
 }
 
 /// Five sequential rewrites of the config (each with a unique
@@ -477,10 +613,21 @@ async fn concurrent_self_write_no_loop() {
         tokio::time::sleep(Duration::from_millis(350)).await;
     }
 
-    // Assert: the final alias is visible.
+    // Assert: the final alias is visible. The final rewrite is re-issued on
+    // the restimulus cadence (identical bytes, idempotent) because a lone
+    // atomic rename is not reliably delivered to the watcher -- the loop above
+    // is the behavior under test, but its LAST event is the one this assertion
+    // depends on.
     assert!(
-        wait_for_alias(&base_url, "alias-4", Duration::from_secs(5)).await,
-        "final alias-4 did not appear within 5s after five sequential reloads"
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            config_text_with_alias("alias-4").as_bytes(),
+            "alias-4",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "final alias-4 did not appear within {RELOAD_WAIT_CEILING:?} after five sequential reloads"
     );
 }
 
@@ -502,20 +649,28 @@ async fn sighup_combined_with_file_rewrite_surfaces_new_config() {
     // design (both arms converge on the same coordinator). The
     // SIGHUP-only contract is covered separately by the unit test
     // referenced in the doc comment above.
-    write_atomic(
-        &config_path,
-        config_text_with_alias("sighup-post").as_bytes(),
-    );
+    let post = config_text_with_alias("sighup-post");
+    write_atomic(&config_path, post.as_bytes());
 
     // Send SIGHUP to ourselves.
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     kill(Pid::from_raw(std::process::id() as i32), Signal::SIGHUP).expect("send SIGHUP");
 
-    // Assert: the new alias surfaces.
+    // Assert: the new alias surfaces. The rewrite is re-issued on the
+    // restimulus cadence (identical bytes, idempotent) so the fs arm still
+    // converges if the lone rename above was never delivered -- the combined
+    // arm is what is under test, not one specific arm winning the race.
     assert!(
-        wait_for_alias(&base_url, "sighup-post", Duration::from_secs(3)).await,
-        "sighup-post alias did not appear within 3s after SIGHUP"
+        poll_alias_with_restimulus(
+            &base_url,
+            &config_path,
+            post.as_bytes(),
+            "sighup-post",
+            RELOAD_WAIT_CEILING,
+        )
+        .await,
+        "sighup-post alias did not appear within {RELOAD_WAIT_CEILING:?} after SIGHUP"
     );
 }
 
@@ -886,10 +1041,17 @@ async fn config_set_valid_edit_hot_reloads() {
 /// A `config set` whose candidate fails the shared validation gate writes
 /// NOTHING: the file stays byte-identical and the running server never sees
 /// a reload (the old alias remains, no candidate alias appears).
+///
+/// The watch is proven delivering FIRST, so "the old alias is still live" is
+/// evidence about the failed edit rather than about a watcher that was never
+/// going to report anything. That marker write also establishes the byte
+/// baseline this test compares against.
 #[tokio::test]
 async fn config_set_failed_candidate_makes_no_watcher_visible_write() {
     let (base_url, dir) = spawn_server_with_config_text(&v3_config_with_alias("stable")).await;
     let config_path = dir.path().join("config.toml");
+
+    prove_watch_delivering(&base_url, &config_path, "stable", "set-fail-armed").await;
     let before = std::fs::read(&config_path).unwrap();
 
     // A non-numeric value for a numeric field fails the re-parse gate.
@@ -1583,12 +1745,6 @@ const PRETTY_ARGUMENTS: &str = "{\n  \"query\": \"rust\",\n  \"limit\": 10\n}";
 /// silent change in the minifier cannot move both sides of the assertion.
 const COMPACT_ARGUMENTS: &str = "{\"query\":\"rust\",\"limit\":10}";
 
-/// How long `failed_reload_keeps_old_reduction_state` holds the unparseable
-/// candidate on disk, re-issuing the write on the `RESTIMULUS_INTERVAL`
-/// cadence. Spans several intervals so the rejected write is delivered
-/// repeatedly rather than once, and each delivery is checked.
-const REJECT_HOLD_WINDOW: Duration = Duration::from_secs(4);
-
 /// Single-provider config with `[reduction] enabled` set explicitly.
 ///
 /// The value is ALWAYS written, never left to the schema default, so the
@@ -1988,40 +2144,6 @@ async fn request_pinned_before_the_swap_keeps_old_reduction_state() {
     );
 }
 
-/// Re-issue an atomic rewrite of `config_path` with `contents` on the
-/// `RESTIMULUS_INTERVAL` cadence for `window`, failing the moment `id`
-/// surfaces on `/v1/models`.
-///
-/// The inverse of `poll_alias_with_restimulus`: that one waits for an alias a
-/// VALID candidate should publish, this one holds a candidate that must NEVER
-/// publish one and watches for the alias as a rejection oracle. Same
-/// re-issuing rationale -- a single write can race ahead of the asynchronously
-/// armed inotify watch and be dropped with no fs-event re-delivery, so
-/// repeated identical writes are what make the stimulus reliable rather than
-/// best-effort.
-async fn hold_rejected_candidate(
-    base_url: &str,
-    config_path: &Path,
-    contents: &[u8],
-    id: &str,
-    window: Duration,
-) {
-    let deadline = Instant::now() + window;
-    write_atomic(config_path, contents);
-    let mut last_write = Instant::now();
-    while Instant::now() < deadline {
-        assert!(
-            !list_model_ids(base_url).await.iter().any(|s| s == id),
-            "the unparseable candidate's alias `{id}` surfaced, so the reload was APPLIED",
-        );
-        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
-            write_atomic(config_path, contents);
-            last_write = Instant::now();
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 /// A reload candidate that would disable reduction but FAILS validation
 /// leaves the live state untouched: the running router keeps reduction ON
 /// and the next request still egresses compacted bytes. Same rejection seam
@@ -2095,7 +2217,8 @@ async fn failed_reload_keeps_old_reduction_state() {
         &base_url,
         &config_path,
         reduction_config_unparseable(&up.uri(), false, "reject-marker").as_bytes(),
-        "reject-marker",
+        Some("reject-marker"),
+        Some("reduce-me"),
         REJECT_HOLD_WINDOW,
     )
     .await;
