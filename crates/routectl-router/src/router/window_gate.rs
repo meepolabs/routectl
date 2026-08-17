@@ -98,6 +98,11 @@ impl SkipWarnThrottle {
 /// The process-wide throttle the production call site shares. A per-process
 /// stamp, not a per-record item cap: the stream this bounds is repeats across
 /// REQUESTS, which no within-record sampler can see.
+///
+/// Deliberately process-wide rather than per-`Router`, unlike the skip
+/// counter it accompanies: `RouterMetrics` carries across a hot-reload via
+/// `carry_over_metrics_from`, so the two stay in agreement about whether a
+/// skip happened -- neither resets independently of the other on a reload.
 static SKIP_WARN_THROTTLE: SkipWarnThrottle = SkipWarnThrottle::new();
 
 /// Seconds since the Unix epoch, `0` on a pre-epoch clock (which then
