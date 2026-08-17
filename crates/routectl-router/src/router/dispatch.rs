@@ -1700,6 +1700,14 @@ impl Router {
             FailureClass::Unknown if facts.status.is_some() => {
                 self.metrics.incr_unknown_failure_classification();
             }
+            // The window gate runs during chain construction, strictly
+            // before dispatch -- so every target reaching this arm cleared
+            // the gate. Paired with the gate's own skip counter; see the
+            // counter's doc comment for the remap-mixing caveat this arm
+            // is subject to.
+            FailureClass::ContextWindow => {
+                self.metrics.incr_context_window_overflow();
+            }
             _ => {}
         }
         emit_class_decision(&ClassDecisionObs {

@@ -1343,3 +1343,188 @@ fn would_trim_k_floor_for_meta_truth_table() {
         );
     }
 }
+
+#[test]
+fn carry_over_metrics_from_shares_storage_across_a_rebuild() {
+    // Arrange: bump a counter on the outgoing Router directly through its
+    // shared metrics handle, mimicking a late-completing request that
+    // still holds the old Router after a swap.
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    before.metrics.incr_window_gate_skip();
+    let mut after = Router::new(config);
+    assert_eq!(
+        after.metrics.window_gate_skips_total(),
+        0,
+        "a freshly-built Router starts at zero before any carry-over",
+    );
+
+    // Act
+    after.carry_over_metrics_from(&before);
+
+    // Assert: the new Router observes the pre-carry-over increment,
+    // proving the storage is SHARED rather than snapshotted.
+    assert_eq!(after.metrics.window_gate_skips_total(), 1);
+
+    // A further increment through EITHER handle must be visible through
+    // both, since carry-over shares the underlying Arc rather than
+    // copying a value at one instant.
+    after.metrics.incr_window_gate_skip();
+    assert_eq!(before.metrics.window_gate_skips_total(), 2);
+}
+
+#[test]
+fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
+    // Arrange: bump a couple of counters so the snapshot's assertions
+    // pin real numbers, not just field presence.
+    let config = Arc::new(Config::default());
+    let router = Router::new(config);
+    router.metrics.incr_window_gate_skip();
+    router.metrics.incr_window_gate_skip();
+    router.metrics.incr_context_window_overflow();
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        router.log_metrics_snapshot();
+    });
+
+    // Assert: exactly one event on the stable target/message a
+    // structured-log consumer matches on -- a regression that re-splits
+    // the snapshot into two partial events, or drops the spawn entirely,
+    // fails here.
+    let snapshots: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.target == "routectl_router::router::metrics" && e.message == "router metrics snapshot"
+        })
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "exactly one router metrics snapshot event must be emitted, got {}",
+        snapshots.len()
+    );
+    let snapshot = snapshots[0];
+
+    // The two counters bumped above carry their real accumulated values.
+    assert_eq!(snapshot.field("rc_window_gate_skips_total"), Some("2"));
+    assert_eq!(
+        snapshot.field("rc_context_window_overflow_total"),
+        Some("1")
+    );
+
+    // Every other counter is present (proving the field is not dropped)
+    // at its untouched zero value.
+    for field in [
+        "rc_unknown_failure_classifications_total",
+        "rc_feature_unsupported_total",
+        "rc_learned_negatives_total",
+        "rc_learned_negatives_f1_total",
+        "rc_learned_negatives_f2_total",
+        "rc_probe_attempts_total",
+        "rc_probe_failures_total",
+        "rc_invalidations_total",
+        "rc_d17_tail_total",
+        "rc_strip_total",
+        "rc_strip_rollback_total",
+        "rc_strip_strict_rejected_total",
+        "rc_mask_suppressed_total",
+        "rc_f2_same_chain_suppressed_total",
+        "rc_feature_naming_unmatched_total",
+        "rc_verified_working_total",
+        "rc_f3_suspect_total",
+        "rc_quota_placement_below_cap_total",
+        "rc_quota_placement_all_capped_total",
+        "rc_quota_placement_mixed_unknown_total",
+        "rc_quota_placement_all_unknown_total",
+    ] {
+        assert_eq!(
+            snapshot.field(field),
+            Some("0"),
+            "field {field} must be present on the single snapshot event"
+        );
+    }
+
+    // The bedrock-only field's presence must track the build's feature
+    // set exactly -- present under the default (bedrock-on) build,
+    // absent when the feature is compiled out. A field split back onto
+    // a second partial event, rather than folded into this one, fails
+    // this assertion because the field would be missing here.
+    #[cfg(feature = "bedrock")]
+    assert_eq!(
+        snapshot.field("rc_bedrock_validation_unmatched_total"),
+        Some("0"),
+        "bedrock build must carry the bedrock counter on the single snapshot event"
+    );
+    #[cfg(not(feature = "bedrock"))]
+    assert_eq!(
+        snapshot.field("rc_bedrock_validation_unmatched_total"),
+        None,
+        "non-bedrock build must not emit the bedrock-only counter"
+    );
+}
+
+#[test]
+fn emit_class_observability_bumps_context_window_overflow_on_context_window_class() {
+    use routectl_core::failure_class::{ClassifiedFailure, MatchedBy};
+
+    struct StubProvider;
+    #[async_trait::async_trait]
+    impl Provider for StubProvider {
+        fn id(&self) -> &'static str {
+            "stub"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("stub", "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            unreachable!()
+        }
+        async fn stream(
+            &self,
+            _: ChatRequest,
+        ) -> Result<futures::stream::BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!()
+        }
+    }
+
+    let router = build_router_with_provider_timeouts(None, None);
+    let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+    let model = Arc::new(ResolvedModel::new("nick", "p1", provider, "upstream"));
+    let target = into_one_dispatch_target(model);
+    let policy = RetryPolicy::default();
+
+    let err = Error::upstream("p1", 400, "prompt is too long");
+    let cf = ClassifiedFailure {
+        class: FailureClass::ContextWindow,
+        matched_by: MatchedBy::Status,
+    };
+
+    assert_eq!(router.metrics.context_window_overflow_total(), 0);
+
+    router.emit_class_observability(
+        &err,
+        &cf,
+        &cf.class,
+        false,
+        None,
+        DispatchSurface::Complete,
+        "p1",
+        &target,
+        false,
+        &policy,
+        false,
+        false,
+        false,
+    );
+
+    assert_eq!(
+        router.metrics.context_window_overflow_total(),
+        1,
+        "a dispatch error arm reaching FailureClass::ContextWindow means the \
+         target cleared the proactive window gate and still overflowed",
+    );
+}

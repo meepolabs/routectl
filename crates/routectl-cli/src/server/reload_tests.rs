@@ -1484,3 +1484,103 @@ fn both_reload_paths_carry_the_prefix_epoch_store_over() {
          sibling session-keyed store carries at"
     );
 }
+
+// ---- Router-metrics snapshot driver ----
+
+/// Two Routers differing only in catalog-overlay revision, with the
+/// revision bump carried across via the PUBLIC `carry_over_learned_from`
+/// -- the only seam this crate has to produce a real, non-zero router
+/// counter without reaching into `routectl-router`'s private metrics
+/// internals. Bumps `rc_invalidations_total` to exactly 1.
+fn router_with_one_invalidation() -> Router {
+    let config = Arc::new(Config::default());
+    let mut before = Router::new(config.clone());
+    before.install_catalog_overlay(Arc::new(CatalogOverlay {
+        revision: 1,
+        ..Default::default()
+    }));
+    let mut router = Router::new(config);
+    router.install_catalog_overlay(Arc::new(CatalogOverlay {
+        revision: 2,
+        ..Default::default()
+    }));
+    router.carry_over_learned_from(&before);
+    router
+}
+
+/// Guards the router-metrics driver's shutdown-flush seam
+/// (`run_router_metrics_snapshot_driver`): removing the production spawn,
+/// or breaking its shutdown arm, leaves every other reload test green
+/// because nothing else drives this function.
+#[tokio::test]
+async fn router_metrics_snapshot_driver_flushes_at_graceful_shutdown() {
+    let router_swap = Arc::new(ArcSwap::from_pointee(router_with_one_invalidation()));
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    // Flip shutdown before driving the loop so the driver takes its
+    // shutdown branch on the first poll and returns ON THIS THREAD --
+    // `with_capture` only sees events emitted on the calling thread.
+    shutdown_tx.send(()).unwrap();
+
+    let ((), events) = routectl_testkit::with_capture(run_router_metrics_snapshot_driver(
+        router_swap,
+        shutdown_rx,
+    ))
+    .await;
+
+    let snapshot = events
+        .iter()
+        .find(|event| {
+            event.target == "routectl_router::router::metrics"
+                && event.message == "router metrics snapshot"
+        })
+        .expect("graceful shutdown must flush a router metrics snapshot");
+    assert_eq!(
+        snapshot.field("rc_invalidations_total"),
+        Some("1"),
+        "the flushed snapshot must carry the shared instance's accumulated total"
+    );
+}
+
+/// Guards the OTHER seam in the driver: the periodic
+/// [`ROUTER_METRICS_SNAPSHOT_INTERVAL`] tick, which the shutdown-flush
+/// test above cannot observe (it returns on the shutdown branch before
+/// the timer ever elapses). `start_paused` auto-advances the clock to
+/// each pending deadline, so a full interval passes without a single
+/// millisecond of wall time.
+#[tokio::test(start_paused = true)]
+async fn router_metrics_snapshot_driver_flushes_on_the_periodic_tick() {
+    let router_swap = Arc::new(ArcSwap::from_pointee(router_with_one_invalidation()));
+    // The sender stays alive for the whole test: dropping it would make
+    // `shutdown.changed()` resolve, firing the shutdown flush and
+    // masking a missing periodic emission.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
+
+    let (outcome, events) = routectl_testkit::with_capture(tokio::time::timeout(
+        ROUTER_METRICS_SNAPSHOT_INTERVAL + std::time::Duration::from_secs(1),
+        run_router_metrics_snapshot_driver(router_swap, shutdown_rx),
+    ))
+    .await;
+    assert!(
+        outcome.is_err(),
+        "the loop must still be running: it may only exit on the shutdown signal"
+    );
+
+    let snapshots: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.target == "routectl_router::router::metrics"
+                && event.message == "router metrics snapshot"
+        })
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "exactly one periodic snapshot must be emitted per elapsed interval, got {}",
+        snapshots.len()
+    );
+    assert_eq!(
+        snapshots[0].field("rc_invalidations_total"),
+        Some("1"),
+        "the periodic snapshot must carry the shared instance's accumulated total"
+    );
+}

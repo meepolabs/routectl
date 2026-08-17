@@ -262,10 +262,12 @@ pub struct Router {
     /// answer unavailable. Costs one refcount: every build path already
     /// holds the overlay behind an `Arc`.
     catalog_overlay: Arc<crate::catalog_overlay::CatalogOverlay>,
-    /// Lock-free router-side observability counters. Not carried over on
-    /// a hot-reload rebuild (a reset is benign for observability, same
-    /// rationale as `round_robin`).
-    metrics: RouterMetrics,
+    /// Lock-free router-side observability counters. Carried over on a
+    /// hot-reload rebuild by `carry_over_metrics_from`, which shares this
+    /// `Arc` rather than resetting it: unlike `round_robin`, these counters
+    /// back an operator-facing snapshot, so a reload that silently zeroed
+    /// them would make a diffed rate compute garbage with no indication why.
+    metrics: Arc<RouterMetrics>,
     /// `true` iff `config.providers` contains a `ProviderEntry::AnthropicApi`
     /// with `credential_source == Forwarded`. Computed ONCE here at
     /// construction (a full `config.providers` scan) rather than re-scanned
@@ -422,6 +424,20 @@ struct RouterMetrics {
     /// The expected state of a fresh process and of an uncurated provider, so
     /// a high count here is not by itself a fault.
     quota_placement_all_unknown_total: AtomicU64,
+    /// Dispatch targets that cleared the proactive window gate
+    /// ([`window_gate_skips_total`](Self::window_gate_skips_total)) and then
+    /// still hit a reactive `FailureClass::ContextWindow` rejection. Paired
+    /// with the skip count, this is what makes the gate's safety margin
+    /// answerable: skips that likely saved a doomed knock versus overflows
+    /// the gate let through anyway.
+    ///
+    /// CAVEAT, do not gloss: `FailureClass::ContextWindow` is reachable both
+    /// natively from the classifier and via an operator class remap
+    /// (`apply_remap`), so this count mixes classifier-native rejections
+    /// with policy-remapped ones under one number -- the same interpretive
+    /// trap the skip counter carries for false skips. Bumped once per
+    /// dispatch error arm by the class-observability path.
+    context_window_overflow_total: AtomicU64,
 }
 
 /// Running quota-placement totals, partitioned by the partition's arms.
@@ -521,6 +537,15 @@ impl RouterMetrics {
         self.window_gate_skips_total.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Bump the paired reactive-overflow count: a target cleared the
+    /// proactive gate and still hit a `FailureClass::ContextWindow`
+    /// rejection. See [`context_window_overflow_total`](Self::context_window_overflow_total)
+    /// for the remap-mixing caveat.
+    fn incr_context_window_overflow(&self) {
+        self.context_window_overflow_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Bump the counter for one quota-placement arm and return every arm's
     /// running total, so the throttled diagnostic reports the whole partition
     /// without a second pass.
@@ -573,131 +598,181 @@ impl RouterMetrics {
     }
 
     /// Read the cumulative unknown-upstream-classification count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn unknown_failure_classifications_total(&self) -> u64 {
         self.unknown_failure_classifications_total
             .load(Ordering::Relaxed)
     }
 
     /// Read the cumulative feature-unsupported classification count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn feature_unsupported_total(&self) -> u64 {
         self.feature_unsupported_total.load(Ordering::Relaxed)
     }
 
+    /// Read the cumulative acting learned-negative count (F1 + F2 + F3).
+    fn learned_negatives_total(&self) -> u64 {
+        self.learned_negatives_total.load(Ordering::Relaxed)
+    }
+
     /// Read the cumulative learned-registry invalidation count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn invalidations_total(&self) -> u64 {
         self.invalidations_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative admitted-re-probe count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn probe_attempts_total(&self) -> u64 {
         self.probe_attempts_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative same-capability re-probe-failure count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn probe_failures_total(&self) -> u64 {
         self.probe_failures_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative learned-tail entry count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn d17_tail_total(&self) -> u64 {
         self.d17_tail_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative in-place-strip count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn strip_total(&self) -> u64 {
         self.strip_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative strip-rollback count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn strip_rollback_total(&self) -> u64 {
         self.strip_rollback_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative strict-rejected-strip count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn strip_strict_rejected_total(&self) -> u64 {
         self.strip_strict_rejected_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative masked-rejection-suppression count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn mask_suppressed_total(&self) -> u64 {
         self.mask_suppressed_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative unmatched-Bedrock-validation count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(all(test, feature = "bedrock"))]
+    #[cfg(feature = "bedrock")]
     fn bedrock_validation_unmatched_total(&self) -> u64 {
         self.bedrock_validation_unmatched_total
             .load(Ordering::Relaxed)
     }
 
     /// Read the cumulative F1-phase acting-negative count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn learned_negatives_f1_total(&self) -> u64 {
         self.learned_negatives_f1_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative F2-phase acting-negative count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn learned_negatives_f2_total(&self) -> u64 {
         self.learned_negatives_f2_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative same-chain-F1 F2-suppression count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn f2_same_chain_suppressed_total(&self) -> u64 {
         self.f2_same_chain_suppressed_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative unmatched-feature-naming count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn feature_naming_unmatched_total(&self) -> u64 {
         self.feature_naming_unmatched_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative acting-VerifiedWorking-positive count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn verified_working_total(&self) -> u64 {
         self.verified_working_total.load(Ordering::Relaxed)
     }
 
     /// Read the cumulative acting-F3-suspected-absence count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
     fn f3_suspect_total(&self) -> u64 {
         self.f3_suspect_total.load(Ordering::Relaxed)
     }
 
-    /// Read the cumulative window-gate skip count.
-    /// Test-only read surface today; ungate with the metrics snapshot.
-    #[cfg(test)]
+    /// Read the cumulative window-gate skip count. The authoritative
+    /// count of chain targets the proactive gate skipped before dispatch --
+    /// a skip VOLUME signal, not a false-skip oracle: it counts skips, not
+    /// outcomes, so it cannot by itself say whether a given skip avoided a
+    /// doomed knock or discarded a target that would have served the
+    /// request. Pair with
+    /// [`context_window_overflow_total`](Self::context_window_overflow_total)
+    /// to bound the other half of the margin question.
     fn window_gate_skips_total(&self) -> u64 {
         self.window_gate_skips_total.load(Ordering::Relaxed)
+    }
+
+    /// Read the cumulative paired reactive-overflow count. See
+    /// [`context_window_overflow_total`](Self::context_window_overflow_total)
+    /// for the remap-mixing caveat.
+    fn context_window_overflow_total(&self) -> u64 {
+        self.context_window_overflow_total.load(Ordering::Relaxed)
+    }
+
+    /// Emits one structured `tracing::debug!` line carrying every router
+    /// counter's current value, mirroring the front-proxy
+    /// `ProxyMetrics::log_snapshot` convention. Fields are all counter
+    /// names + numeric values -- no token, credential, or request/response
+    /// body content ever reaches this call.
+    fn log_snapshot(&self) {
+        let quota = self.quota_placement_totals();
+        #[cfg(feature = "bedrock")]
+        tracing::debug!(
+            target: "routectl_router::router::metrics",
+            rc_unknown_failure_classifications_total = self.unknown_failure_classifications_total(),
+            rc_feature_unsupported_total = self.feature_unsupported_total(),
+            rc_learned_negatives_total = self.learned_negatives_total(),
+            rc_learned_negatives_f1_total = self.learned_negatives_f1_total(),
+            rc_learned_negatives_f2_total = self.learned_negatives_f2_total(),
+            rc_probe_attempts_total = self.probe_attempts_total(),
+            rc_probe_failures_total = self.probe_failures_total(),
+            rc_invalidations_total = self.invalidations_total(),
+            rc_d17_tail_total = self.d17_tail_total(),
+            rc_strip_total = self.strip_total(),
+            rc_strip_rollback_total = self.strip_rollback_total(),
+            rc_strip_strict_rejected_total = self.strip_strict_rejected_total(),
+            rc_mask_suppressed_total = self.mask_suppressed_total(),
+            rc_f2_same_chain_suppressed_total = self.f2_same_chain_suppressed_total(),
+            rc_feature_naming_unmatched_total = self.feature_naming_unmatched_total(),
+            rc_verified_working_total = self.verified_working_total(),
+            rc_f3_suspect_total = self.f3_suspect_total(),
+            rc_window_gate_skips_total = self.window_gate_skips_total(),
+            rc_context_window_overflow_total = self.context_window_overflow_total(),
+            rc_quota_placement_below_cap_total = quota.below_cap,
+            rc_quota_placement_all_capped_total = quota.all_capped,
+            rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
+            rc_quota_placement_all_unknown_total = quota.all_unknown,
+            rc_bedrock_validation_unmatched_total = self.bedrock_validation_unmatched_total(),
+            "router metrics snapshot"
+        );
+        #[cfg(not(feature = "bedrock"))]
+        tracing::debug!(
+            target: "routectl_router::router::metrics",
+            rc_unknown_failure_classifications_total = self.unknown_failure_classifications_total(),
+            rc_feature_unsupported_total = self.feature_unsupported_total(),
+            rc_learned_negatives_total = self.learned_negatives_total(),
+            rc_learned_negatives_f1_total = self.learned_negatives_f1_total(),
+            rc_learned_negatives_f2_total = self.learned_negatives_f2_total(),
+            rc_probe_attempts_total = self.probe_attempts_total(),
+            rc_probe_failures_total = self.probe_failures_total(),
+            rc_invalidations_total = self.invalidations_total(),
+            rc_d17_tail_total = self.d17_tail_total(),
+            rc_strip_total = self.strip_total(),
+            rc_strip_rollback_total = self.strip_rollback_total(),
+            rc_strip_strict_rejected_total = self.strip_strict_rejected_total(),
+            rc_mask_suppressed_total = self.mask_suppressed_total(),
+            rc_f2_same_chain_suppressed_total = self.f2_same_chain_suppressed_total(),
+            rc_feature_naming_unmatched_total = self.feature_naming_unmatched_total(),
+            rc_verified_working_total = self.verified_working_total(),
+            rc_f3_suspect_total = self.f3_suspect_total(),
+            rc_window_gate_skips_total = self.window_gate_skips_total(),
+            rc_context_window_overflow_total = self.context_window_overflow_total(),
+            rc_quota_placement_below_cap_total = quota.below_cap,
+            rc_quota_placement_all_capped_total = quota.all_capped,
+            rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
+            rc_quota_placement_all_unknown_total = quota.all_unknown,
+            "router metrics snapshot"
+        );
     }
 }
 
@@ -1376,7 +1451,7 @@ impl Router {
             catalog_version: crate::catalog_baked::CATALOG_VERSION,
             overlay_revision: 0,
             catalog_overlay: Arc::default(),
-            metrics: RouterMetrics::default(),
+            metrics: Arc::new(RouterMetrics::default()),
             has_forwarded_provider,
             volatile_prefix_warned: Mutex::new(HashSet::new()),
             prefix_rewrite_warned: Arc::new(AtomicBool::new(false)),
@@ -1572,6 +1647,26 @@ impl Router {
     pub fn carry_over_prefix_epochs_from(&mut self, previous: &Self) {
         self.prefix_epoch_store = Arc::clone(&previous.prefix_epoch_store);
         self.prefix_rewrite_warned = Arc::clone(&previous.prefix_rewrite_warned);
+    }
+
+    /// Carry the previous Router's observability counters into this
+    /// freshly-built Router during a hot-reload, by SHARING the storage
+    /// rather than copying values.
+    ///
+    /// Mandatory. Copying values would lose increments from late-completing
+    /// requests still holding the outgoing Router after the swap -- the
+    /// same in-flight-observation hazard `carry_over_prefix_epochs_from`
+    /// guards against, and the same fix: share the `Arc` so both Routers'
+    /// increments land on the one storage. Every counter is already a plain
+    /// atomic (`&self` increments), so Arc-sharing needs no further
+    /// synchronization.
+    ///
+    /// Call this BEFORE `carry_over_learned_from` at every reload site: that
+    /// call bumps `invalidations_total` on a catalog/overlay change, and
+    /// that increment must land on the shared storage, not a value this
+    /// Router is about to discard.
+    pub fn carry_over_metrics_from(&mut self, previous: &Self) {
+        self.metrics = Arc::clone(&previous.metrics);
     }
 
     /// Carry the previous Router's per-lane token-estimate correction
@@ -1883,6 +1978,17 @@ impl Router {
             .entry(name.clone())
             .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&Default::default()))));
         self.providers.insert(name, provider);
+    }
+
+    /// Emit this Router's observability counters as one structured
+    /// `tracing::debug!` line, mirroring the front-proxy's metrics-snapshot
+    /// convention. Intended to be driven on an interval and once more at
+    /// graceful shutdown by the owning process, the same shape as the
+    /// front-proxy's own driver. No token, credential, or request/response
+    /// body content ever reaches this call -- every field is a counter name
+    /// plus its numeric value.
+    pub fn log_metrics_snapshot(&self) {
+        self.metrics.log_snapshot();
     }
 }
 

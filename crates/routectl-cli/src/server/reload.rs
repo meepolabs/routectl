@@ -54,6 +54,38 @@ pub(super) async fn await_reload_tasks(handles: Vec<tokio::task::JoinHandle<()>>
     }
 }
 
+/// How often the router-metrics driver flushes a snapshot to `tracing`.
+/// Mirrors the front-proxy's own snapshot-interval discipline
+/// (`crate::proxy::listener`): a sibling constant rather than a shared one,
+/// since the two live in different crates with no public seam between them.
+const ROUTER_METRICS_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// Periodically flush the live `Router`'s metrics snapshot to `tracing`
+/// until `shutdown` fires, then flush once more before returning -- so a
+/// session shorter than one interval still surfaces its totals. Skips the
+/// immediate t=0 tick `interval` would otherwise fire (an all-zero startup
+/// snapshot carries no signal), matching the front-proxy's own driver.
+async fn run_router_metrics_snapshot_driver(
+    router_swap: Arc<ArcSwap<Router>>,
+    mut shutdown: watch::Receiver<()>,
+) {
+    let mut snapshot_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + ROUTER_METRICS_SNAPSHOT_INTERVAL,
+        ROUTER_METRICS_SNAPSHOT_INTERVAL,
+    );
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                router_swap.load().log_metrics_snapshot();
+                return;
+            }
+            _ = snapshot_tick.tick() => {
+                router_swap.load().log_metrics_snapshot();
+            }
+        }
+    }
+}
+
 /// Spawn the file-watch task, the SIGHUP listener (cfg(unix)), and
 /// the reload coordinator. The returned vector keeps the
 /// `JoinHandle`s alive until `serve_on_listener` returns; dropping
@@ -94,6 +126,11 @@ pub(super) fn spawn_reload_pipeline(
     }
 
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadRequest>(16);
+
+    handles.push(tokio::spawn(run_router_metrics_snapshot_driver(
+        router_swap.clone(),
+        shutdown_rx.clone(),
+    )));
 
     match file_watch::spawn_watcher(targets, reload_tx.clone(), shutdown_rx.clone()) {
         Ok(handle) => handles.push(handle),
@@ -542,6 +579,7 @@ async fn rebuild_router_for_seat_change(
     new_router.carry_over_prefix_epochs_from(&router_swap.load_full());
     new_router.carry_over_calibration_from(&router_swap.load_full());
     new_router.carry_over_quota_from(&router_swap.load_full());
+    new_router.carry_over_metrics_from(&router_swap.load_full());
     new_router.carry_over_learned_from(&router_swap.load_full());
     router_swap.store(Arc::new(new_router));
     tracing::info!(
@@ -631,6 +669,7 @@ pub(super) async fn handle_config_reload(
     new_router.carry_over_prefix_epochs_from(&previous_router);
     new_router.carry_over_calibration_from(&previous_router);
     new_router.carry_over_quota_from(&previous_router);
+    new_router.carry_over_metrics_from(&previous_router);
     new_router.carry_over_learned_from(&previous_router);
 
     // A reload that advanced the catalog version or overlay revision moves the
