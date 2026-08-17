@@ -31,6 +31,11 @@
 //! [`evaluate`] / [`break_even_k`] at all -- a `Disabled` / `Missing` merge
 //! result never reaches this module.
 //!
+//! A separate, simpler question lives here too:
+//! [`emission_break_even_k`] prices PLACING a breakpoint (1 write + `K`
+//! reads) rather than editing a warm prefix, so it needs no candidate and no
+//! token counts -- see its own docs.
+//!
 //! Purity: depends only on [`crate::catalog::CatalogRow`] and std. The
 //! `f32` row multipliers are widened to `f64` for the arithmetic.
 
@@ -160,6 +165,49 @@ pub fn break_even_k(row: &CatalogRow, candidate: &PrefixReductionCandidate) -> O
         c_after * wm
     };
     Some(one_time_cost / read_savings_per_reuse)
+}
+
+/// Emission-side break-even reuse count `K*`: the minimum per-turn prefix
+/// reuse count at which PLACING a cache breakpoint pays for its write
+/// premium, over the honest 1-write + `K`-reads model:
+///
+/// ```text
+/// no marker:   (1 + K) * C * 1.0
+/// with marker: C * wm + K * C * rm
+/// marker wins iff  wm + K*rm < 1 + K   ->   K* = (wm - 1) / (1 - rm)
+/// ```
+///
+/// The base input price `C` cancels, so this needs no token counts and no
+/// [`PrefixReductionCandidate`] -- it is a per-row constant. It is a
+/// deliberately separate function from [`break_even_k`], which prices a
+/// prefix EDIT and requires a candidate that has no emission-side analogue.
+///
+/// Returns `None` to mean NEVER SUPPRESS -- no finite positive break-even
+/// exists, or withholding a marker could not pay:
+/// - `wm <= 1.0`: writes carry no premium, so `K*` would be zero or
+///   negative.
+/// - `rm >= 1.0`: a read costs at least a fresh miss, which would make the
+///   denominator zero or negative. Degenerate row data; the conservative
+///   answer is to keep emitting.
+/// - [`CatalogRow::auto_cacher`]: a provider that caches for free must never
+///   have a marker withheld on economic grounds. This is checked
+///   explicitly rather than inferred from `wm`, so the gate's correctness
+///   rests on the economics rather than on a distant, changeable
+///   provider-kind default -- the baked auto-cacher rows in fact carry a
+///   `wm` above `1.0`.
+///
+/// Arithmetic is in `f64` (the `f32` row fields are widened).
+#[must_use]
+pub fn emission_break_even_k(row: &CatalogRow) -> Option<f64> {
+    if row.auto_cacher {
+        return None;
+    }
+    let wm = f64::from(row.wm);
+    let rm = f64::from(row.rm);
+    if wm <= 1.0 || rm >= 1.0 {
+        return None;
+    }
+    Some((wm - 1.0) / (1.0 - rm))
 }
 
 /// Decide KEEP vs BREAK for a candidate at an assumed reuse count `k`.
@@ -311,6 +359,117 @@ mod tests {
 
         // (200000 * 2.0) / (50000 * 0.10) == 80.
         assert!((k_star - 80.0).abs() < 1e-4, "K* was {k_star}");
+    }
+
+    // -- emission_break_even_k: the per-row constant ------------------------
+
+    #[test]
+    fn emission_break_even_k_anthropic_5m_is_about_zero_point_two_eight() {
+        // Arrange: wm=1.25, rm=0.10.
+        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        assert_eq!(row.wm, 1.25);
+
+        // Act
+        let k_star = emission_break_even_k(&row).expect("wm > 1.0");
+
+        // Assert: (1.25 - 1) / (1 - 0.10) == 0.2777...
+        assert!((k_star - 0.277_777_8).abs() < 1e-4, "K* was {k_star}");
+    }
+
+    #[test]
+    fn emission_break_even_k_anthropic_1h_is_about_one_point_one_one() {
+        // Arrange: the 1h tier row carries the doubled write premium.
+        let row = lookup("anthropic-api", "claude-opus-4-8", Some("1h"));
+        assert_eq!(row.wm, 2.0);
+
+        // Act
+        let k_star = emission_break_even_k(&row).expect("wm > 1.0");
+
+        // Assert: (2.0 - 1) / (1 - 0.10) == 1.111...
+        assert!((k_star - 1.111_111_1).abs() < 1e-4, "K* was {k_star}");
+    }
+
+    #[test]
+    fn emission_break_even_k_real_auto_cacher_row_never_suppresses() {
+        // Arrange: a REAL baked auto-cacher row. It carries wm=1.25, so the
+        // wm guard alone would NOT cover it -- `auto_cacher` is checked in
+        // its own right.
+        let row = lookup("openai-responses", "gpt-5.5", None);
+        assert!(row.auto_cacher, "openai-responses must be an auto-cacher");
+        assert!(row.wm > 1.0, "row wm was {} -- test premise gone", row.wm);
+
+        // Act / Assert: None == never suppress.
+        assert_eq!(emission_break_even_k(&row), None);
+    }
+
+    #[test]
+    fn emission_break_even_k_no_write_premium_never_suppresses() {
+        // Arrange: `wm == 1.0` on an explicit-breakpoint row -- no write
+        // premium to recover, independent of the auto-cacher guard.
+        use crate::catalog::CachePricingOverride;
+        let ov = CachePricingOverride {
+            wm: Some(1.0),
+            override_acknowledges_cost_risk: true,
+            ..Default::default()
+        };
+        let row = CatalogRow::sentinel()
+            .with_overrides(&ov)
+            .expect("accepted with ack");
+        assert!(!row.auto_cacher, "must be write-premium");
+
+        // Act / Assert: None == never suppress.
+        assert_eq!(emission_break_even_k(&row), None);
+    }
+
+    #[test]
+    fn emission_break_even_k_none_when_write_premium_below_one() {
+        // A wm strictly BELOW 1.0 (a write cheaper than a miss) is also
+        // never-suppress, not a negative break-even.
+        use crate::catalog::CachePricingOverride;
+        let ov = CachePricingOverride {
+            wm: Some(0.5),
+            override_acknowledges_cost_risk: true,
+            ..Default::default()
+        };
+        let row = CatalogRow::sentinel()
+            .with_overrides(&ov)
+            .expect("accepted with ack");
+
+        assert_eq!(emission_break_even_k(&row), None);
+    }
+
+    #[test]
+    fn emission_break_even_k_none_on_degenerate_read_multiplier() {
+        // rm >= 1.0 zeroes or inverts the denominator; the conservative
+        // answer is never-suppress rather than inf / a negative K*.
+        use crate::catalog::CachePricingOverride;
+        let ov = CachePricingOverride {
+            wm: Some(1.25),
+            rm: Some(1.0),
+            override_acknowledges_cost_risk: true,
+            ..Default::default()
+        };
+        let row = CatalogRow::sentinel()
+            .with_overrides(&ov)
+            .expect("accepted with ack");
+        assert!(!row.auto_cacher, "must reach the rm guard, not auto_cacher");
+
+        assert_eq!(emission_break_even_k(&row), None);
+    }
+
+    #[test]
+    fn emission_break_even_k_ignores_the_edit_side_candidate_shape() {
+        // The emission constant depends on the row alone: the 5m row's K*
+        // is unchanged by any prefix-edit sizing, which is exactly why it
+        // needs no `PrefixReductionCandidate`.
+        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        let emission = emission_break_even_k(&row).expect("wm > 1.0");
+        let edit = break_even_k(&row, &scenario()).expect("d > 0");
+
+        assert!(
+            emission < edit,
+            "emission K* {emission} must be far below the edit-side K* {edit}",
+        );
     }
 
     // -- evaluate verdicts: write-premium branch ---------------------------

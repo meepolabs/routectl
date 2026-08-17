@@ -1507,6 +1507,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::CacheCapability::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::config::CacheConfig
 pub routectl_router::config::CacheConfig::auto_emit_top_level_breakpoint: bool
+pub routectl_router::config::CacheConfig::k_gated_emission: bool
 pub routectl_router::config::CacheConfig::normalize_tools: bool
 impl core::clone::Clone for routectl_router::CacheConfig
 pub fn routectl_router::CacheConfig::clone(&self) -> routectl_router::CacheConfig
@@ -6966,6 +6967,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::CacheCapability::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::CacheConfig
 pub routectl_router::CacheConfig::auto_emit_top_level_breakpoint: bool
+pub routectl_router::CacheConfig::k_gated_emission: bool
 pub routectl_router::CacheConfig::normalize_tools: bool
 impl core::clone::Clone for routectl_router::CacheConfig
 pub fn routectl_router::CacheConfig::clone(&self) -> routectl_router::CacheConfig
@@ -9098,6 +9100,7 @@ pub fn routectl_router::KSessionStore::len(&self) -> usize
 pub fn routectl_router::KSessionStore::new() -> Self
 pub fn routectl_router::KSessionStore::put(&self, routectl_router::KSessionKey, routectl_router::KSessionWindow)
 pub fn routectl_router::KSessionStore::record_sample(&self, routectl_router::KSessionKey, routectl_router::Sample)
+pub fn routectl_router::KSessionStore::tally_since(&self, &routectl_router::KSessionKey, core::option::Option<std::time::SystemTime>) -> core::option::Option<(u32, u32)>
 impl core::default::Default for routectl_router::KSessionStore
 pub fn routectl_router::KSessionStore::default() -> Self
 impl !core::marker::Freeze for routectl_router::KSessionStore
@@ -9140,6 +9143,7 @@ pub fn routectl_router::KSessionWindow::iter(&self) -> impl core::iter::traits::
 pub fn routectl_router::KSessionWindow::len(&self) -> usize
 pub fn routectl_router::KSessionWindow::new() -> Self
 pub fn routectl_router::KSessionWindow::push(&mut self, routectl_router::Sample)
+pub fn routectl_router::KSessionWindow::tally_since(&self, core::option::Option<std::time::SystemTime>) -> (u32, u32)
 impl core::clone::Clone for routectl_router::KSessionWindow
 pub fn routectl_router::KSessionWindow::clone(&self) -> routectl_router::KSessionWindow
 impl core::cmp::Eq for routectl_router::KSessionWindow

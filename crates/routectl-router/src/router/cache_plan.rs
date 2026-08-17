@@ -6,8 +6,17 @@ use routectl_core::{ChatRequest, scan_volatile};
 /// Request-level inputs to the auto-cache decision, computed ONCE per
 /// request off the original `req` (above the `'chain` loop) and reused
 /// for every retry and fallback target. Holding these constant is what
-/// makes auto-emit idempotent: retrying the same target sends
-/// byte-identical bytes, and a fallback target re-derives nothing.
+/// makes auto-emit idempotent PER TARGET: retrying the same target sends
+/// byte-identical bytes, and a fallback target re-derives nothing from the
+/// previous hop.
+///
+/// Idempotence is per-TARGET, not per-REQUEST. Every fact here is
+/// target-invariant, but the placement step also consults a per-target
+/// verdict (the K-gated emission gate, consulted once per chain entry
+/// above the retry loop), so two targets in one fallback chain may
+/// legitimately differ on emit-vs-skip. That is why a session-derived
+/// suppression verdict must never be stored on this struct: it would apply
+/// one target's economics to a different model's target.
 ///
 /// The gate reads `has_caller_breakpoints` / `caller_breakpoint_count`
 /// (snapshotted from the frozen floor at build time) directly so the
@@ -71,6 +80,12 @@ pub(super) enum CacheInjection {
     /// The caller already supplied at least one breakpoint; auto-emit
     /// would risk a second marker / byte rewrite, so we defer entirely.
     SkippedCallerSupplied,
+    /// The session's CALIBRATED per-turn reuse floor sits below the target
+    /// row's emission break-even `K*`, so placing a marker would pay a write
+    /// premium the observed reuse rate cannot recover. Withholds BOTH
+    /// markers, and only ever for a calibrated estimate on a priced,
+    /// non-auto-cacher row while `[cache] k_gated_emission` is on.
+    SkippedKBelowBreakEven,
     /// The stable cacheable prefix carries high-confidence volatile
     /// tokens; caching it would write-without-read every request.
     SkippedVolatileHigh,
@@ -110,6 +125,7 @@ impl CacheInjection {
     /// | SkippedNoCapability      | `auto_skipped:no_capability`       |
     /// | SkippedBreakpointCap     | `auto_skipped:breakpoint_cap`      |
     /// | SkippedNoPlacementRegion | `auto_skipped:no_placement_region` |
+    /// | SkippedKBelowBreakEven   | `auto_skipped:k_below_break_even`  |
     /// | ValidationRolledBack     | `auto_skipped:validation_rolled_back` |
     pub(super) const fn strategy_str(self) -> &'static str {
         match self {
@@ -121,6 +137,7 @@ impl CacheInjection {
             Self::SkippedNoCapability => "auto_skipped:no_capability",
             Self::SkippedBreakpointCap => "auto_skipped:breakpoint_cap",
             Self::SkippedNoPlacementRegion => "auto_skipped:no_placement_region",
+            Self::SkippedKBelowBreakEven => "auto_skipped:k_below_break_even",
             Self::ValidationRolledBack => "auto_skipped:validation_rolled_back",
         }
     }

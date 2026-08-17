@@ -30,7 +30,7 @@ use crate::context_trim::{
     SteadyStateTrimParams, collect_near_lossless_marks, estimate_total_tokens,
     near_lossless_candidate, propose_steady_state_trim, trimmed_prefix_fingerprint,
 };
-use crate::cost_gate::break_even_k;
+use crate::cost_gate::{break_even_k, emission_break_even_k};
 use crate::feature_keys::derive_feature_keys;
 
 use super::ReplayDegradation;
@@ -377,10 +377,20 @@ impl Router {
             // Transactional: both markers validate as one candidate and
             // commit or discard together. Never mutates the original `req`;
             // any doubt sends un-injected.
+            //
+            // The K-gated verdict is consulted HERE, once per chain entry, so
+            // it is constant across this target's retries and re-derived for
+            // the next fallback target against its own row and triple.
+            let k_suppressed = self.k_emission_suppressed(
+                &auto_cache_plan,
+                target,
+                req.routectl_internal.inbound_session_key.as_deref(),
+            );
             let cache_decision = apply_auto_cache_placement(
                 &mut attempt_req,
                 &auto_cache_plan,
                 cache_target_gates(provider_cfg),
+                k_suppressed,
             );
             // Cache observability: stamp the per-marker decision tokens so
             // the outcome log and the usage ledger can see what was decided,
@@ -1131,11 +1141,18 @@ impl Router {
             // Auto-cache: see `complete_inner`. Same once-vs-per-attempt
             // split and the same transactional commit-or-discard; injected
             // on this clone after overlays, before the inner loop. Original
-            // `req` is never mutated.
+            // `req` is never mutated. The K-gated verdict is consulted at the
+            // same seam for the same per-target reason.
+            let k_suppressed = self.k_emission_suppressed(
+                &auto_cache_plan,
+                target,
+                req.routectl_internal.inbound_session_key.as_deref(),
+            );
             let cache_decision = apply_auto_cache_placement(
                 &mut attempt_req,
                 &auto_cache_plan,
                 cache_target_gates(provider_cfg),
+                k_suppressed,
             );
             // Cache observability: see `complete_inner`. Stamp the per-marker
             // decision tokens and emit the per-request decision at debug. No
@@ -1802,9 +1819,8 @@ impl Router {
     ///
     /// Additionally, when the size-baseline plan exists, consults the
     /// in-process [`crate::k_estimator::KEstimator`] over the request's
-    /// `inbound_session_key` and the SAME pricing row's `ttl_seconds`
-    /// (threaded through for provenance / reserved for future
-    /// age-conditioning; the per-turn hazard model does not split on it).
+    /// `inbound_session_key` and the SAME pricing row's `ttl_seconds` (which
+    /// bounds the age of the samples the estimate may count).
     /// The estimate's `k_floor` is stamped onto `meta.would_trim_k_floor` only
     /// for a `Calibrated` confidence (the only bound the cost gate may
     /// consult to authorize a cut). The met/unmet/cold/unpriced verdict is
@@ -1865,25 +1881,28 @@ impl Router {
             let break_even = row.and_then(|r| break_even_k(r, &plan.candidate));
             meta.would_trim_break_even_k = break_even;
 
-            // Consult the K estimator over the SAME row whose TTL priced K*: the
-            // TTL is threaded through for provenance only -- the per-turn
-            // hazard model does not split on it -- so a `k_floor` is
-            // comparable to `break_even`. The current sample for THIS turn
-            // is recorded post-response in `record_k_sample`, so the
-            // estimator reads PRIOR-turn samples only. The query keys on
-            // `served_model` (the nickname), NOT the upstream `model`, so the
-            // query triple matches the triple `record_k_sample` writes under.
-            // A `Disabled` / `Missing` cell has no row to read `ttl_seconds`
-            // from; the sentinel's TTL is the same conservative default used
-            // everywhere else a trusted row is unavailable.
+            // Consult the K estimator over the SAME row whose TTL priced K*:
+            // the estimator counts only samples younger than that TTL, so a
+            // `k_floor` is measured over the same cache period `break_even`
+            // is priced for and the two are comparable. The current sample
+            // for THIS turn is recorded post-response in `record_k_sample`,
+            // so the estimator reads PRIOR-turn samples only. The triple comes
+            // from the shared `k_query_key` derivation, which keys the model
+            // dimension on `served_model` (the nickname), NOT the upstream
+            // `model`, so this read matches the triple `record_k_sample`
+            // writes under. A `Disabled` / `Missing` cell has no row to read
+            // `ttl_seconds` from; the sentinel's TTL is the same conservative
+            // default used everywhere else a trusted row is unavailable.
             let ttl_seconds = row.map_or(CatalogRow::sentinel().ttl_seconds, |r| r.ttl_seconds);
-            let estimate = self.k_estimator.estimate(&crate::k_estimator::KQuery {
-                session_key: attempt_req.routectl_internal.inbound_session_key.as_deref(),
-                provider_kind: provider_kind.unwrap_or(""),
-                model: served_model,
-                ttl: Duration::from_secs(u64::from(ttl_seconds)),
-                now: SystemTime::now(),
-            });
+            let k_key = k_query_key(
+                attempt_req.routectl_internal.inbound_session_key.as_deref(),
+                provider_kind,
+                served_model,
+            );
+            let estimate = self.k_estimator.estimate(&k_key.query(
+                Duration::from_secs(u64::from(ttl_seconds)),
+                SystemTime::now(),
+            ));
 
             meta.would_trim_k_floor = would_trim_k_floor_for_meta(break_even, &estimate);
 
@@ -1930,6 +1949,70 @@ impl Router {
         }
 
         record_near_lossless_marks(attempt_req, &params, row, meta);
+    }
+
+    /// Should BOTH auto-cache markers be withheld from this target because
+    /// the session's measured per-turn reuse cannot pay the write premium?
+    ///
+    /// Consulted ONCE per chain entry, immediately before
+    /// `apply_auto_cache_placement` and above the same-target retry loop, so
+    /// every retry of one target dispatches byte-identical bytes while a
+    /// fallback target re-evaluates against ITS own row and triple. The
+    /// verdict is per-(session, provider_kind, served nickname, priced row),
+    /// which is why it is passed as an argument rather than stored on
+    /// `AutoCacheRequestPlan` (whose facts are target-invariant).
+    ///
+    /// Every branch fails toward EMIT -- the direction that preserves the
+    /// previously-shipped auto-emission behavior and can only cost a wasted
+    /// write premium, never lost output.
+    /// The short-circuits are ordered cheapest-first and all of them read
+    /// fields already in hand, so an ineligible dispatch allocates nothing:
+    ///
+    /// 1. `[cache] k_gated_emission` off (the default) -- no consultation at
+    ///    all, so the marker-emission behavior is preserved exactly.
+    /// 2. the request carries caller breakpoints -- placement defers for its
+    ///    own reason and this gate must not shadow that token.
+    /// 3. the global auto-emit switch is off -- likewise.
+    /// 4. no inbound session key -- there is no triple to accumulate reuse
+    ///    against, so no evidence can exist.
+    /// 5. no served nickname -- the sample write skips such a target
+    ///    entirely, so its window is permanently cold.
+    ///
+    /// Only then is the K triple built and the estimator consulted. The
+    /// numeric compare is additionally gated on `may_suppress` (Calibrated
+    /// only) and on the row having a finite emission break-even: an
+    /// auto-cacher, a premium-free row, or an untrusted (`Disabled` /
+    /// `Missing`) merge result never suppresses.
+    fn k_emission_suppressed(
+        &self,
+        plan: &AutoCacheRequestPlan,
+        target: &DispatchTarget,
+        session_key: Option<&str>,
+    ) -> bool {
+        if !self.config.cache.k_gated_emission
+            || plan.has_caller_breakpoints
+            || !plan.global_auto_emit_enabled
+        {
+            return false;
+        }
+        let (Some(session_key), Some(served_model)) = (session_key, target.nickname.as_deref())
+        else {
+            return false;
+        };
+
+        let Some(row) = target.model.effective_row.priced() else {
+            return false;
+        };
+        let Some(break_even) = emission_break_even_k(row) else {
+            return false;
+        };
+
+        let key = k_query_key(Some(session_key), target.provider_kind, served_model);
+        let estimate = self.k_estimator.estimate(&key.query(
+            Duration::from_secs(u64::from(row.ttl_seconds)),
+            SystemTime::now(),
+        ));
+        may_suppress(&estimate) && estimate.k_floor < break_even
     }
 }
 
@@ -1995,6 +2078,88 @@ fn record_near_lossless_marks(
     }
 }
 
+/// The single (session_key, provider_kind, served_model) triple every K
+/// window is written and read under.
+///
+/// Constructed by [`k_query_key`] and projected to whichever side's type the
+/// caller needs: [`KQueryKey::query`] for a read
+/// ([`crate::k_estimator::KQuery`]), [`KQueryKey::store_key`] for a write
+/// ([`crate::k_estimator::KSessionKey`]). Both projections read the SAME
+/// three fields, so the write triple and the read triple cannot drift apart
+/// field-by-field.
+///
+/// The model dimension is the served NICKNAME, never the upstream wire id. A
+/// mis-keyed read does not fail loudly -- it silently returns another
+/// triple's window, or a permanent `Cold`.
+pub(super) struct KQueryKey<'a> {
+    session_key: Option<&'a str>,
+    provider_kind: &'a str,
+    served_model: &'a str,
+}
+
+/// Derive the K triple for one dispatch.
+///
+/// `provider_kind` is `None` for a target that never stamped one; it
+/// normalizes to `""` so the read side keys deterministically rather than
+/// skipping the store. `session_key` is `None` for a keyless request: a read
+/// under it is `Cold` by construction and a write is skipped, because there
+/// is no stable identity to accumulate against.
+pub(super) const fn k_query_key<'a>(
+    session_key: Option<&'a str>,
+    provider_kind: Option<&'a str>,
+    served_model: &'a str,
+) -> KQueryKey<'a> {
+    KQueryKey {
+        session_key,
+        provider_kind: match provider_kind {
+            Some(kind) => kind,
+            None => "",
+        },
+        served_model,
+    }
+}
+
+impl<'a> KQueryKey<'a> {
+    /// Project to the read-side estimator query. `ttl` and `now` are
+    /// per-consult inputs, not part of the triple's identity.
+    pub(super) const fn query(
+        &self,
+        ttl: Duration,
+        now: SystemTime,
+    ) -> crate::k_estimator::KQuery<'a> {
+        crate::k_estimator::KQuery {
+            session_key: self.session_key,
+            provider_kind: self.provider_kind,
+            model: self.served_model,
+            ttl,
+            now,
+        }
+    }
+
+    /// Project to the write-side store key. `None` for a keyless request --
+    /// the caller has nothing to record against.
+    pub(super) fn store_key(&self) -> Option<crate::k_estimator::KSessionKey> {
+        Some(crate::k_estimator::KSessionKey {
+            session_key: self.session_key?.to_string(),
+            provider_kind: self.provider_kind.to_string(),
+            model: self.served_model.to_string(),
+        })
+    }
+}
+
+/// Is this estimate's numeric `k_floor` actionable at all?
+///
+/// True only for `Confidence::Calibrated`. `Low` force-clamps `k_floor` to
+/// `0.0` (`k_estimator::default_impl`'s thin-sample clamp) and `Cold`
+/// reports an all-zero default, so a bare numeric compare against a
+/// break-even K would read those clamps as real evidence of no reuse and
+/// suppress every thin-sampled or unseen session. Gating on the confidence
+/// class first makes "estimator not calibrated -> do not act" one branch
+/// rather than a comparison every caller has to remember to guard.
+pub(super) fn may_suppress(estimate: &crate::k_estimator::KEstimate) -> bool {
+    estimate.confidence == crate::k_estimator::Confidence::Calibrated
+}
+
 /// Pure helper that selects the `would_trim_k_floor` value recorded by
 /// `Router::record_would_trim`. Returns `Some(estimate.k_floor)` only when
 /// `break_even` is a Present-row K* AND the estimator's confidence is
@@ -2005,7 +2170,7 @@ pub(super) fn would_trim_k_floor_for_meta(
     break_even: Option<f64>,
     estimate: &crate::k_estimator::KEstimate,
 ) -> Option<f64> {
-    if break_even.is_some() && estimate.confidence == crate::k_estimator::Confidence::Calibrated {
+    if break_even.is_some() && may_suppress(estimate) {
         Some(estimate.k_floor)
     } else {
         None
@@ -2207,21 +2372,37 @@ fn cache_target_gates(provider_cfg: Option<&crate::config::ProviderEntry>) -> Ca
 /// before the inner retry loop, so all retries on a target reuse
 /// byte-identical bytes. A fallback target starts from a fresh clone of
 /// the canonical request, so a discarded candidate on one target cannot
-/// contaminate the next.
+/// contaminate the next. Byte identity is therefore per-TARGET: identical
+/// across retries of one target, and never promised across two targets of a
+/// fallback chain, which may legitimately differ on emit-vs-skip.
 ///
 /// `caller_supplied` is evaluated FIRST as a request-level fact: a request
 /// that already carries caller breakpoints is independent of which target /
 /// provider is selected, so it takes precedence over every per-target /
 /// config `auto_skipped:*` reason (global / provider kill-switch, capability).
+///
+/// `k_suppressed` is the per-target verdict of `Router::k_emission_suppressed`,
+/// consulted once at the call site. It withholds BOTH markers as a shared
+/// reason, checked immediately AFTER `shared_skip_reason` so
+/// `caller_supplied` and `global_disabled` keep their precedence -- both are
+/// already short-circuits inside the gate itself, so the ordering here only
+/// pins that the recorded TOKEN stays theirs.
 fn apply_auto_cache_placement(
     attempt_req: &mut ChatRequest,
     plan: &AutoCacheRequestPlan,
     gates: CacheTargetGates,
+    k_suppressed: bool,
 ) -> CacheDecision {
     if let Some(reason) = shared_skip_reason(plan) {
         return CacheDecision {
             front: reason,
             terminal: reason,
+        };
+    }
+    if k_suppressed {
+        return CacheDecision {
+            front: CacheInjection::SkippedKBelowBreakEven,
+            terminal: CacheInjection::SkippedKBelowBreakEven,
         };
     }
 
@@ -3081,6 +3262,10 @@ mod context_reduction_dispatch_tests;
 #[cfg(test)]
 #[path = "k_query_key_tests.rs"]
 mod k_query_key_tests;
+
+#[cfg(test)]
+#[path = "k_gated_emission_tests.rs"]
+mod k_gated_emission_tests;
 
 #[cfg(test)]
 #[path = "shadow_misfire_log_tests.rs"]

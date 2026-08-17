@@ -47,7 +47,9 @@ pub struct KQuery<'a> {
     /// Served model nickname -- the operator-facing label, not the upstream
     /// wire id.
     pub model: &'a str,
-    /// Configured TTL of the cache prefix the trimmer is pricing.
+    /// Configured TTL of the cache prefix the trimmer is pricing. Also bounds
+    /// the age of the samples an estimate may count: evidence older than
+    /// `now - ttl` predates the cache period being priced and is discarded.
     pub ttl: Duration,
     /// Dispatch-time wall clock used to age live ledger samples.
     pub now: SystemTime,

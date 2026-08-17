@@ -95,6 +95,29 @@ impl KSessionWindow {
     pub fn iter(&self) -> impl Iterator<Item = &Sample> {
         self.samples.iter()
     }
+
+    /// Tally the samples at or after `cutoff` as `(retained, reuses)`.
+    /// `cutoff` of `None` imposes no lower bound.
+    ///
+    /// A sample timestamped AFTER the caller's reference instant is retained
+    /// rather than discarded: [`Sample::ts`] and the caller's `now` are two
+    /// independent wall-clock reads, so the freshest sample can legitimately
+    /// sit marginally ahead of the querying dispatch's clock, and dropping it
+    /// would discard the single most relevant observation.
+    pub fn tally_since(&self, cutoff: Option<SystemTime>) -> (u32, u32) {
+        let mut retained: u32 = 0;
+        let mut reuses: u32 = 0;
+        for sample in &self.samples {
+            if cutoff.is_some_and(|c| sample.ts < c) {
+                continue;
+            }
+            retained += 1;
+            if sample.observed_reuse {
+                reuses += 1;
+            }
+        }
+        (retained, reuses)
+    }
 }
 
 /// Bounded LRU map of [`KSessionKey`] -> [`KSessionWindow`], sibling to
@@ -134,6 +157,19 @@ impl KSessionStore {
     /// the triple.
     pub fn get(&self, key: &KSessionKey) -> Option<KSessionWindow> {
         self.sessions.lock().get(key).cloned()
+    }
+
+    /// Tally the window for `key` at or after `cutoff` as
+    /// `(retained, reuses)`, bumping the triple's LRU recency under the same
+    /// lock. `None` when no window has been recorded for the triple.
+    ///
+    /// The estimator's read path: reducing under the lock rather than through
+    /// [`Self::get`] keeps a query from cloning the whole ring on every turn.
+    pub fn tally_since(&self, key: &KSessionKey, cutoff: Option<SystemTime>) -> Option<(u32, u32)> {
+        self.sessions
+            .lock()
+            .get(key)
+            .map(|window| window.tally_since(cutoff))
     }
 
     /// Append one live `sample` to the window for `key`, creating an empty
@@ -232,6 +268,69 @@ mod tests {
         // not 0.
         let first = w.iter().next().expect("non-empty window");
         assert_eq!(first.ts, UNIX_EPOCH + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn tally_since_counts_only_samples_at_or_after_the_cutoff() {
+        // Arrange: window_with places sample i at epoch + i seconds with
+        // observed_reuse on even i -- 10 samples, 5 reuses.
+        let w = window_with(10);
+
+        // Act + Assert: no cutoff sees every sample.
+        assert_eq!(w.tally_since(None), (10, 5));
+
+        // A cutoff at second 4 keeps samples 4..=9 (6 samples, reuses at
+        // 4, 6, 8) -- the boundary sample itself is retained.
+        assert_eq!(
+            w.tally_since(Some(UNIX_EPOCH + Duration::from_secs(4))),
+            (6, 3)
+        );
+
+        // A cutoff past every sample keeps nothing.
+        assert_eq!(
+            w.tally_since(Some(UNIX_EPOCH + Duration::from_secs(100))),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn store_tally_since_misses_unknown_triple_and_bumps_recency() {
+        // Arrange
+        let store = KSessionStore::new();
+        let k = key("sess-1", "anthropic-api", "opus");
+        store.put(k.clone(), window_with(4));
+
+        // Act + Assert: a hit reduces without cloning; a miss is None.
+        assert_eq!(store.tally_since(&k, None), Some((4, 2)));
+        assert_eq!(
+            store.tally_since(&key("sess-2", "anthropic-api", "opus"), None),
+            None,
+        );
+    }
+
+    #[test]
+    fn store_tally_since_bumps_lru_recency() {
+        // Arrange: fill to capacity so the next insert forces an eviction.
+        let store = KSessionStore::new();
+        for i in 0..K_SESSION_CAPACITY {
+            store.put(
+                key(&format!("sess-{i}"), "anthropic-api", "opus"),
+                window_with(1),
+            );
+        }
+        let oldest = key("sess-0", "anthropic-api", "opus");
+
+        // Act: the estimator's read path must promote the triple it reads,
+        // or a hot session's window gets evicted out from under it.
+        assert!(store.tally_since(&oldest, None).is_some());
+        store.put(
+            key("sess-overflow", "anthropic-api", "opus"),
+            window_with(1),
+        );
+
+        // Assert: the tallied triple survived; the new LRU was evicted.
+        assert!(store.get(&oldest).is_some());
+        assert_eq!(store.get(&key("sess-1", "anthropic-api", "opus")), None);
     }
 
     #[test]

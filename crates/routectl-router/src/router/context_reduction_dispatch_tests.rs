@@ -102,6 +102,7 @@ fn rig(
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: auto_cache,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         reduction: ReductionConfig {
             enabled: reduction_enabled,
@@ -138,6 +139,7 @@ fn rig_default_reduction(entry: ProviderEntry) -> (Router, Arc<ParkingMutex<Vec<
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: false,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         retry: RetryPolicy {
             initial_backoff_ms: 0,
@@ -499,6 +501,7 @@ fn two_entry_chain_rig() -> (Router, Captured, Captured) {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: false,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         reduction: ReductionConfig { enabled: true },
         retry: RetryPolicy {
@@ -701,6 +704,7 @@ fn flaky_retry_rig(failures: u32) -> (Router, Captured) {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: false,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         reduction: ReductionConfig { enabled: true },
         retry: RetryPolicy {
@@ -739,6 +743,7 @@ fn two_reducing_entries_rig() -> (Router, Captured, Captured) {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: false,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         reduction: ReductionConfig { enabled: true },
         retry: RetryPolicy {

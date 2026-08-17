@@ -659,28 +659,48 @@ pub(super) async fn handle_config_reload(
         enqueue_reload_tombstone(usage, new_catalog_version, new_overlay_revision);
     }
 
-    // The reduction master switch is the operator's live kill switch for the
-    // dispatch-path minifier, so a reload that flipped it says so on the
-    // success line -- an operator disabling reduction needs proof the
-    // intended transition landed, not just that the router swapped. The
-    // fields are omitted when the value did not change, which keeps every
-    // ordinary reload's line unchanged and makes the flip greppable. Both
-    // arms must carry the identical message text; the sibling unit tests pin
-    // that.
-    if current_config.reduction.enabled == new_config.reduction.enabled {
-        tracing::info!(
-            path = %path.display(),
-            trigger = trigger.as_str(),
-            "config reloaded; router rebuilt and swapped",
-        );
-    } else {
-        tracing::info!(
-            path = %path.display(),
-            trigger = trigger.as_str(),
-            reduction_enabled_before = current_config.reduction.enabled,
-            reduction_enabled_after = new_config.reduction.enabled,
-            "config reloaded; router rebuilt and swapped",
-        );
+    // The reduction and K-gated-emission master switches are the operator's
+    // live kill switches for the dispatch-path minifier and for
+    // break-even-gated cache emission, so a reload that flipped either says so
+    // on the success line -- an operator disabling one needs proof the intended
+    // transition landed, not just that the router swapped. Each pair is
+    // omitted when that value did not change, which keeps every ordinary
+    // reload's line unchanged and makes a flip greppable. Every arm must carry
+    // the identical message text; the local macro single-sources it and the
+    // sibling unit tests pin it.
+    macro_rules! reload_success_line {
+        ($($transition:tt)*) => {
+            tracing::info!(
+                path = %path.display(),
+                trigger = trigger.as_str(),
+                $($transition)*
+                "config reloaded; router rebuilt and swapped",
+            )
+        };
+    }
+    let reduction_before = current_config.reduction.enabled;
+    let reduction_after = new_config.reduction.enabled;
+    let k_gated_before = current_config.cache.k_gated_emission;
+    let k_gated_after = new_config.cache.k_gated_emission;
+    match (
+        reduction_before != reduction_after,
+        k_gated_before != k_gated_after,
+    ) {
+        (false, false) => reload_success_line!(),
+        (true, false) => reload_success_line!(
+            reduction_enabled_before = reduction_before,
+            reduction_enabled_after = reduction_after,
+        ),
+        (false, true) => reload_success_line!(
+            k_gated_emission_before = k_gated_before,
+            k_gated_emission_after = k_gated_after,
+        ),
+        (true, true) => reload_success_line!(
+            reduction_enabled_before = reduction_before,
+            reduction_enabled_after = reduction_after,
+            k_gated_emission_before = k_gated_before,
+            k_gated_emission_after = k_gated_after,
+        ),
     }
 
     let restart_required =

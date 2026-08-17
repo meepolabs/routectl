@@ -16,6 +16,12 @@
 //! single long contiguous session is `n` observations, not one -- which is
 //! what fixes v1's starvation of few-long-contiguous sessions.
 //!
+//! The model does not split the window on TTL gaps, but it does BOUND it by
+//! age: only samples within `now - ttl` are trials. Observations older than
+//! one cache period carry no information about the prefix being priced now,
+//! and counting them lets a stale window hold a verdict at `Calibrated` for a
+//! session that has since gone quiet or come back to life.
+//!
 //! [`wilson_bound`] is the isolated, swappable, validation-gated core:
 //! a pure free function with its own tests, tuned against real ledger data by
 //! the calibration harness. `Z_WILSON`, `P_CLAMP`, and `CALIBRATED_MIN_TRIALS`
@@ -66,9 +72,6 @@ impl LedgerBackedK {
 
 impl KEstimator for LedgerBackedK {
     fn estimate(&self, q: &KQuery<'_>) -> KEstimate {
-        // q.ttl and q.now are accepted by the KQuery contract but unused by
-        // this constant-hazard model; reserved for a future additive
-        // age-conditioning refinement.
         let Some(session_key) = q.session_key else {
             return cold_default();
         };
@@ -79,15 +82,19 @@ impl KEstimator for LedgerBackedK {
             model: q.model.to_string(),
         };
 
-        let Some(window) = self.store.get(&key) else {
+        // Evidence older than one cache period says nothing about whether the
+        // prefix written NOW will be re-read: a window of stale misses must
+        // not hold the verdict at Calibrated and suppress a marker for a
+        // session that has since become active. `checked_sub` guards a `now`
+        // below the epoch (a pinned test clock), where no cutoff applies.
+        let cutoff = q.now.checked_sub(q.ttl);
+        let Some((n, successes)) = self.store.tally_since(&key, cutoff) else {
             return cold_default();
         };
-        if window.is_empty() {
+        if n == 0 {
             return cold_default();
         }
 
-        let n = window.len() as u32;
-        let successes = window.iter().filter(|s| s.observed_reuse).count() as u32;
         let (k_floor, k_point, k_ceiling, confidence) = hazard_estimate(successes, n);
 
         let source = match confidence {
@@ -210,27 +217,48 @@ fn expected_k(p: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::k_estimator::store::{KSessionWindow, Sample};
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    /// Base instant the sample fixtures are laid out from. Well clear of the
+    /// epoch so a query clock can sit a realistic TTL AHEAD of the samples and
+    /// still subtract without underflowing.
+    const BASE_SECS: u64 = 10_000;
+
+    /// Query clock used by the fresh-window fixtures: 60s after
+    /// [`BASE_SECS`], so every sample the window sizes below place at
+    /// `BASE_SECS + i` lands inside a 5-minute TTL.
+    fn now_fresh() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(BASE_SECS + 60)
+    }
+
+    fn ttl_5m() -> Duration {
+        Duration::from_mins(5)
+    }
+
+    /// Build a window whose sample timestamps are `BASE_SECS + secs`.
     fn window_from(samples: &[(u64, bool)]) -> KSessionWindow {
         let mut w = KSessionWindow::new();
         for (secs, reuse) in samples {
             w.push(Sample {
-                ts: UNIX_EPOCH + Duration::from_secs(*secs),
+                ts: UNIX_EPOCH + Duration::from_secs(BASE_SECS + *secs),
                 observed_reuse: *reuse,
             });
         }
         w
     }
 
-    fn query(session: Option<&str>, ttl: Duration) -> KQuery<'_> {
+    fn query_at(session: Option<&str>, ttl: Duration, now: SystemTime) -> KQuery<'_> {
         KQuery {
             session_key: session,
             provider_kind: "anthropic-api",
             model: "opus",
             ttl,
-            now: UNIX_EPOCH,
+            now,
         }
+    }
+
+    fn query(session: Option<&str>, ttl: Duration) -> KQuery<'_> {
+        query_at(session, ttl, now_fresh())
     }
 
     fn key(session: &str) -> KSessionKey {
@@ -509,5 +537,114 @@ mod tests {
         assert_eq!(out.samples, 12);
         assert!(out.k_floor >= 0.0 && out.k_floor <= out.k_point);
         assert_eq!(out.source, EstimateSource::LiveLedger);
+    }
+
+    // --- TTL windowing ---
+
+    #[test]
+    fn estimate_excludes_samples_older_than_the_ttl() {
+        // Arrange: a calibrated-size window split across the TTL boundary --
+        // 10 all-miss samples an hour old, then 8 all-hit samples inside the
+        // last 5 minutes.
+        let mut samples: Vec<(u64, bool)> = (0..10u64).map(|i| (i, false)).collect();
+        samples.extend((0..8u64).map(|i| (3600 + i, true)));
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act: query one minute after the fresh block.
+        let now = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 3600 + 60);
+        let out = est.estimate(&query_at(Some("s1"), ttl_5m(), now));
+
+        // Assert: only the 8 in-window samples are trials, so the stale
+        // all-miss block does not drag the estimate down.
+        assert_eq!(out.samples, 8, "stale samples must not be counted");
+        assert_eq!(out.confidence, Confidence::Calibrated);
+        assert!(
+            out.k_floor > 0.0,
+            "an all-hit in-window block must set a positive floor, got {}",
+            out.k_floor
+        );
+    }
+
+    #[test]
+    fn estimate_falls_to_low_when_ttl_filter_drops_below_calibration_floor() {
+        // Arrange: a window that WOULD be calibrated on raw count -- 12
+        // samples -- but only 3 of them land inside the TTL.
+        let mut samples: Vec<(u64, bool)> = (0..9u64).map(|i| (i, true)).collect();
+        samples.extend((0..3u64).map(|i| (3600 + i, true)));
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act
+        let now = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 3600 + 60);
+        let out = est.estimate(&query_at(Some("s1"), ttl_5m(), now));
+
+        // Assert: Low, not Calibrated, and the floor is force-clamped to 0 --
+        // a thin post-filter window authorizes no cut and gates nothing.
+        assert_eq!(
+            out.confidence,
+            Confidence::Low,
+            "a TTL-filtered window below the calibration floor must be Low"
+        );
+        assert_eq!(out.samples, 3);
+        assert_eq!(out.k_floor, 0.0);
+    }
+
+    #[test]
+    fn estimate_fully_stale_window_is_cold() {
+        // Arrange: every sample predates the TTL window by an hour.
+        let samples: Vec<(u64, bool)> = (0..12u64).map(|i| (i, true)).collect();
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act
+        let now = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 3600);
+        let out = est.estimate(&query_at(Some("s1"), ttl_5m(), now));
+
+        // Assert: no trials survive, so this is indistinguishable from having
+        // no evidence at all -- a cold default, floor 0.
+        assert_eq!(out.confidence, Confidence::Cold);
+        assert_eq!(out.source, EstimateSource::ColdDefault);
+        assert_eq!(out.samples, 0);
+        assert_eq!(out.k_floor, 0.0);
+    }
+
+    #[test]
+    fn estimate_retains_a_sample_marginally_ahead_of_the_query_clock() {
+        // Arrange: Sample.ts and KQuery.now are independent wall-clock reads,
+        // so the newest sample can sit just ahead of the querying dispatch's
+        // clock. Those samples are the most relevant evidence there is.
+        let samples: Vec<(u64, bool)> = (0..10u64).map(|i| (100 + i, true)).collect();
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act: a query clock BEFORE every sample.
+        let now = UNIX_EPOCH + Duration::from_secs(BASE_SECS + 50);
+        let out = est.estimate(&query_at(Some("s1"), ttl_5m(), now));
+
+        // Assert: all ten future-dated samples are retained.
+        assert_eq!(out.samples, 10);
+        assert_eq!(out.confidence, Confidence::Calibrated);
+    }
+
+    #[test]
+    fn estimate_with_now_below_the_ttl_applies_no_cutoff() {
+        // Arrange: a pinned test clock at the epoch cannot subtract a TTL.
+        // The fallback keeps the whole window rather than discarding it.
+        let samples: Vec<(u64, bool)> = (0..10u64).map(|i| (i, true)).collect();
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act
+        let out = est.estimate(&query_at(Some("s1"), ttl_5m(), UNIX_EPOCH));
+
+        // Assert
+        assert_eq!(out.samples, 10);
+        assert_eq!(out.confidence, Confidence::Calibrated);
     }
 }

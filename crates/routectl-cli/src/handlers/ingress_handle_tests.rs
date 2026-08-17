@@ -106,6 +106,13 @@ struct PersistedRow {
     /// completions). Distinguishes a warm-hold pre-content dispatch failure
     /// (`pre_content_dispatch`) from a mid-stream cut (`mid_stream`).
     stream_stage: Option<String>,
+    /// `calib_estimated_tokens`: routectl's own pre-dispatch estimate,
+    /// stamped for every attempt regardless of request size. Lets a test
+    /// read back the size the trim trigger was compared against.
+    calib_estimated_tokens: Option<i64>,
+    /// `would_trim_tokens`: `None` whenever the trim advisory declined,
+    /// which a below-trigger request always does.
+    would_trim_tokens: Option<i64>,
 }
 
 fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
@@ -113,7 +120,8 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
         .conn()
         .prepare(
             "SELECT request_id, outcome, ttfb_ms, input_tokens, output_tokens, \
-             attempt_count, fallback_count, provider, alias, http_status, extra FROM requests \
+             attempt_count, fallback_count, provider, alias, http_status, extra, \
+             calib_estimated_tokens, would_trim_tokens FROM requests \
              ORDER BY rowid",
         )
         .expect("prepare select");
@@ -140,6 +148,8 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
             alias: r.get(8)?,
             http_status: r.get(9)?,
             stream_stage,
+            calib_estimated_tokens: r.get(11)?,
+            would_trim_tokens: r.get(12)?,
         })
     })
     .expect("query rows")
@@ -2497,6 +2507,77 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
     assert!(
         router2.k_session_store.is_empty(),
         "a keyless request must not be recorded",
+    );
+}
+
+/// Regression pin: the K-sample write is UNCONDITIONAL on a successful keyed
+/// dispatch and must NOT inherit the trim trigger. `record_would_trim`
+/// early-returns for a request at or below `[trim] trigger_tokens`, so every
+/// `would_trim_*` advisory stays `None` on ordinary traffic -- but the K
+/// estimator's evidence comes from the post-response write path, which is
+/// deliberately outside that gate. Sliding the write behind the trigger would
+/// leave the per-session store empty for all normal-sized requests and
+/// silently disarm every consumer of K.
+///
+/// Drives the real non-streaming handler (`complete_response`) end-to-end
+/// against a mock upstream, then asserts BOTH halves together from one row:
+/// the request really was sub-trigger (`would_trim_tokens` NULL while the
+/// estimate is far under the trigger) AND the served triple still holds
+/// exactly one sample.
+#[tokio::test]
+async fn sub_trigger_keyed_dispatch_still_lands_a_k_sample() {
+    use crate::ingress::openai::OpenAiIngress;
+    use routectl_router::KSessionKey;
+    use std::sync::Arc;
+
+    // Arrange: an ordinary tiny request carrying a session key, so the trim
+    // trigger declines while the K write path stays eligible.
+    let upstream = calibration_upstream().await;
+    let router = Arc::new(calibration_recording_router(&upstream.uri()).await);
+    let trigger_tokens = router.config.trim.to_params().trigger_tokens;
+    let rig = CaptureRig::new();
+    let mut req = sample_request("a", false);
+    req.routectl_internal.inbound_session_key = Some("sess-sub-trigger".to_string());
+    let draft = build_usage_draft("openai", &req, "req-k-sub-trigger".to_string());
+
+    // Act: the production non-streaming path.
+    let resp = complete_response(
+        Arc::clone(&router),
+        req,
+        Default::default(),
+        OpenAiIngress,
+        ErrorEnvelopeShape::OpenAi,
+        rig.handle.clone().expect("rig handle present"),
+        draft,
+    )
+    .await;
+
+    // Assert: a delivered 200 recorded one sample under the served triple.
+    assert_eq!(resp.status(), StatusCode::OK);
+    let window = router
+        .k_session_store
+        .get(&KSessionKey {
+            session_key: "sess-sub-trigger".into(),
+            provider_kind: "openai-compat".into(),
+            model: "m".into(),
+        })
+        .expect("a sub-trigger keyed dispatch must still record a K sample");
+    assert_eq!(window.len(), 1, "exactly one sample per dispatch");
+
+    // Assert: the request genuinely sat below the trigger, so the pin above
+    // cannot pass by accident on an over-trigger fixture.
+    let rows = rig.flush_and_read().await;
+    assert_eq!(rows.len(), 1);
+    let estimate = rows[0]
+        .calib_estimated_tokens
+        .expect("the pre-dispatch estimate is stamped for every attempt");
+    assert!(
+        u64::try_from(estimate).expect("estimate is non-negative") <= trigger_tokens,
+        "fixture must stay below the trim trigger: {estimate} vs {trigger_tokens}",
+    );
+    assert_eq!(
+        rows[0].would_trim_tokens, None,
+        "a sub-trigger request records no trim advisory",
     );
 }
 

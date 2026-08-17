@@ -10,7 +10,16 @@
 //! validation, the prompt-cache pricing catalog and its operator overlay,
 //! the OAuth activation inventory, and the `doctor` report shapes.
 
+/// Test-only global allocator: lets a test assert that a hot-path predicate
+/// allocates nothing on its short-circuit path. Only compiled into the lib
+/// test binary, never into the shipped library.
+#[cfg(test)]
+#[global_allocator]
+static ALLOC_PROBE: alloc_probe::ProbeAllocator = alloc_probe::ProbeAllocator;
+
 pub(crate) mod activation;
+#[cfg(test)]
+pub(crate) mod alloc_probe;
 pub(crate) mod anthropic_family;
 pub(crate) mod calibration;
 pub(crate) mod capability_detect;

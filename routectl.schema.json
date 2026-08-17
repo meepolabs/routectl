@@ -213,11 +213,16 @@
     },
     "CacheConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[cache]` config block. Global policy for the\ndispatch-path auto-cache feature. A missing `[cache]` table\ndeserializes to `CacheConfig::default()` (auto-emit enabled), and the\nper-field `#[serde(default)]` keeps an omitted key enabled too.\n\nThis is the GLOBAL kill-switch; each `[providers.X]` entry carries an\noptional `auto_emit_top_level_breakpoint` override consulted only when\nthe global switch is on. The effective decision is \"global on AND\nprovider not explicitly off\".",
+      "description": "Operator-facing `[cache]` config block. Global policy for the\ndispatch-path auto-cache feature. A missing `[cache]` table\ndeserializes to `CacheConfig::default()` (auto-emit enabled), and the\nper-field `#[serde(default)]` gives an omitted key that same default --\non for the two emission/normalization switches, off for\n`k_gated_emission`.\n\nThis is the GLOBAL kill-switch; each `[providers.X]` entry carries an\noptional `auto_emit_top_level_breakpoint` override consulted only when\nthe global switch is on. The effective decision is \"global on AND\nprovider not explicitly off\".",
       "properties": {
         "auto_emit_top_level_breakpoint": {
           "default": true,
           "description": "Master switch for dispatch-path auto-emission of a top-level\n`cache_control` ephemeral_5m breakpoint. Default on.",
+          "type": "boolean"
+        },
+        "k_gated_emission": {
+          "default": false,
+          "description": "Master switch for withholding auto-emitted cache breakpoints on a\nsession whose measured per-turn reuse sits below the marker's\nbreak-even point. Default OFF: K windows recorded before front-marker\nemission shipped describe a world with less caching, so acting on them\nwould suppress emission on evidence that predates the caching, and a\nwrong suppression costs money at HTTP 200 with no error signal.",
           "type": "boolean"
         },
         "normalize_tools": {
@@ -2042,6 +2047,7 @@
       "$ref": "#/$defs/CacheConfig",
       "default": {
         "auto_emit_top_level_breakpoint": true,
+        "k_gated_emission": false,
         "normalize_tools": true
       },
       "description": "Operator-facing `[cache]` block. Controls the dispatch-path\nauto-emission of a top-level Anthropic `cache_control` breakpoint.\nA missing block keeps the default: auto-emit enabled."

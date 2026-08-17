@@ -110,6 +110,7 @@ fn rig(
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: global_enabled,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         // Zero backoff keeps the multi-attempt test fast.
         retry: RetryPolicy {
@@ -628,6 +629,7 @@ fn rig_with_cache_pricing_override(
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: true,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         cache_pricing,
         ..Config::default()
@@ -991,7 +993,7 @@ fn helper_emits_on_clean_capable_request() {
     let mut req = base_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false), false);
     assert_eq!(out.terminal, CacheInjection::Emitted);
     assert_eq!(req.cache_control, Some(CacheControl::ephemeral_5m()));
 }
@@ -1000,7 +1002,7 @@ fn helper_emits_on_clean_capable_request() {
 fn helper_fails_closed_on_unknown_capability() {
     let mut req = base_req();
     let p = plan(0, false, true, &req);
-    let out = apply_auto_cache_placement(&mut req, &p, gates(None, true, false));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(None, true, false), false);
     assert_eq!(out.terminal, CacheInjection::SkippedNoCapability);
     assert_eq!(req.cache_control, None);
 }
@@ -1059,7 +1061,7 @@ fn helper_rolls_back_when_validation_fails() {
     // branch given the production no-caller gate.
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false), false);
     assert_eq!(out.terminal, CacheInjection::ValidationRolledBack);
     assert_eq!(
         req.cache_control, None,
@@ -1077,7 +1079,7 @@ fn helper_caller_supplied_dominates_all_per_target_skip_reasons() {
 
     // Act + Assert: capability unknown (None) -> caller_supplied, NOT
     // no_capability (the key precedence change).
-    let out = apply_auto_cache_placement(&mut req, &p, gates(None, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(None, true, true), false);
     assert_eq!(out.front, CacheInjection::SkippedCallerSupplied);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(
@@ -1088,19 +1090,19 @@ fn helper_caller_supplied_dominates_all_per_target_skip_reasons() {
     // Global kill-switch off -> caller still dominates.
     let p_global_off = plan(1, false, false, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p_global_off, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p_global_off, gates(cap, true, true), false);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(req.cache_control, None);
 
     // Per-provider kill-switches off -> caller still dominates.
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false, false));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false, false), false);
     assert_eq!(out.front, CacheInjection::SkippedCallerSupplied);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(req.cache_control, None);
 
     // Volatile-high veto must not override caller_supplied either.
     let p_volatile = plan(1, true, true, &req);
-    let out = apply_auto_cache_placement(&mut req, &p_volatile, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p_volatile, gates(cap, true, true), false);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(req.cache_control, None);
 }
@@ -1312,7 +1314,7 @@ fn front_and_terminal_roll_back_together_on_validation_failure() {
 
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
 
     assert_eq!(out.front, CacheInjection::ValidationRolledBack);
     assert_eq!(out.terminal, CacheInjection::ValidationRolledBack);
@@ -1378,7 +1380,7 @@ fn rollback_preserves_overlay_mutations_and_every_cache_slot() {
 
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
     assert_eq!(out.front, CacheInjection::ValidationRolledBack);
     assert_eq!(out.terminal, CacheInjection::ValidationRolledBack);
 
@@ -1403,7 +1405,7 @@ fn front_missing_skips_only_the_front_marker() {
     req.system = Some(SystemContent::Text("flat system".into()));
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
 
     assert_eq!(out.front, CacheInjection::SkippedNoPlacementRegion);
     assert_eq!(out.terminal, CacheInjection::Emitted);
@@ -1419,7 +1421,7 @@ fn terminal_missing_skips_only_the_terminal_marker() {
     let mut req = blocks_system_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(false, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
 
     assert_eq!(out.front, CacheInjection::Emitted);
     assert_eq!(out.terminal, CacheInjection::SkippedNoCapability);
@@ -1438,7 +1440,7 @@ fn both_missing_skips_both_with_their_own_reasons() {
     req.system = Some(SystemContent::Text("flat system".into()));
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(false, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
 
     assert_eq!(out.front, CacheInjection::SkippedNoPlacementRegion);
     assert_eq!(out.terminal, CacheInjection::SkippedNoCapability);
@@ -1478,7 +1480,7 @@ fn no_placement_region_survives_a_validation_rollback() {
     .into();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
 
     assert_eq!(
         out.front,
@@ -1495,7 +1497,7 @@ fn front_marker_lands_on_the_last_custom_tool_when_system_is_flat() {
     let mut req = tools_only_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
 
     assert_eq!(out.front, CacheInjection::Emitted);
     let tools = req.tools.as_ref().expect("tools present");
@@ -1531,6 +1533,7 @@ fn placement_fails_closed_when_the_resolved_slot_no_longer_matches() {
         &mut req,
         &p,
         gates(Some(CacheCapability::new(false, true)), true, true),
+        false,
     );
     assert_eq!(
         out.front,
@@ -1562,6 +1565,7 @@ fn placement_skips_a_slot_that_became_wire_ineligible() {
         &mut req,
         &p,
         gates(Some(CacheCapability::new(false, true)), true, true),
+        false,
     );
     assert_eq!(out.front, CacheInjection::SkippedNoPlacementRegion);
     assert_eq!(front_marker(&req), None);
@@ -1628,7 +1632,7 @@ fn front_gate_off_withholds_only_the_front_marker() {
     let mut req = blocks_system_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false), false);
 
     assert_eq!(out.front, CacheInjection::SkippedProviderDisabled);
     assert_eq!(out.terminal, CacheInjection::Emitted);
@@ -1650,6 +1654,7 @@ fn explicit_opt_in_is_inert_where_the_wire_cannot_carry_the_marker() {
         &mut req,
         &p,
         gates_front_unsupported(Some(CacheCapability::new(true, true))),
+        false,
     );
 
     assert_eq!(
@@ -1679,7 +1684,7 @@ fn global_kill_switch_withholds_both_markers() {
     let mut req = blocks_system_req();
     let p = plan(0, false, false, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true));
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
 
     assert_eq!(out.front, CacheInjection::SkippedGlobalDisabled);
     assert_eq!(out.terminal, CacheInjection::SkippedGlobalDisabled);
@@ -1695,7 +1700,7 @@ fn injected_front_marker_is_never_at_the_messages_position() {
     for mut req in [blocks_system_req(), tools_only_req()] {
         let p = plan(0, false, true, &req);
         let cap = Some(CacheCapability::new(true, true));
-        let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false, true));
+        let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false, true), false);
         assert_eq!(out.front, CacheInjection::Emitted);
 
         let positions: Vec<_> = compute_frozen_floor(&req).positions().to_vec();
@@ -2091,7 +2096,12 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
     // Target 1: both regions enabled -> two injections -> over the cap ->
     // the whole candidate is discarded.
     let mut attempt_one = canonical.clone();
-    let first = apply_auto_cache_placement(&mut attempt_one, &shared_plan, gates(cap, true, true));
+    let first = apply_auto_cache_placement(
+        &mut attempt_one,
+        &shared_plan,
+        gates(cap, true, true),
+        false,
+    );
 
     assert_eq!(first.front, CacheInjection::ValidationRolledBack);
     assert_eq!(first.terminal, CacheInjection::ValidationRolledBack);
@@ -2106,8 +2116,12 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
     // attempt started from the canonical request rather than from target 1's
     // discarded candidate.
     let mut attempt_two = canonical.clone();
-    let second =
-        apply_auto_cache_placement(&mut attempt_two, &shared_plan, gates(cap, true, false));
+    let second = apply_auto_cache_placement(
+        &mut attempt_two,
+        &shared_plan,
+        gates(cap, true, false),
+        false,
+    );
 
     assert_eq!(second.front, CacheInjection::SkippedProviderDisabled);
     assert_eq!(
@@ -2141,8 +2155,12 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
         ),
         "the fixture must offer a front slot for the control to be meaningful",
     );
-    let contaminated_out =
-        apply_auto_cache_placement(&mut contaminated, &shared_plan, gates(cap, true, false));
+    let contaminated_out = apply_auto_cache_placement(
+        &mut contaminated,
+        &shared_plan,
+        gates(cap, true, false),
+        false,
+    );
     assert_eq!(
         contaminated_out.terminal,
         CacheInjection::ValidationRolledBack,
@@ -2401,6 +2419,7 @@ fn rig_with_overlay(
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: true,
             normalize_tools: true,
+            k_gated_emission: false,
         },
         retry: RetryPolicy {
             initial_backoff_ms: 0,
