@@ -1,6 +1,6 @@
 //! Auto-cache request plan (pure read; the injection CALL stays in dispatch).
 
-use routectl_core::cache_control::compute_frozen_floor;
+use routectl_core::cache_control::{FrontSlot, compute_frozen_floor, front_breakpoint_slot};
 use routectl_core::{ChatRequest, scan_volatile};
 
 /// Request-level inputs to the auto-cache decision, computed ONCE per
@@ -17,6 +17,14 @@ pub(super) struct AutoCacheRequestPlan {
     pub(super) caller_breakpoint_count: usize,
     pub(super) volatile_high_veto: bool,
     pub(super) global_auto_emit_enabled: bool,
+    /// Resolved anchor for the FRONT marker, or `None` when the request
+    /// offers no placement region (a flat-string system with no custom
+    /// tool). `None` is what makes the front decision
+    /// [`CacheInjection::SkippedNoPlacementRegion`].
+    ///
+    /// The slot carries a resolved INDEX, so every target and every retry
+    /// marks the same element without re-deriving it.
+    pub(super) front_slot: Option<FrontSlot>,
 }
 
 impl AutoCacheRequestPlan {
@@ -32,25 +40,33 @@ impl AutoCacheRequestPlan {
             caller_breakpoint_count,
             volatile_high_veto,
             global_auto_emit_enabled,
+            front_slot: front_breakpoint_slot(req),
         }
     }
 }
 
-/// Outcome of an auto-cache injection decision for one dispatch target.
-/// Drives control flow today (and is the stable per-target signal the
-/// cache-decision log carries). Every non-`Emitted` variant means
-/// `attempt_req` was left untouched -- the dispatched bytes equal the
-/// un-injected clone.
+/// Outcome of an auto-cache injection decision for ONE marker on one
+/// dispatch target. Drives control flow today (and is the stable
+/// per-target signal the cache-decision log carries). Every non-`Emitted`
+/// variant means that marker was not placed -- the dispatched bytes equal
+/// the un-injected clone for that marker's slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CacheInjection {
-    /// A top-level ephemeral_5m breakpoint was injected and validated.
+    /// An ephemeral_5m breakpoint was injected in this marker's slot and
+    /// validated.
     Emitted,
     /// Global `[cache] auto_emit_top_level_breakpoint = false`.
     SkippedGlobalDisabled,
-    /// Per-provider `auto_emit_top_level_breakpoint = false`.
+    /// Per-provider `auto_emit_top_level_breakpoint = false` (terminal
+    /// marker) or `auto_emit_per_block_breakpoints = false` (front
+    /// marker). The two knobs are independent.
     SkippedProviderDisabled,
-    /// Target's provider does not honor a top-level breakpoint (or its
-    /// capability is unknown -- fail closed).
+    /// The target's egress cannot carry this marker to the wire (or its
+    /// capability is unknown -- fail closed). For the TERMINAL marker:
+    /// `CacheCapability::supports_top_level_cache_control` is false. For
+    /// the FRONT marker: the provider kind has no per-block breakpoint
+    /// surface (`ProviderEntry::supports_per_block_breakpoints`), so an
+    /// explicit operator opt-in there is inert rather than honored.
     SkippedNoCapability,
     /// The caller already supplied at least one breakpoint; auto-emit
     /// would risk a second marker / byte rewrite, so we defer entirely.
@@ -60,17 +76,24 @@ pub(super) enum CacheInjection {
     SkippedVolatileHigh,
     /// Injecting would push the breakpoint count past `MAX_BREAKPOINTS`.
     SkippedBreakpointCap,
-    /// Injection was attempted but post-injection validation failed; the
-    /// original `cache_control` was restored and the clone dispatched
-    /// unchanged.
+    /// The request offers no slot this marker could occupy -- the front
+    /// marker on a request whose system is a flat string and which carries
+    /// no typed custom tool. The alternative (lifting the system to
+    /// blocks) is a wire-shape change on a re-encoding-banned path, so the
+    /// marker is skipped and the coverage gap recorded instead.
+    SkippedNoPlacementRegion,
+    /// Injection was attempted but validating the COMBINED breakpoint
+    /// sequence failed, so the whole candidate was discarded and the
+    /// pre-cache clone dispatched unchanged. Both markers record this
+    /// unless one was already skipped for its own reason.
     ValidationRolledBack,
 }
 
 impl CacheInjection {
     /// Stable operator-facing token for this decision, emitted in the
-    /// `cache_auto_decision` log. Not persisted: the usage DB's
-    /// `requests.strategy` column is write-stopped as of 0.9.x, so the log
-    /// line is the only place the token appears. These tokens are a
+    /// `cache_auto_decision` log and persisted in the usage ledger's
+    /// per-marker decision columns. The legacy `requests.strategy` column
+    /// stays write-stopped as of 0.9.x. These tokens are a
     /// CONTRACT: do not
     /// rename or repurpose them, only add new ones. The `auto_skipped:`
     /// prefix groups the variants where auto-emit ran but declined.
@@ -86,6 +109,7 @@ impl CacheInjection {
     /// | SkippedProviderDisabled  | `auto_skipped:provider_disabled`   |
     /// | SkippedNoCapability      | `auto_skipped:no_capability`       |
     /// | SkippedBreakpointCap     | `auto_skipped:breakpoint_cap`      |
+    /// | SkippedNoPlacementRegion | `auto_skipped:no_placement_region` |
     /// | ValidationRolledBack     | `auto_skipped:validation_rolled_back` |
     pub(super) const fn strategy_str(self) -> &'static str {
         match self {
@@ -96,7 +120,27 @@ impl CacheInjection {
             Self::SkippedProviderDisabled => "auto_skipped:provider_disabled",
             Self::SkippedNoCapability => "auto_skipped:no_capability",
             Self::SkippedBreakpointCap => "auto_skipped:breakpoint_cap",
+            Self::SkippedNoPlacementRegion => "auto_skipped:no_placement_region",
             Self::ValidationRolledBack => "auto_skipped:validation_rolled_back",
         }
     }
 }
+
+/// Per-marker outcome of the auto-cache placement step for one dispatch
+/// target: one decision for the FRONT marker (a system block or a custom
+/// tool definition) and one for the TERMINAL marker (the top-level
+/// `cache_control` field).
+///
+/// The two decisions are independent -- a marker with no placement region
+/// skips alone and does not suppress the other -- but they are produced
+/// together so the placement step commits or discards a single candidate
+/// request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CacheDecision {
+    pub(super) front: CacheInjection,
+    pub(super) terminal: CacheInjection,
+}
+
+#[cfg(test)]
+#[path = "cache_plan_tests.rs"]
+mod cache_plan_tests;

@@ -449,6 +449,59 @@ impl<T> core::convert::From<T> for routectl_usage::BucketSpec
 pub fn routectl_usage::BucketSpec::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::BucketSpec
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::BucketSpec
+pub struct routectl_usage::CacheDecisionSummary
+pub routectl_usage::CacheDecisionSummary::epoch_classified: i64
+pub routectl_usage::CacheDecisionSummary::epoch_reseeded: i64
+pub routectl_usage::CacheDecisionSummary::epoch_rewritten: i64
+pub routectl_usage::CacheDecisionSummary::epoch_stable: i64
+pub routectl_usage::CacheDecisionSummary::front_decided: i64
+pub routectl_usage::CacheDecisionSummary::front_emitted: i64
+pub routectl_usage::CacheDecisionSummary::terminal_decided: i64
+pub routectl_usage::CacheDecisionSummary::terminal_emitted: i64
+impl core::clone::Clone for routectl_usage::CacheDecisionSummary
+pub fn routectl_usage::CacheDecisionSummary::clone(&self) -> routectl_usage::CacheDecisionSummary
+impl core::cmp::Eq for routectl_usage::CacheDecisionSummary
+impl core::cmp::PartialEq for routectl_usage::CacheDecisionSummary
+pub fn routectl_usage::CacheDecisionSummary::eq(&self, &routectl_usage::CacheDecisionSummary) -> bool
+impl core::default::Default for routectl_usage::CacheDecisionSummary
+pub fn routectl_usage::CacheDecisionSummary::default() -> routectl_usage::CacheDecisionSummary
+impl core::fmt::Debug for routectl_usage::CacheDecisionSummary
+pub fn routectl_usage::CacheDecisionSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_usage::CacheDecisionSummary
+impl core::marker::StructuralPartialEq for routectl_usage::CacheDecisionSummary
+impl core::marker::Freeze for routectl_usage::CacheDecisionSummary
+impl core::marker::Send for routectl_usage::CacheDecisionSummary
+impl core::marker::Sync for routectl_usage::CacheDecisionSummary
+impl core::marker::Unpin for routectl_usage::CacheDecisionSummary
+impl core::marker::UnsafeUnpin for routectl_usage::CacheDecisionSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::CacheDecisionSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::CacheDecisionSummary
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::CacheDecisionSummary where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::CacheDecisionSummary::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::CacheDecisionSummary where U: core::convert::From<T>
+pub fn routectl_usage::CacheDecisionSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::CacheDecisionSummary where U: core::convert::Into<T>
+pub type routectl_usage::CacheDecisionSummary::Error = core::convert::Infallible
+pub fn routectl_usage::CacheDecisionSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::CacheDecisionSummary where U: core::convert::TryFrom<T>
+pub type routectl_usage::CacheDecisionSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::CacheDecisionSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::CacheDecisionSummary where T: core::clone::Clone
+pub type routectl_usage::CacheDecisionSummary::Owned = T
+pub fn routectl_usage::CacheDecisionSummary::clone_into(&self, &mut T)
+pub fn routectl_usage::CacheDecisionSummary::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::CacheDecisionSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::CacheDecisionSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::CacheDecisionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::CacheDecisionSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::CacheDecisionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::CacheDecisionSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::CacheDecisionSummary where T: core::clone::Clone
+pub unsafe fn routectl_usage::CacheDecisionSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::CacheDecisionSummary
+pub fn routectl_usage::CacheDecisionSummary::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::CacheDecisionSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::CacheDecisionSummary
 pub struct routectl_usage::CalibrationSampleRow
 pub routectl_usage::CalibrationSampleRow::estimated_tokens: i64
 pub routectl_usage::CalibrationSampleRow::model: alloc::string::String
@@ -1227,6 +1280,58 @@ impl<T> core::convert::From<T> for routectl_usage::Rates
 pub fn routectl_usage::Rates::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::Rates
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::Rates
+pub struct routectl_usage::ReductionSummary
+pub routectl_usage::ReductionSummary::bytes_saved: i64
+pub routectl_usage::ReductionSummary::decided_requests: i64
+pub routectl_usage::ReductionSummary::decisions: alloc::vec::Vec<(alloc::string::String, i64)>
+pub routectl_usage::ReductionSummary::strings_compressed: i64
+pub routectl_usage::ReductionSummary::strings_rejected: i64
+pub routectl_usage::ReductionSummary::strings_skipped: i64
+impl routectl_usage::ReductionSummary
+pub const fn routectl_usage::ReductionSummary::est_tokens_saved(&self) -> i64
+impl core::clone::Clone for routectl_usage::ReductionSummary
+pub fn routectl_usage::ReductionSummary::clone(&self) -> routectl_usage::ReductionSummary
+impl core::cmp::Eq for routectl_usage::ReductionSummary
+impl core::cmp::PartialEq for routectl_usage::ReductionSummary
+pub fn routectl_usage::ReductionSummary::eq(&self, &routectl_usage::ReductionSummary) -> bool
+impl core::default::Default for routectl_usage::ReductionSummary
+pub fn routectl_usage::ReductionSummary::default() -> routectl_usage::ReductionSummary
+impl core::fmt::Debug for routectl_usage::ReductionSummary
+pub fn routectl_usage::ReductionSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_usage::ReductionSummary
+impl core::marker::Freeze for routectl_usage::ReductionSummary
+impl core::marker::Send for routectl_usage::ReductionSummary
+impl core::marker::Sync for routectl_usage::ReductionSummary
+impl core::marker::Unpin for routectl_usage::ReductionSummary
+impl core::marker::UnsafeUnpin for routectl_usage::ReductionSummary
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_usage::ReductionSummary
+impl core::panic::unwind_safe::UnwindSafe for routectl_usage::ReductionSummary
+impl<Q, K> hashbrown::Equivalent<K> for routectl_usage::ReductionSummary where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_usage::ReductionSummary::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_usage::ReductionSummary where U: core::convert::From<T>
+pub fn routectl_usage::ReductionSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_usage::ReductionSummary where U: core::convert::Into<T>
+pub type routectl_usage::ReductionSummary::Error = core::convert::Infallible
+pub fn routectl_usage::ReductionSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_usage::ReductionSummary where U: core::convert::TryFrom<T>
+pub type routectl_usage::ReductionSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_usage::ReductionSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_usage::ReductionSummary where T: core::clone::Clone
+pub type routectl_usage::ReductionSummary::Owned = T
+pub fn routectl_usage::ReductionSummary::clone_into(&self, &mut T)
+pub fn routectl_usage::ReductionSummary::to_owned(&self) -> T
+impl<T> core::any::Any for routectl_usage::ReductionSummary where T: 'static + ?core::marker::Sized
+pub fn routectl_usage::ReductionSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_usage::ReductionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::ReductionSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_usage::ReductionSummary where T: ?core::marker::Sized
+pub fn routectl_usage::ReductionSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_usage::ReductionSummary where T: core::clone::Clone
+pub unsafe fn routectl_usage::ReductionSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_usage::ReductionSummary
+pub fn routectl_usage::ReductionSummary::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_usage::ReductionSummary
+impl<T> tracing::instrument::WithSubscriber for routectl_usage::ReductionSummary
 pub struct routectl_usage::ReuseSampleRow
 pub routectl_usage::ReuseSampleRow::cache_read: i64
 pub routectl_usage::ReuseSampleRow::model: alloc::string::String
@@ -1483,7 +1588,9 @@ impl<T> tracing::instrument::WithSubscriber for routectl_usage::UsageHandle
 pub struct routectl_usage::UsageRecord
 pub routectl_usage::UsageRecord::alias: alloc::string::String
 pub routectl_usage::UsageRecord::attempt_count: u32
+pub routectl_usage::UsageRecord::cache_front_decision: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::cache_read: core::option::Option<u64>
+pub routectl_usage::UsageRecord::cache_terminal_decision: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::cache_write_1h: core::option::Option<u64>
 pub routectl_usage::UsageRecord::cache_write_5m: core::option::Option<u64>
 pub routectl_usage::UsageRecord::calib_estimated_tokens: core::option::Option<u64>
@@ -1501,6 +1608,7 @@ pub routectl_usage::UsageRecord::model: core::option::Option<alloc::string::Stri
 pub routectl_usage::UsageRecord::msg_count: u32
 pub routectl_usage::UsageRecord::outcome: routectl_usage::Outcome
 pub routectl_usage::UsageRecord::output_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::prefix_epoch_event: core::option::Option<i64>
 pub routectl_usage::UsageRecord::provider: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::provider_kind: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::quota_claim: core::option::Option<alloc::string::String>
@@ -1511,6 +1619,11 @@ pub routectl_usage::UsageRecord::quota_reset: core::option::Option<i64>
 pub routectl_usage::UsageRecord::quota_status: core::option::Option<alloc::string::String>
 pub routectl_usage::UsageRecord::quota_utilization: core::option::Option<f64>
 pub routectl_usage::UsageRecord::reasoning_tokens: core::option::Option<u64>
+pub routectl_usage::UsageRecord::reduction_bytes_saved: core::option::Option<u64>
+pub routectl_usage::UsageRecord::reduction_decision: core::option::Option<alloc::string::String>
+pub routectl_usage::UsageRecord::reduction_strings_compressed: core::option::Option<u64>
+pub routectl_usage::UsageRecord::reduction_strings_rejected: core::option::Option<u64>
+pub routectl_usage::UsageRecord::reduction_strings_skipped: core::option::Option<u64>
 pub routectl_usage::UsageRecord::request_id: alloc::string::String
 pub routectl_usage::UsageRecord::requested_model: alloc::string::String
 pub routectl_usage::UsageRecord::resolved_class: core::option::Option<alloc::string::String>
@@ -1657,8 +1770,12 @@ pub fn routectl_usage::WouldTrimSummary::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_usage::WouldTrimSummary
 impl<T> tracing::instrument::WithSubscriber for routectl_usage::WouldTrimSummary
 pub const routectl_usage::CHANNEL_CAPACITY: usize
+pub const routectl_usage::PREFIX_EPOCH_RESEEDED: i64
+pub const routectl_usage::PREFIX_EPOCH_REWRITTEN: i64
+pub const routectl_usage::PREFIX_EPOCH_STABLE: i64
 pub const routectl_usage::SCHEMA_VERSION: i64
 pub fn routectl_usage::aggregate(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<routectl_usage::AggRow>, routectl_usage::QueryError>
+pub fn routectl_usage::cache_decision_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::CacheDecisionSummary, routectl_usage::QueryError>
 pub fn routectl_usage::earliest_ts_start(&routectl_usage::UsageDb, i64) -> core::result::Result<core::option::Option<i64>, routectl_usage::QueryError>
 pub fn routectl_usage::errors_by_class(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, alloc::string::String, i64)>, routectl_usage::QueryError>
 pub fn routectl_usage::estimate_cost_tokens(i64, i64, i64, i64, i64, i64, &routectl_usage::Rates) -> core::option::Option<routectl_usage::CostBreakdown>
@@ -1675,6 +1792,7 @@ pub fn routectl_usage::query(&routectl_usage::UsageDb, &routectl_usage::QuerySpe
 pub fn routectl_usage::read_calibration_samples_since(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::CalibrationSampleRow>>
 pub fn routectl_usage::read_capability_events_after(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::CapabilityEventRow>>
 pub fn routectl_usage::read_reuse_samples_since(&rusqlite::Connection, i64, usize) -> rusqlite::Result<alloc::vec::Vec<routectl_usage::ReuseSampleRow>>
+pub fn routectl_usage::reduction_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::ReductionSummary, routectl_usage::QueryError>
 pub fn routectl_usage::shadow_misfire_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::ShadowMisfireSummary, routectl_usage::QueryError>
 pub fn routectl_usage::ttfbs(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<alloc::vec::Vec<(routectl_usage::GroupKey, i64)>, routectl_usage::QueryError>
 pub fn routectl_usage::would_trim_summary(&routectl_usage::UsageDb, i64, i64) -> core::result::Result<routectl_usage::WouldTrimSummary, routectl_usage::QueryError>

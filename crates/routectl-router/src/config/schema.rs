@@ -1309,6 +1309,14 @@ pub enum ProviderEntry {
         /// `runtime`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for dispatch-path auto-emission of
+        /// per-block cache breakpoints (the FRONT marker). `None` takes
+        /// the kind-level default: `true` for an anthropic-api entry on
+        /// the default base URL, `false` everywhere else. Independent of
+        /// `auto_emit_top_level_breakpoint`, which governs the terminal
+        /// top-level marker alone. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_per_block_breakpoints: Option<bool>,
         /// Per-provider override for the dispatch-path token-reduction
         /// feature. `None` inherits the global `[reduction]` switch;
         /// `Some(false)` disables reduction for this provider even when
@@ -1423,6 +1431,14 @@ pub enum ProviderEntry {
         /// this provider. Cache policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for dispatch-path auto-emission of
+        /// per-block cache breakpoints (the FRONT marker). `None` takes
+        /// the kind-level default: `true` for an anthropic-api entry on
+        /// the default base URL, `false` everywhere else. Independent of
+        /// `auto_emit_top_level_breakpoint`, which governs the terminal
+        /// top-level marker alone. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_per_block_breakpoints: Option<bool>,
         /// Per-provider override for the dispatch-path token-reduction
         /// feature. `None` inherits the global `[reduction]` switch;
         /// `Some(false)` disables reduction for this provider. Reduction
@@ -1511,6 +1527,14 @@ pub enum ProviderEntry {
         /// this provider. Cache policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for dispatch-path auto-emission of
+        /// per-block cache breakpoints (the FRONT marker). `None` takes
+        /// the kind-level default: `true` for an anthropic-api entry on
+        /// the default base URL, `false` everywhere else. Independent of
+        /// `auto_emit_top_level_breakpoint`, which governs the terminal
+        /// top-level marker alone. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_per_block_breakpoints: Option<bool>,
         /// Per-provider override for the dispatch-path token-reduction
         /// feature. `None` inherits the global `[reduction]` switch;
         /// `Some(false)` disables reduction for this provider. Reduction
@@ -1571,6 +1595,14 @@ pub enum ProviderEntry {
         /// this provider. Cache policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for dispatch-path auto-emission of
+        /// per-block cache breakpoints (the FRONT marker). `None` takes
+        /// the kind-level default: `true` for an anthropic-api entry on
+        /// the default base URL, `false` everywhere else. Independent of
+        /// `auto_emit_top_level_breakpoint`, which governs the terminal
+        /// top-level marker alone. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_per_block_breakpoints: Option<bool>,
         /// Per-provider override for the dispatch-path token-reduction
         /// feature. `None` inherits the global `[reduction]` switch;
         /// `Some(false)` disables reduction for this provider. Reduction
@@ -1621,6 +1653,14 @@ pub enum ProviderEntry {
         /// this provider. Cache policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for dispatch-path auto-emission of
+        /// per-block cache breakpoints (the FRONT marker). `None` takes
+        /// the kind-level default: `true` for an anthropic-api entry on
+        /// the default base URL, `false` everywhere else. Independent of
+        /// `auto_emit_top_level_breakpoint`, which governs the terminal
+        /// top-level marker alone. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_per_block_breakpoints: Option<bool>,
         /// Per-provider override for the dispatch-path token-reduction
         /// feature. `None` inherits the global `[reduction]` switch;
         /// `Some(false)` disables reduction for this provider. Reduction
@@ -1975,6 +2015,97 @@ impl ProviderEntry {
         }
     }
 
+    /// Per-provider override for dispatch-path auto-emission of
+    /// per-block cache breakpoints (the FRONT marker). `None` means
+    /// "take the kind-level default" -- [`Self::per_block_breakpoints_enabled`]
+    /// resolves it. Mirrors [`Self::auto_emit_top_level_breakpoint`].
+    pub const fn auto_emit_per_block_breakpoints(&self) -> Option<bool> {
+        match self {
+            Self::OpenaiCompat {
+                auto_emit_per_block_breakpoints,
+                ..
+            } => *auto_emit_per_block_breakpoints,
+            Self::AnthropicApi {
+                auto_emit_per_block_breakpoints,
+                ..
+            } => *auto_emit_per_block_breakpoints,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock {
+                auto_emit_per_block_breakpoints,
+                ..
+            } => *auto_emit_per_block_breakpoints,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                auto_emit_per_block_breakpoints,
+                ..
+            } => *auto_emit_per_block_breakpoints,
+            #[cfg(feature = "gemini")]
+            Self::Gemini {
+                auto_emit_per_block_breakpoints,
+                ..
+            } => *auto_emit_per_block_breakpoints,
+        }
+    }
+
+    /// Whether this entry's EGRESS can actually carry a per-block cache
+    /// marker to the wire. Wire capability, not operator intent -- the
+    /// counterpart of `CacheCapability::supports_top_level_cache_control`
+    /// for the front marker, and the reason that struct is not widened
+    /// (its `new()` is public with fixed arity).
+    ///
+    /// True for `anthropic-api` (native per-block `cache_control`) and for
+    /// `bedrock` with `api_shape = "converse"` (the egress translates a
+    /// per-block marker into a sibling `cachePoint` block). False
+    /// everywhere else:
+    ///
+    /// - `bedrock` / `api_shape = "invoke"` -- no front-marker path; the
+    ///   egress lowers the TOP-LEVEL marker to per-block itself, so an
+    ///   additionally-placed front marker is redundant at best.
+    /// - `openai-compat` -- the egress DROPS a per-block marker with a
+    ///   WARN, and under `[server] strict_translation` rejects the whole
+    ///   request with a 400.
+    /// - `openai-responses` / `gemini` -- no per-block breakpoint surface
+    ///   (both cache server-side automatically).
+    ///
+    /// Placement requires this AND [`Self::per_block_breakpoints_enabled`],
+    /// so an explicit `auto_emit_per_block_breakpoints = true` on an
+    /// unsupported kind stays INERT rather than emitting a marker the wire
+    /// discards -- which would also record a false `auto_emitted` decision.
+    pub const fn supports_per_block_breakpoints(&self) -> bool {
+        match self {
+            Self::AnthropicApi { .. } => true,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { api_shape, .. } => {
+                matches!(api_shape, BedrockApiShapeConfig::Converse)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether per-block front-marker auto-emission is enabled for this
+    /// entry: the operator override when set, otherwise the kind-level
+    /// default.
+    ///
+    /// The kind-level default is `true` ONLY for an `anthropic-api` entry
+    /// on the default Anthropic base URL -- the population whose terminal
+    /// marker is already auto-emitted. Everything else, including both
+    /// Bedrock shapes and a custom-base `anthropic-api` entry, defaults
+    /// to `false` so the feature fails toward current behavior.
+    ///
+    /// Operator INTENT only. Placement additionally requires
+    /// [`Self::supports_per_block_breakpoints`], so a `true` here on a
+    /// kind whose egress cannot carry the marker does not emit one.
+    ///
+    /// Independent of `auto_emit_top_level_breakpoint`, which governs the
+    /// terminal top-level marker alone.
+    pub fn per_block_breakpoints_enabled(&self) -> bool {
+        self.auto_emit_per_block_breakpoints()
+            .unwrap_or_else(|| match self {
+                Self::AnthropicApi { base_url, .. } => base_url == &default_anthropic_base(),
+                _ => false,
+            })
+    }
+
     /// Per-provider override for the dispatch-path token-reduction
     /// feature. `None` means "inherit the global `[reduction]` switch";
     /// `Some(false)` disables reduction for this provider even when the
@@ -2018,6 +2149,7 @@ impl ProviderEntry {
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -2043,6 +2175,7 @@ impl ProviderEntry {
             max_thinking_entry_bytes: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             cloak: CloakConfig::default(),
             #[cfg(feature = "bedrock")]
@@ -2068,6 +2201,7 @@ impl ProviderEntry {
             codex_version: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -2091,6 +2225,7 @@ impl ProviderEntry {
             auth_mode: GeminiAuthMode::default(),
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }

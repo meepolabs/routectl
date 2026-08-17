@@ -1224,3 +1224,27 @@ fn both_reload_paths_carry_the_quota_store_over() {
          store carries at, so a future site added for one is added for both"
     );
 }
+
+/// Both reload paths must carry the per-session prefix-epoch baselines over,
+/// and the same silence argument applies: an emptied store makes every live
+/// session's next turn first-seen, and a first-seen turn is deliberately
+/// unclassified -- so the detector simply stops finding anything, which reads
+/// as healthy traffic. Structural for the same reason as the quota guard: the
+/// property is about the wiring, not about either path in isolation.
+#[test]
+fn both_reload_paths_carry_the_prefix_epoch_store_over() {
+    let reload_src = include_str!("reload.rs");
+
+    assert_eq!(
+        reload_src.matches("carry_over_prefix_epochs_from").count(),
+        2,
+        "both reload paths must carry the prefix-epoch baselines onto the new \
+         router -- one-site-only silently blinds the detector on that path"
+    );
+    assert_eq!(
+        reload_src.matches("carry_over_prefix_epochs_from").count(),
+        reload_src.matches("carry_over_k_store_from").count(),
+        "the prefix-epoch carry-over must be wired at exactly the sites the \
+         sibling session-keyed store carries at"
+    );
+}

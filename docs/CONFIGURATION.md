@@ -342,6 +342,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
 | `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
 | `auto_emit_top_level_breakpoint` | `[providers.X]`               | `Option<bool>`, default None (inherits global); `false` disables auto-cache for this provider     |
+| `auto_emit_per_block_breakpoints` | `[providers.X]`              | `Option<bool>`, default None (-> per-kind default: true for default-base `anthropic-api`, false elsewhere); gates the per-block FRONT marker only, and is inert on kinds whose egress cannot carry one |
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
 | `enabled`                      | `[reduction]` global            | bool, default true; master switch for dispatch-path context reduction (see `[reduction]`)         |
 | `reduction_enabled`            | `[providers.X]`                 | `Option<bool>`, default None (inherits global); `false` disables reduction for this provider      |
@@ -2482,7 +2483,7 @@ Each provider kind has a **conservative** default capability:
 | `kind`              | `supports_top_level_cache_control` | `cache_hit_observable` |
 |---------------------|------------------------------------|------------------------|
 | `anthropic-api`     | true (default base URL only -- see below) | true            |
-| `bedrock`           | false (per-block markers only -- see below) | true                 |
+| `bedrock`           | true on `api_shape = "invoke"`, false on `"converse"` -- see below | true  |
 | `openai-responses`  | false (server-side auto-cache; no explicit breakpoint) | true |
 | `openai-compat`     | false                              | false                  |
 | any unknown kind    | false                              | false                  |
@@ -2513,17 +2514,106 @@ their custom-base host supports caching must set `cache_capability`
 explicitly to opt in (an explicit override always wins, even on a custom
 base URL).
 
-**bedrock fails closed for auto-emit.** Bedrock honors prompt caching
+**bedrock defaults split by `api_shape`.** Bedrock honors prompt caching
 only via per-block markers -- a `cachePoint` block on Converse, a
 per-block `cache_control` on Invoke -- never a routectl-injected
-top-level marker (on Converse it lands in
-`additionalModelRequestFields` and never becomes a `cachePoint`; on
-Invoke it is an undocumented top-level field AWS does not honor). So the
-`bedrock` default is `false/true`: auto-emit is skipped
-(`auto_skipped:no_capability`) rather than silently no-op'd, while hit
-usage is still reported back (`cache_hit_observable = true`).
-Caller-supplied per-block markers are unaffected and still cache
-normally; an operator may override per entry.
+top-level marker on the wire. The two shapes therefore default
+differently:
+
+- `api_shape = "invoke"` (the default) gets `true/true`, so auto-emit
+  runs. The bedrock-invoke egress lowers a routectl-injected top-level
+  `cache_control` onto the last cache-eligible content block -- the
+  per-block form Invoke honors -- and re-validates the resulting
+  breakpoint sequence before the body ships. When no eligible block
+  exists, or the lowered arrangement would violate the breakpoint
+  invariants, the top-level marker is dropped and the request goes out
+  uncached (logged at WARN) instead of 400ing.
+- `api_shape = "converse"` gets `false/true`: a top-level marker lands
+  in `additionalModelRequestFields` and never becomes a `cachePoint`, so
+  auto-emit is skipped (`auto_skipped:no_capability`) rather than
+  silently no-op'd, while hit usage is still reported back
+  (`cache_hit_observable = true`).
+
+Caller-supplied per-block markers are unaffected on either shape and
+still cache normally; an operator may override per entry.
+
+### Per-block front marker (`auto_emit_per_block_breakpoints`)
+
+Each `[providers.X]` entry carries an optional
+`auto_emit_per_block_breakpoints` (bool). It gates dispatch-path
+auto-emission of a **per-block** cache breakpoint at the FRONT of the
+cacheable prefix -- the Anthropic per-block `cache_control` marker and the
+Bedrock Converse `cachePoint` block. It does **not** govern the terminal
+top-level marker; that stays entirely under
+`auto_emit_top_level_breakpoint` and the global `[cache]` switch. The two
+knobs are independent, so turning per-block emission off never disturbs
+the terminal marker an existing deployment already gets.
+
+When the key is omitted, the kind-level default applies:
+
+| Provider entry                            | Default |
+|-------------------------------------------|---------|
+| `anthropic-api` on the default base URL   | true    |
+| `anthropic-api` on any other base URL     | false   |
+| `bedrock`, `api_shape = "converse"`       | false   |
+| `bedrock`, `api_shape = "invoke"`         | false (key is inert -- see below) |
+| every other kind                          | false (key is inert -- see below) |
+
+Only default-base `anthropic-api` defaults on: that is the population
+whose terminal marker is already auto-emitted, so the front marker adds
+no new upstream shape. Everywhere else per-block emission is opt-in, so
+the feature fails toward current behavior.
+
+**The knob is operator INTENT, not a capability override.** Emission also
+requires that the target's egress can actually carry a per-block marker to
+the wire, which only `anthropic-api` and `bedrock` with `api_shape =
+"converse"` can. Setting the key to `true` on any other kind is accepted
+and INERT: no marker is placed, and the recorded decision is
+`auto_skipped:no_capability` rather than `auto_emitted`, so the decision
+ledger never claims a marker that never shipped. This is deliberate
+fail-closed behavior -- on `openai-compat` an emitted per-block marker
+would be dropped with a WARN, and under `[server] strict_translation`
+would fail the whole request with a 400.
+
+```toml
+# Opt a Bedrock Converse provider in to front-marker emission.
+[providers.bedrock-converse]
+kind = "bedrock"
+region = "us-east-1"
+api_shape = "converse"
+creds = { kind = "default-chain" }
+auto_emit_per_block_breakpoints = true
+
+# Opt the real Anthropic surface back out without touching the terminal
+# marker.
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+auto_emit_per_block_breakpoints = false
+```
+
+**Inert where the wire cannot carry the marker.** Setting the key (to
+either value) on a `bedrock` entry with `api_shape = "invoke"`, or on any
+`openai-compat` / `openai-responses` / `gemini` entry, is accepted -- the
+config still loads -- but changes nothing, and the loader emits a startup
+WARN naming the provider so the key is not mistaken for an active setting.
+Invoke has no front-marker path (its egress lowers the *top-level* marker
+to per-block form itself); the other kinds have no per-block breakpoint
+surface at all.
+
+**A cachePoint below the upstream's minimum prefix is a silent no-op.**
+AWS (and Anthropic) only cache a prefix that clears a per-model minimum
+token count; a marker emitted on a shorter prefix is accepted and simply
+never produces a cache entry. routectl does not gate emission on an
+estimated token count -- the estimate would be wrong often enough to
+withhold markers that would have cached -- so a small-prefix request may
+record `auto_emitted` while the upstream reports no cache write. Read the
+decision alongside the reported cache-write tokens, not on its own.
+
+The custom-base `anthropic-api` fail-closed posture above is unchanged:
+that entry is gated by `cache_capability` for the terminal marker and by
+this default of `false` for the front marker; both need an explicit
+operator opt-in.
 
 ### Tool-array normalization (`normalize_tools`)
 

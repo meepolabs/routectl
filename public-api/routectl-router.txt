@@ -1002,6 +1002,7 @@ pub routectl_router::config::ProviderEntry::AnthropicApi::allowed_betas: alloc::
 pub routectl_router::config::ProviderEntry::AnthropicApi::anthropic_version: alloc::string::String
 pub routectl_router::config::ProviderEntry::AnthropicApi::api_key_ref: alloc::string::String
 pub routectl_router::config::ProviderEntry::AnthropicApi::auth_kind: routectl_providers::anthropic_api::client::AuthKind
+pub routectl_router::config::ProviderEntry::AnthropicApi::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::AnthropicApi::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::AnthropicApi::base_url: alloc::string::String
 pub routectl_router::config::ProviderEntry::AnthropicApi::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
@@ -1019,6 +1020,7 @@ pub routectl_router::config::ProviderEntry::AnthropicApi::user_agent: core::opti
 #[non_exhaustive] pub routectl_router::config::ProviderEntry::Bedrock
 pub routectl_router::config::ProviderEntry::Bedrock::anthropic_beta: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::config::ProviderEntry::Bedrock::api_shape: routectl_router::BedrockApiShapeConfig
+pub routectl_router::config::ProviderEntry::Bedrock::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::Bedrock::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::Bedrock::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::config::ProviderEntry::Bedrock::creds: routectl_router::BedrockCredsConfig
@@ -1031,6 +1033,7 @@ pub routectl_router::config::ProviderEntry::Bedrock::user_agent: core::option::O
 #[non_exhaustive] pub routectl_router::config::ProviderEntry::Gemini
 pub routectl_router::config::ProviderEntry::Gemini::api_key_ref: alloc::string::String
 pub routectl_router::config::ProviderEntry::Gemini::auth_mode: routectl_providers::gemini::cloudcode::GeminiAuthMode
+pub routectl_router::config::ProviderEntry::Gemini::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::Gemini::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::Gemini::base_url: alloc::string::String
 pub routectl_router::config::ProviderEntry::Gemini::cache_capability: core::option::Option<routectl_router::CacheCapability>
@@ -1041,6 +1044,7 @@ pub routectl_router::config::ProviderEntry::Gemini::runtime: routectl_router::Pr
 pub routectl_router::config::ProviderEntry::Gemini::user_agent: core::option::Option<alloc::string::String>
 #[non_exhaustive] pub routectl_router::config::ProviderEntry::OpenaiCompat
 pub routectl_router::config::ProviderEntry::OpenaiCompat::api_key_ref: alloc::string::String
+pub routectl_router::config::ProviderEntry::OpenaiCompat::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::OpenaiCompat::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::OpenaiCompat::base_url: alloc::string::String
 pub routectl_router::config::ProviderEntry::OpenaiCompat::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
@@ -1054,6 +1058,7 @@ pub routectl_router::config::ProviderEntry::OpenaiCompat::user_agent: core::opti
 pub routectl_router::config::ProviderEntry::OpenaiResponses::account_id_ref: core::option::Option<alloc::string::String>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::api_key_ref: alloc::string::String
 pub routectl_router::config::ProviderEntry::OpenaiResponses::auth_kind: routectl_providers::openai_responses::AuthKind
+pub routectl_router::config::ProviderEntry::OpenaiResponses::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::base_url: core::option::Option<alloc::string::String>
 pub routectl_router::config::ProviderEntry::OpenaiResponses::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
@@ -1068,6 +1073,7 @@ impl routectl_router::ProviderEntry
 pub fn routectl_router::ProviderEntry::anthropic_api(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::anthropic_beta_floor(&self) -> &[alloc::string::String]
 pub fn routectl_router::ProviderEntry::api_key_ref(&self) -> core::option::Option<&str>
+pub const fn routectl_router::ProviderEntry::auto_emit_per_block_breakpoints(&self) -> core::option::Option<bool>
 pub const fn routectl_router::ProviderEntry::auto_emit_top_level_breakpoint(&self) -> core::option::Option<bool>
 pub fn routectl_router::ProviderEntry::cache_capability(&self) -> routectl_router::CacheCapability
 pub fn routectl_router::ProviderEntry::codex_version(&self) -> core::option::Option<&str>
@@ -1079,10 +1085,12 @@ pub const fn routectl_router::ProviderEntry::kind_str(&self) -> &'static str
 pub fn routectl_router::ProviderEntry::openai_compat(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::openai_responses(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_router::ProviderEntry::payload_extras(&self) -> core::option::Option<&serde_json::value::Value>
+pub fn routectl_router::ProviderEntry::per_block_breakpoints_enabled(&self) -> bool
 pub fn routectl_router::ProviderEntry::redact_secrets(&mut self)
 pub const fn routectl_router::ProviderEntry::reduction_enabled(&self) -> core::option::Option<bool>
 pub const fn routectl_router::ProviderEntry::runtime(&self) -> &routectl_router::ProviderRuntimePolicy
 pub fn routectl_router::ProviderEntry::secret_uris(&self) -> alloc::vec::Vec<&str>
+pub const fn routectl_router::ProviderEntry::supports_per_block_breakpoints(&self) -> bool
 pub fn routectl_router::ProviderEntry::with_account_id_ref(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::with_anthropic_version(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::with_auth_kind(self, routectl_providers::anthropic_api::client::AuthKind) -> Self
@@ -2281,7 +2289,7 @@ impl core::cmp::Eq for routectl_router::ReductionConfig
 impl core::cmp::PartialEq for routectl_router::ReductionConfig
 pub fn routectl_router::ReductionConfig::eq(&self, &routectl_router::ReductionConfig) -> bool
 impl core::default::Default for routectl_router::ReductionConfig
-pub fn routectl_router::ReductionConfig::default() -> routectl_router::ReductionConfig
+pub fn routectl_router::ReductionConfig::default() -> Self
 impl core::fmt::Debug for routectl_router::ReductionConfig
 pub fn routectl_router::ReductionConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for routectl_router::ReductionConfig
@@ -3122,13 +3130,20 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::router::CapabilityObserveEvent::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::router::DispatchMeta
 pub routectl_router::router::DispatchMeta::attempt_count: u32
+pub routectl_router::router::DispatchMeta::cache_front_decision: core::option::Option<&'static str>
 pub routectl_router::router::DispatchMeta::cache_strategy: core::option::Option<&'static str>
+pub routectl_router::router::DispatchMeta::cache_terminal_decision: core::option::Option<&'static str>
 pub routectl_router::router::DispatchMeta::calib_estimated_tokens: core::option::Option<u64>
 pub routectl_router::router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::router::DispatchMeta::fallback_count: u32
 pub routectl_router::router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
+pub routectl_router::router::DispatchMeta::prefix_epoch_event: core::option::Option<i64>
+pub routectl_router::router::DispatchMeta::reduction_bytes_saved: core::option::Option<u64>
 pub routectl_router::router::DispatchMeta::reduction_strategy: core::option::Option<&'static str>
+pub routectl_router::router::DispatchMeta::reduction_strings_compressed: core::option::Option<u64>
+pub routectl_router::router::DispatchMeta::reduction_strings_rejected: core::option::Option<u64>
+pub routectl_router::router::DispatchMeta::reduction_strings_skipped: core::option::Option<u64>
 pub routectl_router::router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
 pub routectl_router::router::DispatchMeta::resolved_alias: alloc::string::String
 pub routectl_router::router::DispatchMeta::selection_decision: core::option::Option<&'static str>
@@ -3392,6 +3407,7 @@ pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
+pub fn routectl_router::router::Router::carry_over_prefix_epochs_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
@@ -5634,6 +5650,7 @@ pub routectl_router::ProviderEntry::AnthropicApi::allowed_betas: alloc::vec::Vec
 pub routectl_router::ProviderEntry::AnthropicApi::anthropic_version: alloc::string::String
 pub routectl_router::ProviderEntry::AnthropicApi::api_key_ref: alloc::string::String
 pub routectl_router::ProviderEntry::AnthropicApi::auth_kind: routectl_providers::anthropic_api::client::AuthKind
+pub routectl_router::ProviderEntry::AnthropicApi::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::ProviderEntry::AnthropicApi::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::AnthropicApi::base_url: alloc::string::String
 pub routectl_router::ProviderEntry::AnthropicApi::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
@@ -5651,6 +5668,7 @@ pub routectl_router::ProviderEntry::AnthropicApi::user_agent: core::option::Opti
 #[non_exhaustive] pub routectl_router::ProviderEntry::Bedrock
 pub routectl_router::ProviderEntry::Bedrock::anthropic_beta: alloc::vec::Vec<alloc::string::String>
 pub routectl_router::ProviderEntry::Bedrock::api_shape: routectl_router::BedrockApiShapeConfig
+pub routectl_router::ProviderEntry::Bedrock::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::ProviderEntry::Bedrock::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::Bedrock::cache_capability: core::option::Option<routectl_router::CacheCapability>
 pub routectl_router::ProviderEntry::Bedrock::creds: routectl_router::BedrockCredsConfig
@@ -5663,6 +5681,7 @@ pub routectl_router::ProviderEntry::Bedrock::user_agent: core::option::Option<al
 #[non_exhaustive] pub routectl_router::ProviderEntry::Gemini
 pub routectl_router::ProviderEntry::Gemini::api_key_ref: alloc::string::String
 pub routectl_router::ProviderEntry::Gemini::auth_mode: routectl_providers::gemini::cloudcode::GeminiAuthMode
+pub routectl_router::ProviderEntry::Gemini::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::ProviderEntry::Gemini::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::Gemini::base_url: alloc::string::String
 pub routectl_router::ProviderEntry::Gemini::cache_capability: core::option::Option<routectl_router::CacheCapability>
@@ -5673,6 +5692,7 @@ pub routectl_router::ProviderEntry::Gemini::runtime: routectl_router::ProviderRu
 pub routectl_router::ProviderEntry::Gemini::user_agent: core::option::Option<alloc::string::String>
 #[non_exhaustive] pub routectl_router::ProviderEntry::OpenaiCompat
 pub routectl_router::ProviderEntry::OpenaiCompat::api_key_ref: alloc::string::String
+pub routectl_router::ProviderEntry::OpenaiCompat::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::ProviderEntry::OpenaiCompat::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::OpenaiCompat::base_url: alloc::string::String
 pub routectl_router::ProviderEntry::OpenaiCompat::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
@@ -5686,6 +5706,7 @@ pub routectl_router::ProviderEntry::OpenaiCompat::user_agent: core::option::Opti
 pub routectl_router::ProviderEntry::OpenaiResponses::account_id_ref: core::option::Option<alloc::string::String>
 pub routectl_router::ProviderEntry::OpenaiResponses::api_key_ref: alloc::string::String
 pub routectl_router::ProviderEntry::OpenaiResponses::auth_kind: routectl_providers::openai_responses::AuthKind
+pub routectl_router::ProviderEntry::OpenaiResponses::auto_emit_per_block_breakpoints: core::option::Option<bool>
 pub routectl_router::ProviderEntry::OpenaiResponses::auto_emit_top_level_breakpoint: core::option::Option<bool>
 pub routectl_router::ProviderEntry::OpenaiResponses::base_url: core::option::Option<alloc::string::String>
 pub routectl_router::ProviderEntry::OpenaiResponses::bedrock_mantle: core::option::Option<routectl_router::BedrockMantleConfig>
@@ -5700,6 +5721,7 @@ impl routectl_router::ProviderEntry
 pub fn routectl_router::ProviderEntry::anthropic_api(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::anthropic_beta_floor(&self) -> &[alloc::string::String]
 pub fn routectl_router::ProviderEntry::api_key_ref(&self) -> core::option::Option<&str>
+pub const fn routectl_router::ProviderEntry::auto_emit_per_block_breakpoints(&self) -> core::option::Option<bool>
 pub const fn routectl_router::ProviderEntry::auto_emit_top_level_breakpoint(&self) -> core::option::Option<bool>
 pub fn routectl_router::ProviderEntry::cache_capability(&self) -> routectl_router::CacheCapability
 pub fn routectl_router::ProviderEntry::codex_version(&self) -> core::option::Option<&str>
@@ -5711,10 +5733,12 @@ pub const fn routectl_router::ProviderEntry::kind_str(&self) -> &'static str
 pub fn routectl_router::ProviderEntry::openai_compat(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::openai_responses(impl core::convert::Into<alloc::string::String>) -> Self
 pub const fn routectl_router::ProviderEntry::payload_extras(&self) -> core::option::Option<&serde_json::value::Value>
+pub fn routectl_router::ProviderEntry::per_block_breakpoints_enabled(&self) -> bool
 pub fn routectl_router::ProviderEntry::redact_secrets(&mut self)
 pub const fn routectl_router::ProviderEntry::reduction_enabled(&self) -> core::option::Option<bool>
 pub const fn routectl_router::ProviderEntry::runtime(&self) -> &routectl_router::ProviderRuntimePolicy
 pub fn routectl_router::ProviderEntry::secret_uris(&self) -> alloc::vec::Vec<&str>
+pub const fn routectl_router::ProviderEntry::supports_per_block_breakpoints(&self) -> bool
 pub fn routectl_router::ProviderEntry::with_account_id_ref(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::with_anthropic_version(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn routectl_router::ProviderEntry::with_auth_kind(self, routectl_providers::anthropic_api::client::AuthKind) -> Self
@@ -8222,13 +8246,20 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::DiffRow::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::DispatchMeta
 pub routectl_router::DispatchMeta::attempt_count: u32
+pub routectl_router::DispatchMeta::cache_front_decision: core::option::Option<&'static str>
 pub routectl_router::DispatchMeta::cache_strategy: core::option::Option<&'static str>
+pub routectl_router::DispatchMeta::cache_terminal_decision: core::option::Option<&'static str>
 pub routectl_router::DispatchMeta::calib_estimated_tokens: core::option::Option<u64>
 pub routectl_router::DispatchMeta::capability_observations: alloc::vec::Vec<routectl_router::router::CapabilityObserveEvent>
 pub routectl_router::DispatchMeta::cleared_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityClearedEvent>
 pub routectl_router::DispatchMeta::fallback_count: u32
 pub routectl_router::DispatchMeta::learned_capabilities: alloc::vec::Vec<routectl_router::router::CapabilityLearnEvent>
+pub routectl_router::DispatchMeta::prefix_epoch_event: core::option::Option<i64>
+pub routectl_router::DispatchMeta::reduction_bytes_saved: core::option::Option<u64>
 pub routectl_router::DispatchMeta::reduction_strategy: core::option::Option<&'static str>
+pub routectl_router::DispatchMeta::reduction_strings_compressed: core::option::Option<u64>
+pub routectl_router::DispatchMeta::reduction_strings_rejected: core::option::Option<u64>
+pub routectl_router::DispatchMeta::reduction_strings_skipped: core::option::Option<u64>
 pub routectl_router::DispatchMeta::replay_degradation: core::option::Option<routectl_router::router::ReplayDegradation>
 pub routectl_router::DispatchMeta::resolved_alias: alloc::string::String
 pub routectl_router::DispatchMeta::selection_decision: core::option::Option<&'static str>
@@ -10568,7 +10599,7 @@ impl core::cmp::Eq for routectl_router::ReductionConfig
 impl core::cmp::PartialEq for routectl_router::ReductionConfig
 pub fn routectl_router::ReductionConfig::eq(&self, &routectl_router::ReductionConfig) -> bool
 impl core::default::Default for routectl_router::ReductionConfig
-pub fn routectl_router::ReductionConfig::default() -> routectl_router::ReductionConfig
+pub fn routectl_router::ReductionConfig::default() -> Self
 impl core::fmt::Debug for routectl_router::ReductionConfig
 pub fn routectl_router::ReductionConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for routectl_router::ReductionConfig
@@ -10919,6 +10950,7 @@ pub fn routectl_router::router::Router::calibration_lanes(&self) -> alloc::vec::
 pub fn routectl_router::router::Router::carry_over_calibration_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_k_store_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_learned_from(&mut self, &Self)
+pub fn routectl_router::router::Router::carry_over_prefix_epochs_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
@@ -12203,6 +12235,7 @@ pub fn routectl_router::overall_exit(&[routectl_router::Finding]) -> i32
 pub fn routectl_router::overlay_default_path() -> std::path::PathBuf
 pub const fn routectl_router::overlay_revision(&routectl_router::CatalogOverlay) -> u64
 pub fn routectl_router::parse_config(&str) -> core::result::Result<routectl_router::config::Config, alloc::string::String>
+pub fn routectl_router::per_block_breakpoint_warnings(&routectl_router::config::Config) -> alloc::vec::Vec<alloc::string::String>
 pub fn routectl_router::persist_catalog_import_baseline(&std::path::Path, &str, &routectl_router::ShrinkCounts, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>)
 pub fn routectl_router::plan_migration(&toml_edit::document::DocumentMut, u32, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &std::path::Path) -> core::result::Result<routectl_router::MigrationPlan, routectl_router::MigrateError>
 pub fn routectl_router::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>

@@ -153,6 +153,7 @@ fn build_router_with_chain(
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -172,6 +173,7 @@ fn build_router_with_chain(
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -430,6 +432,7 @@ fn build_router_two_models_one_provider(
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -591,6 +594,7 @@ fn helper_distinguishes_provider_and_model_source() {
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -1132,6 +1136,7 @@ fn beta_pinned_reads_provider_and_model_floors_and_ignores_non_beta_strips() {
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -1176,6 +1181,7 @@ fn bedrock_provider_beta_floor_routes_away_never_strips() {
             anthropic_beta: vec!["context-management-2025-06-27".to_string()],
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         },
@@ -1467,6 +1473,7 @@ fn bedrock_target_threads_kind_so_dotted_capability_resolves_to_head() {
             anthropic_beta: vec![],
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         },

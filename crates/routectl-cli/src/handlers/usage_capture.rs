@@ -91,6 +91,9 @@ pub(crate) fn build_usage_draft(
         reduction_strings_skipped: None,
         reduction_strings_rejected: None,
         reduction_bytes_saved: None,
+        cache_front_decision: None,
+        cache_terminal_decision: None,
+        prefix_epoch_event: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -453,6 +456,11 @@ impl UsageCapture {
         self.record.reduction_strings_skipped = meta.reduction_strings_skipped;
         self.record.reduction_strings_rejected = meta.reduction_strings_rejected;
         self.record.reduction_bytes_saved = meta.reduction_bytes_saved;
+        // Closed-set decision tokens and one INTEGER epoch fact -- same
+        // no-payload-bytes property as the reduction columns above.
+        self.record.cache_front_decision = meta.cache_front_decision.map(str::to_string);
+        self.record.cache_terminal_decision = meta.cache_terminal_decision.map(str::to_string);
+        self.record.prefix_epoch_event = meta.prefix_epoch_event;
         self.drain_capability_events(meta, catalog_version, overlay_revision);
     }
 

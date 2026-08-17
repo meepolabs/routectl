@@ -102,6 +102,7 @@ fn anthropic_api_entry() -> ProviderEntry {
         max_thinking_entry_bytes: None,
         cache_capability: None,
         auto_emit_top_level_breakpoint: None,
+        auto_emit_per_block_breakpoints: None,
         reduction_enabled: None,
         cloak: routectl_providers::anthropic_api::CloakConfig::default(),
         #[cfg(feature = "bedrock")]
@@ -121,6 +122,7 @@ fn openai_compat_entry() -> ProviderEntry {
         user_agent: None,
         cache_capability: None,
         auto_emit_top_level_breakpoint: None,
+        auto_emit_per_block_breakpoints: None,
         reduction_enabled: None,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: None,
@@ -160,6 +162,7 @@ fn bedrock_entry() -> ProviderEntry {
         anthropic_beta: vec![],
         cache_capability: None,
         auto_emit_top_level_breakpoint: None,
+        auto_emit_per_block_breakpoints: None,
         reduction_enabled: None,
         runtime: ProviderRuntimePolicy::default(),
     }

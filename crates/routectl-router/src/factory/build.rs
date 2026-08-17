@@ -237,6 +237,7 @@ async fn build_provider_inner(
             user_agent,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            auto_emit_per_block_breakpoints: _,
             reduction_enabled: _,
             #[cfg(feature = "bedrock")]
             bedrock_mantle,
@@ -326,6 +327,7 @@ async fn build_provider_inner(
             max_thinking_entry_bytes,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            auto_emit_per_block_breakpoints: _,
             reduction_enabled: _,
             cloak,
             #[cfg(feature = "bedrock")]
@@ -481,6 +483,7 @@ async fn build_provider_inner(
             codex_version: _,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            auto_emit_per_block_breakpoints: _,
             reduction_enabled: _,
             #[cfg(feature = "bedrock")]
             bedrock_mantle,
@@ -609,6 +612,7 @@ async fn build_provider_inner(
             anthropic_beta,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            auto_emit_per_block_breakpoints: _,
             reduction_enabled: _,
             runtime: _,
         } => {
@@ -664,6 +668,7 @@ async fn build_provider_inner(
             auth_mode,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            auto_emit_per_block_breakpoints: _,
             reduction_enabled: _,
             runtime: _,
         } => {

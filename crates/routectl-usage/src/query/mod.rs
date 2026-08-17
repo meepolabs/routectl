@@ -1,6 +1,7 @@
 //! Usage read-query facade and shared row/error types.
 
 mod aggregate;
+mod cache_decision;
 mod calibration;
 mod capability;
 mod deadline;
@@ -11,6 +12,7 @@ mod would_trim;
 pub use aggregate::{
     QuotaSnapshot, aggregate, earliest_ts_start, errors_by_class, latest_quota_by_seat, ttfbs,
 };
+pub use cache_decision::{CacheDecisionSummary, cache_decision_summary};
 pub use calibration::{CalibrationSampleRow, read_calibration_samples_since};
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,

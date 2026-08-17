@@ -204,6 +204,7 @@ mod build_resolved_models_tests {
             anthropic_beta: Vec::new(),
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime: Default::default(),
         };
@@ -1313,6 +1314,7 @@ mod gemini_cloud_code_factory_tests {
                 auth_mode,
                 cache_capability,
                 auto_emit_top_level_breakpoint,
+                auto_emit_per_block_breakpoints,
                 reduction_enabled,
                 runtime,
                 ..
@@ -1325,6 +1327,7 @@ mod gemini_cloud_code_factory_tests {
                 auth_mode,
                 cache_capability,
                 auto_emit_top_level_breakpoint,
+                auto_emit_per_block_breakpoints,
                 reduction_enabled,
                 runtime,
             },

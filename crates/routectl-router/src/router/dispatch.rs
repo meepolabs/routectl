@@ -13,8 +13,9 @@ use std::time::{Duration, Instant, SystemTime};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result,
-    cache_control::{MAX_BREAKPOINTS, validate_source},
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, ReplayScheme,
+    Result,
+    cache_control::{MAX_BREAKPOINTS, system_block_is_wire_eligible, validate_source},
     context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
     failure_class::{
         ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify, classify_with_attempt,
@@ -33,7 +34,7 @@ use crate::cost_gate::break_even_k;
 use crate::feature_keys::derive_feature_keys;
 
 use super::ReplayDegradation;
-use super::cache_plan::{AutoCacheRequestPlan, CacheInjection};
+use super::cache_plan::{AutoCacheRequestPlan, CacheDecision, CacheInjection};
 use super::capability_learn::LearnDedupeKey;
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
@@ -273,6 +274,11 @@ impl Router {
         if auto_cache_plan.has_caller_breakpoints {
             self.warn_volatile_in_caller_prefix(&req);
         }
+        // Prefix-rewrite detector: ONCE per client request, off the ORIGINAL
+        // req and above the chain loop for the same reason the auto-cache plan
+        // is -- it observes the CLIENT's bytes, which do not vary by target,
+        // and its output must never reach the per-target emission path.
+        self.observe_prefix_epoch(&req, meta);
         let mut last_err: Option<Error> = None;
         // One learned-capability observation per request per
         // (state_key, feature): the error arm fires per attempt, so this
@@ -364,30 +370,33 @@ impl Router {
                 &mut attempt_req,
                 meta,
             );
-            // Auto-cache: maybe inject a top-level cache_control breakpoint
+            // Auto-cache: maybe inject the front + terminal cache markers
             // on THIS per-attempt clone, after overlays (the last
-            // dispatch-time touch of cache_control) and before the retry
+            // dispatch-time touch of any cache marker) and before the retry
             // loop, so every retry on this target reuses identical bytes.
-            // Never mutates the original `req`; any doubt sends un-injected.
-            let cache_injection = maybe_apply_auto_cache_control(
+            // Transactional: both markers validate as one candidate and
+            // commit or discard together. Never mutates the original `req`;
+            // any doubt sends un-injected.
+            let cache_decision = apply_auto_cache_placement(
                 &mut attempt_req,
                 &auto_cache_plan,
-                provider_cfg.map(crate::config::ProviderEntry::cache_capability),
-                provider_cfg
-                    .and_then(crate::config::ProviderEntry::auto_emit_top_level_breakpoint)
-                    .unwrap_or(true),
+                cache_target_gates(provider_cfg),
             );
-            // Cache observability: stamp the per-request decision token so the
-            // outcome log can see what was decided (the usage DB's
-            // `strategy` column is write-stopped), and
-            // emit the per-request decision at debug. No bodies / secrets:
-            // only provider name, model id, and the stable strategy token.
-            let strategy_token = cache_injection.strategy_str();
-            meta.cache_strategy = Some(strategy_token);
+            // Cache observability: stamp the per-marker decision tokens so
+            // the outcome log and the usage ledger can see what was decided,
+            // and emit the per-request decision at debug. No bodies /
+            // secrets: only provider name, model id, and stable tokens.
+            let front_token = cache_decision.front.strategy_str();
+            let terminal_token = cache_decision.terminal.strategy_str();
+            meta.cache_strategy = Some(terminal_token);
+            meta.cache_front_decision = Some(front_token);
+            meta.cache_terminal_decision = Some(terminal_token);
             tracing::debug!(
                 provider = %provider_name,
                 model = %model,
-                strategy = strategy_token,
+                strategy = terminal_token,
+                front_decision = front_token,
+                terminal_decision = terminal_token,
                 "cache_auto_decision",
             );
 
@@ -1039,6 +1048,10 @@ impl Router {
         if auto_cache_plan.has_caller_breakpoints {
             self.warn_volatile_in_caller_prefix(&req);
         }
+        // Prefix-rewrite detector -- see `complete_inner`. Same once-per-client-
+        // request placement above the chain loop, so the streaming path is not a
+        // second site that mints an extra observation for the same turn.
+        self.observe_prefix_epoch(&req, meta);
         let mut last_err: Option<Error> = None;
         // One learned-capability observation per request per
         // (state_key, feature): the error arm fires per attempt, so this
@@ -1116,25 +1129,28 @@ impl Router {
                 meta,
             );
             // Auto-cache: see `complete_inner`. Same once-vs-per-attempt
-            // split; injected on this clone after overlays, before the
-            // inner loop. Original `req` is never mutated.
-            let cache_injection = maybe_apply_auto_cache_control(
+            // split and the same transactional commit-or-discard; injected
+            // on this clone after overlays, before the inner loop. Original
+            // `req` is never mutated.
+            let cache_decision = apply_auto_cache_placement(
                 &mut attempt_req,
                 &auto_cache_plan,
-                provider_cfg.map(crate::config::ProviderEntry::cache_capability),
-                provider_cfg
-                    .and_then(crate::config::ProviderEntry::auto_emit_top_level_breakpoint)
-                    .unwrap_or(true),
+                cache_target_gates(provider_cfg),
             );
-            // Cache observability: see `complete_inner`. Stamp the decision
-            // token and emit the per-request decision at debug. No bodies /
-            // secrets: only provider name, model id, strategy token.
-            let strategy_token = cache_injection.strategy_str();
-            meta.cache_strategy = Some(strategy_token);
+            // Cache observability: see `complete_inner`. Stamp the per-marker
+            // decision tokens and emit the per-request decision at debug. No
+            // bodies / secrets: only provider name, model id, stable tokens.
+            let front_token = cache_decision.front.strategy_str();
+            let terminal_token = cache_decision.terminal.strategy_str();
+            meta.cache_strategy = Some(terminal_token);
+            meta.cache_front_decision = Some(front_token);
+            meta.cache_terminal_decision = Some(terminal_token);
             tracing::debug!(
                 provider = %provider_name,
                 model = %model,
-                strategy = strategy_token,
+                strategy = terminal_token,
+                front_decision = front_token,
+                terminal_decision = terminal_token,
                 "cache_auto_decision",
             );
 
@@ -2112,63 +2128,250 @@ pub(super) const fn reduction_strategy_token(
     }
 }
 
-/// Decide-and-maybe-inject a single top-level `cache_control` ephemeral_5m
-/// breakpoint on the PER-ATTEMPT clone. Mutates ONLY `attempt_req`, never
-/// the original request. Never returns `Err` and never panics: any doubt
-/// degrades to "dispatch the un-injected clone".
+/// Config inputs the placement step reads per dispatch target. Grouped so
+/// the two call sites (completion + streaming) pass one value and cannot
+/// drift in argument order.
+#[derive(Debug, Clone, Copy)]
+struct CacheTargetGates {
+    /// The target provider's prompt-cache capability, `None` when the
+    /// provider is absent from the table (fail closed).
+    capability: Option<CacheCapability>,
+    /// Per-provider `auto_emit_top_level_breakpoint`, resolved (absent
+    /// inherits the global switch).
+    terminal_enabled: bool,
+    /// Whether the target's EGRESS can carry a per-block marker to the
+    /// wire (`ProviderEntry::supports_per_block_breakpoints`) -- the front
+    /// marker's capability gate, distinct from the operator switch below.
+    front_supported: bool,
+    /// Per-provider `auto_emit_per_block_breakpoints`, resolved through
+    /// `ProviderEntry::per_block_breakpoints_enabled` (absent takes the
+    /// kind-level default). Operator INTENT: placement also requires
+    /// `front_supported`.
+    front_enabled: bool,
+}
+
+/// Resolve the per-target cache gates from the target's `[providers.X]`
+/// entry. An absent entry fails closed on every gate (no capability, no
+/// per-block support, no default to read). One resolver so the completion
+/// and streaming call sites cannot resolve the knobs differently.
+fn cache_target_gates(provider_cfg: Option<&crate::config::ProviderEntry>) -> CacheTargetGates {
+    CacheTargetGates {
+        capability: provider_cfg.map(crate::config::ProviderEntry::cache_capability),
+        terminal_enabled: provider_cfg
+            .and_then(crate::config::ProviderEntry::auto_emit_top_level_breakpoint)
+            .unwrap_or(true),
+        front_supported: provider_cfg
+            .is_some_and(crate::config::ProviderEntry::supports_per_block_breakpoints),
+        front_enabled: provider_cfg
+            .is_some_and(crate::config::ProviderEntry::per_block_breakpoints_enabled),
+    }
+}
+
+/// Decide-and-maybe-inject the auto-cache markers on the PER-ATTEMPT
+/// clone, TRANSACTIONALLY: both candidate markers are applied to one
+/// throwaway clone, the complete breakpoint sequence is validated ONCE,
+/// and the candidate is then committed whole or discarded whole. Mutates
+/// ONLY `attempt_req`, never the original request. Never returns `Err`
+/// and never panics: any doubt degrades to "dispatch the un-injected
+/// clone".
 ///
-/// clone -> set -> validate -> keep-or-rollback: the only mutation is a
-/// single assignment to `attempt_req.cache_control`, and it is reverted if
-/// `validate_source` rejects the injected shape. Called once per chain
-/// entry, AFTER `apply_layered_overlays` (so injection is the last
-/// dispatch-time touch of `cache_control`) and before the inner retry
-/// loop, so all retries on a target reuse byte-identical bytes.
+/// Two markers, independently gated:
 ///
-/// `capability` is `None` when the target's provider is absent from the
-/// table -> fail closed (no injection). Cheap field checks run before the
-/// validate call so the common skip paths never allocate.
+/// - FRONT -- a per-block `cache_control` on the resolved
+///   [`FrontSlot`] (the last wire-eligible system block, else the last
+///   custom tool). Requires BOTH the provider's
+///   `auto_emit_per_block_breakpoints` (operator intent) AND
+///   `supports_per_block_breakpoints` (wire capability: anthropic-api and
+///   Bedrock Converse, where the egress translates the marker into a
+///   `cachePoint` block). `CacheCapability` does NOT gate it -- that
+///   struct describes the TOP-LEVEL field only.
+/// - TERMINAL -- the top-level `cache_control` field. Gated by the
+///   provider's `auto_emit_top_level_breakpoint` and by
+///   `supports_top_level_cache_control`, exactly as before.
+///
+/// The global `[cache] auto_emit_top_level_breakpoint` switch is the
+/// master kill for dispatch-path auto-emission and withholds BOTH
+/// markers, so an operator who has auto-emit off today never starts
+/// receiving a front marker.
+///
+/// Rollback is by construction: the pre-cache request is never mutated
+/// until the candidate validates, so a discarded candidate preserves
+/// every overlay / strip / minify change AND every cache-placement slot
+/// (tools, system, messages, top-level) with no restore bookkeeping. On
+/// validation failure both provisionally-emitted markers record
+/// [`CacheInjection::ValidationRolledBack`]; a marker already skipped
+/// keeps its own reason.
+///
+/// Called once per chain entry, AFTER `apply_layered_overlays` (so
+/// injection is the last dispatch-time touch of any cache marker) and
+/// before the inner retry loop, so all retries on a target reuse
+/// byte-identical bytes. A fallback target starts from a fresh clone of
+/// the canonical request, so a discarded candidate on one target cannot
+/// contaminate the next.
 ///
 /// `caller_supplied` is evaluated FIRST as a request-level fact: a request
 /// that already carries caller breakpoints is independent of which target /
 /// provider is selected, so it takes precedence over every per-target /
 /// config `auto_skipped:*` reason (global / provider kill-switch, capability).
-fn maybe_apply_auto_cache_control(
+fn apply_auto_cache_placement(
     attempt_req: &mut ChatRequest,
     plan: &AutoCacheRequestPlan,
-    capability: Option<CacheCapability>,
-    provider_auto_emit_enabled: bool,
-) -> CacheInjection {
-    if plan.has_caller_breakpoints {
-        return CacheInjection::SkippedCallerSupplied;
-    }
-    if !plan.global_auto_emit_enabled {
-        return CacheInjection::SkippedGlobalDisabled;
-    }
-    if !provider_auto_emit_enabled {
-        return CacheInjection::SkippedProviderDisabled;
-    }
-    match capability {
-        Some(c) if c.supports_top_level_cache_control => {}
-        _ => return CacheInjection::SkippedNoCapability,
-    }
-    if plan.volatile_high_veto {
-        return CacheInjection::SkippedVolatileHigh;
-    }
-    // Defensive drift guard: no-caller implies 0 today, so +1 is always
-    // within MAX. Kept so a future change that injects alongside caller
-    // markers cannot silently exceed the cap.
-    if plan.caller_breakpoint_count.saturating_add(1) > MAX_BREAKPOINTS {
-        return CacheInjection::SkippedBreakpointCap;
+    gates: CacheTargetGates,
+) -> CacheDecision {
+    if let Some(reason) = shared_skip_reason(plan) {
+        return CacheDecision {
+            front: reason,
+            terminal: reason,
+        };
     }
 
-    // clone -> set -> validate -> keep-or-rollback, local to this clone.
-    let original = attempt_req.cache_control.clone();
-    attempt_req.cache_control = Some(CacheControl::ephemeral_5m());
-    if validate_source(attempt_req).is_ok() {
-        CacheInjection::Emitted
+    let mut front = if !gates.front_enabled {
+        CacheInjection::SkippedProviderDisabled
+    } else if !gates.front_supported {
+        // An explicit opt-in on a kind whose egress cannot carry a
+        // per-block marker is INERT, not honored: emitting here would ship
+        // a marker the wire drops (openai-compat WARNs and 400s under
+        // strict_translation) while recording a false `auto_emitted`.
+        CacheInjection::SkippedNoCapability
+    } else if plan.volatile_high_veto {
+        CacheInjection::SkippedVolatileHigh
+    } else if plan.front_slot.is_none() {
+        CacheInjection::SkippedNoPlacementRegion
     } else {
-        attempt_req.cache_control = original;
-        CacheInjection::ValidationRolledBack
+        CacheInjection::Emitted
+    };
+    let terminal = if !gates.terminal_enabled {
+        CacheInjection::SkippedProviderDisabled
+    } else if !gates
+        .capability
+        .is_some_and(|c| c.supports_top_level_cache_control)
+    {
+        CacheInjection::SkippedNoCapability
+    } else if plan.volatile_high_veto {
+        CacheInjection::SkippedVolatileHigh
+    } else {
+        CacheInjection::Emitted
+    };
+
+    let intended = usize::from(front == CacheInjection::Emitted)
+        + usize::from(terminal == CacheInjection::Emitted);
+    if intended == 0 {
+        return CacheDecision { front, terminal };
+    }
+    // Defensive drift guard: no-caller implies 0 today, so +2 is always
+    // within MAX. Kept so a future change that injects alongside caller
+    // markers cannot silently exceed the cap.
+    if plan.caller_breakpoint_count.saturating_add(intended) > MAX_BREAKPOINTS {
+        return CacheDecision {
+            front: cap_skip(front),
+            terminal: cap_skip(terminal),
+        };
+    }
+
+    // The candidate is a throwaway clone: nothing observable is mutated
+    // until it validates, which IS the rollback.
+    let mut candidate = attempt_req.clone();
+    if let (CacheInjection::Emitted, Some(slot)) = (front, plan.front_slot) {
+        // The slot index was resolved off the ORIGINAL request; a
+        // dispatch-time step (strip, a payload overlay) may have reshaped
+        // system / tools since. Placement fails closed rather than
+        // marking a different element than the one that was selected.
+        if !place_front_marker(&mut candidate, slot) {
+            front = CacheInjection::SkippedNoPlacementRegion;
+        }
+    }
+    if terminal == CacheInjection::Emitted {
+        candidate.cache_control = Some(CacheControl::ephemeral_5m());
+    }
+    if front != CacheInjection::Emitted && terminal != CacheInjection::Emitted {
+        return CacheDecision { front, terminal };
+    }
+
+    if validate_source(&candidate).is_ok() {
+        *attempt_req = candidate;
+        CacheDecision { front, terminal }
+    } else {
+        CacheDecision {
+            front: rollback_skip(front),
+            terminal: rollback_skip(terminal),
+        }
+    }
+}
+
+/// Request-level reasons that withhold BOTH markers, in precedence order.
+/// `None` means the request itself is eligible and the per-marker gates
+/// decide.
+///
+/// The high-confidence volatile veto is NOT here: it is applied per marker
+/// so it keeps its existing precedence BELOW the per-target config and
+/// capability gates, leaving the terminal marker's recorded token
+/// unchanged from before per-marker placement existed.
+const fn shared_skip_reason(plan: &AutoCacheRequestPlan) -> Option<CacheInjection> {
+    if plan.has_caller_breakpoints {
+        return Some(CacheInjection::SkippedCallerSupplied);
+    }
+    if !plan.global_auto_emit_enabled {
+        return Some(CacheInjection::SkippedGlobalDisabled);
+    }
+    None
+}
+
+/// Fold a per-marker decision through the breakpoint-cap refusal: a
+/// marker that was going to be emitted records the cap, a marker already
+/// skipped keeps its own reason.
+const fn cap_skip(decision: CacheInjection) -> CacheInjection {
+    match decision {
+        CacheInjection::Emitted => CacheInjection::SkippedBreakpointCap,
+        other => other,
+    }
+}
+
+/// Fold a per-marker decision through a whole-candidate validation
+/// failure: a marker that was applied to the discarded candidate records
+/// the rollback, a marker already skipped keeps its own reason.
+const fn rollback_skip(decision: CacheInjection) -> CacheInjection {
+    match decision {
+        CacheInjection::Emitted => CacheInjection::ValidationRolledBack,
+        other => other,
+    }
+}
+
+/// Write an ephemeral_5m marker into `slot` on `req`. Returns false when
+/// the slot no longer resolves to the element that was selected (a
+/// reshaped system / tools array), leaving `req` untouched.
+///
+/// CONSTRAINT (accepted, measured rather than fixed): a marker on a system
+/// block that a downstream egress DROPS -- the billing-attribution strip in
+/// `routectl-providers` `system_filter` removes a Claude Code attribution
+/// block -- silently never reaches the wire. Coupling this placement to
+/// that providers-crate predicate would invert the crate dependency; the
+/// divergence is diagnosable instead by comparing the recorded decision
+/// against the observed `detect_prompt_caching` outcome.
+fn place_front_marker(req: &mut ChatRequest, slot: FrontSlot) -> bool {
+    match slot {
+        FrontSlot::LastSystemBlock { block_index } => {
+            let Some(routectl_core::SystemContent::Blocks(blocks)) = req.system.as_mut() else {
+                return false;
+            };
+            let Some(block) = blocks.get_mut(block_index) else {
+                return false;
+            };
+            if !system_block_is_wire_eligible(block) {
+                return false;
+            }
+            block.cache_control = Some(CacheControl::ephemeral_5m());
+            true
+        }
+        FrontSlot::LastCustomTool { tool_index } => {
+            let Some(tools) = req.tools.as_mut() else {
+                return false;
+            };
+            let Some(routectl_core::ToolDef::Custom(tool)) = tools.get_mut(tool_index) else {
+                return false;
+            };
+            tool.cache_control = Some(CacheControl::ephemeral_5m());
+            true
+        }
     }
 }
 

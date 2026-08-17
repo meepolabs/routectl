@@ -414,29 +414,42 @@ never bodies, prompt content, or secrets.
 ### `cache_auto_decision` (DEBUG, per dispatch)
 
 Emitted once per dispatch target with the decision the auto-emitter
-made for that target.
+made for that target. routectl places up to TWO markers per request -- a
+FRONT per-block marker (on the last wire-eligible system block, else the
+last custom tool) and a TERMINAL top-level marker -- so the line carries
+one decision per marker plus the legacy aggregate.
 
-| Field      | Meaning                                                        |
-|------------|----------------------------------------------------------------|
-| `provider` | The provider name the request dispatched to.                   |
-| `model`    | The resolved model id.                                         |
-| `strategy` | The stable decision token (vocabulary below).                  |
+| Field                | Meaning                                                   |
+|----------------------|-----------------------------------------------------------|
+| `provider`           | The provider name the request dispatched to.              |
+| `model`              | The resolved model id.                                    |
+| `strategy`           | The TERMINAL marker's decision token (vocabulary below); kept under this name for continuity with existing log consumers. |
+| `front_decision`     | The FRONT marker's decision token, same vocabulary.       |
+| `terminal_decision`  | The TERMINAL marker's decision token, same vocabulary.    |
 
-The `strategy` token is a stable contract, but a LOG-ONLY one: the usage
-DB's `strategy` column is write-stopped (retained in the schema, NULL for
-every row written by this version onward), so this DEBUG line is the only
-place the token appears -- it is not persisted anywhere:
+The two markers are gated independently, so the tokens routinely differ:
+a Bedrock Converse target records `auto_emitted` for the front marker and
+`auto_skipped:no_capability` for the terminal one, and an opted-in
+openai-compat target records `auto_skipped:no_capability` for the front
+marker (its egress cannot carry one). Request-level facts
+(`caller_supplied`, `auto_skipped:global_disabled`) apply to both.
+
+The tokens are one vocabulary shared by this log line and the usage
+ledger's `cache_front_decision` / `cache_terminal_decision` columns. The
+legacy `requests.strategy` column stays write-stopped (retained in the
+schema, NULL for every row written by this version onward):
 
 | Token                                  | Meaning                                                                 |
 |----------------------------------------|-------------------------------------------------------------------------|
-| `auto_emitted`                         | routectl injected a top-level ephemeral_5m breakpoint.                  |
+| `auto_emitted`                         | routectl injected an ephemeral_5m breakpoint in this marker's slot.     |
 | `caller_supplied`                      | The caller already supplied a breakpoint; routectl deferred entirely.   |
 | `volatile_vetoed`                      | The stable prefix carried high-confidence volatile tokens; vetoed.      |
-| `auto_skipped:global_disabled`         | `[cache] auto_emit_top_level_breakpoint = false`.                       |
-| `auto_skipped:provider_disabled`       | The provider's `auto_emit_top_level_breakpoint = false`.                |
-| `auto_skipped:no_capability`           | The provider does not honor a top-level breakpoint (or capability unknown -- fail closed). |
+| `auto_skipped:global_disabled`         | `[cache] auto_emit_top_level_breakpoint = false` (the master kill for both markers). |
+| `auto_skipped:provider_disabled`       | The provider's `auto_emit_top_level_breakpoint = false` (terminal) or `auto_emit_per_block_breakpoints = false` (front). |
+| `auto_skipped:no_capability`           | The target's egress cannot carry this marker (or its capability is unknown -- fail closed): no top-level support for the terminal marker, no per-block surface for the front marker. |
 | `auto_skipped:breakpoint_cap`          | Injecting would exceed the 4-breakpoint maximum.                        |
-| `auto_skipped:validation_rolled_back`  | Injection was attempted but failed post-injection validation; rolled back. |
+| `auto_skipped:no_placement_region`     | The request offers no slot this marker could occupy -- a front marker on a flat-string system with no typed custom tool. |
+| `auto_skipped:validation_rolled_back`  | Injection was attempted but the combined breakpoint sequence failed validation; the whole candidate was discarded. |
 
 ### `cache_auto_outcome` (DEBUG healthy / WARN on thrash)
 
@@ -498,6 +511,46 @@ request:
 
 Counts, ids, and stable tokens only -- never bodies, prompt content, or
 secrets.
+
+### `cache_prefix_rewritten_in_epoch` (WARN)
+
+Emitted when the prefix-rewrite detector observes that the CLIENT rewrote
+history inside its own conversation prefix. The detector runs once per client
+request, before any dispatch target is chosen, over the raw canonical prefix
+(system + tools + every message except the newest turn -- the newest turn grows
+every turn by construction, so including it would report a rewrite every time).
+A rewritten prefix invalidates the upstream cache from the rewrite point
+onward, so every later turn pays full input price on bytes that were already
+cached.
+
+| Field                 | Meaning                                                                |
+|-----------------------|------------------------------------------------------------------------|
+| `session_key_hash`    | Per-process-salted hash of the inbound session key. Stable within one run so an operator can correlate lines, unpredictable across runs. The raw key is never logged. |
+| `previous_prefix_len` | Message count the stored baseline prefix covered.                      |
+| `prefix_len`          | Message count the prefix covers on this turn.                          |
+| `epoch`               | Rewrites observed for this session within its tracked lifetime.        |
+
+Dedup is per-process edge-triggered: the FIRST in-epoch rewrite any session
+shows emits this WARN, and later rewrites stay silent (same trade as
+`cache_volatile_in_caller_prefix`). The unsuppressed volume rides the usage
+DB's `prefix_epoch_event` column instead -- 0 stable, 1 rewritten, 2 reseeded.
+
+Never a false positive, by construction:
+
+- A prefix that SHORTENED is recognized by length alone as the compaction shape
+  (a summary replacing history) -- recorded as a reseed, never warned. The
+  accepted residual is a bounded false NEGATIVE: a rewrite that also shortens
+  the prefix is unobservable.
+- A first-seen session (including the first turn after a process restart, and a
+  session evicted from the bounded store) is recorded as a baseline with no
+  classification and no WARN.
+- A request carrying no session key produces no state and no WARN -- there is
+  nothing to compare a later turn against.
+
+**Remedy:** the rewrite happens client-side, so routectl cannot fix it. Look
+for a client that edits, re-orders, or re-renders earlier turns (a re-generated
+system preamble, a re-serialized tool history, an injected per-turn timestamp)
+rather than only appending to them.
 
 ## Startup cache-policy banner
 

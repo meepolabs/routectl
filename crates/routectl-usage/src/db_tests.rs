@@ -1690,7 +1690,7 @@ fn v14_to_v15_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
     assert_eq!(
         table_shape(&migrated, "requests"),
         table_shape(fresh.conn(), "requests"),
-        "a migrated v14 DB must be indistinguishable from a fresh v15 DB"
+        "a migrated v14 DB must be indistinguishable from a fresh one"
     );
 
     // Idempotent: a second pass over an already-current DB is a no-op.
@@ -1699,7 +1699,151 @@ fn v14_to_v15_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
     assert!(has_column(&migrated, "reduction_bytes_saved"));
 }
 
-/// Pins the physical `requests` DDL shape: 64 columns, in this exact
+/// The `requests` DDL as it stood before the v16 cache-decision set was
+/// appended: the current DDL truncated right after the last v15 column. Derived
+/// from the live constant rather than hand-copied so it cannot silently diverge
+/// from the real prior shape.
+fn requests_ddl_without_cache_decision_columns() -> String {
+    const LAST_V15_COLUMN: &str = "    reduction_bytes_saved INTEGER,";
+    let (head, tail) = CREATE_REQUESTS_TABLE
+        .split_once(LAST_V15_COLUMN)
+        .expect("current DDL still ends its v15 column set with reduction_bytes_saved");
+    assert!(
+        tail.contains("cache_front_decision") && tail.contains("prefix_epoch_event"),
+        "the cache-decision set must be the trailing appended block"
+    );
+    format!("{head}    reduction_bytes_saved INTEGER\n)")
+}
+
+/// A v15 DB (created before the cache-decision set existed) must migrate to v16
+/// with a schema PHYSICALLY IDENTICAL to a fresh v16 DB -- same columns, same
+/// declared types, same null-ability, same order. Any pre-existing row survives
+/// with all three columns NULL (no backfill), the write-stopped legacy
+/// `strategy` column is left alone, and a second pass is a no-op.
+#[test]
+fn v15_to_v16_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
+    // Arrange: a genuine v15-shaped `requests` table (the full current DDL
+    // minus the three appended columns) carrying a pre-migration row.
+    let (_migrated_dir, migrated_path) = temp_db_path();
+    let migrated = Connection::open(&migrated_path).expect("raw open");
+    migrated
+        .execute_batch(&requests_ddl_without_cache_decision_columns())
+        .expect("build v15 requests table");
+    migrated
+        .execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('schema_version', '15');
+             INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, input_tokens, \
+                 reduction_bytes_saved) \
+                 VALUES (1, 2, 'pre-cache-decision-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, \
+                 1, 0, 100, 900);
+             PRAGMA user_version = 15;",
+        )
+        .expect("seed v15 db");
+    assert_eq!(user_version(&migrated), 15);
+    let has_column = |c: &Connection, name: &str| -> bool {
+        c.prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name=?1")
+            .expect("prepare")
+            .exists([name])
+            .expect("query")
+    };
+    assert!(
+        !has_column(&migrated, "cache_front_decision"),
+        "sanity: the v15 table carries none of the cache-decision columns"
+    );
+    assert!(
+        has_column(&migrated, "strategy"),
+        "sanity: the v15 table still carries the write-stopped legacy column"
+    );
+
+    // Act
+    let version = migrate_to_current(&migrated, 0).expect("migrate v15->v16");
+
+    // Assert: version landed, and the pre-migration row survives with its
+    // prior columns intact and all three new ones NULL.
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(user_version(&migrated), SCHEMA_VERSION);
+    let (input_tokens, bytes_saved): (Option<i64>, Option<i64>) = migrated
+        .query_row(
+            "SELECT input_tokens, reduction_bytes_saved \
+             FROM requests WHERE request_id='pre-cache-decision-row'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("old row survives");
+    let (front, terminal, epoch): (Option<String>, Option<String>, Option<i64>) = migrated
+        .query_row(
+            "SELECT cache_front_decision, cache_terminal_decision, prefix_epoch_event \
+             FROM requests WHERE request_id='pre-cache-decision-row'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("old row survives");
+    assert_eq!(input_tokens, Some(100));
+    assert_eq!(bytes_saved, Some(900));
+    assert!(front.is_none(), "no backfill of cache_front_decision");
+    assert!(terminal.is_none(), "no backfill of cache_terminal_decision");
+    assert!(epoch.is_none(), "no backfill of prefix_epoch_event");
+    let meta_version: String = migrated
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("meta schema_version");
+    assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+
+    // Assert: the migrated shape is indistinguishable from a fresh one.
+    let (_fresh_dir, fresh_path) = temp_db_path();
+    let fresh = open(&fresh_path).expect("open fresh db");
+    assert_eq!(
+        table_shape(&migrated, "requests"),
+        table_shape(fresh.conn(), "requests"),
+        "a migrated v15 DB must be indistinguishable from a fresh v16 DB"
+    );
+
+    // Idempotent: a second pass over an already-current DB is a no-op.
+    let again = migrate_to_current(&migrated, 0).expect("re-run migrate");
+    assert_eq!(again, SCHEMA_VERSION);
+    assert!(has_column(&migrated, "prefix_epoch_event"));
+}
+
+/// A DB stamped at an OLD version must climb the ladder step by step rather
+/// than jumping: a v14 DB reaching current proves both the v15 and the v16 arms
+/// ran, since neither set of columns exists in the v14 shape and no single step
+/// adds both.
+#[test]
+fn migrating_a_pre_v16_db_applies_every_intermediate_step() {
+    // Arrange: a v14-shaped table, two ladder steps behind current.
+    let (_dir, path) = temp_db_path();
+    let conn = Connection::open(&path).expect("raw open");
+    conn.execute_batch(&requests_ddl_without_reduction_columns())
+        .expect("build v14 requests table");
+    conn.execute_batch(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+         INSERT INTO meta (key, value) VALUES ('schema_version', '14');
+         PRAGMA user_version = 14;",
+    )
+    .expect("seed v14 db");
+
+    // Act
+    let version = migrate_to_current(&conn, 0).expect("migrate v14->current");
+
+    // Assert: both intermediate column sets are present, so no step was skipped.
+    assert_eq!(version, SCHEMA_VERSION);
+    let has_column = |name: &str| -> bool {
+        conn.prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name=?1")
+            .expect("prepare")
+            .exists([name])
+            .expect("query")
+    };
+    assert!(has_column("reduction_bytes_saved"), "the v15 step ran");
+    assert!(has_column("prefix_epoch_event"), "the v16 step ran");
+}
+
+/// Pins the physical `requests` DDL shape: 67 columns, in this exact
 /// order, with this exact null-ability. The set intentionally EXCEEDS the
 /// `UsageRecord` field set by three write-stopped legacy columns
 /// (`strategy`, `reduction_strategy`, `selection_decision`), which the DDL
@@ -1775,6 +1919,9 @@ fn requests_columns_match_physical_schema() {
         ("reduction_strings_skipped", false),
         ("reduction_strings_rejected", false),
         ("reduction_bytes_saved", false),
+        ("cache_front_decision", false),
+        ("cache_terminal_decision", false),
+        ("prefix_epoch_event", false),
     ];
 
     let (_dir, path) = temp_db_path();

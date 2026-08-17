@@ -36,8 +36,9 @@ pub(crate) mod volatile;
 pub mod test_utils;
 
 pub use cache_control::{
-    Breakpoint, BreakpointPosition, CacheBreakpointSource, CacheControl, FrozenFloor,
-    OwnedBreakpoint, compute_frozen_floor, mutable_suffix_start, validate_source,
+    Breakpoint, BreakpointPosition, CacheBreakpointSource, CacheControl, FrontSlot, FrozenFloor,
+    OwnedBreakpoint, compute_frozen_floor, eligible_system_block_index, front_breakpoint_slot,
+    mutable_suffix_start, system_block_is_wire_eligible, validate_source,
 };
 pub use capability::{
     CACHE_HIT, COMPUTER_USE, EVIDENCE_CLASSES, EvidenceSource, FailurePhase, PROMPT_CACHING,

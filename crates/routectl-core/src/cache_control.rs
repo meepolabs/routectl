@@ -368,6 +368,116 @@ pub fn mutable_suffix_start(req: &crate::ChatRequest) -> Option<usize> {
     }
 }
 
+/// Where an auto-emitted FRONT cache breakpoint can be placed on a
+/// request. Both variants sit strictly BEFORE the messages in cache-prefix
+/// order, so a front marker never freezes any part of the message list.
+///
+/// Each variant carries the resolved INDEX of the element to mark. The
+/// injector must mark that index rather than re-deriving "the last one":
+/// the resolution rules here (wire-eligibility for system blocks, typed-only
+/// for tools) are not reproducible from a naive `last()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontSlot {
+    /// The last WIRE-ELIGIBLE block of a `SystemContent::Blocks` system
+    /// prompt, by index into that block list. See
+    /// [`system_block_is_wire_eligible`].
+    LastSystemBlock {
+        /// Index into the `SystemContent::Blocks` vector.
+        block_index: usize,
+    },
+    /// The last typed custom tool definition, by index into `req.tools`.
+    LastCustomTool {
+        /// Index into the `req.tools` vector.
+        tool_index: usize,
+    },
+}
+
+impl FrontSlot {
+    /// The cache-prefix position this slot occupies. Never
+    /// [`BreakpointPosition::Messages`] -- see [`front_breakpoint_slot`].
+    pub const fn position(self) -> BreakpointPosition {
+        match self {
+            Self::LastSystemBlock { .. } => BreakpointPosition::System,
+            Self::LastCustomTool { .. } => BreakpointPosition::Tools,
+        }
+    }
+}
+
+/// Whether a system block survives to the wire and can therefore anchor a
+/// cache breakpoint.
+///
+/// A blank-text block cannot: the Converse egress skips blank blocks
+/// individually (`bedrock/converse/system.rs:66-68`, where an empty text
+/// block cannot anchor a `cachePoint` because AWS rejects a marker with no
+/// preceding content), and both egresses drop a wholly-blank system outright
+/// via `SystemContent::is_blank` (`anthropic_api/request.rs:523`,
+/// `bedrock/converse/system.rs:40`). Marking a blank block would emit a
+/// marker that never reaches the wire while also suppressing fallback to an
+/// available tools anchor.
+///
+/// The blank test mirrors `SystemContent::is_blank`'s per-block rule
+/// (`system_content.rs:71`) so one definition of "blank" governs both.
+pub fn system_block_is_wire_eligible(block: &crate::SystemBlock) -> bool {
+    !block.text.trim().is_empty()
+}
+
+/// Index of the last wire-eligible block in a system prompt, or `None` when
+/// the system offers no anchor (a flat `Text`, an empty block list, or a
+/// block list whose every block is blank).
+///
+/// This is the SINGLE definition of the system anchor. The injector resolves
+/// its target through this function (or through the index in
+/// [`FrontSlot::LastSystemBlock`]) so placement can never diverge from
+/// selection.
+pub fn eligible_system_block_index(system: &crate::SystemContent) -> Option<usize> {
+    match system {
+        crate::SystemContent::Text(_) => None,
+        crate::SystemContent::Blocks(blocks) => {
+            blocks.iter().rposition(system_block_is_wire_eligible)
+        }
+    }
+}
+
+/// Resolve the slot an auto-emitted FRONT cache breakpoint would occupy,
+/// or `None` when the request offers no anchor.
+///
+/// Pure read of `req`: no mutation, no wire re-encode, no shape lift.
+///
+/// System is preferred over tools whenever a wire-eligible system-block
+/// anchor exists. A tools-slot marker can be dropped during anthropic-api
+/// assembly -- `tool_choice = "none"` suppresses the whole tools array -- so
+/// a marker placed there is not guaranteed to reach the wire, while a marker
+/// on a wire-eligible system block is.
+///
+/// The system anchor is the last WIRE-ELIGIBLE block, not simply the last
+/// block: see [`system_block_is_wire_eligible`]. When no eligible block
+/// remains, resolution falls back to the tools anchor rather than returning
+/// a slot the wire would discard.
+///
+/// A flat-string system (`SystemContent::Text`) has no per-block marker
+/// field and offers no anchor. It is NOT lifted to `Blocks`: that is a
+/// wire-shape change on a re-encoding-banned path and would break cache
+/// affinity for every caller already sending a flat string. Such a
+/// request with no custom tool yields `None` (no front marker emitted).
+///
+/// Only `ToolDef::Custom` anchors the tools slot. `ToolDef::Other`
+/// (builtins, future wire shapes) is preserved verbatim through the
+/// egresses, so injecting a marker into its opaque payload is not a read
+/// this function can promise.
+pub fn front_breakpoint_slot(req: &crate::ChatRequest) -> Option<FrontSlot> {
+    if let Some(block_index) = req.system.as_ref().and_then(eligible_system_block_index) {
+        return Some(FrontSlot::LastSystemBlock { block_index });
+    }
+
+    let tool_index = req
+        .tools
+        .as_ref()?
+        .iter()
+        .rposition(|t| matches!(t, crate::ToolDef::Custom(_)))?;
+
+    Some(FrontSlot::LastCustomTool { tool_index })
+}
+
 /// Whether any content part of `m` carries a caller `cache_control`
 /// marker, using the same check the `cache_breakpoints` walk applies.
 fn message_has_caller_marker(m: &crate::Message) -> bool {
@@ -851,6 +961,395 @@ mod tests {
 
         // Act
         let _ = mutable_suffix_start(&req);
+
+        // Assert: byte-identical (ChatRequest has no PartialEq).
+        let after = serde_json::to_value(&req).unwrap();
+        assert_eq!(before, after);
+    }
+
+    // --- front_breakpoint_slot tests ---
+
+    fn custom_tool(name: &str) -> ToolDef {
+        ToolDef::Custom(CustomTool {
+            name: name.into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        })
+    }
+
+    fn system_blocks(texts: &[&str]) -> SystemContent {
+        SystemContent::Blocks(
+            texts
+                .iter()
+                .map(|t| SystemBlock {
+                    kind: "text".into(),
+                    text: (*t).into(),
+                    cache_control: None,
+                    citations: None,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn front_slot_system_blocks_only_is_last_system_block() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(system_blocks(&["a", "b"])),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, Some(FrontSlot::LastSystemBlock { block_index: 1 }));
+    }
+
+    #[test]
+    fn front_slot_prefers_system_over_tools_when_both_present() {
+        // Arrange: a tools-slot marker can be dropped under
+        // tool_choice = "none", so System must win.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(system_blocks(&["sys"])),
+            tools: Some(vec![custom_tool("calc")]),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, Some(FrontSlot::LastSystemBlock { block_index: 0 }));
+    }
+
+    #[test]
+    fn front_slot_tools_only_is_last_custom_tool() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            tools: Some(vec![custom_tool("calc"), custom_tool("grep")]),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, Some(FrontSlot::LastCustomTool { tool_index: 1 }));
+    }
+
+    #[test]
+    fn front_slot_skips_trailing_blank_system_block() {
+        // Arrange: the final block is whitespace-only. The Converse egress
+        // skips blank blocks individually, so a marker there would never
+        // reach the wire -- the anchor must be the last NONBLANK block.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(system_blocks(&["real instructions", "   \n\t "])),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert: index 0, the block the wire keeps -- not index 1.
+        assert_eq!(slot, Some(FrontSlot::LastSystemBlock { block_index: 0 }));
+    }
+
+    #[test]
+    fn front_slot_all_blank_system_blocks_falls_back_to_custom_tool() {
+        // Arrange: every system block is blank, so both egresses drop the
+        // whole system via is_blank. The tools anchor must not be blocked.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(system_blocks(&["", "  "])),
+            tools: Some(vec![custom_tool("calc")]),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, Some(FrontSlot::LastCustomTool { tool_index: 0 }));
+    }
+
+    #[test]
+    fn front_slot_all_blank_system_blocks_no_tools_is_none() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(system_blocks(&["", "   "])),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, None);
+    }
+
+    #[test]
+    fn front_slot_tool_index_skips_trailing_builtin_tool() {
+        // Arrange: the last tool is an opaque `Other`; the anchor is the
+        // last TYPED custom tool.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            tools: Some(vec![
+                custom_tool("calc"),
+                ToolDef::Other(json!({"type": "web_search_20250901", "name": "web_search"})),
+            ]),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, Some(FrontSlot::LastCustomTool { tool_index: 0 }));
+    }
+
+    #[test]
+    fn eligible_system_block_index_agrees_with_resolved_slot() {
+        // The injector resolves its target through the same rule the
+        // selector used; the two must never diverge.
+        let system = system_blocks(&["a", "b", "  "]);
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(system.clone()),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+        let direct = eligible_system_block_index(&system);
+
+        // Assert
+        assert_eq!(direct, Some(1));
+        assert_eq!(slot, Some(FrontSlot::LastSystemBlock { block_index: 1 }));
+    }
+
+    #[test]
+    fn eligible_system_block_index_is_none_for_flat_text() {
+        assert_eq!(
+            eligible_system_block_index(&SystemContent::Text("flat".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn system_block_wire_eligibility_matches_is_blank_per_block_rule() {
+        // is_blank calls a Blocks system blank when EVERY block's text is
+        // blank; per-block eligibility must use the same blank predicate.
+        let blank = SystemBlock {
+            kind: "text".into(),
+            text: "  \n ".into(),
+            cache_control: None,
+            citations: None,
+        };
+        let real = SystemBlock {
+            kind: "text".into(),
+            text: "hi".into(),
+            cache_control: None,
+            citations: None,
+        };
+        assert!(!system_block_is_wire_eligible(&blank));
+        assert!(system_block_is_wire_eligible(&real));
+        assert!(SystemContent::Blocks(vec![blank.clone()]).is_blank());
+        assert!(!SystemContent::Blocks(vec![blank, real]).is_blank());
+    }
+
+    #[test]
+    fn front_slot_flat_string_system_no_tools_is_none() {
+        // Arrange: SystemContent::Text has no per-block marker field, and
+        // lifting Text -> Blocks is a banned wire-shape change.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(SystemContent::Text("you are helpful".into())),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert: no anchor, and the flat string is still a flat string.
+        assert_eq!(slot, None);
+        let after = serde_json::to_value(&req).unwrap();
+        assert_eq!(before["system"], json!("you are helpful"));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn front_slot_flat_string_system_with_custom_tool_is_last_custom_tool() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(SystemContent::Text("you are helpful".into())),
+            tools: Some(vec![custom_tool("calc")]),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, Some(FrontSlot::LastCustomTool { tool_index: 0 }));
+    }
+
+    #[test]
+    fn front_slot_empty_system_blocks_is_none() {
+        // Arrange: an empty Blocks array has no block to anchor on.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(SystemContent::Blocks(vec![])),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, None);
+    }
+
+    #[test]
+    fn front_slot_builtin_tool_only_is_none() {
+        // Arrange: ToolDef::Other is an opaque payload preserved verbatim
+        // through the egresses -- not an injection anchor.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            tools: Some(vec![ToolDef::Other(json!({
+                "type": "web_search_20250901",
+                "name": "web_search"
+            }))]),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, None);
+    }
+
+    #[test]
+    fn front_slot_no_system_no_tools_is_none() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_text_msg("hi", None)].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let slot = front_breakpoint_slot(&req);
+
+        // Assert
+        assert_eq!(slot, None);
+    }
+
+    /// This test IS the D1 ordering contract: a front marker never lands on
+    /// a message-part position, so `mutable_suffix_start`'s domain is
+    /// byte-identical with and without front-marker injection.
+    #[test]
+    fn front_slot_is_never_a_messages_position() {
+        // Arrange: every request shape that can yield a slot, including ones
+        // whose messages carry their own caller markers.
+        let shapes = vec![
+            ChatRequest {
+                model: "claude-sonnet-4".into(),
+                system: Some(system_blocks(&["a", "b"])),
+                messages: vec![user_text_msg("hi", Some(cc_5m()))].into(),
+                ..Default::default()
+            },
+            ChatRequest {
+                model: "claude-sonnet-4".into(),
+                system: Some(system_blocks(&["sys"])),
+                tools: Some(vec![custom_tool("calc")]),
+                messages: vec![user_text_msg("hi", Some(cc_1h()))].into(),
+                ..Default::default()
+            },
+            ChatRequest {
+                model: "claude-sonnet-4".into(),
+                tools: Some(vec![custom_tool("calc")]),
+                messages: vec![user_text_msg("hi", Some(cc_5m()))].into(),
+                ..Default::default()
+            },
+            ChatRequest {
+                model: "claude-sonnet-4".into(),
+                system: Some(SystemContent::Text("flat".into())),
+                messages: vec![user_text_msg("hi", None)].into(),
+                ..Default::default()
+            },
+            ChatRequest {
+                model: "claude-sonnet-4".into(),
+                system: Some(system_blocks(&["real", "  "])),
+                messages: vec![user_text_msg("hi", Some(cc_5m()))].into(),
+                ..Default::default()
+            },
+            ChatRequest {
+                model: "claude-sonnet-4".into(),
+                system: Some(system_blocks(&["", " "])),
+                tools: Some(vec![custom_tool("calc")]),
+                messages: vec![user_text_msg("hi", Some(cc_5m()))].into(),
+                ..Default::default()
+            },
+        ];
+
+        for req in &shapes {
+            // Act
+            let slot = front_breakpoint_slot(req);
+
+            // Assert
+            if let Some(slot) = slot {
+                assert_ne!(
+                    slot.position(),
+                    BreakpointPosition::Messages,
+                    "front slot {slot:?} resolved to a message-part position"
+                );
+                assert!(matches!(
+                    slot.position(),
+                    BreakpointPosition::System | BreakpointPosition::Tools
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn front_breakpoint_slot_does_not_mutate_request() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            system: Some(system_blocks(&["a", "b"])),
+            tools: Some(vec![custom_tool("calc")]),
+            messages: vec![user_text_msg("hi", Some(cc_5m()))].into(),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let _ = front_breakpoint_slot(&req);
 
         // Assert: byte-identical (ChatRequest has no PartialEq).
         let after = serde_json::to_value(&req).unwrap();
