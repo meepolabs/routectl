@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
 };
 
 use super::response_types::{
@@ -288,7 +288,7 @@ fn walk_output(
                 let (type_tag, extras) = split_other_value(raw);
                 tracing::debug!(
                     provider = provider_id,
-                    type_tag = %type_tag,
+                    type_tag = %sanitize_for_log(&type_tag),
                     "openai-responses: forward-compat output_item preserved via ContentPart::Other"
                 );
                 parts.push(ContentPart::Other {

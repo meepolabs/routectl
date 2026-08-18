@@ -1,6 +1,6 @@
 use serde_json::{Map, Value, json};
 
-use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result};
+use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result, sanitize_for_log};
 
 use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass, StreamRequestContext};
 
@@ -216,7 +216,7 @@ fn replay_opaque_events(
                     tracing::warn!(
                         provider = "anthropic",
                         upstream_index = *upstream_index,
-                        type_tag = %type_tag,
+                        type_tag = %sanitize_for_log(type_tag),
                         "anthropic ingress: skipping opaque content_block_start; \
                          non-utf8 raw_data bytes",
                     );

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result, Role,
+    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result, Role, sanitize_for_log,
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -664,7 +664,7 @@ impl SseState {
                 let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
                 tracing::debug!(
                     provider = %provider_id,
-                    event_type = %event_type,
+                    event_type = %sanitize_for_log(event_type),
                     "anthropic SSE: unknown top-level event; sink-draining",
                 );
                 Ok(None)

@@ -11,7 +11,7 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{ChatRequest, is_canonical_request_key};
+use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 
 use crate::anthropic_api::request::DroppedFormatKeys;
 use crate::anthropic_api::request::build_thinking;
@@ -86,7 +86,7 @@ pub(super) fn build_additional_fields(
             if bag.contains_key(key) && !cfg.allowed_body_fields.iter().any(|k| k == key) {
                 tracing::warn!(
                     provider = %cfg.id,
-                    field = %key,
+                    field = %sanitize_for_log(key),
                     surface = "converse_additional_fields",
                     "allowed_body_fields omits routectl-managed field; it will be \
                      dropped and thinking/effort semantics will be lost. Add this \
@@ -173,7 +173,7 @@ fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<
         if is_converse_managed_key(k) {
             tracing::debug!(
                 provider = %cfg.id,
-                key = %k,
+                key = %sanitize_for_log(k),
                 "forward-compat extra would override routectl-managed key; \
                  dropped (Converse)"
             );
@@ -316,7 +316,7 @@ fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) {
         if is_converse_managed_key(k) {
             tracing::warn!(
                 provider = %cfg.id,
-                key = %k,
+                key = %sanitize_for_log(k),
                 "additional_model_request_fields attempted to override \
                  routectl-managed key; dropped (Converse)"
             );
@@ -401,7 +401,7 @@ fn strip_thinking_when_tool_choice_forces_use(
         };
         tracing::debug!(
             provider = %cfg.id,
-            tool_choice_type = %variant,
+            tool_choice_type = %sanitize_for_log(variant),
             "stripped thinking from Converse additionalModelRequestFields: \
              toolChoice forces tool use; Anthropic forbids the combo"
         );

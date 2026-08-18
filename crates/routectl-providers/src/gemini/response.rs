@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatResponse, Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Result,
-    Role, Usage,
+    Role, Usage, sanitize_for_log,
 };
 
 use super::GEMINI_FORMAT;
@@ -42,7 +42,7 @@ pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<Cha
                         provider = %provider_id,
                         surface = "complete",
                         origin = "prompt_feedback",
-                        block_reason = %reason,
+                        block_reason = %sanitize_for_log(reason),
                         "gemini: prompt blocked on 200 surface"
                     );
                     Some("content_filter".to_string())
@@ -161,7 +161,7 @@ fn walk_parts(provider_id: &str, parts: &[ResponsePart]) -> Result<WalkedParts> 
                 Err(e) => {
                     tracing::debug!(
                         provider = %provider_id,
-                        fn_name = %fc.name,
+                        fn_name = %sanitize_for_log(&fc.name),
                         error = %e,
                         "gemini: could not serialize function_call args"
                     );
@@ -252,7 +252,7 @@ pub(super) fn map_finish_reason(
         "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "TOO_MANY_TOOL_CALLS" => "stop",
         other => {
             tracing::debug!(
-                finish_reason = %other,
+                finish_reason = %sanitize_for_log(other),
                 "gemini: unmapped finishReason; defaulting to stop"
             );
             "stop"

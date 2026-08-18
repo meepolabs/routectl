@@ -19,7 +19,7 @@
 
 use serde_json::Value;
 
-use routectl_core::{ChatRequest, ChatResponse, Error, Result};
+use routectl_core::{ChatRequest, ChatResponse, Error, Result, sanitize_for_log};
 
 use super::BedrockConfig;
 use super::betas::filter_bedrock_betas;
@@ -121,7 +121,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
             if is_bedrock_invoke_managed_key(k) {
                 tracing::warn!(
                     provider = %cfg.id,
-                    key = %k,
+                    key = %sanitize_for_log(k),
                     "additional_model_request_fields attempted to override \
                      routectl-managed key; dropped"
                 );

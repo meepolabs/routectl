@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use serde_json::Value;
 
-use routectl_core::{ChatRequest, is_canonical_request_key};
+use routectl_core::{ChatRequest, is_canonical_request_key, sanitize_for_log};
 
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
@@ -379,7 +379,7 @@ pub(super) fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&
         if is_routectl_managed_key(k) {
             tracing::debug!(
                 provider = id,
-                key = %k,
+                key = %sanitize_for_log(k),
                 "forward-compat extra would override routectl-managed key; dropped"
             );
             continue;
@@ -835,7 +835,7 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body
     obj.remove("thinking");
     tracing::debug!(
         provider = provider_id,
-        tool_choice_type = %ttype,
+        tool_choice_type = %sanitize_for_log(&ttype),
         "stripped thinking from outgoing body: tool_choice forces tool use; \
          Anthropic forbids the combo"
     );

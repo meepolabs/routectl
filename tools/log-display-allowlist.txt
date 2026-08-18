@@ -1,0 +1,15 @@
+# Allowlist for scripts/check-log-display.sh.
+#
+# Each entry exempts one `<path>:<field>` pair from the "wire-derived
+# tracing field rendered via % must route through sanitize_for_log" rule.
+# Keyed by path + FIELD NAME, not line number, so an entry survives edits
+# to the file it covers.
+#
+# An entry is only justified when the rendered value provably carries no
+# caller or upstream bytes -- it is a compile-time literal, or it is
+# selected from a fixed set of literals by the surrounding control flow.
+# "Looks safe" is not a reason. State the reason on the entry.
+#
+# Format: <path>:<field>  # <reason>
+
+crates/routectl-providers/src/anthropic_api/parts.rs:media_type  # inside the ALLOWED_IMAGE_MEDIA_TYPES.contains() branch, so the value is one of that const's literal MIME strings; the non-allowlisted branch below it renders the caller's bytes and does sanitize

@@ -25,7 +25,7 @@
 //! gap; downstream consumers that need exact-byte parity must intercept
 //! at the byte stream layer instead.
 
-use routectl_core::OpaqueSseEvent;
+use routectl_core::{OpaqueSseEvent, sanitize_for_log};
 use serde_json::Value;
 
 /// Maximum number of opaque delta events captured per unknown content
@@ -202,7 +202,7 @@ impl OpaqueCapture {
         tracing::info!(
             provider = %provider,
             upstream_index = self.upstream_index,
-            block_type = %self.type_tag,
+            block_type = %sanitize_for_log(&self.type_tag),
             captured_bytes = self.bytes_so_far,
             delta_count = self.delta_count,
             start_emitted = self.start_emitted,
@@ -224,7 +224,7 @@ impl OpaqueCapture {
         tracing::warn!(
             provider = %provider,
             upstream_index = self.upstream_index,
-            block_type = %self.type_tag,
+            block_type = %sanitize_for_log(&self.type_tag),
             reason = %reason,
             captured_bytes = self.bytes_so_far,
             delta_count = self.delta_count,

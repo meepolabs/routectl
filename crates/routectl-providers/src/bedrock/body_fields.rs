@@ -39,6 +39,8 @@
 
 use serde_json::{Map, Value};
 
+use routectl_core::sanitize_for_log;
+
 /// Which surface this filter is being applied to. Drives logging
 /// context only -- the filter shape is identical (drop unknown).
 #[derive(Debug, Clone, Copy)]
@@ -96,7 +98,7 @@ pub(super) fn filter_bedrock_body_fields(
     for key in to_drop {
         tracing::debug!(
             provider = %provider_id,
-            field = %key,
+            field = %sanitize_for_log(&key),
             surface = surface.as_str(),
             "dropping body field not in operator-supplied [bedrock] allowed_body_fields"
         );
