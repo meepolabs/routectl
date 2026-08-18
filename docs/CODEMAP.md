@@ -4794,6 +4794,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   end-to-end path. XDG scoped to a fresh tempdir (isolating the managed secret
   store + credentials.json) with an isolated usage DB; env-mutating cases are
   serialized and readiness is polled off `/health`
+- `tests/documented_provider_blocks.rs` -- docs-vs-schema tripwire: every
+  fenced `toml` block in `docs/CONFIGURATION.md` plus all of
+  `examples/config.toml` must deserialize into the `ProviderEntry` variant its
+  own `kind` names, so a key documented on a variant that has none fails here
+  (`deny_unknown_fields`) instead of at an operator's next startup. Both files
+  are `include_str!`d; fragment blocks with no `[providers.<name>]` + `kind`
+  header are skipped by design
 - `tests/anthropic_ingress.rs` -- `/v1/messages` end-to-end (cache_control
   round-trip, forward-compat, listener auth)
 - `tests/responses_ingress.rs` -- `/v1/responses` end-to-end (Responses body
