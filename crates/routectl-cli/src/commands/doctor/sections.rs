@@ -273,6 +273,38 @@ pub(super) fn section_secret_orphans(ctx: &DoctorContext) -> Vec<Finding> {
         .collect()
 }
 
+/// Orphan-seat section: each stored OAuth seat no provider entry's
+/// `oauth://` ref reaches is a Warn. Read-only and non-destructive -- a
+/// stored credential is never auto-deleted or refreshed. The finding names
+/// the SEAT KEY only (provider id plus the operator's own label); no token
+/// material, account data, or storage path is disclosed.
+pub(super) fn section_seat_orphans(ctx: &DoctorContext) -> Vec<Finding> {
+    ctx.orphan_seats
+        .iter()
+        .map(|seat| Finding {
+            section: "seats",
+            name: seat.clone(),
+            status: Status::Warn,
+            detail: format!("seat `{seat}` has stored credentials but no provider entry uses it"),
+            remediation: Some(format!(
+                "reference this seat from a provider `api_key_ref` or run \
+                 `routectl logout {}` to remove it",
+                logout_target(seat)
+            )),
+        })
+        .collect()
+}
+
+/// The `routectl logout` invocation that removes exactly this seat: a
+/// labelled seat needs `--label`, or the bare form would remove the DEFAULT
+/// seat instead and leave the orphan in place.
+fn logout_target(seat_key: &str) -> String {
+    match seat_key.split_once('#') {
+        Some((provider, label)) => format!("{provider} --label {label}"),
+        None => seat_key.to_string(),
+    }
+}
+
 pub(super) fn section_auth(ctx: &DoctorContext) -> Vec<Finding> {
     if let Some(err) = &ctx.auth_store_error {
         return vec![Finding {

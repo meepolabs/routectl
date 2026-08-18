@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use routectl_auth::LocalProbe;
-use routectl_auth::oauth::types::{TokenRecord, unix_now};
+use routectl_auth::oauth::types::{TokenRecord, seat_key, unix_now};
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, default_secret_dir};
 use routectl_core::ProbeOutcome;
@@ -100,6 +100,7 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
     let (probes, seats, auth_store_error) = gather_auth().await;
     let secret_checks = gather_secret_checks(&config, &probes);
     let orphan_secrets = gather_orphan_secrets(&config);
+    let orphan_seats = gather_orphan_seats(&config, &seats);
     let would_trim = compute_would_trim_panel(&config, Local::now());
 
     DoctorContext {
@@ -111,6 +112,7 @@ pub async fn gather_context_no_network(config_path: &Path) -> DoctorContext {
         auth_store_error,
         secret_checks,
         orphan_secrets,
+        orphan_seats,
         probe_results: Vec::new(),
         would_trim,
         now_unix: unix_now(),
@@ -493,6 +495,72 @@ pub(super) fn gather_orphan_secrets(config: &Config) -> Vec<String> {
             orphans.push(name.to_string());
         }
     }
+    orphans.sort();
+    orphans
+}
+
+/// The `oauth://` coverage the config's provider entries express, split by
+/// how each ref resolves at dispatch:
+///
+///   - `pooled_providers` -- providers named by a BARE `oauth://<provider>`
+///     ref (label `None`). Such a ref is a POOL ref: the factory expands it
+///     through `list_seats` into every stored seat of that provider, so a
+///     bare ref covers the default seat AND every labelled sibling.
+///   - `pinned_seats` -- full seat keys named by a LABELLED
+///     `oauth://<provider>#<label>` ref. A labelled ref pins exactly that one
+///     seat and covers no sibling, not even the default.
+struct SeatCoverage {
+    pooled_providers: BTreeSet<String>,
+    pinned_seats: BTreeSet<String>,
+}
+
+fn referenced_seat_coverage(config: &Config) -> SeatCoverage {
+    let mut pooled_providers = BTreeSet::new();
+    let mut pinned_seats = BTreeSet::new();
+    for entry in config.providers.values() {
+        for uri in entry.secret_uris() {
+            let Ok(SecretRef::OAuth { provider, label }) = SecretRef::parse(uri) else {
+                continue;
+            };
+            match label {
+                Some(label) => {
+                    pinned_seats.insert(seat_key(&provider, Some(&label)));
+                }
+                None => {
+                    pooled_providers.insert(provider);
+                }
+            }
+        }
+    }
+    SeatCoverage {
+        pooled_providers,
+        pinned_seats,
+    }
+}
+
+/// Read-only diff of the STORED OAuth seats against the `oauth://` refs the
+/// config expresses. Complements [`gather_orphan_secrets`], which covers
+/// managed `file://` secrets only. Returns the seat keys (`<provider>` for the
+/// default seat, `<provider>#<label>` for a labelled one) no provider entry
+/// reaches; nothing is ever refreshed, rewritten, or removed.
+///
+/// Seat matching is by FULL seat identity, with pool expansion honored: a
+/// labelled ref pins one seat, so the default seat of that provider is an
+/// orphan unless something else reaches it; a bare pool ref reaches every
+/// stored seat of its provider, so no sibling of a pooled provider is an
+/// orphan. The returned strings carry only the provider id and the operator's
+/// own seat label -- never token material, account data, or a storage path.
+pub(super) fn gather_orphan_seats(config: &Config, seats: &[(String, TokenRecord)]) -> Vec<String> {
+    let coverage = referenced_seat_coverage(config);
+    let mut orphans: Vec<String> = seats
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .filter(|key| {
+            let provider = key.split_once('#').map_or(*key, |(p, _)| p);
+            !coverage.pooled_providers.contains(provider) && !coverage.pinned_seats.contains(*key)
+        })
+        .map(str::to_string)
+        .collect();
     orphans.sort();
     orphans
 }

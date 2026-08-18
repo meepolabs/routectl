@@ -14,13 +14,13 @@ use crate::commands::parse_error_redaction::redact_config_load_error;
 
 use super::gather::{
     build_capability_inputs, derive_prior_cells, gather_capability_matrix, gather_context,
-    gather_context_no_network, gather_orphan_secrets, gather_secret_checks,
+    gather_context_no_network, gather_orphan_seats, gather_orphan_secrets, gather_secret_checks,
     sanitize_store_open_error,
 };
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
     freshness_findings, legacy_nudge, secret_finding, section_auth, section_capability,
-    section_config, section_probe, section_secret_orphans, section_version,
+    section_config, section_probe, section_seat_orphans, section_secret_orphans, section_version,
 };
 use super::*;
 
@@ -63,6 +63,7 @@ fn ctx(
         auth_store_error: None,
         secret_checks: Vec::new(),
         orphan_secrets: Vec::new(),
+        orphan_seats: Vec::new(),
         probe_results: Vec::new(),
         would_trim: None,
         now_unix: 1_000,
@@ -669,8 +670,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_four() {
-    assert_eq!(SCHEMA_VERSION, 4);
+fn schema_version_is_five() {
+    assert_eq!(SCHEMA_VERSION, 5);
     let context = ctx(
         config_with_overrides(),
         Some("version = 3\n"),
@@ -678,7 +679,7 @@ fn schema_version_is_four() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 4);
+    assert_eq!(report.schema_version, 5);
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
     let value = serde_json::to_value(&report).expect("serialize");
@@ -1345,6 +1346,252 @@ fn referenced_managed_secret_is_not_an_orphan() {
     assert!(gather_orphan_secrets(&cfg).is_empty());
 }
 
+/// A stored seat some provider entry's bare `oauth://<provider>` ref reaches
+/// is NOT an orphan -- the bare ref is a pool ref, so it covers the default
+/// seat and every labelled sibling of that provider.
+#[test]
+fn referenced_oauth_seat_is_not_an_orphan() {
+    let cfg = config_referencing_anthropic();
+    let seats = vec![
+        ("anthropic".to_string(), token_record(9_000)),
+        ("anthropic#seat-b".to_string(), token_record(9_000)),
+    ];
+
+    assert!(gather_orphan_seats(&cfg, &seats).is_empty());
+}
+
+/// A stored seat no provider entry references surfaces as a Warn naming the
+/// seat, and the scan neither refreshes nor removes the credential.
+#[test]
+fn unreferenced_oauth_seat_warns_by_name() {
+    let cfg = config_referencing_anthropic();
+    let seats = vec![
+        ("anthropic".to_string(), token_record(9_000)),
+        ("codex".to_string(), token_record(9_000)),
+    ];
+
+    let orphans = gather_orphan_seats(&cfg, &seats);
+    assert_eq!(orphans, vec!["codex".to_string()]);
+
+    let mut context = ctx(cfg, Some("version = 3\n"), Vec::new(), seats);
+    context.orphan_seats = orphans;
+    let findings = section_seat_orphans(&context);
+    let f = find(&findings, "seats", "codex");
+    assert_eq!(f.status, Status::Warn);
+    assert_eq!(
+        f.detail,
+        "seat `codex` has stored credentials but no provider entry uses it"
+    );
+    assert!(f.remediation.is_some());
+    // Advisory only: an orphan seat never flips the exit code.
+    assert_eq!(overall_exit(&findings), 0);
+}
+
+/// A LABELLED ref pins exactly one seat: it does not cover the provider's
+/// default seat, which is reported as the orphan it is.
+#[test]
+fn labelled_ref_does_not_cover_the_default_seat() {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic#seat-b"),
+    );
+    let seats = vec![
+        ("anthropic".to_string(), token_record(9_000)),
+        ("anthropic#seat-b".to_string(), token_record(9_000)),
+    ];
+
+    assert_eq!(
+        gather_orphan_seats(&cfg, &seats),
+        vec!["anthropic".to_string()],
+        "the default seat is not covered by a label-pinned ref"
+    );
+}
+
+/// The converse: a ref pinning one label leaves a DIFFERENT stored label an
+/// orphan -- sibling labels are distinct seats, never interchangeable.
+#[test]
+fn labelled_ref_does_not_cover_a_sibling_label() {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic#seat-b"),
+    );
+    let seats = vec![
+        ("anthropic#seat-a".to_string(), token_record(9_000)),
+        ("anthropic#seat-b".to_string(), token_record(9_000)),
+    ];
+
+    assert_eq!(
+        gather_orphan_seats(&cfg, &seats),
+        vec!["anthropic#seat-a".to_string()],
+        "a sibling label is a distinct seat"
+    );
+}
+
+/// The orphan-seat remediation targets EXACTLY the reported seat: a labelled
+/// seat's logout hint carries `--label`, or the bare form would remove the
+/// default seat and leave the orphan in place.
+#[test]
+fn labelled_orphan_remediation_carries_the_label() {
+    let mut context = ctx(
+        Config::default(),
+        Some("version = 3\n"),
+        Vec::new(),
+        Vec::new(),
+    );
+    context.orphan_seats = vec!["anthropic#seat-a".to_string(), "codex".to_string()];
+    let findings = section_seat_orphans(&context);
+
+    let labelled = find(&findings, "seats", "anthropic#seat-a")
+        .remediation
+        .clone()
+        .expect("labelled orphan carries a remediation");
+    assert!(
+        labelled.contains("routectl logout anthropic --label seat-a"),
+        "labelled logout hint must pin the label: {labelled}"
+    );
+    let default = find(&findings, "seats", "codex")
+        .remediation
+        .clone()
+        .expect("default orphan carries a remediation");
+    assert!(
+        default.contains("routectl logout codex"),
+        "default logout hint must name the provider: {default}"
+    );
+    assert!(
+        !default.contains("--label"),
+        "the default seat takes no label: {default}"
+    );
+}
+
+/// No token material, refresh token, or account identity from a stored seat
+/// reaches the rendered report through the orphan-seat section -- on either
+/// the human or the JSON surface.
+#[test]
+fn orphan_seat_report_never_leaks_token_material() {
+    const ACCESS: &str = "at-FAKE-SEAT-LEAK-ACCESS";
+    const REFRESH: &str = "rt-FAKE-SEAT-LEAK-REFRESH";
+    const EMAIL: &str = "leaky@example.invalid";
+
+    let leaky: TokenRecord = serde_json::from_value(serde_json::json!({
+        "access_token": ACCESS,
+        "refresh_token": REFRESH,
+        "token_type": "Bearer",
+        "expires_at_unix": 9_000,
+        "scopes": ["user:inference"],
+        "account": { "email": EMAIL, "account_id": "acct-leak" },
+        "obtained_at_unix": 0,
+    }))
+    .expect("valid TokenRecord json");
+
+    let seats = vec![("codex".to_string(), leaky)];
+    let orphans = gather_orphan_seats(&Config::default(), &seats);
+    assert_eq!(orphans, vec!["codex".to_string()]);
+
+    let mut context = ctx(
+        Config::default(),
+        Some("version = 3\n"),
+        Vec::new(),
+        seats.clone(),
+    );
+    context.orphan_seats = orphans;
+    let report = build_report(&context);
+    assert_eq!(
+        find(&report.findings, "seats", "codex").status,
+        Status::Warn
+    );
+
+    let human = render_human(&report).join("\n");
+    let json = serde_json::to_string(&report).expect("report serializes");
+    for surface in [&human, &json] {
+        assert!(!surface.contains(ACCESS), "access token leaked: {surface}");
+        assert!(
+            !surface.contains(REFRESH),
+            "refresh token leaked: {surface}"
+        );
+        assert!(!surface.contains(EMAIL), "account email leaked: {surface}");
+        assert!(
+            !surface.contains("acct-leak"),
+            "account id leaked: {surface}"
+        );
+        assert!(
+            !surface.contains("credentials.json"),
+            "a storage path leaked: {surface}"
+        );
+    }
+}
+
+/// The orphan-seat section is wired into BOTH the CLI battery and the
+/// offline status doctor, so an orphan is reported on either surface.
+#[test]
+fn seats_section_is_in_both_section_lists() {
+    assert!(
+        SECTIONS.iter().any(|(k, _)| *k == "seats"),
+        "seats must be in SECTIONS (CLI doctor)"
+    );
+    assert!(
+        NO_NETWORK_SECTIONS.iter().any(|(k, _)| *k == "seats"),
+        "seats must be in NO_NETWORK_SECTIONS (offline status doctor)"
+    );
+}
+
+/// End-to-end through the real gather: a stored seat with no matching
+/// provider entry surfaces on the report, and the run leaves the credentials
+/// file byte-identical.
+#[tokio::test]
+#[serial_test::serial]
+async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
+    let cfg_dir = tmp.path().join("routectl");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let config_path = cfg_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        b"version = 3\n[providers.anthropic]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic#seat-b\"\n",
+    )
+    .unwrap();
+
+    // Two stored seats: the label-pinned one the config reaches, and the
+    // default seat nothing references.
+    let creds_path = cfg_dir.join("credentials.json");
+    std::fs::write(
+        &creds_path,
+        br#"{"schema_version":1,"providers":{
+            "anthropic":{"access_token":"at-orphan","refresh_token":"rt-orphan",
+              "expires_at_unix":9999999999,"scopes":["user:inference"],"obtained_at_unix":0},
+            "anthropic#seat-b":{"access_token":"at-used","refresh_token":"rt-used",
+              "expires_at_unix":9999999999,"scopes":["user:inference"],"obtained_at_unix":0}
+        }}"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let before = snapshot_dir(tmp.path());
+    let context = gather_context_no_network(&config_path).await;
+    let report = build_report_no_network(&context);
+    let after = snapshot_dir(tmp.path());
+
+    assert_eq!(before, after, "the seat scan must not mutate any file");
+    assert_eq!(
+        find(&report.findings, "seats", "anthropic").status,
+        Status::Warn
+    );
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| f.section == "seats" && f.name == "anthropic#seat-b"),
+        "the referenced seat must not be reported as an orphan"
+    );
+    let human = render_human(&report).join("\n");
+    assert!(!human.contains("at-orphan"), "token leaked: {human}");
+    assert!(!human.contains("rt-orphan"), "token leaked: {human}");
+}
+
 /// End-to-end: a doctor run over a config with an `oauth://` provider and
 /// a populated managed secret directory leaves the config dir, the
 /// credentials record, and the secret dir byte-identical -- the oauth
@@ -1506,6 +1753,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         auth_store_error: Some(sanitize_store_open_error(&raw_store_error)),
         secret_checks: Vec::new(),
         orphan_secrets: Vec::new(),
+        orphan_seats: Vec::new(),
         probe_results: Vec::new(),
         would_trim: None,
         now_unix: 1_000,
@@ -1622,7 +1870,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 4);
+    assert_eq!(no_net.schema_version, 5);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"

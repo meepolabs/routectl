@@ -36,7 +36,7 @@ use self::gather::{SecretCheck, gather_context};
 use self::render::render_human;
 use self::sections::{
     section_auth, section_capability, section_config, section_freshness, section_inventory,
-    section_probe, section_secret_orphans, section_version,
+    section_probe, section_seat_orphans, section_secret_orphans, section_version,
 };
 
 pub(crate) use self::gather::gather_context_no_network;
@@ -59,7 +59,10 @@ pub(crate) use self::gather::gather_context_no_network;
 /// superseded by the structured `capability_matrix` panel (lanes by
 /// capability keys, one resolved display cell each), and the freshness
 /// section joins the report.
-const SCHEMA_VERSION: u32 = 4;
+///
+/// v4 -> v5: the `seats` section joins the report, one finding per stored
+/// OAuth seat no provider entry references.
+const SCHEMA_VERSION: u32 = 5;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -75,6 +78,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("version", section_version),
     ("config", section_config),
     ("auth", section_auth),
+    ("seats", section_seat_orphans),
     ("secrets", section_secret_orphans),
     ("probe", section_probe),
     ("capability", section_capability),
@@ -95,6 +99,7 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("version", section_version),
     ("config", section_config),
     ("auth", section_auth),
+    ("seats", section_seat_orphans),
     ("secrets", section_secret_orphans),
     ("capability", section_capability),
     ("freshness", section_freshness),
@@ -127,6 +132,12 @@ pub(crate) struct DoctorContext {
     /// Basenames of managed secret files not referenced by any provider.
     /// A read-only directory-vs-refs diff; the files are never removed.
     orphan_secrets: Vec<String>,
+    /// Seat keys (`<provider>` / `<provider>#<label>`) of stored OAuth
+    /// credentials no provider entry's `oauth://` ref reaches. A read-only
+    /// stored-seats-vs-refs diff; no credential is refreshed or removed. Only
+    /// the provider id and the operator's own seat label -- never token
+    /// material or a storage path.
+    orphan_seats: Vec<String>,
     /// One read-only reachability outcome per configured provider, gathered
     /// through the shared `probe_all` orchestration (oauth via `probe_local`,
     /// no refresh; forwarded short-circuited). The probe section maps each
