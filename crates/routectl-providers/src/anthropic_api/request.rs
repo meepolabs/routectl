@@ -270,6 +270,48 @@ impl DroppedFormatKeys {
     }
 }
 
+/// The two deferred `output_config` diagnostics of ONE normalization, kept
+/// together so a seam that keeps writing to `output_config` after assembly
+/// cannot emit one of them and forget the other.
+///
+/// Both records defer for the same reason: the Bedrock-Invoke
+/// `additional_model_request_fields` merge runs after assembly and can
+/// replace `output_config` wholesale, so that seam re-runs BOTH passes on the
+/// body it actually ships and folds the second run's records in here before
+/// emitting once. See [`normalize_deferring_format_key_warn`].
+pub(crate) struct DeferredOutputConfigDiagnostics {
+    dropped_format_keys: DroppedFormatKeys,
+    repair: super::output_schema::AdditionalPropertiesRepair,
+}
+
+impl DeferredOutputConfigDiagnostics {
+    /// Re-run both `output_config` passes on a body rewritten after assembly
+    /// and fold their records into this one, so the request still yields one
+    /// WARN per diagnostic however many times the passes ran.
+    pub(crate) fn rescanning(
+        mut self,
+        provider: &str,
+        obj: &mut serde_json::Map<String, Value>,
+    ) -> Result<Self> {
+        self.dropped_format_keys = self
+            .dropped_format_keys
+            .merged(drop_unrepresentable_output_format_keys(obj));
+        self.repair = self
+            .repair
+            .merged(super::output_schema::inject_additional_properties_false(
+                provider, obj,
+            )?);
+        Ok(self)
+    }
+
+    /// Emit both aggregated WARNs. Called exactly once per request, after
+    /// every pass that can write `output_config` has run.
+    pub(crate) fn warn(&self, provider: &str) {
+        self.dropped_format_keys.warn(provider);
+        self.repair.warn(provider);
+    }
+}
+
 /// Remove `name` and `strict` from `output_config.format` on an ASSEMBLED
 /// body (or Converse bag), whatever path put them there. Reports what it
 /// removed; the caller aggregates and emits the single WARN.
@@ -445,15 +487,18 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// block ships as its unwrapped inner blob on the terminal host and
 /// byte-for-byte everywhere else. Callers with no Anthropic host in play
 /// (the Bedrock Invoke lane) pass `false`.
-/// Assemble the body and RETURN the omitted-key record instead of emitting
-/// it, for callers that keep writing to `output_config` after this returns.
+/// Assemble the body and RETURN the deferred `output_config` diagnostics
+/// instead of emitting them, for callers that keep writing to
+/// `output_config` after this returns.
 ///
 /// Bedrock Invoke is the only such caller: it merges
 /// `additional_model_request_fields` AFTER normalization, a post-normalize
 /// write path `is_bedrock_invoke_managed_key` does not cover for
-/// `output_config`, so an operator-supplied object can reintroduce the keys
-/// this pass just removed. It scrubs again and emits ONE WARN covering both
-/// sources. Emitting here as well would double-warn for a single request.
+/// `output_config`, so an operator-supplied object can both reintroduce the
+/// unrepresentable keys this pass removed and replace the repaired schema
+/// wholesale. It re-runs both passes on the body it ships and emits ONE WARN
+/// per diagnostic covering both sources. Emitting here as well would
+/// double-warn for a single request.
 ///
 /// Every other caller wants [`normalize`], which emits before returning.
 pub(crate) fn normalize_deferring_format_key_warn(
@@ -466,7 +511,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
     >,
     terminal_anthropic_host: bool,
-) -> Result<(Value, DroppedFormatKeys)> {
+) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; WARN once so
     // the loss isn't silent. Bedrock-Invoke delegates body construction here,
@@ -674,18 +719,18 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // assembled body AFTER the provider-extras merge and the converter, for
     // the same reason the key scrub above does -- a caller-supplied
     // output_config.format wins via `entry().or_insert()`, so a converter-side
-    // repair would be a no-op for exactly the callers that omit the key. The
-    // WARN (a present non-`false` value forwarded verbatim) is emitted here
-    // rather than deferred: both seams that call this function
-    // (`normalize` and the Bedrock-Invoke `normalize_request`) run it once per
-    // request, and neither RE-RUNS the repair afterward. Not the same as
-    // "neither rewrites the schema": the Bedrock-Invoke
-    // `additional_model_request_fields` merge runs after this and can replace
-    // `output_config` wholesale, which no repair pass then sees. That seam is
-    // a filed follow-up; the one-WARN-per-request conclusion holds either way.
-    if let Some(obj) = body.as_object_mut() {
-        super::output_schema::inject_additional_properties_false(id, obj)?.warn(id);
-    }
+    // repair would be a no-op for exactly the callers that omit the key.
+    //
+    // The record is RETURNED, not emitted, for the same reason as the key
+    // scrub above: the Bedrock-Invoke `additional_model_request_fields` merge
+    // runs after this function and can replace `output_config` wholesale, so
+    // that seam RE-RUNS the repair on the body it actually ships and folds
+    // both records into the one WARN it owns. Emitting here as well would
+    // report a single request twice.
+    let repair = match body.as_object_mut() {
+        Some(obj) => super::output_schema::inject_additional_properties_false(id, obj)?,
+        None => super::output_schema::AdditionalPropertiesRepair::default(),
+    };
 
     // When context_management emulation is active we have already applied
     // the edits above. Strip the `context_management` body key so it is
@@ -726,15 +771,22 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // the caller's sampling from the source request when no thinking survives,
     // so a stripped-thinking body never ships the forced 1.0.
     reconcile_sampling_params(id, req, &mut body);
-    Ok((body, dropped_format_keys))
+    Ok((
+        body,
+        DeferredOutputConfigDiagnostics {
+            dropped_format_keys,
+            repair,
+        },
+    ))
 }
 
-/// Assemble the Anthropic Messages body and emit the omitted-key WARN.
+/// Assemble the Anthropic Messages body and emit the deferred
+/// `output_config` diagnostics.
 ///
 /// The emitting wrapper over [`normalize_deferring_format_key_warn`]: it owns
-/// the ONE `output_config.format` warning for the request. Callers that keep
-/// writing to `output_config` after assembly must use the deferring variant
-/// and emit once themselves, or the request warns twice.
+/// the ONE `output_config` warning per diagnostic for the request. Callers
+/// that keep writing to `output_config` after assembly must use the deferring
+/// variant and emit once themselves, or the request warns twice.
 pub(crate) fn normalize(
     id: &str,
     req: &ChatRequest,
@@ -746,7 +798,7 @@ pub(crate) fn normalize(
     >,
     terminal_anthropic_host: bool,
 ) -> Result<Value> {
-    let (body, dropped_format_keys) = normalize_deferring_format_key_warn(
+    let (body, deferred) = normalize_deferring_format_key_warn(
         id,
         req,
         adaptive,
@@ -755,7 +807,7 @@ pub(crate) fn normalize(
         thinking_cache,
         terminal_anthropic_host,
     )?;
-    dropped_format_keys.warn(id);
+    deferred.warn(id);
     Ok(body)
 }
 

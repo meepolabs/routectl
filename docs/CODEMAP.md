@@ -928,10 +928,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   interpreter (base64-unwrap of Anthropic SSE per frame); delegates the
   framing byte loop and DoS cap to `frame.rs`
 - `src/bedrock/invoke.rs` -- InvokeModel adapter: reuses
-  `anthropic_api::request::normalize` (selecting reasoning-envelope
-  passthrough EXPLICITLY -- this lane is never the genuine Anthropic host),
+  `anthropic_api::request::normalize_deferring_format_key_warn` (selecting
+  reasoning-envelope passthrough EXPLICITLY -- this lane is never the genuine
+  Anthropic host),
   patches `anthropic_version:
-  "bedrock-2023-05-31"`, and applies the structured-outputs body-beta union
+  "bedrock-2023-05-31"`, re-runs both `output_config` passes (the
+  unrepresentable-key scrub and the `additionalProperties: false` repair) on
+  the post-`additional_model_request_fields` body via
+  `DeferredOutputConfigDiagnostics::rescanning`, since that merge is a
+  post-normalize write path that can replace `output_config` wholesale, and
+  applies the structured-outputs body-beta union
   LAST (after both allowlist filters) so a body shipping
   `output_config.format` never egresses without its gating flag
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke

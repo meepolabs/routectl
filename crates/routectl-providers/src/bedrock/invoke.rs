@@ -35,27 +35,26 @@ const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 /// vendors, prefer Converse (vendor-neutral) -- the InvokeModel adapter
 /// here does not currently shape Mistral/Llama/Cohere bodies.
 pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value> {
-    let (mut body, dropped_format_keys) =
-        crate::anthropic_api::request::normalize_deferring_format_key_warn(
-            &cfg.id,
-            req,
-            cfg.adaptive_thinking.unwrap_or(false),
-            // Bedrock-Invoke applies its own beta filter via
-            // `crate::bedrock::betas::filter_bedrock_betas` (called below
-            // on the assembled body); pass an empty allowlist here so the
-            // anthropic-api egress's filter is a no-op pass-through.
-            &[],
-            // Bedrock does not emulate context_management beta; no cache.
-            false,
-            None,
-            // Bedrock Invoke is never the genuine Anthropic host: this lane
-            // egresses to a Bedrock endpoint, so a routectl reasoning
-            // envelope in a `redacted_thinking` block rides through
-            // byte-for-byte. Stated EXPLICITLY here rather than inherited, so
-            // the passthrough cannot be flipped by a default changing
-            // elsewhere.
-            false,
-        )?;
+    let (mut body, deferred) = crate::anthropic_api::request::normalize_deferring_format_key_warn(
+        &cfg.id,
+        req,
+        cfg.adaptive_thinking.unwrap_or(false),
+        // Bedrock-Invoke applies its own beta filter via
+        // `crate::bedrock::betas::filter_bedrock_betas` (called below
+        // on the assembled body); pass an empty allowlist here so the
+        // anthropic-api egress's filter is a no-op pass-through.
+        &[],
+        // Bedrock does not emulate context_management beta; no cache.
+        false,
+        None,
+        // Bedrock Invoke is never the genuine Anthropic host: this lane
+        // egresses to a Bedrock endpoint, so a routectl reasoning
+        // envelope in a `redacted_thinking` block rides through
+        // byte-for-byte. Stated EXPLICITLY here rather than inherited, so
+        // the passthrough cannot be flipped by a default changing
+        // elsewhere.
+        false,
+    )?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(
             cfg.id.clone(),
@@ -188,16 +187,17 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         super::body_fields::FilterContext::InvokeBody,
     );
 
-    // Scrub the `output_config.format` keys Anthropic cannot represent. The
-    // shared assembly already ran this pass on the body it built, but the
-    // `additional_model_request_fields` merge above is a post-normalize write
-    // path that `is_bedrock_invoke_managed_key` does not cover for
-    // `output_config`, so an operator-supplied object could reintroduce them.
-    // Both records fold into ONE WARN: the shared pass deliberately deferred
-    // its emission so this lane does not warn twice for a single request.
-    dropped_format_keys
-        .merged(crate::anthropic_api::request::drop_unrepresentable_output_format_keys(obj))
-        .warn(&cfg.id);
+    // Re-run both `output_config` passes the shared assembly already ran, on
+    // the body that ACTUALLY ships. The `additional_model_request_fields`
+    // merge above is a post-normalize write path that
+    // `is_bedrock_invoke_managed_key` does not cover for `output_config`, so
+    // an operator-supplied object can both reintroduce the `format` keys
+    // Anthropic cannot represent and replace the whole repaired schema with
+    // an unrepaired one (missing the mandatory `additionalProperties: false`).
+    // Each diagnostic folds into ONE WARN: the shared pass deliberately
+    // deferred its emission so this lane does not warn twice for a single
+    // request.
+    deferred.rescanning(&cfg.id, obj)?.warn(&cfg.id);
 
     // Capability union, LAST so it reads the body that actually ships: a
     // body carrying `output_config.format` gains the structured-outputs beta
@@ -1664,6 +1664,103 @@ mod tests {
             }
             Err(format!(
                 "one request must produce exactly one dropped-format-key WARN; got {warns}"
+            ))
+        });
+    }
+
+    /// An operator `additional_model_request_fields` object replaces the whole
+    /// `output_config` the shared assembly repaired, so its schema arrives on
+    /// this seam never having seen the `additionalProperties: false` pass.
+    /// Anthropic (and AWS, which forwards to the same validator) rejects an
+    /// object schema omitting the key, so the re-run is what makes the
+    /// operator's schema shippable.
+    #[test]
+    fn operator_supplied_output_schema_is_repaired_on_the_invoke_body() {
+        // Arrange
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "address": {
+                                "type": "object",
+                                "properties": {"street": {"type": "string"}}
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+        let req = user_req();
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        let schema = &body["output_config"]["format"]["schema"];
+        assert_eq!(
+            schema["additionalProperties"],
+            json!(false),
+            "the merge-supplied root schema must ship repaired: {body}"
+        );
+        assert_eq!(
+            schema["properties"]["address"]["additionalProperties"],
+            json!(false),
+            "a nested object omitting the key 400s even when the root carries it: {body}"
+        );
+    }
+
+    /// The repair runs twice on this lane -- once inside the shared assembly,
+    /// once on the merged body -- and a non-`false` value present on both
+    /// passes must still yield ONE WARN. An operator counting these lines
+    /// would otherwise double-count every such request.
+    #[test]
+    #[tracing_test::traced_test]
+    fn additional_properties_forward_warns_once_across_both_repair_passes() {
+        // Arrange
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "additionalProperties": true}
+                }
+            }
+        }));
+        let mut req = user_req();
+        req.response_format = Some(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "caller-widget",
+                "schema": {"type": "object", "additionalProperties": true}
+            }
+        }));
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        assert_eq!(
+            body["output_config"]["format"]["schema"]["additionalProperties"],
+            json!(true),
+            "a present non-false value is forwarded verbatim, never overwritten: {body}"
+        );
+        logs_assert(|lines: &[&str]| {
+            let warns = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("output_schema_additional_properties_not_false")
+                        && l.contains("WARN")
+                })
+                .count();
+            if warns == 1 {
+                return Ok(());
+            }
+            Err(format!(
+                "one request must produce exactly one additionalProperties WARN; got {warns}"
             ))
         });
     }
