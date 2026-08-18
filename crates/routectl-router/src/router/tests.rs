@@ -487,17 +487,71 @@ fn carry_over_sticky_from_preserves_pins() {
     // Assert: the pin survived the rebuild, INCLUDING the repinned flag --
     // otherwise a reload would reset the one-time cap and re-open the flap
     // window.
-    let entries = after.sticky_pins.export_entries();
-    assert!(
-        entries.contains(&(
-            "sess-1".to_string(),
-            crate::seat_pool::SeatPin {
-                state_key: "opus#seat-b".to_string(),
-                repinned: true,
-            }
-        )),
+    assert_eq!(
+        after.sticky_pins.get("sess-1"),
+        Some(crate::seat_pool::SeatPin {
+            state_key: "opus#seat-b".to_string(),
+            repinned: true,
+        }),
         "carry_over_sticky_from must preserve session->seat pins (with the \
              repinned flag) across a rebuild",
+    );
+}
+
+#[test]
+fn carry_over_sticky_from_shares_the_pins_arc() {
+    // Regression guard for the silent-collapse trap, sticky-pin edition: the
+    // carry-over shares the outgoing Router's `StickyPins` Arc rather than
+    // snapshotting it, mirroring `carry_over_k_store_from`.
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    let mut after = Router::new(config);
+
+    // Act
+    after.carry_over_sticky_from(&before);
+
+    // Assert: the map handle itself is shared, not copied.
+    assert!(
+        Arc::ptr_eq(&after.sticky_pins, &before.sticky_pins),
+        "carry_over_sticky_from must share the StickyPins Arc, not snapshot it",
+    );
+}
+
+#[test]
+fn carry_over_sticky_from_makes_a_swap_window_pin_visible() {
+    // Regression guard for the snapshot-copy race: a request that mints or
+    // migrates a pin AFTER `carry_over_sticky_from` runs but BEFORE the new
+    // Router is published still holds a reference to the OUTGOING Router.
+    // Under a copy-based carry-over that late pin lands only in the map the
+    // swap discards; under a shared map it lands in the same map the new
+    // Router reads.
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    let mut after = Router::new(config);
+
+    // Act: carry over first, exactly as the hot-reload coordinator does
+    // before publishing the new Router...
+    after.carry_over_sticky_from(&before);
+
+    // ...then a request still in flight against the OUTGOING router mints a
+    // pin after the carry-over ran.
+    before.sticky_pins.put(
+        "late-sess",
+        crate::seat_pool::SeatPin {
+            state_key: "opus#seat-b".into(),
+            repinned: false,
+        },
+    );
+
+    // Assert: the shared map already reflects the late pin.
+    assert_eq!(
+        after.sticky_pins.get("late-sess"),
+        Some(crate::seat_pool::SeatPin {
+            state_key: "opus#seat-b".to_string(),
+            repinned: false,
+        }),
+        "a pin written on the outgoing router after carry-over must land in \
+             the map the new router reads",
     );
 }
 
@@ -575,11 +629,13 @@ fn carry_over_calibration_from_preserves_a_learned_factor() {
 
 #[test]
 fn carry_over_calibration_from_drops_lanes_the_new_config_no_longer_serves() {
-    // The store has no LRU because the lane keyspace is bounded by the loaded
-    // config. An unfiltered carry-over breaks that bound: a run of reloads
-    // that rename models would carry every retired name forward forever,
-    // growing the map with lanes no request can ever reach. Only the lane
-    // whose nickname the new resolved table still holds survives.
+    // The carry-over contract flipped from import-time filtering to
+    // Arc-sharing plus an active prune: a retired lane's SAMPLES may still
+    // sit in the shared map for one bounded window (see the store's own
+    // doc), but it must never again be OBSERVABLE through the current
+    // Router -- `factor_for` must read it as unseen, exactly as it would a
+    // lane that never existed. Only the lane whose nickname the new
+    // resolved table still holds may produce a factor.
     use std::time::SystemTime;
 
     let kind = "openai-compat";
@@ -601,18 +657,97 @@ fn carry_over_calibration_from_drops_lanes_the_new_config_no_longer_serves() {
     }
     assert_eq!(before.calibration_store.len(), 2);
 
+    let kept_key = crate::calibration::LaneKey {
+        provider_kind: kind.to_string(),
+        nickname: "kept".to_string(),
+    };
+    let retired_key = crate::calibration::LaneKey {
+        provider_kind: kind.to_string(),
+        nickname: "retired".to_string(),
+    };
+
     // Act: the replacement router serves only `kept`.
     let mut after = router_serving_nicknames(&config, &["kept"]);
     after.carry_over_calibration_from(&before);
 
-    // Assert
-    let surviving: Vec<String> = after
-        .calibration_store
-        .export_entries()
-        .into_iter()
-        .map(|(key, _)| key.nickname)
-        .collect();
-    assert_eq!(surviving, vec!["kept".to_string()]);
+    // Assert: the kept lane's learned factor survives...
+    assert!(
+        after.calibration_store.factor_for(&kept_key, now).is_some(),
+        "a lane the new config still serves must remain observable",
+    );
+    // ...and the retired lane is unobservable through the current Router,
+    // exactly as an unseen lane would read.
+    assert_eq!(
+        after.calibration_store.factor_for(&retired_key, now),
+        None,
+        "a lane the new config no longer serves must not be observable",
+    );
+}
+
+#[test]
+fn carry_over_calibration_from_shares_the_store_arc() {
+    // Regression guard for the silent-collapse trap, calibration edition: the
+    // carry-over shares the outgoing Router's store Arc rather than
+    // snapshotting it, mirroring `carry_over_k_store_from`.
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    let mut after = Router::new(config);
+
+    // Act
+    after.carry_over_calibration_from(&before);
+
+    // Assert: the store handle itself is shared, not copied.
+    assert!(
+        Arc::ptr_eq(&after.calibration_store, &before.calibration_store),
+        "carry_over_calibration_from must share the store Arc, not snapshot it",
+    );
+}
+
+#[test]
+fn carry_over_calibration_from_makes_a_swap_window_sample_visible() {
+    // Regression guard for the snapshot-copy race: a response that completes
+    // AFTER `carry_over_calibration_from` runs but BEFORE the new Router is
+    // published still holds a reference to the OUTGOING Router. Under a
+    // copy-based carry-over that late sample lands only in the store the
+    // swap discards; under a shared store it lands in the same map the new
+    // Router reads.
+    use std::time::SystemTime;
+
+    let kind = "openai-compat";
+    let nickname = "opus";
+    let now = SystemTime::now();
+
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone());
+    let mut after = router_serving_nicknames(&config, &[nickname]);
+
+    // Act: carry over first, exactly as the hot-reload coordinator does
+    // before publishing the new Router...
+    after.carry_over_calibration_from(&before);
+
+    // ...then a request still in flight against the OUTGOING router records
+    // its sample after the carry-over ran.
+    for i in 0..9 {
+        before.record_calibration_sample(
+            Some(kind),
+            Some(nickname),
+            Some(&format!("caller-{}", i % 3)),
+            10_000,
+            13_000,
+            now,
+        );
+    }
+
+    // Assert: the shared store already reflects the late sample.
+    let key = crate::calibration::LaneKey {
+        provider_kind: kind.to_string(),
+        nickname: nickname.to_string(),
+    };
+    assert!(
+        after.calibration_store.factor_for(&key, now).is_some(),
+        "a sample recorded on the outgoing router after carry-over must \
+             land in the store the new router reads",
+    );
 }
 
 /// Building the quota store's key from the model's own credential ref is what
@@ -645,6 +780,40 @@ fn router_serving_one_oauth_seat(config: &Arc<Config>, label: Option<&str>) -> R
     );
     router
         .install_resolved_models(std::iter::once(("opus".to_string(), Arc::new(model))).collect());
+    router
+}
+
+/// A Router serving TWO models on distinct OAuth credentials, so the quota
+/// store has two declared seats -- used by the re-admit test to prove the
+/// OUTGOING router genuinely admitted a seat the incoming router later
+/// drops (as opposed to a seat it never declared in the first place).
+fn router_serving_two_oauth_seats(config: &Arc<Config>, label_a: &str, label_b: &str) -> Router {
+    let mut router = router_serving_nicknames(config, &["opus-a", "opus-b"]);
+    let provider = router
+        .resolved_models
+        .get("opus-a")
+        .expect("the installed model")
+        .provider
+        .clone();
+    let model_a = ResolvedModel::new("opus-a", "p", provider.clone(), "upstream")
+        .with_auth_secret_ref(routectl_auth::SecretRef::OAuth {
+            provider: "anthropic".to_string(),
+            label: Some(label_a.to_string()),
+        });
+    let model_b = ResolvedModel::new("opus-b", "p", provider, "upstream").with_auth_secret_ref(
+        routectl_auth::SecretRef::OAuth {
+            provider: "anthropic".to_string(),
+            label: Some(label_b.to_string()),
+        },
+    );
+    router.install_resolved_models(
+        [
+            ("opus-a".to_string(), Arc::new(model_a)),
+            ("opus-b".to_string(), Arc::new(model_b)),
+        ]
+        .into_iter()
+        .collect(),
+    );
     router
 }
 
@@ -751,6 +920,119 @@ fn carry_over_quota_from_drops_a_seat_the_new_config_no_longer_declares() {
         after.quota_store.is_empty(),
         "a retired seat's reading must not survive the rebuild"
     );
+}
+
+#[test]
+fn carry_over_quota_from_shares_the_store_arc() {
+    // Regression guard for the silent-collapse trap, quota edition: the
+    // carry-over shares the outgoing Router's store Arc rather than
+    // snapshotting it, mirroring `carry_over_k_store_from`.
+    let config = Arc::new(Config::default());
+    let before = router_serving_one_oauth_seat(&config, Some("seat-b"));
+    let mut after = router_serving_one_oauth_seat(&config, Some("seat-b"));
+
+    // Act
+    after.carry_over_quota_from(&before);
+
+    // Assert: the store handle itself is shared, not copied.
+    assert!(
+        Arc::ptr_eq(&after.quota_store, &before.quota_store),
+        "carry_over_quota_from must share the store Arc, not snapshot it",
+    );
+}
+
+#[test]
+fn carry_over_quota_from_makes_a_swap_window_reading_visible() {
+    // Regression guard for the snapshot-copy race: a response that completes
+    // AFTER `carry_over_quota_from` runs but BEFORE the new Router is
+    // published still holds a reference to the OUTGOING Router. Under a
+    // copy-based carry-over that late reading lands only in the store the
+    // swap discards; under a shared store it lands in the same map the new
+    // Router reads.
+    let config = Arc::new(Config::default());
+    let key = quota_seat_key("anthropic", Some("seat-b"));
+    let before = router_serving_one_oauth_seat(&config, Some("seat-b"));
+    let mut after = router_serving_one_oauth_seat(&config, Some("seat-b"));
+
+    // Act: carry over first, exactly as the hot-reload coordinator does
+    // before publishing the new Router...
+    after.carry_over_quota_from(&before);
+
+    // ...then a request still in flight against the OUTGOING router feeds
+    // its reading after the carry-over ran.
+    assert!(
+        before
+            .quota_store
+            .observe(&key, observed_quota_reading("0.42")),
+        "the still-admitted seat accepts the late reading"
+    );
+
+    // Assert: the shared store already reflects the late reading.
+    assert_eq!(
+        quota_fast_fraction(&after, &key),
+        Some(0.42),
+        "a reading observed on the outgoing router after carry-over must \
+             land in the store the new router reads",
+    );
+}
+
+#[test]
+fn carry_over_quota_from_re_admits_exactly_the_new_seat_set() {
+    // The re-admit half of D6c: a reload that changes the seat set leaves
+    // the SHARED store admitting exactly the new seats -- a dropped seat's
+    // write is refused and counted, a kept seat's late write still lands.
+    let config = Arc::new(Config::default());
+    let kept = quota_seat_key("anthropic", Some("kept"));
+    let dropped = quota_seat_key("anthropic", Some("dropped"));
+
+    // The OUTGOING router genuinely admits BOTH seats -- proven by writing
+    // through it and asserting the write landed, not assumed from the seat
+    // set it was constructed with.
+    let before = router_serving_two_oauth_seats(&config, "kept", "dropped");
+    assert!(
+        before
+            .quota_store
+            .observe(&kept, observed_quota_reading("0.10"))
+    );
+    assert!(
+        before
+            .quota_store
+            .observe(&dropped, observed_quota_reading("0.20")),
+        "the outgoing router must genuinely admit the seat it is about to drop"
+    );
+
+    // The INCOMING router declares only `kept`.
+    let mut after = router_serving_one_oauth_seat(&config, Some("kept"));
+    after.carry_over_quota_from(&before);
+
+    assert_eq!(
+        quota_fast_fraction(&after, &dropped),
+        None,
+        "the dropped seat's pre-existing reading must be pruned by the re-admit"
+    );
+
+    let refused_before = after.quota_store.refused_by_admission_total();
+
+    // A late write for a seat the new config never declared is refused and
+    // counted.
+    assert!(
+        !after
+            .quota_store
+            .observe(&dropped, observed_quota_reading("0.99"))
+    );
+    assert_eq!(
+        after.quota_store.refused_by_admission_total(),
+        refused_before + 1,
+        "a write for a seat outside the re-admitted set must be counted",
+    );
+
+    // A late write for the still-admitted seat lands.
+    assert!(
+        after
+            .quota_store
+            .observe(&kept, observed_quota_reading("0.55"))
+    );
+    assert_eq!(quota_fast_fraction(&after, &kept), Some(0.55));
 }
 
 /// A Router serving exactly `nicknames` out of its resolved table, so the
@@ -1400,6 +1682,16 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
     router.metrics.incr_window_gate_skip();
     router.metrics.incr_window_gate_skip();
     router.metrics.incr_context_window_overflow();
+    // Refused-by-admission lives on QuotaStore, not RouterMetrics, but must
+    // ride the same snapshot event -- an undeclared seat's write refuses.
+    router.quota_store.observe(
+        &crate::quota::key::seat_key_for_secret_ref(Some(&routectl_auth::SecretRef::OAuth {
+            provider: "anthropic".to_string(),
+            label: None,
+        }))
+        .expect("an oauth ref has a key"),
+        observed_quota_reading("0.10"),
+    );
 
     // Act
     let events = routectl_testkit::capture_events(|| {
@@ -1426,6 +1718,11 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
 
     // The two counters bumped above carry their real accumulated values.
     assert_eq!(snapshot.field("rc_window_gate_skips_total"), Some("2"));
+    assert_eq!(
+        snapshot.field("rc_quota_refused_by_admission_total"),
+        Some("1"),
+        "the store-owned counter must ride the same snapshot event",
+    );
     assert_eq!(
         snapshot.field("rc_context_window_overflow_total"),
         Some("1")

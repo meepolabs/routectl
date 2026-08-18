@@ -137,8 +137,14 @@ pub struct Router {
     /// `round_robin` (which is dropped on a Router rebuild because resetting
     /// to seat 0 is benign), these pins MUST survive a hot-reload: dropping
     /// them would scatter every live conversation off its warm-cache seat,
-    /// causing a mass cold-miss. See `carry_over_sticky_from`.
-    sticky_pins: crate::seat_pool::StickyPins,
+    /// causing a mass cold-miss.
+    ///
+    /// Held behind an `Arc` so `carry_over_sticky_from` can SHARE the map
+    /// with the outgoing Router rather than copying its entries: a pin
+    /// written through the outgoing Router in the window between the
+    /// carry-over and the swap lands in the same map the incoming Router
+    /// reads. See `carry_over_sticky_from`.
+    sticky_pins: Arc<crate::seat_pool::StickyPins>,
     /// Per-session K-estimator window store, sibling to `sticky_pins`.
     /// Triple-keyed by (session, provider_kind, model) so a session that
     /// switches provider or model does not bleed its cache-reuse history
@@ -196,12 +202,15 @@ pub struct Router {
     ///
     /// Not the LRU shape `k_session_store` uses: a lane is an
     /// operator-declared nickname on one of the four provider kinds, so the
-    /// keyspace is bounded by the loaded config rather than by client
-    /// traffic, and a plain map cannot grow past it.
+    /// keyspace is bounded by the models ever declared in this process
+    /// rather than by client traffic.
     ///
     /// MUST survive a hot-reload (see `carry_over_calibration_from`): a wipe
     /// sends every lane back to the uncorrected estimate, and because that IS
-    /// the pre-correction behavior the loss reads as health.
+    /// the pre-correction behavior the loss reads as health. Carried by
+    /// SHARING the `Arc` and then actively pruning any lane the new
+    /// resolved-model table no longer serves -- see the store's own doc for
+    /// the bounded leak that sharing (rather than a copy) accepts.
     calibration_store: Arc<crate::calibration::CalibrationStore>,
     /// Latest per-seat subscription-quota reading, keyed by the OAuth
     /// `provider#label` ACCOUNT identity (see `crate::quota::key`) and NOT by
@@ -216,7 +225,9 @@ pub struct Router {
     ///
     /// MUST survive a hot-reload (see `carry_over_quota_from`): an emptied store
     /// reads exactly as a fleet of seats that have not reported yet, which is
-    /// the cap-dormant fallback -- so the loss would look like health.
+    /// the cap-dormant fallback -- so the loss would look like health. Carried by
+    /// SHARING the `Arc` and then re-declaring write admission against the new
+    /// config -- see the store's own doc for the carry-over contract.
     quota_store: Arc<crate::quota::store::QuotaStore>,
     /// In-memory learned-capability registry (the `k_session_store`
     /// pattern): per-(target, feature) negatives the dispatch path learns
@@ -716,7 +727,13 @@ impl RouterMetrics {
     /// `ProxyMetrics::log_snapshot` convention. Fields are all counter
     /// names + numeric values -- no token, credential, or request/response
     /// body content ever reaches this call.
-    fn log_snapshot(&self) {
+    ///
+    /// `quota_refused_by_admission_total` rides this snapshot rather than
+    /// living on `RouterMetrics` itself: the counter is owned by
+    /// `QuotaStore` (mirroring its own rejection counters), and the caller
+    /// -- [`Router::log_metrics_snapshot`] -- is the one place that already
+    /// holds both `self.metrics` and `self.quota_store`.
+    fn log_snapshot(&self, quota_refused_by_admission_total: u64) {
         let quota = self.quota_placement_totals();
         #[cfg(feature = "bedrock")]
         tracing::debug!(
@@ -744,6 +761,7 @@ impl RouterMetrics {
             rc_quota_placement_all_capped_total = quota.all_capped,
             rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
             rc_quota_placement_all_unknown_total = quota.all_unknown,
+            rc_quota_refused_by_admission_total = quota_refused_by_admission_total,
             rc_bedrock_validation_unmatched_total = self.bedrock_validation_unmatched_total(),
             "router metrics snapshot"
         );
@@ -773,6 +791,7 @@ impl RouterMetrics {
             rc_quota_placement_all_capped_total = quota.all_capped,
             rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
             rc_quota_placement_all_unknown_total = quota.all_unknown,
+            rc_quota_refused_by_admission_total = quota_refused_by_admission_total,
             "router metrics snapshot"
         );
     }
@@ -1592,17 +1611,22 @@ impl Router {
     /// reload because a reset to seat 0 costs at most one mis-rotated
     /// request -- benign. Pins are not benign, so they survive here.)
     ///
-    /// Entries are replayed in LRU order (least-recently-used first) so the
-    /// destination map preserves the source's recency ordering, keeping the
-    /// eviction frontier consistent across the rebuild.
+    /// Carried by SHARING the `Arc` rather than copying entries, the same
+    /// fix `carry_over_k_store_from` applies to the K-estimator store: a
+    /// snapshot-and-replay has a window between the snapshot and the new
+    /// Router's publish where a pin written through the outgoing Router (an
+    /// overflow-repin racing the swap) would land only in the map this
+    /// carry-over is about to discard. Sharing the map means both Routers'
+    /// writes land on the one LRU, so a pin racing the swap is neither lost
+    /// nor written to a copy nobody reads. This also shares the anti-herd
+    /// tiebreak counter, which now keeps advancing across a reload instead
+    /// of resetting -- see the field's own doc on `StickyPins`.
     ///
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in,
     /// alongside `carry_over_runtime_state_from`.
     pub fn carry_over_sticky_from(&mut self, previous: &Self) {
-        for (session_key, pin) in previous.sticky_pins.export_entries() {
-            self.sticky_pins.put(&session_key, pin);
-        }
+        self.sticky_pins = Arc::clone(&previous.sticky_pins);
     }
 
     /// Carry the previous Router's per-session K-estimator windows into
@@ -1694,23 +1718,25 @@ impl Router {
     /// lane simply reads as not-yet-calibrated, which is indistinguishable
     /// from health.
     ///
-    /// No ordering discipline (unlike the LRU-shaped session carries): the
-    /// lane map never evicts, so there is no eviction frontier to preserve.
+    /// Carried by SHARING the `Arc` rather than copying entries: a sample
+    /// recorded through the outgoing Router in the window between this call
+    /// and the swap lands in the same map the incoming Router reads, so it
+    /// is neither lost nor written to a copy nobody reads. Immediately after
+    /// the share, `CalibrationStore::retain_lanes`
+    /// drops every lane `Router::knows_nickname` refuses -- the same
+    /// predicate the boot rebuild filters rows by -- so the map does not
+    /// grow past the models ever declared in this process; leaving a run of
+    /// reloads with renamed models to carry every past name forward would
+    /// break that bound.
     ///
-    /// A lane whose nickname this Router's resolved table no longer holds is
-    /// DROPPED, through the same predicate the boot rebuild filters rows by.
-    /// The store has no LRU because the lane keyspace is bounded by the loaded
-    /// config; importing retired lanes unconditionally would break exactly
-    /// that bound, since a run of reloads with renamed models would carry every
-    /// past name forward forever.
+    /// Sharing accepts one bounded leak the old copy-and-filter did not: an
+    /// in-flight write through the OLD `Arc` can re-create a lane for a
+    /// nickname this prune just dropped. See the store's own doc for why the
+    /// leak is bounded and self-healing rather than something to close here.
     pub fn carry_over_calibration_from(&mut self, previous: &Self) {
-        let retained = previous
-            .calibration_store
-            .export_entries()
-            .into_iter()
-            .filter(|(key, _)| self.knows_nickname(&key.nickname))
-            .collect();
-        self.calibration_store.import_entries(retained);
+        self.calibration_store = Arc::clone(&previous.calibration_store);
+        self.calibration_store
+            .retain_lanes(|key| self.knows_nickname(&key.nickname));
     }
 
     /// Carry the previous Router's latest per-seat subscription-quota readings
@@ -1727,13 +1753,21 @@ impl Router {
     /// is a config swap that empties the store on that path only, which no
     /// symptom would distinguish from the same silence.
     ///
-    /// A seat outside the NEW config's declared set is dropped: the import goes
-    /// through the store's own admission, the same gate the live feed passes, so
-    /// a run of reloads over renamed or removed seats cannot carry retired keys
-    /// forward and break the keyspace bound.
+    /// Carried by SHARING the `Arc` rather than copying entries, THEN
+    /// re-running `Router::admit_quota_seats` against the now-shared
+    /// store: `install_resolved_models` already declared admission once
+    /// against this Router's own (about-to-be-discarded) store, so without
+    /// the re-run the shared store would keep answering from whatever the
+    /// PREVIOUS Router last admitted. The re-run both prunes a seat the new
+    /// config no longer declares (through `QuotaStore::admit_seats`'s own
+    /// fold, so a run of reloads over renamed or removed seats cannot carry
+    /// retired keys forward) and admits a seat the new config newly
+    /// declares, so a late write from a request still holding the outgoing
+    /// Router lands on the one store both Routers read -- neither lost to a
+    /// discarded copy nor double-counted.
     pub fn carry_over_quota_from(&mut self, previous: &Self) {
-        self.quota_store
-            .import_entries(previous.quota_store.export_entries());
+        self.quota_store = Arc::clone(&previous.quota_store);
+        self.admit_quota_seats();
     }
 
     /// Whether `nickname` is still in this Router's resolved model table.
@@ -2001,7 +2035,8 @@ impl Router {
     /// body content ever reaches this call -- every field is a counter name
     /// plus its numeric value.
     pub fn log_metrics_snapshot(&self) {
-        self.metrics.log_snapshot();
+        self.metrics
+            .log_snapshot(self.quota_store.refused_by_admission_total());
     }
 }
 

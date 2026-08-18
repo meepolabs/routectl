@@ -134,24 +134,26 @@ fn a_lane_with_enough_balanced_evidence_yields_its_factor() {
 }
 
 #[test]
-fn export_import_round_trips_every_lane_and_sample() {
+fn retain_lanes_drops_a_lane_the_predicate_refuses() {
     // Arrange: two lanes with different evidence.
-    let source = CalibrationStore::default();
+    let store = CalibrationStore::default();
     for i in 0..4 {
-        source.record(key("anthropic-api", "opus"), 1_000, 1_100 + i, i, now());
+        store.record(key("anthropic-api", "kept"), 1_000, 1_100 + i, i, now());
     }
-    source.record(key("bedrock", "haiku"), 1_000, 900, 7, now());
+    store.record(key("bedrock", "retired"), 1_000, 900, 7, now());
+    assert_eq!(store.len(), 2);
 
-    // Act
-    let destination = CalibrationStore::default();
-    destination.import_entries(source.export_entries());
+    // Act: the predicate admits only the "kept" nickname, mirroring the
+    // carry-over's `knows_nickname` check.
+    store.retain_lanes(|k| k.nickname == "kept");
 
-    // Assert: the destination holds the same lanes with the same samples.
-    let mut before = source.export_entries();
-    let mut after = destination.export_entries();
-    before.sort_by(|a, b| a.0.cmp(&b.0));
-    after.sort_by(|a, b| a.0.cmp(&b.0));
-    assert_eq!(after, before);
+    // Assert
+    let surviving: Vec<String> = store
+        .export_entries()
+        .into_iter()
+        .map(|(k, _)| k.nickname)
+        .collect();
+    assert_eq!(surviving, vec!["kept".to_string()]);
 }
 
 #[test]

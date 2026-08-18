@@ -5,11 +5,27 @@
 //! One [`QuotaSnapshot`] per seat, behind one mutex. The keyspace is the OAuth
 //! seat set the credential store declares and the loaded config admits -- it
 //! is operator-declared, not client-driven, so a plain map cannot grow past
-//! the configured seats. That is the same bound the per-lane calibration store
-//! rests on, one dimension over: a lane is a declared nickname, a seat here is
-//! a declared credential account. Insertion additionally refuses a key outside
-//! the configured seat set, so a renamed or removed seat cannot leave an entry
-//! behind across a reload, and a stray identity cannot mint one at all.
+//! the seats EVER declared in this process. That is the same bound the
+//! per-lane calibration store rests on, one dimension over: a lane is a
+//! declared nickname, a seat here is a declared credential account.
+//!
+//! # The carry-over contract
+//!
+//! A hot-reload shares this store's `Arc` across the rebuild rather than
+//! copying its entries (see `Router::carry_over_quota_from`), so a write
+//! racing the swap lands on the one map both the outgoing and incoming
+//! Router read -- neither lost nor written to a copy nobody reads. Sharing
+//! means insertion admission ([`QuotaStore::admit_seats`]) is a WRITE-TIME
+//! gate re-declared from the new config on every rebuild, not an
+//! import-time filter: a seat's stale reading is actively dropped from the
+//! map the moment `admit_seats` no longer names it (folded into
+//! `admit_seats` itself, so both the boot install path and the reload
+//! carry-over path prune through the one call), and a write for a
+//! not-currently-admitted seat is refused outright and counted
+//! ([`QuotaStore::refused_by_admission_total`]). The keyspace bound is
+//! therefore "seats ever declared in this process, minus whatever the most
+//! recent `admit_seats` call pruned" -- operator-action-bounded, never
+//! traffic-bounded, reset on restart.
 //!
 //! Two shapes in this crate were deliberately NOT copied. The calibration
 //! store keeps a bounded RING per lane because its reduction takes a median
@@ -155,9 +171,8 @@ fn now_epoch_secs() -> u64 {
 /// One seat's stored reading: each window paired with the stamp of the
 /// observation THAT window came from.
 ///
-/// Public only so a carry-over can move readings between two stores; every
-/// field stays private, so the merge rule below is the only way to build or
-/// change one. A caller reads a seat's state through
+/// Every field stays private, so the merge rule below is the only way to
+/// build or change one. A caller reads a seat's state through
 /// [`QuotaStore::reading_for`], which applies read-time expiry -- it cannot
 /// reach an unexpired-checked window by holding this type.
 ///
@@ -170,7 +185,7 @@ fn now_epoch_secs() -> u64 {
 /// stamp for the whole snapshot cannot express that, because the two windows are
 /// merged independently and so can come from different responses.
 #[derive(Debug, Clone)]
-pub struct StoredReading {
+struct StoredReading {
     /// Stamp of the most recent observation merged into this seat, whatever it
     /// carried. Orders arrivals; never ages a window.
     latest: ObservationStamp,
@@ -357,16 +372,37 @@ pub struct QuotaStore {
     /// readings rather than accepting every identity that turns up.
     admitted: Mutex<HashSet<SeatKey>>,
     rejections: RejectionCounters,
+    /// Writes refused because their seat is not in the currently admitted
+    /// set -- see [`QuotaStore::refused_by_admission_total`].
+    refused_by_admission: AtomicU64,
 }
 
 impl QuotaStore {
-    /// Declare the configured seat set this store will hold readings for.
+    /// Declare the configured seat set this store will hold readings for,
+    /// and prune any reading this store already holds for a seat outside
+    /// it.
     ///
-    /// Called once per Router build from the resolved model table, so the
-    /// keyspace bound is the config's rather than the traffic's. Replaces any
-    /// previously declared set: a rebuild's set is the current truth.
+    /// Called from `install_resolved_models` on every Router build (so the
+    /// keyspace bound is the config's rather than the traffic's) and again
+    /// from `Router::carry_over_quota_from` after the store's `Arc` is
+    /// shared with the outgoing Router, so a seat the new config dropped
+    /// cannot keep answering from a reading a past config's traffic wrote.
+    ///
+    /// The prune builds the new admitted set locally, then swaps it into
+    /// `admitted` FIRST and prunes `seats` SECOND (two sequential
+    /// acquisitions, never held together here). Ordering matters: a
+    /// concurrent [`QuotaStore::observe`] holds `seats` across ITS
+    /// admission check (see there), so any `observe` that raced ahead of
+    /// the swap sees the OLD admitted set but still serializes on `seats`
+    /// with this prune -- its insert either lands before the prune (and
+    /// is then pruned away) or after the swap (and is refused outright).
+    /// There is no window where a write for a seat this call retires
+    /// survives.
     pub fn admit_seats(&self, seats: impl IntoIterator<Item = SeatKey>) {
-        *self.admitted.lock() = seats.into_iter().collect();
+        let new_admitted: HashSet<SeatKey> = seats.into_iter().collect();
+        *self.admitted.lock() = new_admitted.clone();
+        let mut guard = self.seats.lock();
+        guard.retain(|key, _| new_admitted.contains(key));
     }
 
     /// Whether `key` is in the configured seat set.
@@ -383,11 +419,21 @@ impl QuotaStore {
     ///
     /// Returns whether anything was stored, which the feed's tests read; the
     /// production call site ignores it.
+    ///
+    /// Holds `seats` across BOTH the admission check and the insert (nesting
+    /// `admitted` inside it via a brief, immediately-released acquisition)
+    /// so this serializes against [`QuotaStore::admit_seats`]'s prune: this
+    /// is the ONLY method that nests the two locks, and always in this one
+    /// direction (`seats` outer, `admitted` inner) -- `admit_seats` itself
+    /// takes them strictly sequentially, never together. That one-directional
+    /// discipline is what closes the TOCTOU: there is no interleaving where a
+    /// retired seat's write survives a concurrent prune.
     pub fn observe(&self, key: &SeatKey, observed: QuotaSnapshot) -> bool {
+        let mut guard = self.seats.lock();
         if !self.admits(key) {
+            self.refused_by_admission.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        let mut guard = self.seats.lock();
         let merged = match guard.get(key) {
             Some(stored) => stored.merged(&observed),
             None => StoredReading::first(observed),
@@ -457,36 +503,18 @@ impl QuotaStore {
         self.seats.lock().is_empty()
     }
 
-    /// Snapshot every seat and its reading, for carrying live readings across a
-    /// hot-reload rebuild.
+    /// Cumulative writes refused because their seat was not in the currently
+    /// admitted set.
     ///
-    /// Each window travels with its OWN observation stamp, so a carried reading
-    /// keeps aging on the instant it was actually read; a reload does not
-    /// refresh what the upstream said.
-    pub fn export_entries(&self) -> Vec<(SeatKey, StoredReading)> {
-        self.seats
-            .lock()
-            .iter()
-            .map(|(key, reading)| (key.clone(), reading.clone()))
-            .collect()
-    }
-
-    /// Install snapshotted entries, subject to the SAME admission the live feed
-    /// is subject to -- so a reload whose config dropped a seat cannot carry
-    /// that seat's reading forward, which is what keeps the keyspace bounded by
-    /// the CURRENT config across a run of reloads.
-    ///
-    /// No ordering discipline (unlike the LRU-shaped session stores): this map
-    /// never evicts, so there is no eviction frontier a scattered replay could
-    /// disturb.
-    pub fn import_entries(&self, entries: Vec<(SeatKey, StoredReading)>) {
-        let mut guard = self.seats.lock();
-        let admitted = self.admitted.lock();
-        for (key, reading) in entries {
-            if admitted.contains(&key) {
-                guard.insert(key, reading);
-            }
-        }
+    /// A nonzero value right after a reload is EXPECTED and bounded: it
+    /// counts a retired seat's late write (one still in flight against the
+    /// outgoing Router when the carry-over re-declared admission) being
+    /// correctly refused. A large or steadily GROWING value outside that
+    /// window is the signal worth acting on -- it means a seat this Router
+    /// should be serving is not in the admitted set, which is exactly the
+    /// symptom of a missed re-admit after a config change.
+    pub fn refused_by_admission_total(&self) -> u64 {
+        self.refused_by_admission.load(Ordering::Relaxed)
     }
 }
 

@@ -171,19 +171,27 @@ const STICKY_PIN_CAPACITY: usize = 4096;
 /// Wraps a `parking_lot::Mutex<LruCache<..>>` for interior mutability so the
 /// map is read/written on the `&self` dispatch path.
 ///
-/// UNLIKE [`RoundRobinCursors`], this map is CARRIED OVER on a Router
-/// rebuild (see `Router::carry_over_sticky_from`). Dropping pins mid-incident
-/// would scatter every live conversation off its warm-cache seat -- a mass
+/// UNLIKE [`RoundRobinCursors`], this whole struct is held behind an `Arc` on
+/// `Router` and SHARED (not copied) across a hot-reload rebuild (see
+/// `Router::carry_over_sticky_from`). Dropping pins mid-incident would
+/// scatter every live conversation off its warm-cache seat -- a mass
 /// cold-miss across all in-flight conversations -- so the carry-over is
-/// mandatory, not benign.
+/// mandatory, not benign. Sharing also means a pin written through the
+/// outgoing Router in the window between the carry-over and the swap lands
+/// in the same map the incoming Router reads, rather than in a snapshot the
+/// swap is about to discard.
 pub struct StickyPins {
     pins: Mutex<LruCache<String, SeatPin>>,
     /// Deterministic anti-herd tiebreak counter. When a birth pick finds
     /// several equally-least-loaded seats, the chooser rotates across them
     /// by `tiebreak % tied.len()` so concurrent fan-out misses reading the
     /// same capacity snapshot spread over distinct seats instead of herding
-    /// onto one. Deliberately NOT carried over on a Router rebuild: a reset
-    /// to 0 is benign -- it only re-seeds tie rotation, never a pin.
+    /// onto one. SHARED across a hot-reload along with the rest of
+    /// `StickyPins` (see the struct doc): the counter now keeps advancing
+    /// rather than resetting to 0 on a rebuild. That is benign in the other
+    /// direction from a reset -- it only shifts which tied seat a rotation
+    /// lands on, never a pin -- so persistence needs no defense, only this
+    /// note for the next reader expecting the old reset.
     tiebreak: AtomicUsize,
 }
 
@@ -224,18 +232,19 @@ impl StickyPins {
         self.pins.lock().put(session_key.to_string(), pin);
     }
 
-    /// Snapshot all entries in LRU order: least-recently-used FIRST,
-    /// most-recently-used LAST. Used for carry-over on a Router rebuild so
-    /// the destination map can re-`put` in the same recency order (carrying
-    /// the `repinned` flag, so the one-time cap survives the reload). (`iter`
-    /// yields MRU->LRU, so the collected order is reversed.)
-    pub(crate) fn export_entries(&self) -> Vec<(String, SeatPin)> {
-        let guard = self.pins.lock();
-        guard
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .rev()
-            .collect()
+    /// Number of pins currently held. Test read surface only: production
+    /// never asks how many conversations are pinned, only whether a given
+    /// one is.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.pins.lock().len()
+    }
+
+    /// True when no session holds a pin. Test read surface only, paired
+    /// with [`StickyPins::len`].
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pins.lock().is_empty()
     }
 }
 
@@ -669,19 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn sticky_pins_put_then_export_round_trips() {
-        // Arrange
-        let pins = StickyPins::new();
-
-        // Act
-        pins.put("sess-1", pin("opus#seat-b"));
-
-        // Assert
-        let entries = pins.export_entries();
-        assert!(entries.contains(&("sess-1".to_string(), pin("opus#seat-b"))));
-    }
-
-    #[test]
     fn sticky_pins_evicts_beyond_capacity() {
         // Arrange
         let pins = StickyPins::new();
@@ -693,20 +689,20 @@ mod tests {
         }
 
         // Assert: bounded at capacity.
-        let entries = pins.export_entries();
-        assert_eq!(entries.len(), STICKY_PIN_CAPACITY);
+        assert_eq!(pins.len(), STICKY_PIN_CAPACITY);
 
         // Assert: the earliest-inserted keys were evicted (LRU).
-        let keys: std::collections::HashSet<&str> =
-            entries.iter().map(|(k, _)| k.as_str()).collect();
         for i in 0..overflow {
             assert!(
-                !keys.contains(format!("sess-{i}").as_str()),
+                pins.get(&format!("sess-{i}")).is_none(),
                 "earliest-inserted key sess-{i} should have been evicted",
             );
         }
         // And the most-recently-inserted survives.
-        assert!(keys.contains(format!("sess-{}", STICKY_PIN_CAPACITY + overflow - 1).as_str()));
+        assert!(
+            pins.get(&format!("sess-{}", STICKY_PIN_CAPACITY + overflow - 1))
+                .is_some()
+        );
     }
 
     // ---- sticky_least_loaded_order pure-fn tests ----

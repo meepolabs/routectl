@@ -3,9 +3,30 @@
 //! One bounded ring of recent ratio samples per lane, behind a single mutex.
 //! Deliberately NOT the bounded-LRU shape the cache-reuse tracker uses: that
 //! keyspace is inbound-session-keyed and therefore client-driven and
-//! unbounded, whereas a lane is `(provider_kind, operator-declared nickname)`
-//! and so bounded by the config the daemon loaded. A plain map cannot grow
-//! past the declared model table.
+//! unbounded, whereas a lane is `(provider_kind, operator-declared nickname)`.
+//!
+//! # The carry-over contract
+//!
+//! A hot-reload shares this store's `Arc` across the rebuild rather than
+//! copying its entries (see `Router::carry_over_calibration_from`), so a
+//! sample recorded through the outgoing Router in the window between the
+//! carry-over and the swap lands in the same map the incoming Router reads.
+//! The carry-over immediately prunes any lane [`CalibrationStore::retain_lanes`]
+//! refuses -- the Router-side predicate checks the lane's nickname against the
+//! new resolved-model table -- so the map does not grow past the models EVER
+//! declared in this process. That bound is operator-action-bounded, never
+//! traffic-bounded, and resets on restart.
+//!
+//! One bounded leak survives the prune, by construction rather than
+//! oversight: `record` has no admission gate of its own, so a write racing
+//! the swap through the OLD `Arc` can re-create a lane for a nickname the
+//! prune just dropped. The leak is bounded on every axis that matters -- at
+//! most one lane per racing request per reload, unreachable by any read
+//! (the gate resolves its lane key from the CURRENT resolved-model table, so
+//! a dropped nickname's key can never form), and swept by the very next
+//! reload's prune. Mirroring quota's write-time admission set here would
+//! close it exactly, and was rejected: a self-healing one-lane leak does not
+//! warrant that machinery.
 //!
 //! The store holds no request content and no session identifier: a sample
 //! carries a timestamp, an integer ratio, and an opaque cohort tag.
@@ -189,16 +210,13 @@ impl CalibrationStore {
             .collect()
     }
 
-    /// Install snapshotted entries, replacing any lane of the same key.
-    ///
-    /// No ordering discipline is needed on the way in (unlike the LRU-shaped
-    /// session stores): this map never evicts, so there is no eviction
-    /// frontier a scattered replay could disturb.
-    pub fn import_entries(&self, entries: Vec<(LaneKey, LaneSamples)>) {
-        let mut guard = self.lanes.lock();
-        for (key, samples) in entries {
-            guard.insert(key, samples);
-        }
+    /// Drop every lane whose key `pred` refuses. The hot-reload carry-over's
+    /// prune step: called with the new Router's `knows_nickname` predicate
+    /// immediately after the store's `Arc` is shared with the outgoing
+    /// Router, so a lane the new resolved-model table no longer serves is
+    /// removed rather than left to answer from a stale nickname forever.
+    pub fn retain_lanes(&self, mut pred: impl FnMut(&LaneKey) -> bool) {
+        self.lanes.lock().retain(|key, _| pred(key));
     }
 }
 
