@@ -566,6 +566,31 @@ mod tests {
 
     use super::*;
 
+    /// How long a test waits for the side under test to close its half of
+    /// a connection before treating the read as a failure. Any regression
+    /// whose failure shape is "the stream never closes" would otherwise
+    /// STALL a parallel cargo test shard on an unbounded read to EOF, and
+    /// a stalled test is a strictly worse diagnosis than a red assertion
+    /// (observed: mutating one of these paths hung past ten minutes rather
+    /// than failing).
+    const CLOSE_DEADLINE: Duration = Duration::from_secs(5);
+
+    /// Read `stream` to EOF under [`CLOSE_DEADLINE`] and decode it lossily.
+    /// `unclosed_means` states what a stream that never closes would prove
+    /// about the code under test, so a blown deadline reads as the specific
+    /// regression rather than as a bare timeout.
+    async fn read_to_close<S: tokio::io::AsyncRead + Unpin>(
+        stream: &mut S,
+        unclosed_means: &str,
+    ) -> String {
+        let mut response = Vec::new();
+        tokio::time::timeout(CLOSE_DEADLINE, stream.read_to_end(&mut response))
+            .await
+            .expect(unclosed_means)
+            .unwrap();
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
     #[test]
     fn parse_connect_request_parses_host_and_port() {
         let raw = b"CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
@@ -839,17 +864,12 @@ mod tests {
             .write_all(format!("CONNECT 127.0.0.1:{dead_port} HTTP/1.1\r\n\r\n").as_bytes())
             .await
             .unwrap();
-        let mut response = Vec::new();
-        // Bounded: a regression that answers `200` and establishes the tunnel
-        // leaves neither side closing, so an unbounded read to EOF would STALL
-        // this test instead of failing it -- and a stalled test in a parallel
-        // shard is a worse diagnosis than a red assertion. Observed: mutating
-        // the target to be reachable hung past ten minutes rather than failing.
-        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
-            .await
-            .expect("the CONNECT exchange must close rather than establish a tunnel")
-            .unwrap();
-        let response = String::from_utf8_lossy(&response);
+        let response = read_to_close(
+            &mut client,
+            "the CONNECT exchange must close rather than establish a tunnel: a regression that \
+             answers 200 and establishes it leaves neither side closing",
+        )
+        .await;
         assert!(
             response.starts_with("HTTP/1.1 502"),
             "an unreachable target must get a 502, not a false 200: {response}"
@@ -944,9 +964,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut response = Vec::new();
-        tls.read_to_end(&mut response).await.unwrap();
-        let response = String::from_utf8_lossy(&response);
+        let response = read_to_close(
+            &mut tls,
+            "the MITM handoff must answer and close the `Connection: close` request: a stream \
+             that never closes means the request was never dispatched through the MITM branch",
+        )
+        .await;
         assert!(
             response.starts_with("HTTP/1.1 200"),
             "expected the reinject mock's 200 through the MITM handoff, got: {response}"
@@ -1089,9 +1112,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut response = Vec::new();
-        tls.read_to_end(&mut response).await.unwrap();
-        let response = String::from_utf8_lossy(&response);
+        let response = read_to_close(
+            &mut tls,
+            "the control-plane forward must answer and close the `Connection: close` request: a \
+             stream that never closes means the forward leg never completed against the upstream \
+             origin",
+        )
+        .await;
         assert!(
             response.starts_with("HTTP/1.1 200"),
             "expected the fake Anthropic origin's 200, got: {response}"

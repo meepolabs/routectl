@@ -50,7 +50,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use routectl_router::{Config, MitmConfig, ServerAuth};
 use rustls_pki_types::pem::PemObject;
@@ -61,6 +61,16 @@ mod common;
 
 const MITM_HOST: &str = "api.anthropic.com";
 const CONNECT_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+/// How long a readiness poll keeps trying before declaring the surface
+/// broken rather than slow. Generous enough to absorb a cold, loaded,
+/// fully parallel suite; short enough that a genuinely dead front fails
+/// the test instead of stalling the shard.
+const READY_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Pause between readiness attempts. A poll cadence, not a readiness
+/// wait -- readiness is always the successful response itself.
+const POLL_CADENCE: Duration = Duration::from_millis(20);
 
 /// Binds an ephemeral loopback port, reads it back, then drops the
 /// listener -- reserving a free port NUMBER for `[mitm] listen_port`,
@@ -76,9 +86,17 @@ const CONNECT_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n
 /// handed in.
 ///
 /// The residual exposure is a concurrent bind claiming the number
-/// between the drop here and that bind, which would degrade the proxy
-/// start (logged, non-fatal) and fail the test -- accepted for a
-/// single-process run.
+/// between the drop here and that bind, which degrades the proxy start
+/// (logged by `serve_on_listener`, deliberately non-fatal there) --
+/// accepted for a single-process run, because the alternative needs the
+/// OS-assigned port of a socket only the booted server holds, reported
+/// back out through a surface that does not exist yet.
+///
+/// What is NOT accepted is that exposure surfacing as a confusing
+/// failure: [`spawn_test_server`] gates on the proxy actually answering
+/// CONNECT on this number before the test dials it, so a lost race fails
+/// at the gate naming the race rather than as a bare "connection
+/// refused" from a much later dial.
 async fn reserve_free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -102,12 +120,23 @@ fn mitm_config(
 }
 
 /// Boots the real `serve_on_listener` on an ephemeral loopback port in a
-/// background task and gives it a moment to start accepting -- mirrors
-/// `tests/server.rs`'s `helpers::spawn_test_server`, duplicated here
-/// (rather than shared) because that helper lives inside `server.rs`'s
-/// own `mod helpers`, private to that integration-test binary.
+/// background task and returns the bound base URL once the server is
+/// actually answering -- mirrors `tests/server.rs`'s
+/// `helpers::spawn_test_server`, duplicated here (rather than shared)
+/// because that helper lives inside `server.rs`'s own `mod helpers`,
+/// private to that integration-test binary.
+///
+/// Readiness is signalled, never slept for: the listener is bound before
+/// the serve task starts, so a bare TCP connect succeeds from the OS
+/// backlog well before the router (or the MITM front) can answer. Both
+/// fronts are polled against a deadline instead -- a fixed wait is a
+/// latent flake the moment the suite runs loaded and in parallel.
 async fn spawn_test_server(config: Arc<Config>) -> String {
     let config = common::isolate_usage_db(config);
+    let proxy_front = config
+        .mitm
+        .as_ref()
+        .map(|mitm| (mitm.listen_port, mitm.mitm_host.clone()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
@@ -118,11 +147,76 @@ async fn spawn_test_server(config: Arc<Config>) -> String {
             .expect("server failed");
     });
 
-    // Give both the main listener AND (when configured) the MITM proxy
-    // listener a moment to finish binding before the test dials in.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    await_health(&base_url).await;
+    if let Some((port, mitm_host)) = proxy_front {
+        await_proxy_front(port, &mitm_host).await;
+    }
 
     base_url
+}
+
+/// Poll `GET {base_url}/health` until it returns success or the readiness
+/// deadline elapses. The inter-attempt pause is a poll cadence, not a
+/// readiness wait -- readiness is the successful response.
+async fn await_health(base_url: &str) {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + READY_DEADLINE;
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(format!("{base_url}/health")).send().await
+            && response.status().is_success()
+        {
+            return;
+        }
+        tokio::time::sleep(POLL_CADENCE).await;
+    }
+    panic!("the test server did not become healthy at {base_url}");
+}
+
+/// Poll the MITM front's CONNECT protocol until it answers `200
+/// Connection Established` for `mitm_host` (which the MITM branch
+/// answers without dialing anything) or the readiness deadline elapses.
+///
+/// A completed CONNECT handshake is the readiness signal specifically
+/// because it discriminates: the port merely being connectable would
+/// also be true of a sibling test that claimed the number
+/// `reserve_free_port` handed back (see its doc on that residual
+/// exposure). So a lost port race fails HERE, naming the race, instead
+/// of surfacing as a misleading "connection refused" (proxy startup
+/// failed, logged and swallowed as non-fatal) at a later CONNECT dial.
+async fn await_proxy_front(port: u16, mitm_host: &str) {
+    let deadline = Instant::now() + READY_DEADLINE;
+    while Instant::now() < deadline {
+        if probe_connect(port, mitm_host).await {
+            return;
+        }
+        tokio::time::sleep(POLL_CADENCE).await;
+    }
+    panic!(
+        "the MITM proxy front never answered CONNECT on 127.0.0.1:{port}: it either failed to \
+         start (a sibling claimed the reserved port number before the proxy bound it) or another \
+         process holds that port"
+    );
+}
+
+/// One CONNECT attempt against the MITM front. Every failure shape (no
+/// connection, a short or unexpected response) is a not-ready-yet, since
+/// the caller retries until its deadline.
+async fn probe_connect(port: u16, mitm_host: &str) -> bool {
+    let Ok(mut tcp) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
+        return false;
+    };
+    if tcp
+        .write_all(format!("CONNECT {mitm_host}:443 HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = [0u8; CONNECT_ESTABLISHED.len()];
+    tokio::time::timeout(READY_DEADLINE, tcp.read_exact(&mut response))
+        .await
+        .is_ok_and(|read| read.is_ok())
+        && response.as_slice() == CONNECT_ESTABLISHED
 }
 
 /// Speaks one CONNECT handshake against the booted MITM proxy port and
@@ -251,7 +345,17 @@ async fn connect_to_mitm_host_reinjects_v1_models_to_the_live_main_listener() {
     .await
     .unwrap();
     let mut response = Vec::new();
-    tls.read_to_end(&mut response).await.unwrap();
+    // Bounded like the `src/proxy/listener.rs` test module's reads: if the
+    // re-inject leg never reaches the live main listener, nothing closes
+    // this stream and an unbounded read to EOF would stall a parallel
+    // shard instead of failing it.
+    tokio::time::timeout(READY_DEADLINE, tls.read_to_end(&mut response))
+        .await
+        .expect(
+            "the re-inject leg must answer and close the `Connection: close` request: a stream \
+             that never closes means the request never reached the live main listener",
+        )
+        .unwrap();
     let response = String::from_utf8_lossy(&response);
 
     assert!(
