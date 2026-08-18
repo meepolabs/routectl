@@ -127,6 +127,14 @@ pub(super) struct AdditionalPropertiesRepair {
 }
 
 impl AdditionalPropertiesRepair {
+    /// Union of two repair passes' forwards, for a seam that re-runs the
+    /// repair after rewriting `output_config` and must still emit ONE WARN.
+    /// The path sample stays bounded: the fold pushes through the same cap.
+    pub(super) fn merged(mut self, other: Self) -> Self {
+        self.forwarded.absorb(other.forwarded);
+        self
+    }
+
     /// Emit the aggregated WARN, if any non-`false` value was forwarded.
     /// Called exactly once per request by the assembly that ran the repair.
     pub(super) fn warn(&self, provider: &str) {

@@ -116,6 +116,20 @@ impl<T: PartialEq> BoundedLogSample<T> {
         self.push(value);
     }
 
+    /// Fold `other`'s items into this sample, keeping the same cap and
+    /// carrying its truncation flag across.
+    ///
+    /// For a tally that runs the same collection pass twice over one request
+    /// (a post-assembly rewrite re-scanned by the seam that made it) so the
+    /// two runs still yield ONE aggregated record.
+    pub fn absorb(&mut self, other: Self) {
+        let Self { items, truncated } = other;
+        for item in items {
+            self.push_distinct(item);
+        }
+        self.truncated |= truncated;
+    }
+
     /// [`Self::push_distinct`] for a value that costs real work to
     /// materialize: `materialize` is NOT called once the sample is full, so
     /// the collection site pays only for the items that can actually reach
