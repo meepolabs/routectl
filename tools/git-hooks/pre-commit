@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Pre-commit gate matching .github/workflows/ci.yml job "fmt + clippy + check".
-# Runs the checks CI runs so a push that lands clean here lands clean in
-# CI too. Set ROUTECTL_SKIP_PRECOMMIT=1 to bypass when iterating fast.
+# Runs the checks CI runs, plus one local-only leg (public-api baseline
+# drift) that CI does not run, so a push that lands clean here lands clean
+# in CI too. Set ROUTECTL_SKIP_PRECOMMIT=1 to bypass when iterating fast.
 #
 # This file is the source of truth for the pre-commit hook. Install it
 # (and commit-msg) into .git/hooks via:
@@ -57,6 +58,26 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 echo "pre-commit: cargo check (lean providers build)"
 cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api
+
+# Public-API baseline drift (local-only leg; CI does not run this). The
+# baseline went stale silently twice with nothing gating it locally, so
+# this blocks wherever the tooling is present; it skips (does not fail)
+# when the tooling is absent so a pinned nightly is never forced onto
+# every contributor machine. Grep the pin out of the script rather than
+# duplicating it here so the two never drift apart.
+PUBLIC_API_NIGHTLY="$(grep -oE '^PUBLIC_API_NIGHTLY=.*' scripts/public-api.sh | cut -d= -f2)"
+HAVE_CARGO_PUBLIC_API=0
+command -v cargo-public-api >/dev/null 2>&1 && HAVE_CARGO_PUBLIC_API=1
+HAVE_NIGHTLY=0
+rustup toolchain list 2>/dev/null | grep -qF "$PUBLIC_API_NIGHTLY" && HAVE_NIGHTLY=1
+if [[ "$HAVE_CARGO_PUBLIC_API" == "1" && "$HAVE_NIGHTLY" == "1" ]]; then
+    echo "pre-commit: cargo-public-api baseline check (local-only leg; CI does not run this)"
+    bash scripts/public-api.sh --check all
+else
+    echo "pre-commit: WARNING skipping public-api baseline check (local-only leg; CI does not run this)" >&2
+    [[ "$HAVE_CARGO_PUBLIC_API" == "1" ]] || echo "pre-commit:   missing cargo-public-api -- install: cargo install cargo-public-api --version 0.52.0" >&2
+    [[ "$HAVE_NIGHTLY" == "1" ]] || echo "pre-commit:   missing nightly toolchain $PUBLIC_API_NIGHTLY -- install: rustup toolchain install $PUBLIC_API_NIGHTLY --profile minimal" >&2
+fi
 
 echo "pre-commit: cargo doc (rustdoc lints denied)"
 # Scoped to the PUBLIC doc surface (no --document-private-items): the
