@@ -1,9 +1,11 @@
 //! Session-keyed last-fingerprint store for the shadow misfire monitor.
 //!
 //! Mirrors the `KSessionStore` shape (bounded LRU map behind a
-//! `parking_lot::Mutex`). Keyed by the same
-//! (session_key, provider_kind, model) triple so the shadow monitor is
-//! independent from the K estimator but uses the same identity semantics.
+//! `parking_lot::Mutex`). Keyed by the identical
+//! (session_key, provider_kind, served nickname) triple, derived through the
+//! same shared helper -- the monitor is a separate store but never a separate
+//! POPULATION, because its whole purpose is to explain the estimator's own
+//! behavior for a given window.
 //!
 //! Each entry stores the last trimmed-prefix fingerprint observed for a
 //! triple. On every turn the monitor compares the new fingerprint against

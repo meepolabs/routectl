@@ -1734,7 +1734,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reuse boolean as `cache_read > 0` -- the router owns that definition, not
   the reader
 - `src/k_estimator/shadow.rs` -- `ShadowStore`, the session-keyed shadow
-  misfire monitor, independent from but identity-matched to `KSessionStore`.
+  misfire monitor, a store separate from `KSessionStore` but keyed off the
+  identical triple via the shared `k_query_key` derivation, so the monitor and
+  the estimator always describe ONE population.
   Recording only, never mutates a dispatched request: `record_and_compare`
   compares a turn's trimmed-prefix fingerprint against the last stored one
   for the triple and returns `FirstSeen` / `Stable` / `Misfire`, where a
@@ -1962,9 +1964,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   provider_kind, served_model) -> KQueryKey`, projected to the read side via
   `KQueryKey::query(ttl, now)` (a `k_estimator::KQuery`) and to the write side
   via `KQueryKey::store_key()` (a `k_estimator::KSessionKey`, `None` when
-  keyless) -- so `record_would_trim`'s consult and `Router::record_k_sample`'s
-  write cannot drift apart, and the model dimension is the served nickname on
-  both. `may_suppress(estimate)` is the shared `Confidence::Calibrated` gate
+  keyless) -- so `record_would_trim`'s consult, its shadow-misfire recording,
+  and `Router::record_k_sample`'s write cannot drift apart, and the model
+  dimension is the served nickname on all three. `record_would_trim` therefore
+  never takes the upstream wire id at all: pricing arrives pre-resolved as an
+  `EffectiveRow`. `may_suppress(estimate)` is the shared `Confidence::Calibrated` gate
   (a `Low` estimate has its `k_floor` clamped to 0.0, so no caller may compare
   the number without it). `Router::k_emission_suppressed(plan, target,
   session_key)` is the K-gated emission consult built on the same two helpers:
@@ -3382,10 +3386,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `record_calibration_sample` feeds that SAME admitted pair into the router's
   in-memory per-lane store (post-response, best-effort, sibling to
   `record_k_sample`), keyed on the served nickname the ledger row also carries.
-  The non-streaming caller records it INSIDE the successful-render arm, on the
-  same boundary as `finalize(Ok)`: a render failure finalizes `upstream_error`,
-  which clears both persisted columns, so recording earlier would leave the
-  live store holding evidence the ledger refused
+  The non-streaming caller records BOTH live evidence writes INSIDE the
+  successful-render arm, on the same boundary as `finalize(Ok)`: a render
+  failure finalizes `upstream_error`, which clears the persisted calibration
+  columns and is refused by the K startup replay (`outcome = 'ok'` only), so
+  recording earlier would leave the live stores holding evidence the ledger
+  refused
 - `src/handlers/status/mod.rs` -- read-only `/status` family. `StatusState`
   carries ONLY read handles (a `StatusRouterHandle` read-only facade over the
   router `ArcSwap` -- see `router_view.rs` -- plus the `activation` `ArcSwap`

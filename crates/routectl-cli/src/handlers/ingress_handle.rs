@@ -472,23 +472,24 @@ async fn complete_response<A: IngressAdapter>(
             // Non-streaming first byte == the response being ready.
             capture.mark_first_byte();
             capture.observe_response(&resp);
-            // Best-effort, post-response: record the observed cache-reuse
-            // into the per-session K-estimator store. Never affects the
-            // response; a keyless / no-served-target request is skipped
-            // inside the helper.
-            capture.record_k_sample(&router, session_key.as_deref());
             match adapter.render_response(resp) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
                     // only path where the client receives 200 + body, so
                     // finalize `ok` here rather than before the render.
                     //
-                    // The live calibration sample respects the SAME boundary.
-                    // A render failure finalizes `UpstreamError`, which clears
-                    // both persisted evidence columns; recording before the
-                    // render would leave the in-memory store holding a sample
-                    // the ledger refused, so the lane would route one way now
-                    // and another way after a restart rebuilt from the ledger.
+                    // Both live evidence writes respect the SAME boundary.
+                    // A render failure finalizes `UpstreamError`, and the
+                    // startup replay admits `outcome = 'ok'` rows only, so
+                    // recording before the render would leave the in-memory
+                    // stores holding evidence the ledger refused -- the lane
+                    // and the K window would route one way now and another
+                    // way after a restart rebuilt from the ledger.
+                    //
+                    // Best-effort: neither call may affect the response, and
+                    // a keyless / no-served-target request is skipped inside
+                    // the respective helper.
+                    capture.record_k_sample(&router, session_key.as_deref());
                     capture.record_calibration_sample(&router, session_key.as_deref());
                     capture.finalize(Outcome::Ok);
                     // The trace-level egress body (dir 4) fires inside the
