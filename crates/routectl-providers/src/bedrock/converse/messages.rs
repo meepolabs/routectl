@@ -13,6 +13,16 @@
 //! caller sees a partial body rather than a translation failure. Cache
 //! breakpoints survive as sibling `{cachePoint}` entries.
 //!
+//! Three paths construct a document here -- the canonical
+//! message-content document (`translate_document`), the raw
+//! Anthropic-shape tool_result document, and the canonical tool_result
+//! document (`document_to_tool_result`) -- and all three route their
+//! `document.name` through `sanitize_document_name` and their citations
+//! lift through `translate_document_citations`, with the two tool_result
+//! paths sharing `tool_result_document_value` for the emitted wire value.
+//! Single enforcement points, so a document cannot behave differently
+//! depending on which carrier it arrived in.
+//!
 //! Image AND document parts follow the two-class policy the Responses
 //! egress also implements, on the malformed-vs-unrepresentable axis:
 //!

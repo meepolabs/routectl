@@ -233,6 +233,14 @@ pub struct ResponsesPassthroughItem {
 /// Every field is `Option` so an egress can fall back to its own
 /// `self.cfg.*` value when the carrier is empty (library consumers
 /// constructing a `ChatRequest` directly never set the carrier).
+///
+/// The whole carrier is `#[serde(skip)]` on `ChatRequest`, so NO field
+/// here ever reaches a wire, a config file, or a persisted body -- that
+/// holds for the resolved-knob fields and equally for the inbound capture
+/// fields (`claude_code_headers`, `stainless_headers`,
+/// `responses_input_passthrough`, `inbound_session_key`,
+/// `forwarded_bearer`, `provenance`), which egresses read and re-emit
+/// deliberately rather than by serialization.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RoutectlInternal {

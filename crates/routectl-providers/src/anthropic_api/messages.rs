@@ -13,9 +13,18 @@
 //! `normalize_replay_invariants` applies two outgoing invariants before
 //! translation: a hard reject for tool_result messages missing a
 //! tool_call_id, and (gated on `history_reasoning`) a strip of unsigned
-//! Thinking blocks that real Anthropic would 400 on replay. Forward-
+//! Thinking blocks that real Anthropic would 400 on replay. That strip
+//! can empty a turn; a turn left with nothing the wire can serialize is
+//! dropped wholesale rather than shipped as `content: []`. Forward-
 //! compat: `ContentPart::Other` passes through verbatim via
 //! `ContentBlock::Other`.
+//!
+//! Diagnostics for the whole egress attempt are aggregated, never
+//! per-item: `ReasoningSkipTally` pools the reasoning-skip categories and
+//! `EnvelopeUnwrapTally` (owned upstream in `request::normalize`, since
+//! cache reinjection also builds `redacted_thinking` blocks) pools the
+//! envelope events, so one request defect costs one WARN line rather than
+//! one per turn.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -81,6 +90,14 @@ use super::types::{AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlo
 /// affected message indices flagged when it is only a sample. Block
 /// content is never logged (could be reasoning over sensitive data).
 /// Preserve strips nothing, so the WARN does not fire under Preserve.
+/// A SECOND aggregated WARN covers the whole-turn drops above (the
+/// per-block line counts blocks, not turns), likewise once per request.
+///
+/// The keep-decision for a reasoning-only turn runs through
+/// `message_has_emittable_reasoning` / `is_anthropic_emittable_detail` --
+/// the same predicate `emit_reasoning_blocks` gates on -- so the drop
+/// here and the emit downstream cannot drift into keeping a turn that
+/// then emits nothing.
 ///
 /// Returns `Cow::Borrowed(&req.messages)` on the no-strip path (Preserve,
 /// or Strip/Auto with nothing to strip) so unmodified requests don't pay
