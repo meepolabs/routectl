@@ -133,6 +133,10 @@ tracing-test = "0.2"
 tracing-core = "0.1"
 routectl-testkit.workspace = true
 criterion = { workspace = true }
+# The openai-responses redirect pin selects between the provider's two
+# client-builder branches through the process environment, so those tests
+# serialize against every other env-touching test in this crate.
+serial_test = "3"
 
 # Egress typed->Value serialization cost via AnthropicApiProvider. Requires
 # the `anthropic-api` feature (the provider it constructs). `harness = false`:

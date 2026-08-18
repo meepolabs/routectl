@@ -2939,6 +2939,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serial_test",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2991,6 +2992,7 @@ dependencies = [
  "routectl-core",
  "serde_json",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

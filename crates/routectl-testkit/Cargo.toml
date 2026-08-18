@@ -12,6 +12,10 @@ description = "Shared in-process tracing-capture test double for routectl's dev-
 routectl-core.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# `redirect_pin` drives two live mock servers, so wiremock is a regular
+# (not dev-) dependency: this crate IS the dev-dependency of everything
+# that consumes it, and its public API hands back `MockServer`s.
+wiremock.workspace = true
 
 [lints]
 workspace = true
