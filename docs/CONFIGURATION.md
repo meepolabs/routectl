@@ -668,7 +668,7 @@ correctly).
 kind           = "bedrock"
 region         = "us-west-2"
 creds          = { kind = "default-chain" }
-anthropic_beta = "computer-use-2025-01-24"
+anthropic_beta = ["computer-use-2025-01-24"]
 ```
 
 ### `[providers.X] allowed_betas` -- Anthropic API (non-Bedrock) allowlist
