@@ -11,6 +11,10 @@
 //! `Router::carry_over_k_store_from` already preserves the live in-memory
 //! store across a reload, so re-running the rebuild there would clobber
 //! fresher live samples with older ledger history.
+//!
+//! Like its sibling warms it runs the migrating open itself before its first
+//! query -- see the sibling `warm_open` module for why the writer's own open
+//! cannot be relied on for that.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,6 +22,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use routectl_router::{KSessionStore, LedgerReader, LedgerSampleRow, rebuild_into};
 use routectl_usage::{OpenError, open_readonly, read_reuse_samples_since};
+
+use super::warm_open::migrate_before_warm;
 
 /// How far back the startup rebuild reads the ledger. A conservative
 /// bound: 8x the longest known cache prefix TTL (24h), so a session whose
@@ -51,10 +57,10 @@ impl UsageLedgerReader {
         }
     }
 
-    /// Warn that a best-effort ledger read failed AFTER the bootstrap
-    /// probe had already opened the DB cleanly. `failure_class` separates
-    /// an open failure (`"open"`) from a query failure (`"query"`) so a
-    /// broken ledger is never mistaken downstream for a legitimately empty
+    /// Warn that a best-effort ledger read failed AFTER the warm's migrating
+    /// open had already brought the DB to the current schema. `failure_class`
+    /// separates an open failure (`"open"`) from a query failure (`"query"`) so
+    /// a broken ledger is never mistaken downstream for a legitimately empty
     /// one (both otherwise yield zero rows). Samples still return empty:
     /// the warm stays best-effort and a read failure never fails bootstrap.
     fn warn_read_failure(&self, failure_class: &str, error: &dyn std::fmt::Display) {
@@ -77,7 +83,7 @@ impl LedgerReader for UsageLedgerReader {
             Ok(db) => db,
             // An absent file or a table-less DB is the legitimately-empty
             // ledger, not a failure: return no samples silently, matching
-            // the cold-start path the bootstrap probe already expects.
+            // the cold-start path.
             Err(OpenError::NoData { .. }) => return Vec::new(),
             Err(e) => {
                 self.warn_read_failure("open", &e);
@@ -114,29 +120,23 @@ fn reuse_row_to_ledger_row(row: routectl_usage::ReuseSampleRow) -> LedgerSampleR
 
 /// One-shot warm of `store` from the usage ledger at serve bootstrap.
 ///
-/// Best-effort: a missing / unreadable DB (`NoData`, open error) skips the
-/// rebuild and leaves the store cold -- a cold start is the safe default
-/// and must never fail bootstrap. On a successful open the rebuild reads
-/// the `[now - REBUILD_WINDOW, now]` window, capped at `REBUILD_ROW_LIMIT`
-/// rows.
+/// Best-effort: a database that cannot be brought to the current schema, or
+/// cannot be read, skips the rebuild and leaves the store cold -- a cold start
+/// is the safe default and must never fail bootstrap. On a successful open the
+/// rebuild reads the `[now - REBUILD_WINDOW, now]` window, capped at
+/// `REBUILD_ROW_LIMIT` rows.
+///
+/// Runs the migrating open synchronously first (see the sibling `warm_open`
+/// module): the read-only open the query needs rejects a schema older than this
+/// binary's, so a warm that merely hoped the writer had already migrated would
+/// silently load nothing.
 pub(crate) fn warm_k_store_from_ledger(db_path: &Path, store: &KSessionStore) {
-    match open_readonly(db_path) {
-        Ok(_) => {}
-        Err(OpenError::NoData { .. }) => {
-            tracing::debug!(
-                db_path = %db_path.display(),
-                "no usage data yet; skipping K-estimator startup warm (cold start)"
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::debug!(
-                db_path = %db_path.display(),
-                error = %e,
-                "usage db not readable; skipping K-estimator startup warm (cold start)"
-            );
-            return;
-        }
+    if !migrate_before_warm(
+        db_path,
+        "k_estimator",
+        "every session's K estimate stays cold",
+    ) {
+        return;
     }
 
     let reader = UsageLedgerReader::new(db_path.to_path_buf());
@@ -503,10 +503,112 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("absent.db");
 
-        // Act + Assert: warm is a no-op, the store stays cold.
+        // Act + Assert: the warm's migrating open creates the ledger empty,
+        // the read finds nothing, and the store stays cold.
         let store = KSessionStore::new();
         warm_k_store_from_ledger(&path, &store);
         assert!(store.is_empty());
+    }
+
+    /// The migration-order regression, in the exact shape that reads as
+    /// health: a ledger whose on-disk schema is OLDER than this binary's is
+    /// refused outright by the read-only open the reuse query needs, so a warm
+    /// that merely hoped the usage writer had already migrated would load ZERO
+    /// rows and leave every session cold with nothing logged. The warm must
+    /// migrate for itself and still find the evidence.
+    #[test]
+    fn warm_loads_evidence_from_a_ledger_left_at_an_older_schema() {
+        // Arrange: seed a reuse-bearing row, then roll the schema version back
+        // so the file presents as written by an older binary.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as i64;
+        insert_reuse_row(
+            &db,
+            "older-schema",
+            now_ms - 1000,
+            "s1",
+            "anthropic-api",
+            "opus",
+            Some(9),
+        );
+        db.conn()
+            .execute_batch(&format!(
+                "PRAGMA user_version = {}",
+                routectl_usage::SCHEMA_VERSION - 1
+            ))
+            .expect("roll the schema version back");
+        drop(db);
+        assert!(
+            open_readonly(&path).is_err(),
+            "sanity: the read-only open the query needs must refuse the older schema"
+        );
+
+        // Act
+        let store = KSessionStore::new();
+        warm_k_store_from_ledger(&path, &store);
+
+        // Assert: the triple warmed, so the warm brought the schema forward
+        // itself rather than silently reading nothing.
+        assert!(
+            store
+                .get(&KSessionKey {
+                    session_key: "s1".into(),
+                    provider_kind: "anthropic-api".into(),
+                    model: "opus".into(),
+                })
+                .is_some(),
+            "an older on-disk schema must be migrated by the warm, not read as empty"
+        );
+    }
+
+    /// The migrating open the warm performs must leave a ledger the real usage
+    /// writer then attaches to without re-migrating -- the guarded, idempotent
+    /// ladder is what makes running it ahead of the writer safe.
+    #[test]
+    fn the_warm_migrates_before_reading_and_the_writer_still_attaches() {
+        // Arrange: an absent ledger, warmed FIRST (bootstrap order) so the
+        // warm itself performs the migrating open.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("usage.db");
+        let cold = KSessionStore::new();
+        warm_k_store_from_ledger(&path, &cold);
+        assert!(cold.is_empty(), "an empty ledger warms no session");
+
+        // Act: start the real writer against the SAME file the warm just
+        // migrated, then seed and warm again as a fresh boot would.
+        let (handle, writer) = routectl_usage::UsageWriter::start(
+            path.clone(),
+            routectl_usage::CHANNEL_CAPACITY,
+            0,
+            true,
+        );
+        drop(handle);
+        writer.shutdown();
+        let db = open(&path).expect("reopen after writer");
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as i64;
+        insert_reuse_row(
+            &db,
+            "post-writer",
+            now_ms - 1000,
+            "s1",
+            "anthropic-api",
+            "opus",
+            Some(9),
+        );
+        drop(db);
+        let store = KSessionStore::new();
+        warm_k_store_from_ledger(&path, &store);
+
+        // Assert: the post-writer read found the reuse columns, so the schema
+        // survived both opens.
+        assert_eq!(store.len(), 1);
     }
 
     /// A session identified ONLY via the body `metadata.session_id`

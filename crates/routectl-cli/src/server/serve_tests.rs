@@ -835,6 +835,74 @@ fn rusqlite_count(path: &std::path::Path) -> i64 {
         .expect("count rows")
 }
 
+// ---- Boot order: a refused boot never touches the ledger ----
+
+/// A boot the public-bind invariant is going to refuse must be refused BEFORE
+/// the ledger-reading warms run and before the usage writer starts. Pinned on
+/// the ledger FILE: every warm performs a migrating open, and the writer opens
+/// it too, so any of them running would materialize the file -- its absence is
+/// the only observable that survives the refusal's early return.
+#[tokio::test]
+async fn a_refused_public_bind_never_opens_the_usage_ledger() {
+    // Arrange: a token-less config on a non-loopback bind, with a usage path
+    // that does not exist yet.
+    let mut config = Config::default();
+    let usage_dir = isolate_usage_db(&mut config);
+    let db_path = config.usage.db_path.clone();
+    let listener = TcpListener::bind("0.0.0.0:0")
+        .await
+        .expect("bind ephemeral public port");
+
+    // Act
+    let result = serve_on_listener(Arc::new(config), listener, None).await;
+
+    // Assert
+    assert!(result.is_err(), "a token-less public bind must be refused");
+    assert!(
+        !db_path.exists(),
+        "a refused boot must not open, migrate, or write the usage ledger"
+    );
+    drop(usage_dir);
+}
+
+/// The same ordering property for the MITM hard-refuse, which is the stricter
+/// of the two (no `--unsafe-public` override) and sits ahead of it: a boot it
+/// refuses must also leave the ledger untouched. Listener tokens are configured
+/// so the public-bind refusal below it cannot be what fires.
+#[tokio::test]
+async fn a_refused_mitm_boot_never_opens_the_usage_ledger() {
+    use routectl_router::MitmConfig;
+
+    // Arrange
+    let (uri, _token_file) = file_token_uri("boot-order-token");
+    let (mut config, usage_dir) = config_with_single_listener_token(&uri);
+    let db_path = config.usage.db_path.clone();
+    config.mitm = Some(MitmConfig {
+        upstream_origin: "https://api.anthropic.com".into(),
+        listen_port: 0,
+        cert_dir: usage_dir.path().join("certs"),
+        mitm_host: "api.anthropic.com".into(),
+        tested_cc_version: None,
+    });
+    let listener = TcpListener::bind("0.0.0.0:0")
+        .await
+        .expect("bind ephemeral public port");
+
+    // Act
+    let result = serve_on_listener(Arc::new(config), listener, None).await;
+
+    // Assert
+    let message = result.expect_err("a public bind with [mitm] must be hard-refused");
+    assert!(
+        message.to_string().contains("[mitm]"),
+        "the MITM refusal must be what fired: {message}"
+    );
+    assert!(
+        !db_path.exists(),
+        "a refused boot must not open, migrate, or write the usage ledger"
+    );
+}
+
 /// Build a minimal valid `UsageRecord` with the given id for drain
 /// tests. Mirrors the writer crate's own fixture shape.
 #[cfg(test)]

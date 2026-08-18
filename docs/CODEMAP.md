@@ -3106,27 +3106,42 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   bounded-drain shutdown
   (`serve_with_bounded_drain` + `drain_deadline_watcher` + `DRAIN_DEADLINE`),
   MITM front-proxy spawn (`start_mitm_proxy`), and the usage-writer lifecycle
-  (`build_usage_writer` / `drain_usage_writer`). On the owned router before
-  the `ArcSwap`, boot runs the K-store warm (`k_rebuild`), then the
-  calibration-lane warm (`calibration_rebuild`), then the
-  learned-capability warm (`capability_rebuild`); `build_usage_writer` is
-  sequenced AHEAD of the capability warm so the fail-closed boot tombstone has
-  a `UsageHandle` to enqueue through, and BEHIND the calibration warm, which
-  performs its own migrating open (see that module). Router construction is
+  (`build_usage_writer` / `drain_usage_writer`). Boot resolves the bound
+  address and the listener tokens, then applies BOTH security refuses (the
+  `[mitm]`-on-non-loopback hard refuse, then the token-less public-bind refuse)
+  BEFORE any ledger-reading warm and before the writer starts, so a doomed boot
+  never opens, migrates, or writes the usage ledger. Only then, on the owned
+  router before the `ArcSwap`, boot runs the K-store warm (`k_rebuild`), the
+  calibration-lane warm (`calibration_rebuild`), and -- after
+  `build_usage_writer`, so the fail-closed boot tombstone has a `UsageHandle` to
+  enqueue through -- the learned-capability warm (`capability_rebuild`). Both
+  ledger-reading warms perform their own migrating open via `warm_open` and so
+  sit ahead of the writer. Router construction is
   delegated to `router_build`. Boot seeds the initial activation inventory and
   spawns the reload pipeline (both owned by the `reload` submodule); a
   forwarded (pure-proxy) egress is an explicit `[providers.X]
   credential_source = "forwarded"` block -- no zero-config synthetic-egress
   injection
+- `src/server/warm_open.rs` -- `migrate_before_warm(db_path, warm,
+  consequence)`, the migrating open EVERY ledger-reading bootstrap warm performs
+  synchronously before its first query, shared by `k_rebuild` and
+  `calibration_rebuild`. The read-only open a warm's query needs rejects any
+  schema version other than this binary's, so a warm sequenced after the usage
+  writer would read ZERO rows off a not-yet-migrated file -- and zero rows is
+  indistinguishable from an empty ledger, so the loss reads as health. Running
+  the guarded, idempotent ladder here leaves the writer's own later open nothing
+  to do, and nothing else holds the DB at that point in bootstrap. A failure
+  skips the warm at `debug` (the writer reports it at `error` from the surface
+  that owns the ledger's health) and never fails boot. Tests in the
+  `#[path]`-included `warm_open_tests.rs`
 - `src/server/calibration_rebuild.rs` -- bridges the leaf usage ledger to the
   router's `CalibrationLedgerReader` seam and runs the boot warm of the
   per-lane token-estimate correction. `warm_calibration_from_ledger` (called
   from `serve` on the owned router before the `ArcSwap`, bootstrap-only --
   never on hot-reload, where `carry_over_calibration_from` preserves the live
-  store) runs the MIGRATING open itself before its first query: the evidence
-  columns exist only after the newest migration and the read-only open rejects
-  an older schema outright, so relying on the usage writer's own (spawned,
-  concurrent) open would trade a silent miss for a race. Read failures return
+  store) runs the shared `warm_open::migrate_before_warm` open before its first
+  query: the evidence columns exist only after the newest migration and the
+  read-only open rejects an older schema outright. Read failures return
   EMPTY, never partial -- a factor reduced from a half-read slice is one the
   full evidence never supported -- and the tally is logged in one info line
   with a `warn` when the row cap truncated the read

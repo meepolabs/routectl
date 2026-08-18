@@ -170,13 +170,59 @@ pub async fn serve_on_listener_with_overlay(
         );
     }
 
+    // Both security refuses below run BEFORE the ledger-reading warms and
+    // before the usage writer starts, so a boot that is going to be refused
+    // never opens the ledger, never migrates it, and never enqueues a boot
+    // tombstone into it. Neither refusal reads anything the warms produce:
+    // one turns on the bound address, the other on the bound address plus the
+    // resolved listener tokens.
+    let bound = listener
+        .local_addr()
+        .map_err(|e| Error::Internal(format!("local_addr: {e}")))?;
+
+    let token_set = resolve_listener_tokens(&config).await?;
+
+    // HARD REFUSE, independent of --unsafe-public and independent of
+    // listener auth tokens: a non-loopback bind with [mitm] enabled
+    // would make the MITM front-proxy an open relay forwarding
+    // arbitrary reachable callers' full-scope upstream credentials
+    // (e.g. a pooled Anthropic OAuth token) to the real upstream
+    // origin. That is a strictly higher stake than the "expose the
+    // ingress API without auth" case the check below guards, so this
+    // has no override -- unlike --unsafe-public, there is no flag that
+    // makes running an MITM open relay a supported configuration.
+    if config.mitm.is_some() && !bound.ip().is_loopback() {
+        return Err(Error::Config(format!(
+            "refusing to start with [mitm] enabled while bound to non-loopback address \
+             `{bound}`; the MITM front-proxy would relay arbitrary reachable callers' \
+             upstream credentials -- this refusal cannot be overridden with --unsafe-public"
+        )));
+    }
+
+    // Cross-check: a public bind (post-`--unsafe-public`) without
+    // any configured listener tokens is a configuration mistake --
+    // the operator's intent to "expose this address" only makes
+    // sense alongside auth. Fail fast here rather than running an
+    // open server. Loopback binds are exempt because the local-dev
+    // workflow relies on token-less loopback access. Use IpAddr
+    // semantics on the actually-bound address (covers 127.x.x.x,
+    // ::1, ::ffff:127.0.0.1 etc.) instead of re-parsing the host
+    // string.
+    if !bound.ip().is_loopback() && token_set.is_empty() {
+        return Err(Error::Config(format!(
+            "refusing to serve on public bind `{bound}` without [server.auth].tokens; \
+             configure listener auth before exposing routectl on a non-loopback address"
+        )));
+    }
+
     // One-shot warm of the K-estimator session store from the usage
     // ledger, on the owned `router` BEFORE it is wrapped in the ArcSwap.
-    // Best-effort: a missing / unreadable DB skips the warm and leaves the
-    // store cold. Runs ONLY here at the initial bootstrap -- NOT on a
-    // hot-reload, where `carry_over_k_store_from` preserves the live store
-    // (re-warming there would clobber fresher live samples with older
-    // ledger history).
+    // Best-effort: a DB that cannot be brought to the current schema or read
+    // skips the warm and leaves the store cold. Runs the migrating open
+    // itself, ahead of the writer, for the reason its sibling warm below
+    // does. Runs ONLY here at the initial bootstrap -- NOT on a hot-reload,
+    // where `carry_over_k_store_from` preserves the live store (re-warming
+    // there would clobber fresher live samples with older ledger history).
     k_rebuild::warm_k_store_from_ledger(&config.usage.db_path, &router.k_session_store);
 
     // One-shot warm of the per-lane token-estimate correction from the same
@@ -212,10 +258,6 @@ pub async fn serve_on_listener_with_overlay(
         &router,
         &usage_handle,
     );
-
-    let bound = listener
-        .local_addr()
-        .map_err(|e| Error::Internal(format!("local_addr: {e}")))?;
 
     // The bound address is fixed for the process; the config-load stamp lands
     // now (the config in `config` IS the one about to go live) and is
@@ -258,41 +300,6 @@ pub async fn serve_on_listener_with_overlay(
         config.log.trace_body_bytes,
         config.log.redact_prompts,
     );
-
-    let token_set = resolve_listener_tokens(&config).await?;
-
-    // HARD REFUSE, independent of --unsafe-public and independent of
-    // listener auth tokens: a non-loopback bind with [mitm] enabled
-    // would make the MITM front-proxy an open relay forwarding
-    // arbitrary reachable callers' full-scope upstream credentials
-    // (e.g. a pooled Anthropic OAuth token) to the real upstream
-    // origin. That is a strictly higher stake than the "expose the
-    // ingress API without auth" case the check below guards, so this
-    // has no override -- unlike --unsafe-public, there is no flag that
-    // makes running an MITM open relay a supported configuration.
-    if config.mitm.is_some() && !bound.ip().is_loopback() {
-        return Err(Error::Config(format!(
-            "refusing to start with [mitm] enabled while bound to non-loopback address \
-             `{bound}`; the MITM front-proxy would relay arbitrary reachable callers' \
-             upstream credentials -- this refusal cannot be overridden with --unsafe-public"
-        )));
-    }
-
-    // Cross-check: a public bind (post-`--unsafe-public`) without
-    // any configured listener tokens is a configuration mistake --
-    // the operator's intent to "expose this address" only makes
-    // sense alongside auth. Fail fast here rather than running an
-    // open server. Loopback binds are exempt because the local-dev
-    // workflow relies on token-less loopback access. Use IpAddr
-    // semantics on the actually-bound address (covers 127.x.x.x,
-    // ::1, ::ffff:127.0.0.1 etc.) instead of re-parsing the host
-    // string.
-    if !bound.ip().is_loopback() && token_set.is_empty() {
-        return Err(Error::Config(format!(
-            "refusing to serve on public bind `{bound}` without [server.auth].tokens; \
-             configure listener auth before exposing routectl on a non-loopback address"
-        )));
-    }
 
     let max_body_bytes = compute_max_body_bytes(&config);
     let router_swap = Arc::new(ArcSwap::from_pointee(router));
