@@ -144,7 +144,14 @@ pub struct GeminiProvider {
 impl GeminiProvider {
     /// Build a provider from its configuration.
     pub fn new(cfg: GeminiConfig) -> Self {
-        let client = crate::http_client::build(cfg.user_agent.as_deref());
+        // `x-goog-api-key` (direct) and the Cloud Code `Authorization:
+        // Bearer` (OAuth) are not both covered by reqwest's default
+        // cross-host strip list, so a followed 3xx from the configured
+        // host could carry either credential to an unintended host. A
+        // redirect on this lane is an upstream fault to surface, not to
+        // chase.
+        let client = crate::http_client::build_no_redirect(cfg.user_agent.as_deref())
+            .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
         Self {
             cfg,
             client,
@@ -365,6 +372,11 @@ impl GeminiProvider {
         let status = resp.status().as_u16();
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             return Err(self.map_error_response(resp, status).await);
         }
@@ -410,6 +422,11 @@ impl GeminiProvider {
         let status = resp.status().as_u16();
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             let err = self.map_error_response(resp, status).await;
             if cloudcode::is_project_mismatch(&err)
@@ -458,6 +475,11 @@ impl GeminiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             return Err(self.map_error_response(resp, status).await);
         }
@@ -494,6 +516,11 @@ impl GeminiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             let err = self.map_error_response(resp, status).await;
             if cloudcode::is_project_mismatch(&err)

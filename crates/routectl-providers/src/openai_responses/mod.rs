@@ -215,6 +215,11 @@ impl Provider for OpenAiResponsesProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             // Capture the headers BEFORE the capped body read moves `resp`;
             // the shared mapper reads the rate-limit hint off them.
@@ -427,6 +432,11 @@ impl Provider for OpenAiResponsesProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             // Capture the headers BEFORE the capped body read moves `resp`;
             // the shared mapper reads the rate-limit hint off them.

@@ -171,8 +171,8 @@ impl OpenAiResponsesProvider {
         // always fails, and a redirect on this lane is an upstream fault to
         // surface, not to chase. The Cloudflare cookie jar is a chatgpt.com
         // concern with no meaning here, so this lane carries neither the jar
-        // nor a persistence path. The first-party lanes keep the
-        // cookie-backed (redirect-following) client below.
+        // nor a persistence path. The first-party lanes below share the same
+        // no-redirect posture (cookie-backed or not) -- see http_client.rs.
         #[cfg(feature = "bedrock")]
         if cfg.mantle.is_some() {
             let client = crate::http_client::build_no_redirect(Some(&ua))
@@ -190,7 +190,11 @@ impl OpenAiResponsesProvider {
         // disk on construction; reqwest reads / writes through the
         // shared Arc on every request; Drop persists on shutdown.
         // Falling back to the cookie-less client when no path is
-        // resolvable keeps tests / non-OAuth deploys working.
+        // resolvable keeps tests / non-OAuth deploys working. Both
+        // branches are no-redirect: `Authorization` and
+        // `chatgpt-account-id` are not both covered by reqwest's
+        // default cross-host strip list, so a followed 3xx could carry
+        // the account id to an unintended host.
         let cookie_path = cookies::default_cookie_path();
         let (client, cookie_jar) = match cookie_path.as_deref() {
             Some(path) => {
@@ -199,7 +203,12 @@ impl OpenAiResponsesProvider {
                     crate::http_client::build_with_cookie_provider(Some(&ua), Arc::clone(&jar));
                 (client, Some(jar))
             }
-            None => (crate::http_client::build(Some(&ua)), None),
+            None => {
+                let client = crate::http_client::build_no_redirect(Some(&ua)).expect(
+                    "reqwest no-redirect client build failed (TLS init?); fatal at startup",
+                );
+                (client, None)
+            }
         };
         Self {
             cfg,

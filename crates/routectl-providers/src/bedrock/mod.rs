@@ -287,7 +287,14 @@ impl BedrockProvider {
     /// running `auth::resolve` to produce the second arg; this is
     /// typically done once in the router's factory.
     pub fn new(cfg: BedrockConfig, resolved: auth::ResolvedCreds) -> Self {
-        let client = crate::http_client::build(cfg.user_agent.as_deref());
+        // A signed request must never be auto-followed across a 3xx:
+        // the SigV4 envelope (`x-amz-*`, including the security token)
+        // is not in reqwest's default cross-host strip list, and
+        // replaying the signature against a different host would fail
+        // anyway. A redirect here is an upstream fault to surface, not
+        // to chase.
+        let client = crate::http_client::build_no_redirect(cfg.user_agent.as_deref())
+            .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
         Self {
             cfg,
             resolved,
@@ -438,6 +445,11 @@ impl Provider for BedrockProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             // Capture the reset hint from response headers BEFORE
             // `read_error_body` moves `resp`, gated on rate-limit statuses.
@@ -535,6 +547,11 @@ impl Provider for BedrockProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             // Capture the reset hint from response headers BEFORE
             // `read_error_body` moves `resp`, gated on rate-limit statuses.
@@ -650,6 +667,11 @@ impl Provider for BedrockProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             let retry_after = if crate::retry_after::is_rate_limit_status(status) {
                 crate::retry_after::parse_retry_after(resp.headers())

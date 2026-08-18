@@ -314,20 +314,16 @@ impl AnthropicApiProvider {
     /// Build a provider from its configuration.
     pub fn new(cfg: AnthropicApiConfig) -> Self {
         let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind);
-        // The mantle lane uses a no-redirect client: a signed POST must
-        // never be auto-followed across a 3xx, since replaying the SigV4
-        // signature against a different host always fails and a redirect
-        // on this lane is an upstream fault to surface, not to chase. The
-        // first-party lane keeps the stock (redirect-following) client.
-        #[cfg(feature = "bedrock")]
-        let client = if cfg.mantle.is_some() {
-            crate::http_client::build_no_redirect(ua.as_deref())
-                .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup")
-        } else {
-            crate::http_client::build(ua.as_deref())
-        };
-        #[cfg(not(feature = "bedrock"))]
-        let client = crate::http_client::build(ua.as_deref());
+        // Both the mantle and first-party lanes use a no-redirect client.
+        // Mantle: a signed POST must never be auto-followed across a 3xx,
+        // since replaying the SigV4 signature against a different host
+        // always fails. First-party: `x-api-key` and the Claude-Code
+        // identity headers are not in reqwest's default cross-host strip
+        // list, so a followed 3xx from the configured host could carry
+        // them to an unintended host. Either way a redirect on this lane
+        // is an upstream fault to surface, not to chase.
+        let client = crate::http_client::build_no_redirect(ua.as_deref())
+            .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
         let cap = std::num::NonZeroUsize::new(context_management::THINKING_CACHE_CAP)
             .expect("THINKING_CACHE_CAP is non-zero");
         let thinking_cache = std::sync::Arc::new(std::sync::RwLock::new(lru::LruCache::new(cap)));

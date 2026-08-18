@@ -10,6 +10,42 @@
 //! Why this lives in `routectl-providers` rather than a shared util crate:
 //! every consumer is a provider, the surface is small, and pulling
 //! `reqwest` into `routectl-core` would invert the dep direction.
+//!
+//! # PER-LANE REDIRECT POLICY
+//!
+//! Every egress client attaches at least one header that reqwest's
+//! default redirect policy (`limited(10)`) does NOT strip on a
+//! cross-host hop -- `x-api-key`, `x-goog-api-key`, `chatgpt-account-id`,
+//! the Claude-Code identity headers, or (on the signed lanes) the
+//! `x-amz-*` SigV4 envelope. reqwest only drops `AUTHORIZATION`,
+//! `COOKIE`, `PROXY_AUTHORIZATION` and `WWW_AUTHENTICATE` on a host
+//! change, which covers none of those. So every credentialed lane in
+//! this crate builds with [`build_no_redirect`] (or, for the
+//! cookie-backed lane, [`build_with_cookie_provider`], which also pins
+//! `Policy::none()`):
+//!
+//! | Lane | Sensitive headers | Policy |
+//! |---|---|---|
+//! | anthropic-api first-party + mantle | `x-api-key`, Claude-Code identity | no-redirect |
+//! | openai-compat first-party + mantle | `Authorization: Bearer` | no-redirect |
+//! | openai-responses ChatGPT-OAuth / ApiKey / mantle | `Authorization`, `chatgpt-account-id` | no-redirect (cookie-backed variant included) |
+//! | gemini (direct + Cloud Code) | `x-goog-api-key`, `Authorization: Bearer` | no-redirect |
+//! | bedrock (native Invoke/Converse) | `x-amz-*` SigV4 envelope, `Authorization: Bearer` | no-redirect |
+//! | probe (`doctor` reachability check) | none carried, but a probe must be exactly one hop | no-redirect |
+//!
+//! There is no evidence in the docs, fixtures, or wire-quirk notes that
+//! any of these lanes depends on following a same-host (or any) 3xx --
+//! checked `docs/WIRE-GOTCHAS.md`, `docs/PROVIDER-QUIRKS.md`, and
+//! `docs/CONFIGURATION.md` (which documents the mantle lanes' no-redirect
+//! posture but records no first-party redirect dependency). With
+//! redirects disabled, reqwest hands back the 3xx response itself rather
+//! than an error, so every lane's status handling adds an explicit arm
+//! for the 300..400 range (checked BEFORE the success/parse path) that
+//! maps a 3xx to an upstream server-fault error -- the same uniform,
+//! simpler choice as the no-redirect policy itself, applied all the way
+//! through to the client-visible error class. There is currently no lane
+//! that needs the stock redirect-following policy; [`common_builder`] is
+//! the shared TLS/timeout/UA base every lane-specific builder wraps.
 
 use reqwest::Client;
 
@@ -118,6 +154,24 @@ pub fn body_cap_exceeded_message() -> String {
     format!("response body exceeded {MAX_RESPONSE_BODY_BYTES}-byte cap")
 }
 
+/// Fixed message for the upstream error every lane surfaces when a
+/// response comes back 3xx. Every credentialed lane disables
+/// redirect-following (see the module docs above), so a 3xx is never a
+/// hop to chase -- it is an upstream fault. Shared literal so the wording
+/// cannot drift between lanes.
+pub const REDIRECT_NOT_FOLLOWED_MESSAGE: &str = "upstream redirected; redirects are not followed";
+
+/// Map a 3xx response to an upstream error that classifies like a server
+/// fault (`FailureClass::ServerError`: retryable, fallbackable, breaker-
+/// debited) instead of the unclassified `Unknown` a raw 3xx status would
+/// otherwise produce. Every lane's status gate must call this for
+/// `300..400` BEFORE its success/parse path -- a 3xx response body is not
+/// JSON in the shape either path expects, and a raw 3xx echoed to the
+/// client would carry no `Location` the client can use.
+pub fn redirect_not_followed_error(provider_id: &str) -> routectl_core::Error {
+    routectl_core::Error::upstream(provider_id, 502, REDIRECT_NOT_FOLLOWED_MESSAGE)
+}
+
 /// Emit exactly one WARN when a response-body read trips the cap. `path`
 /// distinguishes the call site (`complete_success_body` | `error_body` |
 /// `success_body` | `count_tokens_success_body`); `content_length` is the
@@ -139,40 +193,24 @@ pub fn warn_body_cap(provider: &str, status: u16, content_length: Option<u64>, p
     );
 }
 
-/// Build a `reqwest::Client` with the given optional User-Agent.
-///
-/// `None` keeps reqwest's default UA. Use this anywhere a provider
-/// needs a stock client; tests can override later via wiremock.
-///
-/// Panics: practically never. `reqwest::ClientBuilder::build()` only
-/// fails on TLS-init pathologies (missing system cert store, etc.) --
-/// failures we can't recover from at provider-construct time anyway.
-/// Promoting this to `Result<Client>` would force every provider's
-/// `new()` to be fallible without giving callers anything useful to
-/// do at the failure site.
-pub fn build(user_agent: Option<&str>) -> Client {
-    common_builder(user_agent)
-        .build()
-        .expect("reqwest::Client::build failed (TLS init?); fatal at startup")
-}
-
 /// Build a `reqwest::Client` for one-shot reachability probes: same TLS
-/// floor and connect timeout as [`build`], but with redirect-following
-/// DISABLED. A probe must be EXACTLY one request -- following a
-/// `Location` header would turn a single GET into multiple hops and let
-/// a hostile endpoint steer the probe to an unintended host (SSRF).
+/// floor and connect timeout as every other client in this module, but
+/// with redirect-following DISABLED. A probe must be EXACTLY one
+/// request -- following a `Location` header would turn a single GET
+/// into multiple hops and let a hostile endpoint steer the probe to an
+/// unintended host (SSRF).
 ///
-/// Returns `Result` rather than panicking (unlike [`build`]) so a probe
-/// on a machine with a broken TLS store degrades to a typed `Unreachable`
-/// outcome instead of aborting `doctor`. The mantle provider-construction
-/// caller, by contrast, intentionally `.expect()`s this result: a client
-/// that cannot be built at startup is fatal there, matching [`build`]'s
-/// contract -- the `Result` exists for the degradable probe path, not to
-/// make provider construction fallible.
+/// Returns `Result` rather than panicking so a probe on a machine with a
+/// broken TLS store degrades to a typed `Unreachable` outcome instead of
+/// aborting `doctor`. Provider-construction callers, by contrast,
+/// intentionally `.expect()` this result: a client that cannot be built
+/// at startup is fatal there -- the `Result` exists for the degradable
+/// probe path, not to make provider construction fallible.
 #[cfg(any(
     feature = "openai-compat",
     feature = "anthropic-api",
-    feature = "openai-responses"
+    feature = "openai-responses",
+    feature = "gemini"
 ))]
 pub fn build_no_redirect(user_agent: Option<&str>) -> reqwest::Result<Client> {
     common_builder(user_agent)
@@ -185,6 +223,15 @@ pub fn build_no_redirect(user_agent: Option<&str>) -> reqwest::Result<Client> {
 /// requests against `chatgpt.com/backend-api/codex` (mirrors codex
 /// CLI's `with_chatgpt_cloudflare_cookie_store`). The jar is shared
 /// via Arc so the caller can persist it on shutdown.
+///
+/// Redirect-following is disabled for the same reason as
+/// [`build_no_redirect`]: this lane's `Authorization` and
+/// `chatgpt-account-id` headers are not both covered by reqwest's
+/// default cross-host strip list, so a followed 3xx could carry
+/// `chatgpt-account-id` to an unintended host. The cookie jar itself
+/// stays domain-scoped regardless (the underlying `cookie_store` crate
+/// only attaches a cookie to requests matching its recorded domain), so
+/// disabling redirects here is purely about the header pair.
 #[cfg(feature = "openai-responses")]
 pub fn build_with_cookie_provider<S>(user_agent: Option<&str>, jar: std::sync::Arc<S>) -> Client
 where
@@ -192,13 +239,14 @@ where
 {
     common_builder(user_agent)
         .cookie_provider(jar)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("reqwest::Client::build failed (TLS init?); fatal at startup")
 }
 
 /// Shared builder body: TLS-1.2 floor + optional UA. Centralized so
-/// `build` and `build_with_cookie_provider` cannot drift on the TLS /
-/// proxy / etc. defaults.
+/// `build_no_redirect` and `build_with_cookie_provider` cannot drift on
+/// the TLS / proxy / etc. defaults.
 fn common_builder(user_agent: Option<&str>) -> reqwest::ClientBuilder {
     let mut builder = Client::builder()
         // Defense-in-depth: every real provider endpoint enforces
@@ -444,8 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn build_applies_without_panicking_with_read_timeout() {
-        let _client = super::build(Some("test-ua"));
+    fn common_builder_applies_without_panicking_with_read_timeout() {
+        let _client = super::common_builder(Some("test-ua"))
+            .build()
+            .expect("client build must not fail on a sane TLS store");
     }
 
     #[test]
