@@ -18,6 +18,7 @@ overlays merge, what's reserved.
 **Basics**
 - [Getting started: provider + model + alias](#getting-started-provider--model--alias)
 - [Top-level shape](#top-level-shape)
+- [Config schema version (`version`)](#config-schema-version-version)
 - [Editor autocomplete (JSON Schema)](#editor-autocomplete-json-schema)
 - [Listener auth + routing](#listener-auth--routing)
 - [Validating config](#validating-config)
@@ -30,12 +31,15 @@ overlays merge, what's reserved.
   [xAI (Grok)](#xai-grok-provider)
 - Bedrock: [api_shape](#providersx-api_shape----bedrock-api-selector) -
   [beta-flag controls](#bedrock-and-anthropic-api-beta-flag-controls) -
+  [body-field allowlist](#bedrock-allowed_body_fields----global-bedrock-body-field-allowlist) -
   [mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane) -
   [mantle OpenAI lanes](#providersxbedrock_mantle----bedrock-mantle-openai-lanes)
 - anthropic-api flags: [context_management](#context_management-anthropic-api-provider-flag) -
   [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
 
 **Models and routing**
+- [Model routing (`[aliases]`)](#model-routing-aliases)
+- [Model directory (`[models]`)](#model-directory-models)
 - [Per-model knobs](#per-model-knobs) (reasoning, effort, output caps)
 - [history_reasoning](#history_reasoning-reasoning-echo-back)
 - [Retry and fallback defaults](#retry-and-fallback-defaults)
@@ -51,6 +55,7 @@ overlays merge, what's reserved.
 - [Steady-state advisory trim (`[trim]`)](#steady-state-advisory-trim-trim)
 - [Pricing registry](#pricing-registry-registrypatternpricing)
 - [Catalog: prompt-cache economics](#catalog-prompt-cache-economics-routectl-catalog)
+  ([retired `[cache_pricing]`](#retired-cache_pricing))
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
 
 **Operating the daemon**
@@ -112,6 +117,8 @@ A routectl config is a single TOML file with the following top-level
 sections:
 
 ```toml
+version = 3           # config schema version; see "Config schema version"
+
 [server]              # listener: host, port, strict_translation
 [server.auth]         # listener auth tokens (when binding non-loopback)
 
@@ -181,6 +188,45 @@ sections:
 end-to-end reference; [`examples/bedrock.toml`](../examples/bedrock.toml)
 ships an empirical Bedrock allowlist baseline (16 betas + 16 body
 fields). Copy and edit; do not re-derive.
+
+## Config schema version (`version`)
+
+```toml
+version = 3
+```
+
+- **`version`** (u32, required in practice) -- the config schema version
+  this file is written against. The current version is `3`
+  (`CURRENT_CONFIG_VERSION` in
+  `crates/routectl-router/src/config/validate.rs`); a file omitting the
+  key reads as the legacy `1`.
+
+The version is checked in a preflight that reads the key straight off the
+raw TOML text, BEFORE the typed deserialize runs. That ordering is what
+makes the two out-of-range verdicts actionable instead of surfacing as a
+confusing `unknown field` error:
+
+- **Too old** (`version` below the current one, or absent) -- load fails
+  naming `config migrate`. The loader NEVER migrates on load and never
+  writes to the file: `routectl config migrate` is the only thing that
+  rewrites it, and it does so format-preservingly (operator comments
+  survive) in a two-phase commit that stamps the new `version` last.
+- **Too new** (`version` above what this build supports) -- load fails
+  naming a binary upgrade, so a config written by a newer routectl is
+  never partially interpreted by an older one.
+
+The preflight only ever speaks about the `version` key. TOML that does not
+parse at all, or a `version` that is present but is not a plain
+non-negative integer, falls through to the normal typed deserialize so the
+precise syntax or type error is the one reported.
+
+Two keys are retired by the ladder rather than removed silently: v1's
+`[cache_pricing]` table folds into the catalog overlay (see
+[Retired: `[cache_pricing]`](#retired-cache_pricing)), and v2's raw-status
+retry allow/deny escape hatch becomes per-class policy (see
+[Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)).
+`version` is hot-reloadable: a live swap to a config carrying an
+out-of-range version is REJECTED and the prior router keeps serving.
 
 ## Editor autocomplete (JSON Schema)
 
@@ -312,6 +358,82 @@ configured via `[server.auth].tokens`. The `x-routectl-alias` header
 [server]
 allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass header
 ```
+
+## Model routing (`[aliases]`)
+
+`[aliases]` is one flat table mapping the wire `model` string a client
+sends to a `[models.X]` nickname, or to an ordered fallback chain of
+nicknames. A single string is a one-entry chain; a list is a chain walked
+in order.
+
+```toml
+[aliases]
+"claude-opus-*"   = "heavy"                 # suffix-glob key
+"claude-haiku-*"  = ["fast", "fast-backup"] # fallback chain
+"gpt-4o"          = "compat-4o"             # exact key
+default           = "heavy"                 # catch-all
+```
+
+**Key grammar.** A key is either an exact string or a prefix followed by a
+single trailing `*`. Anything else is rejected at `config check`: a bare
+`"*"` (use `default` instead), an embedded asterisk (`"foo-*-bar"`), and
+multiple asterisks are all errors naming the offending key verbatim.
+
+**Resolution order** for an incoming wire model:
+
+1. exact key in `[aliases]`
+2. longest-prefix suffix-glob key
+3. direct `[models.X]` nickname (the wire model IS a nickname)
+4. the `default` key
+5. otherwise an unknown-alias error
+
+**Shadowing:** when a string is both an alias key and a model nickname,
+the ALIAS wins -- that is what lets an operator put a fallback chain
+behind an existing nickname (`foo = ["foo-primary", "foo-backup"]`). Glob
+keys shadow direct nicknames too. The `default` catch-all is consulted
+LAST, after a direct-nickname hit, so a known nickname is never captured
+by the default.
+
+**Chain entries may themselves be alias keys.** They expand inline,
+depth-first, preserving the operator's stated order: with
+`A = ["B", "C"]` and `B = ["X", "Y"]`, `A` resolves to `[X, Y, C]`.
+Recursion is capped (depth 8) as a defensive net; genuine cycles and
+unknown targets are caught at startup by `config check`, which also
+rejects an empty chain and a chain referencing a `selectable = false`
+model.
+
+**Header override.** A client may send `x-routectl-alias: <key>`, which
+wins over the body's `model` field entirely. `[aliases]` is
+hot-reloadable: an edit applies to the next request with no restart.
+
+## Model directory (`[models]`)
+
+Each `[models.X]` entry binds a logical nickname (the table key) to one
+transport and one upstream model id. `[aliases]` references entries by
+nickname; nothing else in the config does.
+
+```toml
+[models.heavy]
+provider   = "anthropic"                  # required; a [providers] key
+upstream   = "claude-opus-4-20250514"     # required; the upstream wire id
+selectable = true                         # default true
+```
+
+- **`provider`** (string, required) -- the `[providers.X]` key this model
+  dispatches through. Validated at startup against the provider table.
+- **`upstream`** (string, required) -- the model id forwarded to the
+  upstream verbatim. For Bedrock this is the inference-profile id (e.g.
+  `us.anthropic.claude-haiku-4-5-20251001-v1:0`); for OpenAI-shaped
+  egresses it is the wire `model` field.
+- **`selectable`** (bool, default true) -- set `false` to keep an entry
+  around while wiring without making it servable. A disabled entry still
+  loads, but `config check` errors if an alias chain references it.
+
+Everything else on `[models.X]` is a per-model behavior knob -- reasoning
+declaration, output caps, header and payload extras, response labels --
+documented under [Per-model knobs](#per-model-knobs), with the full merge
+semantics in the [field-assignment table](#field-assignment-table).
+`[models]` is hot-reloadable.
 
 ## Field-assignment table
 
@@ -474,8 +596,55 @@ allowed_betas        = ["computer-use-2025-01-24", "files-api-2025-04-14"]
 # allowed_body_fields  = [...]  # optional body-field allowlist
 ```
 
-One flag bypasses this filter unconditionally: see
-[the structured-outputs carve-out](#allowed_betas-carve-out-the-structured-outputs-beta).
+Two flags bypass this filter unconditionally: see
+[the capability-beta carve-out](#allowed_betas-carve-out-the-capability-betas).
+
+### `[bedrock] allowed_body_fields` -- global Bedrock body-field allowlist
+
+The `[bedrock]` block's second list, and the only other key on it. Bedrock's
+strict-schema validator 400s any unrecognized field with "Extra inputs are
+not permitted", and routectl's forward-compat sweep forwards
+quarterly-added Anthropic body fields (`context_management`,
+`context_hint`, `speed`, ...) it does not itself model. This list is what
+keeps those from reaching an account whose Bedrock schema has not caught
+up.
+
+```toml
+[bedrock]
+allowed_body_fields = ["messages", "anthropic_version", "max_tokens",
+                       "system", "tools", "anthropic_beta"]
+```
+
+- **Empty / omitted = pass-through (the default).** No filtering; the
+  assembled body and the Converse extras bag are forwarded as-is. This is
+  discovery mode: bring routectl up, observe what is actually sent with
+  `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then populate the
+  list. The empirical baseline is in
+  [`examples/bedrock.toml`](../examples/bedrock.toml) -- copy it rather
+  than re-deriving.
+- **Non-empty = allowlist.** Every key not on the list is dropped before
+  egress, logged at `debug` (not `warn`: the forward-compat sweep produces
+  forwarded keys on every request, so a WARN would flood the log).
+- **Two surfaces, one list.** On `api_shape = "invoke"` it filters the
+  top-level Anthropic Messages body, so the structural keys routectl
+  writes (`messages`, `system`, `tools`, ...) must be ON the list or the
+  assembled body is malformed. On Converse those keys live at the AWS top
+  level and never appear in the filtered
+  `additionalModelRequestFields` bag.
+
+Two coherence checks run at startup, reload, and `config check`, both only
+when the list is non-empty:
+
+- The routectl-mandatory keys `messages`, `anthropic_version`, and
+  `max_tokens` must be present -- but only when some provider uses
+  `api_shape = "invoke"`; a Converse-only deployment is unaffected.
+- `anthropic_beta` must be present when any Bedrock provider sets an
+  `anthropic_beta` floor, or the filter would silently drop the
+  operator-asserted always-send value.
+
+A partial allowlist silently breaks every Bedrock request, so both are
+hard errors at startup rather than a runtime 400. `[bedrock]` is
+hot-reloadable.
 
 ### `[providers.X] anthropic_beta` -- per-provider Bedrock floor
 
@@ -698,7 +867,8 @@ from it; do NOT set `base_url`. The `creds` descriptor takes the same four
 
 ```toml
 [providers.mantle-responses]
-kind = "openai-responses"
+kind        = "openai-responses"
+api_key_ref = ""   # required key, must be empty; the sub-table carries the credential
 
 [providers.mantle-responses.bedrock_mantle]
 region = "us-east-1"
@@ -718,7 +888,9 @@ knob on this lane.
 Validation (build, reload, `config check`) rejects an incoherent entry:
 
 - a non-empty `api_key_ref` -- REJECTED (`creds` is the single credential
-  source).
+  source). The key is REQUIRED on this variant, so write it as an empty
+  string rather than omitting it -- an omitted key fails the parse with
+  `missing field api_key_ref` before validation runs.
 - a set `account_id_ref` -- REJECTED (a ChatGPT-account id has no meaning
   on the mantle lane).
 - a non-default `base_url` -- REJECTED (`region` derives the endpoint).
@@ -743,7 +915,8 @@ Replace it with the `[providers.X.bedrock_mantle]` sub-table carrying
 
 # NEW:
 [providers.mantle-responses]
-kind = "openai-responses"
+kind        = "openai-responses"
+api_key_ref = ""
 
 [providers.mantle-responses.bedrock_mantle]
 region = "us-east-1"
@@ -2180,17 +2353,28 @@ table's own default; a selector absent from the overlay falls through
 to the baked row unchanged. A running `routectl serve` watches the
 overlay file and picks up a write automatically -- no restart needed.
 
-**Retirement of `[cache_pricing]`.** Config schema v1's `[cache_pricing]`
-TOML table (and its `pricing_verifications.json` sidecar) is retired as
-of schema v2, the current version. Loading a v1 config auto-migrates it:
-every `[cache_pricing]` entry (already merged with any sidecar
-verification) is folded into `catalog_overlay.json` as a `source:
-import` cell, then `config.toml` is rewritten in place to `version = 2`
-with `[cache_pricing]` dropped. The migration is idempotent, and fails
-closed on any conflict between a migrated entry and a pre-existing
-overlay value -- nothing is written for ANY key until the conflict is
-resolved by hand. `pricing_verifications.json` is read only as part of
-this migration; nothing writes to it anymore.
+### Retired: `[cache_pricing]`
+
+Config schema v1's `[cache_pricing]` TOML table (and its
+`pricing_verifications.json` sidecar) is retired: at the current schema
+version a non-empty `[cache_pricing]` table is a hard startup error, not
+silently-ignored data.
+
+`routectl config migrate` is what folds it forward -- the loader NEVER
+migrates on load. The migrator plans the whole transform in memory first,
+then commits in two phases: every `[cache_pricing]` entry (already merged
+with any sidecar verification) is written into `catalog_overlay.json` as a
+`source: import` cell, and only then is `config.toml` rewritten
+format-preservingly with the new `version` stamped and `[cache_pricing]`
+dropped. Config last, deliberately: a crash between the phases leaves the
+file still reporting the old version, so a rerun re-plans from scratch.
+
+The migration is idempotent (a cell whose value already matches what a
+prior run wrote is a silent no-op) and fails closed on any conflict
+between a migrated entry and a DIFFERENT pre-existing overlay value --
+nothing is written for ANY key until the conflict is resolved by hand.
+`pricing_verifications.json` is read only as part of this migration;
+nothing writes to it anymore.
 
 ### `routectl catalog list`
 
@@ -2472,7 +2656,7 @@ Auto-emit applies to completions and streaming. It is **not** applied to
 `count_tokens` (`/v1/messages/count_tokens`), which is a probe and never
 writes a cache entry.
 
-### Per-provider switch
+### Per-provider switch (`auto_emit_top_level_breakpoint`)
 
 Each `[providers.X]` entry carries an optional
 `auto_emit_top_level_breakpoint`. `None` (omitted) inherits the global
@@ -2847,7 +3031,7 @@ missing block keeps the default: reduction enabled.
 enabled = false
 ```
 
-### Per-provider switch
+### Per-provider switch (`reduction_enabled`)
 
 Each `[providers.X]` entry carries an optional `reduction_enabled`.
 `None` (omitted) inherits the global switch; `false` disables reduction
@@ -3106,11 +3290,16 @@ is a separate usage error that also exits nonzero.
 ### `--json` is UNSTABLE pre-1.0
 
 Both commands take `--json` for a machine-readable report, and both
-payloads carry a top-level `schema_version` (currently `1`). The JSON
-shape is UNSTABLE before 1.0: fields may be added, renamed, or
-restructured, and `schema_version` bumps when they do. Only the exit-code
-contract above is pinned -- do not build a durable integration on the
-exact JSON shape.
+payloads carry a top-level `schema_version`. The two version independently
+off their own constants -- `SCHEMA_VERSION` in
+`crates/routectl-cli/src/commands/doctor/mod.rs` for `doctor`, and the one
+in `crates/routectl-cli/src/commands/probe/mod.rs` for `provider probe` --
+so read the number off the payload you actually receive rather than
+hardcoding one. The JSON shape is UNSTABLE before 1.0: fields may be added,
+renamed, or restructured, and `schema_version` bumps when they do,
+INCLUDING on a purely additive change (the report is explicitly
+human-facing and non-contractual). Only the exit-code contract above is
+pinned -- do not build a durable integration on the exact JSON shape.
 
 `provider probe --json`:
 
@@ -3124,11 +3313,11 @@ exact JSON shape.
 }
 ```
 
-`doctor --json` carries the flat findings list plus the structured panels:
+`doctor --json` carries the flat findings list plus the structured panels
+(`schema_version` elided here -- read it off the payload):
 
 ```json
 {
-  "schema_version": 1,
   "findings": [
     {
       "section": "auth",
@@ -3138,15 +3327,17 @@ exact JSON shape.
       "remediation": "run `routectl login <provider>` to authenticate"
     }
   ],
-  "panels": { "would_trim": null }
+  "panels": { "would_trim": null, "capability_matrix": null }
 }
 ```
 
 `status` is one of `"Pass"`, `"Warn"`, `"Fail"`; `remediation` is `null`
-on a clean finding and a fix string on every WARN/FAIL. The `would_trim`
-panel is `null` when there is no usage data to summarize; its fields are
-documented under
-[Steady-state would-trim opportunity](#steady-state-would-trim-opportunity).
+on a clean finding and a fix string on every WARN/FAIL. Each panel is
+`null` when it could not be computed: `would_trim` when there is no usage
+data to summarize (its fields are documented under
+[Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)),
+`capability_matrix` when the config layer it draws lanes from could not be
+loaded.
 
 ### `/status/query` is UNSTABLE pre-1.0
 
@@ -3239,13 +3430,30 @@ The battery sections, in render order:
 | OAuth seats (`seats`) | Stored OAuth seats no provider entry's `oauth://` ref reaches surface as a WARN naming the seat. Matching is by full seat identity: a labelled ref (`oauth://<provider>#<label>`) pins that one seat and covers no sibling, while a bare `oauth://<provider>` pool ref covers every stored seat of that provider. Read-only -- a stored credential is NEVER auto-deleted or refreshed, and the finding names only the seat key, never token material or a storage path. |
 | Managed secrets (`secrets`) | Managed secret files not referenced by any provider surface as a WARN. The scan is a read-only directory diff; a stored secret is NEVER auto-deleted. |
 | Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
-| Capability | A reserved seam that renders `not yet available` and contributes no findings; a later release plugs a real producer in here. |
+| Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty), and a WARN nudging `config migrate` when deprecated capability-list keys are still set. Never emits a FAIL, so it can never flip the exit code. |
+| Catalog freshness (`freshness`) | Three advisory rows on how current the catalog data is: the baked catalog version and snapshot date, the freshest overlay verification stamp and its age, and the last SUCCESSFUL `catalog import` with its row counts. A stale overlay or import is a WARN pointing at `catalog import`; never a FAIL. |
 
-`doctor` also attaches the steady-state would-trim opportunity panel
-(read-only, over all recorded history) under `panels.would_trim`; its
-fields are documented under
-[Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)
-and its remediation hint points at `prompt-size --steady-state`.
+Two structured panels render after the sections:
+
+- **`panels.capability_matrix`** -- the learned-capability truth matrix:
+  lanes (config model nicknames, plus any stale learned lane, marked
+  `(unrouted)` when the loaded config no longer maps it) by capability
+  keys, one resolved display cell each. Every cell merges the three signal
+  layers -- operator overrides, the learned ledger-replay registry, and
+  catalog priors -- through the same resolver the router uses, so the panel
+  cannot drift from dispatch precedence; each cell carries its winning
+  layer, its age, and a staleness flag. The ledger source reports a
+  first-class tri-state (available / an honest empty / unavailable with a
+  path-free class code) so "could not read" is never collapsed into
+  "nothing learned".
+- **`panels.would_trim`** -- the steady-state would-trim opportunity,
+  read-only over all recorded history. Its fields are documented under
+  [Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)
+  and its remediation hint points at `prompt-size --steady-state`.
+
+The ordered section list is the command's single extension point
+(`SECTIONS` in `crates/routectl-cli/src/commands/doctor/mod.rs`); the
+offline status surface renders the same list minus `probe`.
 
 Neither command reads a secret it does not need: like
 [`catalog export`](#routectl-catalog-export), a probe or doctor run reads
@@ -3356,7 +3564,8 @@ provider permits -- see the README "Responsible use" section.
        "x-claude-code-agent-id",
        "x-claude-code-parent-agent-id",
    ]
-   header_extras = { ... }   # see "Header pack" below
+   # plus a [providers.anthropic-managed.header_extras] sub-table --
+   # see "Header pack" below
    ```
 
    The `oauth://anthropic` ref resolves at request time against the
@@ -3538,22 +3747,22 @@ fallback chain remain authoritative. An empty or whitespace-only
 
 Drop this into `header_extras` on the anthropic-managed provider so
 the upstream sees the same SDK fingerprint claude-code 2.1.143 sends
-from the bundled `@anthropic-ai/sdk`:
+from the bundled `@anthropic-ai/sdk`. Written as a sub-table -- a
+multi-line inline table (`{ ... }` spanning lines) is not legal TOML:
 
 ```toml
-header_extras = {
-    "anthropic-beta"                         = "claude-code-20250219,oauth-2025-04-20",
-    "x-app"                                  = "cli",
-    "anthropic-dangerous-direct-browser-access" = "true",
-    "x-stainless-arch"                       = "x64",
-    "x-stainless-lang"                       = "js",
-    "x-stainless-os"                         = "Linux",
-    "x-stainless-package-version"            = "0.94.0",
-    "x-stainless-runtime"                    = "node",
-    "x-stainless-runtime-version"            = "v24.3.0",
-    "x-stainless-timeout"                    = "600",
-    "x-stainless-retry-count"                = "0",
-}
+[providers.anthropic-managed.header_extras]
+"anthropic-beta"                            = "claude-code-20250219,oauth-2025-04-20"
+"x-app"                                     = "cli"
+"anthropic-dangerous-direct-browser-access" = "true"
+"x-stainless-arch"                          = "x64"
+"x-stainless-lang"                          = "js"
+"x-stainless-os"                            = "Linux"
+"x-stainless-package-version"               = "0.94.0"
+"x-stainless-runtime"                       = "node"
+"x-stainless-runtime-version"               = "v24.3.0"
+"x-stainless-timeout"                       = "600"
+"x-stainless-retry-count"                   = "0"
 ```
 
 What each family does (one line each):
@@ -3600,7 +3809,7 @@ bearer JWT. Two ways to supply that bearer: routectl-managed OAuth
 (recommended) or a static bearer file (kept for backwards-compat with
 operators who already manage the JWT externally).
 
-### routectl-managed OAuth (recommended)
+### routectl-managed OAuth for Codex (recommended)
 
 Run `routectl login codex` once. routectl spawns a local callback server
 on port 1455 (the codex public PKCE client registers fixed redirect URIs
@@ -3701,7 +3910,7 @@ an xAI OAuth bearer. The credential is managed the same way as the Codex flow --
 PKCE, local callback server, credentials persisted to
 `~/.config/routectl/credentials.json`.
 
-### routectl-managed OAuth (recommended)
+### routectl-managed OAuth for xAI (recommended)
 
 Run `routectl login xai` once. routectl spawns a local callback server on port
 **56121** -- the only redirect URI xAI registers for the public PKCE client
@@ -3719,10 +3928,16 @@ Then in `~/.config/routectl/config.toml`:
 ```toml
 [providers.xai]
 kind        = "openai-compat"
-base_url    = "https://api.x.ai/v1"
-auth_kind   = "oauth-bearer"
+base_url    = "https://api.x.ai/v1"   # REQUIRED non-empty on this kind
 api_key_ref = "oauth://xai"
 ```
+
+The `openai-compat` variant carries NO auth-selector field -- entries are
+`deny_unknown_fields`, so writing an `auth_kind` here fails config load with
+`unknown field`. The `oauth://` scheme on `api_key_ref` is what selects the
+bearer surface; `base_url` must be spelled out because validation rejects an
+empty one on this kind. `routectl login xai` prints exactly this block on
+success.
 
 The `oauth://xai` ref resolves at request time against the credentials store;
 rotation is picked up live without restarting routectl. When the upstream marks
