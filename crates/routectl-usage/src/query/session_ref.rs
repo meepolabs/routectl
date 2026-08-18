@@ -14,6 +14,12 @@
 //!
 //! Never a fingerprint: nothing may persist one of these values or compare
 //! one across runs.
+//!
+//! Consequently NOT COMPARABLE with the router's log-correlation hash of
+//! the same session key: the two run in different processes under
+//! independently seeded salts, and joining them would need exactly the
+//! persistent shared secret the invariant above exists to forbid. A digest
+//! from a usage report and one from a serve log never line up, by design.
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;

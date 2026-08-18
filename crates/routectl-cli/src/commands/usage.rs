@@ -1332,6 +1332,15 @@ const SUPPRESSED_SESSIONS_VALIDITY_NOTE: &str = "  validity: sessions seen, not 
 a ratio or cost claim needs the service's usage-channel dropped_full / \
 dropped_disabled / write_errors counters flat across the window\n";
 
+/// The session-reference scope caveat, printed alongside the finder rows so
+/// an operator does not try to match a reference against a serve log or a
+/// second `usage` run. The digests are salted per process on purpose (see
+/// `routectl_usage`'s session-reference module), so they group only within
+/// the report that printed them.
+const SUPPRESSED_SESSIONS_SCOPE_NOTE: &str = "  scope: the session reference is \
+salted per process -- it groups rows within THIS report only, and never matches \
+a serve-log session hash or another usage run\n";
+
 /// The K-suppressed-session finder block: one line per
 /// `(session, provider_kind, model)` triple that had a marker withheld on
 /// economic grounds, newest suppression first, plus the drop-counter validity
@@ -1344,7 +1353,11 @@ dropped_disabled / write_errors counters flat across the window\n";
 /// only by how fast the session is located and the kill switch thrown.
 ///
 /// `session` renders the opaque per-process reference, never the raw
-/// client-supplied session key.
+/// client-supplied session key. It is scoped to THIS report: the reference
+/// is salted per process, so it does not match the router's session hash in
+/// a serve log, nor the same session's reference in another `usage` run.
+/// Grouping is within one report only, deliberately -- a cross-surface join
+/// would need a persistent shared secret the digest construction forbids.
 fn render_suppressed_sessions(report: &WindowReport) -> String {
     let found = &report.suppressed_sessions;
     if found.rows.is_empty() {
@@ -1372,6 +1385,7 @@ fn render_suppressed_sessions(report: &WindowReport) -> String {
              showing the newest by last suppression\n",
         ));
     }
+    out.push_str(SUPPRESSED_SESSIONS_SCOPE_NOTE);
     out.push_str(SUPPRESSED_SESSIONS_VALIDITY_NOTE);
     out
 }

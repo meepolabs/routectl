@@ -384,6 +384,22 @@ fn redact_enabled() -> bool {
     })
 }
 
+/// Whether prompt redaction is on for this process, for callers OUTSIDE the
+/// traced-body path that must still honor the operator's opt-in.
+///
+/// A log field carrying a caller-chosen free-text value (an unrecognized
+/// protocol tag, say) is not reachable by [`redact_prompts_in`] -- it never
+/// passes through a traced body -- yet an operator who set the knob has
+/// asked for exactly that class of content to stay out of the logs. Such a
+/// site reads this flag and renders a fixed placeholder instead.
+///
+/// Resolution and freezing are `redact_enabled`'s, so every surface in
+/// the process agrees on one value for the whole run.
+#[must_use]
+pub fn redact_prompts_enabled() -> bool {
+    redact_enabled()
+}
+
 /// Whether `ROUTECTL_TRACE_HEADERS` is set to a truthy value
 /// (`1`/`true`/`yes`, case-insensitive, trimmed; default false).
 ///
