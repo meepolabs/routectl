@@ -257,6 +257,19 @@ pub fn routectl_core::cache_control::mutable_suffix_start(&routectl_core::schema
 pub fn routectl_core::cache_control::system_block_is_wire_eligible(&routectl_core::system_content::SystemBlock) -> bool
 pub fn routectl_core::cache_control::validate(&[routectl_core::cache_control::Breakpoint<'_>]) -> routectl_core::error::Result<()>
 pub fn routectl_core::cache_control::validate_source<S: routectl_core::cache_control::CacheBreakpointSource>(&S) -> routectl_core::error::Result<()>
+pub mod routectl_core::cache_decision
+pub const routectl_core::cache_decision::AUTO_EMITTED: &str
+pub const routectl_core::cache_decision::AUTO_SKIPPED_BREAKPOINT_CAP: &str
+pub const routectl_core::cache_decision::AUTO_SKIPPED_GLOBAL_DISABLED: &str
+pub const routectl_core::cache_decision::AUTO_SKIPPED_K_BELOW_BREAK_EVEN: &str
+pub const routectl_core::cache_decision::AUTO_SKIPPED_NO_CAPABILITY: &str
+pub const routectl_core::cache_decision::AUTO_SKIPPED_NO_PLACEMENT_REGION: &str
+pub const routectl_core::cache_decision::AUTO_SKIPPED_PROVIDER_DISABLED: &str
+pub const routectl_core::cache_decision::AUTO_SKIPPED_VALIDATION_ROLLED_BACK: &str
+pub const routectl_core::cache_decision::CACHE_DECISION_TOKENS: &[&str]
+pub const routectl_core::cache_decision::CALLER_SUPPLIED: &str
+pub const routectl_core::cache_decision::VOLATILE_VETOED: &str
+pub fn routectl_core::cache_decision::is_known_cache_decision(&str) -> bool
 pub mod routectl_core::capability
 pub enum routectl_core::capability::EvidenceSource
 pub routectl_core::capability::EvidenceSource::Live
