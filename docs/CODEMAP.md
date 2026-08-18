@@ -344,7 +344,12 @@ listed at the bottom of each crate.
   (sibling to the streaming `MAX_FRAME_BYTES` frame cap; hardcoded, not a
   config knob), `body_cap_exceeded_message` (fixed client-safe string, never
   echoes upstream bytes), and `warn_body_cap` (one-WARN emitter with a fixed,
-  drift-proof field set)
+  drift-proof field set). Module docs carry the workspace-wide per-lane
+  redirect-policy table (every client pins `Policy::none()`, including the
+  `routectl-cli` catalog-import fetch client), plus
+  `redirect_not_followed_error` / `REDIRECT_NOT_FOLLOWED_MESSAGE`, the shared
+  3xx -> upstream-502 mapping every lane's status gate calls before its
+  success path
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller
   `reasoning.effort` against per-model `effort_levels` (rounds toward
   most-capable above max, least-capable below min). Returns `Option`: `None`
@@ -4467,7 +4472,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
     the writer cores in its own tests.
 - `src/commands/catalog_import.rs` -- `routectl catalog import`: the opt-in,
   never-at-startup overlay refresh from the litellm + models.dev sources. This
-  is the CLI fetch boundary (`reqwest`, ~10s timeout, one retry;
+  is the CLI fetch boundary (`reqwest`, ~10s timeout, one retry, no-redirect
+  client whose 3xx maps to a named source failure;
   `--litellm-file`/`--models-dev-file` read both sources from disk instead,
   both-or-neither) -- `routectl-router` itself stays reqwest-free. Flow: fetch
   both sources -> `build_import_candidate` (one run-wide UTC `verified_at`) ->

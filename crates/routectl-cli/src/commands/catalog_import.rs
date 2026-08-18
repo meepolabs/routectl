@@ -45,8 +45,8 @@ const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Hard cap on a fetched source's size. The vendored JSON snapshots this
 /// module fetches are a few MB; a response many times that size (a
-/// redirect to something unexpected, a compromised or misbehaving vendor
-/// host) is rejected rather than buffered into memory in full.
+/// compromised or misbehaving vendor host) is rejected rather than buffered
+/// into memory in full.
 const MAX_FETCH_BYTES: u64 = 32 * 1024 * 1024;
 
 /// `routectl catalog import` flags.
@@ -236,9 +236,18 @@ const fn source_mode(file: Option<&Path>) -> &'static str {
     if file.is_some() { "file" } else { "network" }
 }
 
+/// Build the fetch client. Redirect-following is DISABLED, matching every
+/// egress client in `routectl-providers` (the per-lane policy table lives
+/// in that crate's `http_client` module docs). This lane carries no
+/// credentials, so nothing can leak on a followed hop -- but the two
+/// sources are fixed public URLs that answer 200 directly, so a 3xx here
+/// means the vendor host started steering the fetch somewhere else, which
+/// is an operator-visible source failure rather than a hop to chase.
+/// [`fetch_url_once`] maps the returned 3xx explicitly.
 fn build_http_client() -> Result<reqwest::Client, ImportError> {
     reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ImportError::FetchFailed {
             source_name: "http-client",
@@ -333,6 +342,14 @@ async fn fetch_url_with_retry(client: &reqwest::Client, url: &str) -> Result<Str
 async fn fetch_url_once(client: &reqwest::Client, url: &str) -> Result<String, String> {
     let response = client.get(url).send().await.map_err(|e| e.to_string())?;
     let status = response.status();
+    // The client does not follow redirects, so reqwest hands the 3xx back as
+    // a normal response. Name it explicitly -- the generic `HTTP {status}`
+    // below would read as a vendor outage rather than "this source moved".
+    if status.is_redirection() {
+        return Err(format!(
+            "HTTP {status}: source redirected; redirects are not followed"
+        ));
+    }
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
     }
@@ -1084,6 +1101,37 @@ mod tests {
         // Assert
         assert!(err.contains("fetch cap"), "err: {err}");
         assert!(err.contains("Content-Length"), "err: {err}");
+    }
+
+    /// A no-redirect client hands a 3xx back as a normal response, so the
+    /// fetch path must name it: a bare `HTTP 301` would read as a vendor
+    /// outage, and without the explicit arm a 3xx body would fall through
+    /// to the JSON parse and surface as "invalid JSON".
+    #[tokio::test]
+    async fn redirect_response_is_rejected_with_a_named_reason() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/moved.json"))
+            .respond_with(
+                ResponseTemplate::new(301)
+                    .insert_header("location", "https://example.com/new.json"),
+            )
+            .mount(&server)
+            .await;
+        let client = build_http_client().expect("client build must not fail");
+
+        // Act
+        let err = fetch_url_once(&client, &format!("{}/moved.json", server.uri()))
+            .await
+            .expect_err("a 3xx must be rejected rather than followed or parsed");
+
+        // Assert
+        assert!(err.contains("301"), "the real status must survive: {err}");
+        assert!(
+            err.contains("redirects are not followed"),
+            "the reason must name the redirect: {err}"
+        );
     }
 
     #[test]

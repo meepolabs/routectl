@@ -32,6 +32,14 @@
 //! | gemini (direct + Cloud Code) | `x-goog-api-key`, `Authorization: Bearer` | no-redirect |
 //! | bedrock (native Invoke/Converse) | `x-amz-*` SigV4 envelope, `Authorization: Bearer` | no-redirect |
 //! | probe (`doctor` reachability check) | none carried, but a probe must be exactly one hop | no-redirect |
+//! | `catalog import` source fetch (in `routectl-cli`, not this crate) | none carried | no-redirect |
+//!
+//! The last row is the one client outside this crate: it builds its own
+//! `reqwest::Client` at the CLI fetch boundary (so `routectl-router` stays
+//! reqwest-free) and is genuinely uncredentialed -- two fixed public
+//! catalog URLs, no auth headers. It still pins `Policy::none()` so no
+//! workspace client inherits the stock policy silently, and its fetch path
+//! maps the returned 3xx to a named source failure.
 //!
 //! There is no evidence in the docs, fixtures, or wire-quirk notes that
 //! any of these lanes depends on following a same-host (or any) 3xx --
