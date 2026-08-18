@@ -50,12 +50,13 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use routectl_router::{Config, MitmConfig, ServerAuth};
 use rustls_pki_types::pem::PemObject;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::time::Instant;
 
 mod common;
 
@@ -158,16 +159,23 @@ async fn spawn_test_server(config: Arc<Config>) -> String {
 /// Poll `GET {base_url}/health` until it returns success or the readiness
 /// deadline elapses. The inter-attempt pause is a poll cadence, not a
 /// readiness wait -- readiness is the successful response.
+///
+/// Every attempt (and the cadence pause after it) is bounded by the
+/// REMAINING deadline, not just checked between attempts: a server that
+/// completes the TCP accept but never sends response headers would
+/// otherwise park `send()` on reqwest's own (default: none) timeout and
+/// stall the shard far past `READY_DEADLINE`.
 async fn await_health(base_url: &str) {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + READY_DEADLINE;
     while Instant::now() < deadline {
-        if let Ok(response) = client.get(format!("{base_url}/health")).send().await
+        let attempt = client.get(format!("{base_url}/health")).send();
+        if let Ok(Ok(response)) = tokio::time::timeout_at(deadline, attempt).await
             && response.status().is_success()
         {
             return;
         }
-        tokio::time::sleep(POLL_CADENCE).await;
+        sleep_until_cadence_or_deadline(deadline).await;
     }
     panic!("the test server did not become healthy at {base_url}");
 }
@@ -183,13 +191,20 @@ async fn await_health(base_url: &str) {
 /// exposure). So a lost port race fails HERE, naming the race, instead
 /// of surfacing as a misleading "connection refused" (proxy startup
 /// failed, logged and swallowed as non-fatal) at a later CONNECT dial.
+///
+/// Each attempt is bounded by the remaining deadline for the same reason
+/// as [`await_health`]: a peer that accepts but never answers must fail
+/// this gate, not outlive it.
 async fn await_proxy_front(port: u16, mitm_host: &str) {
     let deadline = Instant::now() + READY_DEADLINE;
     while Instant::now() < deadline {
-        if probe_connect(port, mitm_host).await {
+        if tokio::time::timeout_at(deadline, probe_connect(port, mitm_host))
+            .await
+            .unwrap_or(false)
+        {
             return;
         }
-        tokio::time::sleep(POLL_CADENCE).await;
+        sleep_until_cadence_or_deadline(deadline).await;
     }
     panic!(
         "the MITM proxy front never answered CONNECT on 127.0.0.1:{port}: it either failed to \
@@ -198,9 +213,17 @@ async fn await_proxy_front(port: u16, mitm_host: &str) {
     );
 }
 
+/// Wait one poll cadence, but never past the readiness deadline -- so the
+/// pause between attempts cannot itself push a poll loop over its bound.
+async fn sleep_until_cadence_or_deadline(deadline: Instant) {
+    let wake = (Instant::now() + POLL_CADENCE).min(deadline);
+    tokio::time::sleep_until(wake).await;
+}
+
 /// One CONNECT attempt against the MITM front. Every failure shape (no
 /// connection, a short or unexpected response) is a not-ready-yet, since
-/// the caller retries until its deadline.
+/// the caller retries until its deadline. The caller also bounds this
+/// call, so nothing here needs its own timeout.
 async fn probe_connect(port: u16, mitm_host: &str) -> bool {
     let Ok(mut tcp) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
         return false;
@@ -213,10 +236,7 @@ async fn probe_connect(port: u16, mitm_host: &str) -> bool {
         return false;
     }
     let mut response = [0u8; CONNECT_ESTABLISHED.len()];
-    tokio::time::timeout(READY_DEADLINE, tcp.read_exact(&mut response))
-        .await
-        .is_ok_and(|read| read.is_ok())
-        && response.as_slice() == CONNECT_ESTABLISHED
+    tcp.read_exact(&mut response).await.is_ok() && response.as_slice() == CONNECT_ESTABLISHED
 }
 
 /// Speaks one CONNECT handshake against the booted MITM proxy port and
