@@ -4,6 +4,16 @@
 //! Distinct from `context_trim::fnv1a_hash`, which must stay stable ACROSS
 //! processes because it fingerprints a trimmed prefix that is compared
 //! turn-to-turn. A log-correlation hash needs the opposite property.
+//!
+//! NOT COMPARABLE with the usage crate's session reference: the serve
+//! daemon and the one-shot usage CLI are different processes, each salting
+//! with its own randomly seeded state, and the anti-inversion invariant
+//! below forbids the persistent or env-carried secret that joining them
+//! would require. Grouping holds within one process only, by construction.
+//!
+//! If joining the two surfaces is ever actually asked for, the answer is
+//! the capture table's non-secret `request_id` -- add it to the WARN
+//! payloads and join on that. Never a shared salt.
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;

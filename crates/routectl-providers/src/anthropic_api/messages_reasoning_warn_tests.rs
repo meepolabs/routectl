@@ -636,3 +636,83 @@ fn format_skip_warn_renders_an_absent_format_as_a_placeholder() {
     );
     assert_eq!(entries, vec!["\"<none>\""]);
 }
+
+// --- format-tag rendering under the redaction knob ----------------------
+//
+// `record_format` reads the process-frozen knob, so the three cells of the
+// (known/unknown tag) x (knob on/off) matrix are pinned against
+// `render_skipped_format`, which takes the flag as an argument. The
+// end-to-end knob-ON path through the WARN lives in the isolated
+// `tests/anthropic_reasoning_format_redaction.rs` binary.
+
+/// The knob's promise is about CALLER content. A vocabulary tag is protocol
+/// vocabulary routectl itself defines, so redaction must not cost the
+/// operator the one field that says which dialect arrived.
+#[test]
+fn a_known_format_tag_renders_literally_in_both_knob_states() {
+    for tag in [
+        ANTHROPIC_FORMAT,
+        routectl_core::CODEX_OAUTH,
+        routectl_core::OPENAI_APIKEY,
+        routectl_core::BEDROCK_MANTLE,
+        routectl_core::OPENAI_RESPONSES_V1,
+    ] {
+        assert_eq!(
+            render_skipped_format(Some(tag), true),
+            tag,
+            "a known tag must survive redaction"
+        );
+        assert_eq!(
+            render_skipped_format(Some(tag), false),
+            tag,
+            "a known tag is unchanged with redaction off"
+        );
+    }
+}
+
+/// An unrecognized tag is a caller-chosen free-text string, and the knob is
+/// the operator's request to keep that class of content out of the logs.
+#[test]
+fn an_unknown_format_tag_becomes_the_placeholder_under_redaction() {
+    assert_eq!(
+        render_skipped_format(Some("openai-o-format"), true),
+        "<unrecognized>"
+    );
+}
+
+/// With redaction off, the literal echo is what makes a tag routectl does
+/// not know yet discoverable at all.
+#[test]
+fn an_unknown_format_tag_echoes_literally_without_redaction() {
+    assert_eq!(
+        render_skipped_format(Some("openai-o-format"), false),
+        "openai-o-format"
+    );
+}
+
+/// Every unrecognized tag collapsing to ONE placeholder is the point: the
+/// distinctness sample must not be fillable with caller-chosen strings.
+#[test]
+fn distinct_unknown_tags_share_the_single_placeholder_slot_under_redaction() {
+    let details: Vec<_> = (0..MAX_LOGGED_DIAGNOSTIC_ITEMS + 3)
+        .map(|i| foreign_format_detail(Some(&format!("foreign-format-{i}"))))
+        .collect();
+    let rendered: std::collections::BTreeSet<String> = details
+        .iter()
+        .map(|d| render_skipped_format(d.format.as_deref(), true))
+        .collect();
+
+    assert_eq!(
+        rendered.into_iter().collect::<Vec<_>>(),
+        vec!["<unrecognized>".to_string()],
+        "unknown tags must not each claim a sample slot under redaction"
+    );
+}
+
+/// The absent-tag placeholder is routectl's own literal, not caller
+/// content, so the knob does not touch it.
+#[test]
+fn an_absent_format_renders_the_same_placeholder_in_both_knob_states() {
+    assert_eq!(render_skipped_format(None, true), "<none>");
+    assert_eq!(render_skipped_format(None, false), "<none>");
+}

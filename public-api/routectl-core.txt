@@ -1184,6 +1184,7 @@ pub fn routectl_core::log_safe::header_trace_enabled() -> bool
 pub fn routectl_core::log_safe::headers_to_json<'a>(impl core::iter::traits::collect::IntoIterator<Item = (&'a str, &'a [u8])>) -> serde_json::value::Value
 pub fn routectl_core::log_safe::init_log_overrides(core::option::Option<bool>, core::option::Option<usize>, core::option::Option<bool>)
 pub fn routectl_core::log_safe::is_json_error_envelope(&str) -> bool
+pub fn routectl_core::log_safe::redact_prompts_enabled() -> bool
 pub fn routectl_core::log_safe::redact_prompts_in(&serde_json::value::Value) -> serde_json::value::Value
 pub fn routectl_core::log_safe::sanitize_detail_for_log(&str) -> alloc::string::String
 pub fn routectl_core::log_safe::sanitize_for_log(&str) -> alloc::string::String
@@ -5467,6 +5468,7 @@ pub fn routectl_core::minify_json_whitespace(&str) -> core::option::Option<alloc
 pub fn routectl_core::mutable_suffix_start(&routectl_core::schema::ChatRequest) -> core::option::Option<usize>
 pub fn routectl_core::normalize_capability_key(&str, &str) -> alloc::string::String
 pub fn routectl_core::normalize_reasoning_detail_payloads(&mut routectl_core::schema::ChatRequest)
+pub fn routectl_core::redact_prompts_enabled() -> bool
 pub fn routectl_core::redact_prompts_in(&serde_json::value::Value) -> serde_json::value::Value
 pub fn routectl_core::sanitize_detail_for_log(&str) -> alloc::string::String
 pub fn routectl_core::sanitize_for_log(&str) -> alloc::string::String

@@ -161,6 +161,27 @@ emits a one-shot `info` line at boot reporting the resolved value
 (`redact_prompts=true|false`) so operators can confirm the setting
 took effect.
 
+The knob also governs one field OUTSIDE the traced bodies. The
+foreign-format reasoning WARN's `skipped_formats` names the `format` tag
+of each reasoning detail the Anthropic translator could not echo, and
+that tag is caller-chosen free text. The split:
+
+- Tag in routectl's recognized vocabulary (`anthropic-claude-v1` and the
+  Responses-family tags `openai-responses-v1`, `codex-oauth`,
+  `openai-apikey`, `bedrock-mantle`): echoes literally in BOTH knob
+  states. It is protocol vocabulary routectl itself defines, carries no
+  caller bytes, and naming which dialect arrived is the field's whole
+  diagnostic value.
+- Tag outside that vocabulary: echoes literally with the knob OFF
+  (sanitized, 256-char capped, 8 distinct values sampled), and renders as
+  the literal `<unrecognized>` with the knob ON. Every unknown tag in a
+  request collapses to that one placeholder, so the sample cannot be
+  filled with caller-chosen strings.
+- A detail with no `format` at all renders `<none>` in both states.
+
+To read the literal of a tag routectl does not recognize yet (the
+forward-compat discovery case), run with the knob off.
+
 Two known residual leaks even with the knob ON:
 - `<redacted len=N>` reveals the char count of the original content.
   Short fixed-vocabulary prompts (e.g. "yes" / "no" tool confirms)

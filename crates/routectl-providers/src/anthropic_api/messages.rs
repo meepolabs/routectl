@@ -46,6 +46,37 @@ use super::envelope_policy::passthrough_tally;
 use super::parts::{parse_file_document_source, parse_image_url_source, strip_text_after_tool_use};
 use super::types::{AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlock};
 
+/// Stand-in for a format tag outside the recognized vocabulary, rendered
+/// when the operator has opted into prompt redaction. A literal, so it
+/// carries no caller bytes.
+const UNRECOGNIZED_FORMAT_PLACEHOLDER: &str = "<unrecognized>";
+
+/// Whether a format tag belongs to the vocabulary routectl knows: the
+/// Responses family plus Anthropic's own. Anything else is caller-chosen
+/// free text as far as this process is concerned.
+fn is_known_format_tag(format: Option<&str>) -> bool {
+    routectl_core::is_responses_family(format) || format == Some(super::ANTHROPIC_FORMAT)
+}
+
+/// Render one skipped detail's format tag for the WARN field.
+///
+/// A recognized tag is closed-vocabulary and always echoes. An
+/// unrecognized one is a caller-chosen free-text string, so it echoes only
+/// while prompt redaction is off: under the knob it collapses to
+/// [`UNRECOGNIZED_FORMAT_PLACEHOLDER`], because an operator who opted into
+/// redaction asked for caller content to stay out of the logs and this
+/// field is the one channel that would otherwise carry it. Flipping the
+/// knob off restores the literal for forward-compat discovery.
+fn render_skipped_format(format: Option<&str>, redact: bool) -> String {
+    match format {
+        None => sanitize_for_log("<none>"),
+        Some(tag) if redact && !is_known_format_tag(Some(tag)) => {
+            UNRECOGNIZED_FORMAT_PLACEHOLDER.to_string()
+        }
+        Some(tag) => sanitize_for_log(tag),
+    }
+}
+
 /// Walk the canonical `ChatRequest` messages and apply two outgoing
 /// replay invariants. `history_reasoning` gates ONLY the second
 /// (unsigned-thinking strip); the tool_call_id reject is unconditional.
@@ -564,15 +595,18 @@ impl<'a> ReasoningSkipTally<'a> {
     }
 
     /// Record one reasoning detail skipped because its format tag is not
-    /// `anthropic-claude-v1`. The tag is caller-supplied, so it is
-    /// sanitized BEFORE the distinctness test: that bounds each entry's
-    /// length as it is collected and collapses tags differing only in
-    /// control characters into one slot instead of letting them each
-    /// claim one.
+    /// `anthropic-claude-v1`. The tag is rendered BEFORE the distinctness
+    /// test: that bounds each entry's length as it is collected, collapses
+    /// tags differing only in control characters into one slot instead of
+    /// letting them each claim one, and (under prompt redaction) collapses
+    /// every unrecognized tag into the single placeholder slot rather than
+    /// letting caller-chosen strings each claim one.
     fn record_format(&mut self, format: Option<&str>) {
         self.format_count = self.format_count.saturating_add(1);
-        self.format_values
-            .push_distinct(sanitize_for_log(format.unwrap_or("<none>")));
+        self.format_values.push_distinct(render_skipped_format(
+            format,
+            routectl_core::redact_prompts_enabled(),
+        ));
     }
 
     /// Record one assistant turn whose wire content assembled empty and
@@ -586,8 +620,9 @@ impl<'a> ReasoningSkipTally<'a> {
     /// from `Drop`, so the emission is explicit and testable.
     ///
     /// No reasoning payload reaches a log field (it could be reasoning
-    /// over sensitive data); only counts, canonical indices, and
-    /// sanitized format tags do. Every count is its own exact counter --
+    /// over sensitive data); only counts, canonical indices, and rendered
+    /// format tags do (see [`render_skipped_format`] for the
+    /// redaction-knob split). Every count is its own exact counter --
     /// never a sample's stored length, which caps.
     fn flush(&self) {
         if self.unsigned_count > 0 {

@@ -1,14 +1,23 @@
-//! The foreign-format WARN's `skipped_formats` field must stay readable
-//! when the operator turns prompt redaction on: a format tag is
-//! caller-chosen protocol vocabulary, and the whole diagnostic value of
-//! the field is seeing WHICH foreign dialect arrived. The reasoning body
-//! itself never reaches this record.
+//! The foreign-format WARN's `skipped_formats` field under prompt
+//! redaction: a RECOGNIZED format tag is closed protocol vocabulary and
+//! keeps echoing, because naming which known dialect arrived is the whole
+//! diagnostic value of the field and the tag carries no caller bytes. An
+//! UNRECOGNIZED tag is a caller-chosen free-text string, and an operator
+//! who set `ROUTECTL_LOG_REDACT_PROMPTS=1` asked for exactly that class of
+//! content to stay out of the log line -- so it collapses to the
+//! `<unrecognized>` placeholder. The forward-compat discovery loop (seeing
+//! the literal of a tag routectl does not know yet) survives one
+//! knob-toggle away; that knob-OFF cell is pinned deterministically by the
+//! `render_skipped_format` unit tests in
+//! `anthropic_api/messages_reasoning_warn_tests.rs`, which take the flag as
+//! an argument instead of the frozen process-wide read. The reasoning body
+//! itself never reaches this record in either mode.
 //!
 //! Why a dedicated test binary: the redaction knob is read once per
 //! process and frozen, so proving the on-state requires a pristine
-//! process with the variable set before the first read. One test per
-//! binary also means no sibling test races the process-environment
-//! mutation.
+//! process with the variable set before the first read. Both tests here
+//! share the SAME knob state (on), and no sibling test races the
+//! process-environment mutation.
 
 #![cfg(feature = "anthropic-api")]
 
@@ -55,15 +64,10 @@ fn user_msg(text: &str) -> Message {
     }
 }
 
-#[test]
-fn foreign_format_tag_survives_prompt_redaction() {
-    // Arrange: prompt redaction on for this process, before any reader
-    // freezes the knob.
-    // SAFETY: this binary declares exactly one test, so no sibling test
-    // reads or writes the process environment concurrently.
-    unsafe { std::env::set_var("ROUTECTL_LOG_REDACT_PROMPTS", "1") };
-    let provider = make_provider();
-    let req = ChatRequest {
+/// A request whose assistant turn carries one reasoning detail in `format`,
+/// which the Anthropic translator cannot echo and therefore skips.
+fn request_with_format(format: &str) -> ChatRequest {
+    ChatRequest {
         model: "claude-opus-4-7".into(),
         messages: vec![
             user_msg("think then reply"),
@@ -75,7 +79,7 @@ fn foreign_format_tag_survives_prompt_redaction() {
                 reasoning_details: vec![ReasoningDetail {
                     kind: ReasoningDetailKind::Text,
                     id: None,
-                    format: Some("openai-o-format".to_string()),
+                    format: Some(format.to_string()),
                     index: Some(0),
                     payload: serde_json::json!({"text": "some reasoning", "signature": "sig"}),
                 }],
@@ -87,14 +91,16 @@ fn foreign_format_tag_survives_prompt_redaction() {
         .into(),
         max_tokens: Some(2048),
         ..Default::default()
-    };
+    }
+}
 
-    // Act
+/// Normalize `req` and return the `skipped_formats` field of the
+/// foreign-format WARN.
+fn skipped_formats_for(req: &ChatRequest) -> String {
+    let provider = make_provider();
     let events = routectl_testkit::capture_events(|| {
-        provider.normalize_request(&req).expect("normalize ok");
+        provider.normalize_request(req).expect("normalize ok");
     });
-
-    // Assert
     let warn = events
         .iter()
         .find(|e| {
@@ -102,15 +108,59 @@ fn foreign_format_tag_survives_prompt_redaction() {
                 .contains("skipping reasoning blocks on replay: format is not anthropic-claude-v1")
         })
         .unwrap_or_else(|| panic!("expected the foreign-format WARN; got events: {events:?}"));
-    let rendered = warn
-        .field("skipped_formats")
-        .expect("skipped_formats field present");
+    warn.field("skipped_formats")
+        .expect("skipped_formats field present")
+        .to_string()
+}
+
+/// Turn prompt redaction on for this process, before any reader freezes the
+/// knob.
+///
+/// SAFETY: every test in this binary wants the knob ON and sets it to the
+/// same value, so a concurrent sibling can only write the value already
+/// there; no test reads a different state.
+fn enable_prompt_redaction() {
+    unsafe { std::env::set_var("ROUTECTL_LOG_REDACT_PROMPTS", "1") };
+}
+
+#[test]
+fn known_format_tag_survives_prompt_redaction() {
+    // Arrange: a recognized Responses-family tag -- closed vocabulary, so
+    // redaction has nothing to protect and the diagnostic keeps its value.
+    enable_prompt_redaction();
+    let req = request_with_format(routectl_core::CODEX_OAUTH);
+
+    // Act
+    let rendered = skipped_formats_for(&req);
+
+    // Assert
     assert!(
-        rendered.contains("openai-o-format"),
-        "the format tag must stay visible under prompt redaction; got: {rendered}"
+        rendered.contains(routectl_core::CODEX_OAUTH),
+        "a known format tag must stay visible under prompt redaction; got: {rendered}"
     );
     assert!(
-        !rendered.contains("<redacted"),
-        "the format tag must not be collapsed to a redaction marker; got: {rendered}"
+        !rendered.contains("<unrecognized>"),
+        "a known tag must not be collapsed to the unrecognized placeholder; got: {rendered}"
+    );
+}
+
+#[test]
+fn unrecognized_format_tag_collapses_to_a_placeholder_under_prompt_redaction() {
+    // Arrange: a tag outside the vocabulary is caller-chosen free text, and
+    // the operator opted into keeping caller content out of the logs.
+    enable_prompt_redaction();
+    let req = request_with_format("openai-o-format");
+
+    // Act
+    let rendered = skipped_formats_for(&req);
+
+    // Assert
+    assert!(
+        rendered.contains("<unrecognized>"),
+        "an unknown tag must render as the placeholder under redaction; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("openai-o-format"),
+        "the caller-chosen tag must not reach the log line under redaction; got: {rendered}"
     );
 }
