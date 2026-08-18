@@ -673,6 +673,28 @@ fn redact_value(v: &mut serde_json::Value) {
             if let Some(annotations) = map.get_mut("annotations") {
                 *annotations = redacted_object();
             }
+            // Anthropic/OpenAI Responses `metadata` and OpenAI Responses
+            // `client_metadata`: caller-supplied free-form key/value bags,
+            // both preserved verbatim end-to-end (ingress parse -> egress
+            // wire) precisely because the arm list below cannot enumerate
+            // arbitrary keys. A client sending an unlisted key (e.g.
+            // `metadata.user_email`) would otherwise flow that value raw
+            // into a TRACE body. Collapse the whole object wholesale
+            // (precedent: promptVariables/citations/annotations above).
+            // The `user_id` / `session_id` / `prompt_cache_key` / `user`
+            // arms in the per-key sweep below still serve a reachable path
+            // for `prompt_cache_key` and `user` -- both TOP-LEVEL fields,
+            // never nested under `metadata`; the `metadata.user_id` /
+            // `metadata.session_id` leaves they also named are now
+            // redundant (covered by this whole-object collapse) but kept
+            // for defense-in-depth in case a future caller flattens them
+            // to the top level.
+            if let Some(metadata) = map.get_mut("metadata") {
+                *metadata = redacted_object();
+            }
+            if let Some(client_metadata) = map.get_mut("client_metadata") {
+                *client_metadata = redacted_object();
+            }
             // Anthropic `document` content block: the top-level `title`
             // leaf is the user-supplied document title. Redact REGARDLESS
             // of length (titles are short, so the length-only `data`/`url`
@@ -795,7 +817,27 @@ fn redact_value(v: &mut serde_json::Value) {
                     // AnthropicApiConfig's Debug); collapse the leaf so it
                     // does not flow verbatim into a TRACE body. String leaf
                     // only; recurse otherwise.
-                    "user_id" => {
+                    //
+                    // Reachability after the whole-`metadata`-object
+                    // collapse above: `user_id` and `session_id` only ever
+                    // appear NESTED under `metadata` on the wire shapes this
+                    // module has seen, so that collapse already redacts
+                    // them -- these two arms are now defense-in-depth only
+                    // (a future caller flattening either to the top level
+                    // would still hit them). `prompt_cache_key` and `user`
+                    // are TOP-LEVEL fields, never nested under `metadata`,
+                    // so their arms remain the only reachable path:
+                    //   - `prompt_cache_key`: OpenAI's cache-partition key,
+                    //     read as the body-fallback source in
+                    //     `resolve_session_key`; a client that sets it to a
+                    //     stable per-user string turns it into a persistent
+                    //     user identifier.
+                    //   - `user`: the canonical `ChatRequest.user` field
+                    //     ("opaque end-user identifier forwarded upstream"),
+                    //     serialized verbatim into the openai-compat
+                    //     outgoing body and present as-is on any ingress
+                    //     dialect's raw wire body.
+                    "user_id" | "session_id" | "prompt_cache_key" | "user" => {
                         redact_string_or_recurse(entry);
                     }
                     _ => redact_value(entry),

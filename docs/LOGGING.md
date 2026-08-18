@@ -166,11 +166,15 @@ Two known residual leaks even with the knob ON:
   Short fixed-vocabulary prompts (e.g. "yes" / "no" tool confirms)
   are disambiguable by length alone. Treat redacted traces as a
   length-leaking side channel.
-- The 4xx/5xx upstream error body (`debug_upstream_error_body` at
-  DEBUG level) is NOT redacted -- error bodies are raw strings, not
-  JSON values; they may echo back portions of the request. Operators
-  flipping DEBUG (not TRACE) for triage on a sensitive environment
-  should be aware.
+- Non-JSON 4xx/5xx upstream error bodies (`debug_upstream_error_body` at
+  DEBUG level) are NOT redacted -- a non-JSON error body has no
+  structure for `redact_prompts_in` to walk, so it goes through the
+  HTML-collapse + control-char-strip path only and may echo back
+  portions of the request as raw text. A PARSEABLE JSON error body IS
+  routed through `redact_prompts_in` (the same entry point the trace
+  helpers use), so it collapses under the knob the same way a success
+  body does. Operators flipping DEBUG (not TRACE) for triage on a
+  sensitive environment should be aware of the non-JSON gap.
 
 ```bash
 # Redacted triage. All four trace directions still fire; user content
@@ -229,6 +233,18 @@ the rejection envelope never renders into an `error = ?e` line.
   reproduce a real client's request. That set is the `OPENAI_SESSION_HEADERS`
   allowlist in `ingress::session_key`, which is authoritative -- the list
   here is a reader's convenience and follows it.
+  BODY SIDE IS NOT PART OF THIS EXCEPTION: the whole `metadata` object
+  (Anthropic ingress) and the whole `client_metadata` object (OpenAI
+  Responses egress) collapse to the opaque `{"redacted": true}` marker
+  under `ROUTECTL_LOG_REDACT_PROMPTS=1` -- not just the named
+  `metadata.session_id` / `metadata.user_id` leaves, since either
+  object is a caller-supplied free-form key/value bag and an unlisted
+  key (e.g. `metadata.user_email`) cannot be enumerated by name. The
+  top-level `prompt_cache_key` and canonical `user` fields (never
+  nested under `metadata`) still collapse individually to the
+  `<redacted len=N>` marker, same as any other prompt-bearing leaf.
+  With the knob off, all of the above ride verbatim in the trace body
+  (the fixture-capture posture), same as every other unredacted leaf.
 
 ## Trace-level surfaces
 
