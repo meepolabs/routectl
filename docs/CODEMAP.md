@@ -3091,7 +3091,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the `PUBLIC_ROUTES` / `AUTH_GATED_ROUTES` test-only inventory consts, which
   `serve_tests.rs` enforces against a scan of the crate's registered path
   literals plus real 401-vs-200 probes, so an unclassified route fails a test
-  instead of shipping unauthenticated), the graceful bounded-drain shutdown
+  instead of shipping unauthenticated; `PUBLIC_ROUTES` is additionally pinned
+  to its exact literal set, so widening the unauthenticated surface cannot
+  pass without editing that expectation in the same change), the graceful
+  bounded-drain shutdown
   (`serve_with_bounded_drain` + `drain_deadline_watcher` + `DRAIN_DEADLINE`),
   MITM front-proxy spawn (`start_mitm_proxy`), and the usage-writer lifecycle
   (`build_usage_writer` / `drain_usage_writer`). On the owned router before
