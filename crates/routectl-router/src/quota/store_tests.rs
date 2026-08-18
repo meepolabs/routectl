@@ -512,66 +512,17 @@ fn the_rejection_count_stays_exact_under_a_flood() {
     assert_eq!(store.rejection_totals().implausible_reset, 500);
 }
 
-// ---- Carry-over ----
+// ---- Carry-over (Router shares the store `Arc`; `admit_seats` prunes) ----
 
+/// `admit_seats` is the ONE prune point, called both at install time and
+/// again by `Router::carry_over_quota_from` after the store is shared: a
+/// seat the new call no longer names loses its reading immediately, so a
+/// retired seat cannot keep answering from a past config's traffic.
 #[test]
-fn export_and_import_carry_a_reading_onto_a_fresh_store() {
-    let before = store();
+fn admit_seats_prunes_a_retired_seats_reading() {
+    let store = store();
     let observed = stamp_at(Duration::ZERO);
-    before.observe(
-        &seat(None),
-        snapshot(
-            observed,
-            known(0.45, &observed, Duration::from_hours(2)),
-            QuotaWindow::Unknown,
-        ),
-    );
-
-    let after = store();
-    after.import_entries(before.export_entries());
-
-    let reading = after
-        .reading_for(&seat(None), &observed)
-        .expect("a reading");
-    assert_eq!(fraction_of(&reading.fast, "fast"), 0.45);
-}
-
-/// A carried reading must keep aging on the instant it was READ, not on the
-/// reload. Re-stamping on import would refresh every window a config swap
-/// touched, which is a reload silently extending an upstream's claim.
-#[test]
-fn a_carried_reading_keeps_its_original_observation_instant() {
-    let before = store();
-    let observed = stamp_at(Duration::ZERO);
-    before.observe(
-        &seat(None),
-        snapshot(
-            observed,
-            known(0.45, &observed, Duration::from_hours(1)),
-            QuotaWindow::Unknown,
-        ),
-    );
-
-    let after = store();
-    after.import_entries(before.export_entries());
-
-    let reading = after
-        .reading_for(&seat(None), &stamp_at(Duration::from_hours(2)))
-        .expect("a reading");
-    assert_eq!(
-        reading.fast,
-        QuotaWindow::Unknown,
-        "a reload must not refresh a window past its own reset"
-    );
-}
-
-/// The keyspace bound holds across reloads: a seat the new config no longer
-/// declares is dropped rather than carried forward forever.
-#[test]
-fn a_seat_the_new_config_dropped_is_not_carried_over() {
-    let before = store();
-    let observed = stamp_at(Duration::ZERO);
-    before.observe(
+    store.observe(
         &seat(Some("seat-b")),
         snapshot(
             observed,
@@ -579,16 +530,119 @@ fn a_seat_the_new_config_dropped_is_not_carried_over() {
             QuotaWindow::Unknown,
         ),
     );
+    assert_eq!(store.len(), 1);
 
-    let after = QuotaStore::default();
-    after.admit_seats([seat(None)]);
-    after.import_entries(before.export_entries());
+    store.admit_seats([seat(None)]);
 
     assert!(
-        after.is_empty(),
-        "a retired seat's reading must not survive the rebuild, or a run of \
-         reloads carries every past seat forward"
+        store.is_empty(),
+        "a seat the new admit_seats call no longer names must not keep its reading",
     );
+}
+
+/// Pins the ordering guarantee that closes the admission TOCTOU (a write
+/// racing a concurrent `admit_seats` prune): the interleaving itself is
+/// closed by lock discipline (`observe` holds `seats` across its admission
+/// check and insert, nesting a brief `admitted` read inside it; this is the
+/// only method that nests the two locks, always in this one direction), not
+/// by anything a sequential test can force a race into. What IS
+/// sequentially verifiable, and what this test pins: once `admit_seats`
+/// completes, a retired seat has no reading left AND a subsequent write for
+/// it is refused and counted -- there is no post-prune window where a
+/// stale insert could still land.
+#[test]
+fn after_admit_seats_a_retired_seats_write_is_refused_and_counted() {
+    let store = store();
+    let observed = stamp_at(Duration::ZERO);
+    store.observe(
+        &seat(Some("seat-b")),
+        snapshot(
+            observed,
+            known(0.45, &observed, Duration::from_hours(2)),
+            QuotaWindow::Unknown,
+        ),
+    );
+    assert_eq!(store.len(), 1);
+
+    store.admit_seats([seat(None)]);
+    assert!(
+        store.is_empty(),
+        "the retired seat's pre-existing reading must be gone after the prune",
+    );
+
+    let wrote = store.observe(
+        &seat(Some("seat-b")),
+        snapshot(
+            observed,
+            known(0.9, &observed, Duration::from_hours(2)),
+            QuotaWindow::Unknown,
+        ),
+    );
+    assert!(
+        !wrote,
+        "a write for a seat retired by admit_seats must be refused"
+    );
+    assert_eq!(
+        store.refused_by_admission_total(),
+        1,
+        "the refused write must be counted"
+    );
+    assert!(
+        store.is_empty(),
+        "the refused write must not have inserted a reading"
+    );
+}
+
+/// The counterpart: a seat that survives re-admission keeps its reading.
+#[test]
+fn admit_seats_keeps_a_still_admitted_seats_reading() {
+    let store = store();
+    let observed = stamp_at(Duration::ZERO);
+    store.observe(
+        &seat(None),
+        snapshot(
+            observed,
+            known(0.45, &observed, Duration::from_hours(2)),
+            QuotaWindow::Unknown,
+        ),
+    );
+
+    store.admit_seats([seat(None), seat(Some("seat-c"))]);
+
+    let reading = store.reading_for(&seat(None), &observed);
+    assert!(
+        reading.is_some(),
+        "re-admitting a seat must not drop its existing reading",
+    );
+}
+
+/// A write refused for admission is counted, distinctly from every other
+/// rejection reason -- the signal that makes a missed re-admit visible in
+/// the metrics snapshot instead of silently refusing every write for a
+/// legitimately new seat.
+#[test]
+fn observe_on_an_unadmitted_seat_bumps_the_refusal_counter() {
+    let store = QuotaStore::default();
+    let observed = stamp_at(Duration::ZERO);
+
+    store.observe(
+        &seat(None),
+        snapshot(
+            observed,
+            known(0.25, &observed, Duration::from_mins(30)),
+            QuotaWindow::Unknown,
+        ),
+    );
+    store.observe(
+        &seat(None),
+        snapshot(
+            observed,
+            known(0.25, &observed, Duration::from_mins(30)),
+            QuotaWindow::Unknown,
+        ),
+    );
+
+    assert_eq!(store.refused_by_admission_total(), 2);
 }
 
 /// A late FAST reading must be judged against the FAST window's own stamp, not

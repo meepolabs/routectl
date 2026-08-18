@@ -237,7 +237,7 @@ fn a_keyless_request_places_by_cap_and_creates_no_pin() {
         "every eligible seat still follows, so the fall-through walk is preserved"
     );
     assert!(
-        router.sticky_pins.export_entries().is_empty(),
+        router.sticky_pins.is_empty(),
         "a keyless request must create no pin"
     );
 }
@@ -340,9 +340,10 @@ fn off_agrees_with_the_baseline_on_the_pin_it_writes() {
     let _ = chain_order(&off, "S");
     let _ = chain_order(&baseline, "S");
 
+    let pin_key = super::chain::sticky_pin_key("S", "opus");
     assert_eq!(
-        off.sticky_pins.export_entries(),
-        baseline.sticky_pins.export_entries(),
+        off.sticky_pins.get(&pin_key),
+        baseline.sticky_pins.get(&pin_key)
     );
 }
 
@@ -533,7 +534,7 @@ fn engagement_of(selection: SeatSelection, keyed: bool) -> Engagement {
         .expect("chain resolves");
 
     Engagement {
-        mints_pin: !router.sticky_pins.export_entries().is_empty(),
+        mints_pin: !router.sticky_pins.is_empty(),
         consults_quota: router.metrics.quota_placement_totals()
             != QuotaPlacementTotals {
                 below_cap: 0,

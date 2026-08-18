@@ -1666,9 +1666,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `calibrated_lane_count` runs the same reduction
   over every lane for boot observability; `cohort_of` is the one session-key
   to opaque-cohort derivation both the live write and the rebuild call;
-  `export_entries` / `import_entries` are the hot-reload carry-over seam
-  (`Router::carry_over_calibration_from`, which filters the export against the
-  new resolved-model table so renamed models cannot accumulate dead lanes)
+  `export_entries` backs the boot warm-rebuild path (`calibration_lanes()`)
+  and tests; the hot-reload carry-over (`Router::carry_over_calibration_from`)
+  SHARES the store `Arc` instead and prunes retired lanes through
+  `retain_lanes` against the new resolved-model table -- see the store doc
+  for the one bounded, self-healing leak sharing accepts
 - `src/calibration/factor.rs` -- the reduction and the correction arithmetic.
   `Factor::apply(raw) = raw * permille / 1000` in `u64`, no float (the window
   gate's own no-float-in-a-routing-decision constraint); the ratio is
@@ -1828,8 +1830,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   immortal. `reading_for` re-applies expiry at READ time. Exact per-reason
   rejection counters plus one rate-limited WARN carrying the running totals
   (the window-gate skip pattern); only the routectl-internal account key and
-  counters reach a log line. `export_entries` / `import_entries` carry readings
-  across a reload through the same admission the live feed passes
+  counters reach a log line. `admit_seats` now also PRUNES `seats` for any key
+  outside the new admitted set (folded in so both `install_resolved_models`
+  and the hot-reload carry-over share one prune point); the hot-reload carry-over
+  (`Router::carry_over_quota_from`) SHARES the store `Arc` and re-declares
+  admission against it rather than exporting/importing entries. A write refused
+  for admission bumps `refused_by_admission_total`, which rides the
+  `RouterMetrics::log_snapshot` line as `rc_quota_refused_by_admission_total`
 - `src/quota/feed.rs` -- the post-response feed, wired on BOTH completion paths.
   `feed_response` reads `ChatResponse::upstream_meta` at the terminal
   non-streaming success arm; `FirstChunkFeed` is armed with the served seat's key
@@ -2249,8 +2256,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   + `RoundRobinCursors` (per-pool `AtomicUsize` rotating the start seat per
   request under `RoundRobin`; `FillFirst` walks a fixed default-first order);
   `StickyLeastLoaded` selection adds `StickyPins` (a bounded-LRU `session_key
-  -> SeatPin{state_key, repinned}` map carried across hot-reload via
-  `carry_over_sticky_from`), the pure comparator `pick_least_loaded`
+  -> SeatPin{state_key, repinned}` map, held behind an `Arc` on `Router` and
+  SHARED -- not copied -- across a hot-reload via `carry_over_sticky_from`,
+  which also shares the anti-herd `tiebreak` counter), the pure comparator
+  `pick_least_loaded`
   (dispatchable filter + Closed-preferred health + the subscription-quota
   partition where it decides, else max RPM headroom + deterministic anti-herd
   tiebreak -- quota supersedes ONLY the headroom ranking, and only for a birth),
