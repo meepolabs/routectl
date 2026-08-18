@@ -12,8 +12,8 @@
 # prevent (see the comment block in rust-toolchain.toml).
 #
 # This is a VERSION check, not a rustup-presence check: a distro toolchain that
-# happens to BE the pinned version passes. The pin constrains the effective
-# compiler, not the installer that put it there.
+# happens to BE the pinned version passes -- where its provenance can be
+# verified. Where it cannot, the check fails closed.
 #
 # rustfmt is checked independently of rustc rather than assumed to follow it,
 # because the failure mode is asymmetric: a stray /usr/bin/rustfmt earlier on
@@ -23,8 +23,16 @@
 # build date in parentheses. Same build id means same toolchain; that is the
 # strongest statement rustfmt's own output supports.
 #
+# Consequence: a build that omits the parenthesised build id (some distro
+# builds do) leaves rustfmt's provenance unverifiable, so it is REJECTED rather
+# than waved through. Accepting it would clear the gate for any formatter
+# whatsoever, which is the drift this check exists to catch. The fix is to run
+# the gates under a rustup-managed toolchain, whose binaries always carry the
+# id.
+#
 # Exit codes: 0 = both tools are the pinned toolchain, 1 = a tool is missing,
-# the wrong toolchain resolved, or the pin itself could not be read.
+# the wrong toolchain resolved, rustfmt's provenance could not be verified, or
+# the pin itself could not be read.
 
 set -euo pipefail
 
@@ -90,6 +98,22 @@ build_id_of() {
 RUSTC_ID="$(build_id_of "$RUSTC_LINE")"
 RUSTFMT_ID="$(build_id_of "$RUSTFMT_LINE")"
 
+# A parsed id is usable only with BOTH halves present; anything else leaves
+# nothing to compare rustfmt against.
+usable_id() {
+    local hash="${1%% *}" date="${1##* }"
+    [[ -n "$1" && -n "$hash" && -n "$date" && "$hash" != "$1" ]]
+}
+
+if ! usable_id "$RUSTC_ID" || ! usable_id "$RUSTFMT_ID"; then
+    echo "toolchain: FAIL cannot verify rustfmt provenance: no toolchain build id in" >&2
+    echo "toolchain: version output; use a rustup-managed toolchain or see the comment" >&2
+    echo "toolchain: block at the top of scripts/assert-toolchain.sh" >&2
+    echo "toolchain: rustc reported '$RUSTC_LINE'" >&2
+    echo "toolchain: rustfmt reported '$RUSTFMT_LINE'" >&2
+    exit 1
+fi
+
 # rustc abbreviates the commit hash to 9 chars and rustfmt to 10, so compare on
 # the shorter of the two rather than requiring equal length.
 same_build() {
@@ -99,14 +123,9 @@ same_build() {
     b_hash="${b%% *}"
     b_date="${b##* }"
     [[ "$a_date" == "$b_date" ]] || return 1
-    if [[ -n "$a_hash" && -n "$b_hash" ]]; then
-        n="${#a_hash}"
-        ((${#b_hash} < n)) && n="${#b_hash}"
-        [[ "${a_hash:0:n}" == "${b_hash:0:n}" ]] || return 1
-    else
-        [[ -z "$a_hash" && -z "$b_hash" ]] || return 1
-    fi
-    return 0
+    n="${#a_hash}"
+    ((${#b_hash} < n)) && n="${#b_hash}"
+    [[ "${a_hash:0:n}" == "${b_hash:0:n}" ]]
 }
 
 if ! same_build "$RUSTC_ID" "$RUSTFMT_ID"; then

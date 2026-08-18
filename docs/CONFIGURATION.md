@@ -175,8 +175,9 @@ version = 3           # config schema version; see "Config schema version"
 
 # Prompt-cache economics (wm/rm/ttl/...) live outside config.toml as of
 # schema v2: a baked table plus catalog_overlay.json, managed via
-# `routectl catalog`. A v1 config's [cache_pricing] table auto-migrates
-# into the overlay on load; see "Catalog: prompt-cache economics" below.
+# `routectl catalog`. A v1 config's [cache_pricing] table is a hard
+# startup error, never migrated on load; `routectl config migrate` is
+# what folds it into the overlay. See "Retired: [cache_pricing]" below.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting a first-party upstream.
@@ -187,7 +188,9 @@ version = 3           # config schema version; see "Config schema version"
 [`examples/config.toml`](../examples/config.toml) is a working
 end-to-end reference; [`examples/bedrock.toml`](../examples/bedrock.toml)
 ships an empirical Bedrock allowlist baseline (16 betas + 16 body
-fields). Copy and edit; do not re-derive.
+fields). Copy and edit; do not re-derive. Carrying a v1
+`[cache_pricing]` table: see
+[Retired: `[cache_pricing]`](#retired-cache_pricing).
 
 ## Config schema version (`version`)
 

@@ -163,8 +163,8 @@ took effect.
 
 The knob also governs one field OUTSIDE the traced bodies. The
 foreign-format reasoning WARN's `skipped_formats` names the `format` tag
-of each reasoning detail the Anthropic translator could not echo, and
-that tag is caller-chosen free text. The split:
+of each reasoning detail the Anthropic translator could not echo. That
+tag is caller-supplied, so the knob applies to it. The split:
 
 - Tag in routectl's recognized vocabulary (`anthropic-claude-v1` and the
   Responses-family tags `openai-responses-v1`, `codex-oauth`,
@@ -175,8 +175,8 @@ that tag is caller-chosen free text. The split:
 - Tag outside that vocabulary: echoes literally with the knob OFF
   (sanitized, 256-char capped, 8 distinct values sampled), and renders as
   the literal `<unrecognized>` with the knob ON. Every unknown tag in a
-  request collapses to that one placeholder, so the sample cannot be
-  filled with caller-chosen strings.
+  request collapses to that one placeholder, so the field's size is
+  bounded regardless of how many distinct unknown tags arrive.
 - A detail with no `format` at all renders `<none>` in both states.
 
 To read the literal of a tag routectl does not recognize yet (the
