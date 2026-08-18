@@ -5,9 +5,9 @@
 //! (markup), the [`STYLE_PARTS`] style sources, and the [`SCRIPT_PARTS`] script
 //! sources -- each embedded via `include_str!` and spliced into the markup's
 //! two asset slots as one inline `<style>` and one inline `<script>`. The split
-//! is an authoring
-//! convenience only: the runtime artifact is still ONE offline page with zero
-//! external requests (asserted by [`tests::assembled_page_has_no_external_refs`]),
+//! is an authoring convenience only: the runtime artifact is still ONE offline
+//! page with zero external requests (asserted by the
+//! `assembled_page_has_no_external_refs` test),
 //! and the whole assembly is a `const`, so the served bytes are still static
 //! and there is no per-request work.
 //!

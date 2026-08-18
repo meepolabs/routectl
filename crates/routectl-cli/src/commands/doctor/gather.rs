@@ -206,8 +206,8 @@ pub(super) fn build_capability_inputs(
 /// a row with no capability keys yields NO prior -- the conservative
 /// "unknown" baseline, never a fabricated row. Staleness is NOT filtered
 /// here: the matrix panel flags a stale prior against the operator staleness
-/// hint (via [`is_stale_days`]), so a stale-but-present stamp is surfaced
-/// honestly rather than silently dropped.
+/// hint (via [`routectl_router::is_stale_days`]), so a stale-but-present
+/// stamp is surfaced honestly rather than silently dropped.
 pub(super) fn derive_prior_cells(config: &Config, overlay: &CatalogOverlay) -> Vec<PriorCell> {
     derive_effective_view(config, overlay)
         .models

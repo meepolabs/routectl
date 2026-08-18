@@ -54,6 +54,38 @@ jobs:
           RUSTDOCFLAGS: -D rustdoc::all
         run: cargo doc --workspace --all-features --no-deps
 
+  # The all-features clippy leg above cannot see a lane's own reduced build:
+  # feature unification means a workspace build always has every gate on, so
+  # dead code behind a narrower feature set and lints that only fire without
+  # the default features stay invisible. One leg per lane that has a feature
+  # gate. CI only, deliberately not the pre-commit hook -- the hook is
+  # already minutes long cold, and these legs each pay a fresh feature-set
+  # compile.
+  reduced-features:
+    name: clippy (reduced features)
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: router (no default features)
+            args: -p routectl-router --no-default-features
+          - name: providers (gemini only)
+            args: -p routectl-providers --no-default-features --features gemini
+          - name: providers (openai-responses only)
+            args: -p routectl-providers --no-default-features --features openai-responses
+          - name: providers (bedrock only)
+            args: -p routectl-providers --no-default-features --features bedrock
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.7.5
+
+      - name: cargo clippy -- ${{ matrix.name }}
+        run: cargo clippy ${{ matrix.args }} --all-targets -- -D warnings
+
   msrv:
     name: msrv check (1.95.0)
     runs-on: ubuntu-22.04

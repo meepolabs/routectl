@@ -18,8 +18,8 @@
 //! there is no `Default`, no call site can hold "known 0%" it never observed.
 //!
 //! The reset instant carries it too, and for the same reason. `Known` demands
-//! a [`ValidatedReset`](super::freshness::ValidatedReset), which only
-//! [`accept_reset`](super::freshness::accept_reset) can mint, so the
+//! a [`ValidatedReset`], which only [`accept_reset`](super::freshness::accept_reset)
+//! can mint, so the
 //! plausibility bound is unavoidable rather than advisory. An earlier draft of
 //! this type held a raw `SystemTime` and DOCUMENTED that it had already been
 //! validated -- which is precisely the shape of guarantee a later call site
@@ -120,8 +120,8 @@ pub enum Billing {
 ///
 /// Both fields of `Known` are constrained BY TYPE rather than by convention:
 /// `Utilization` cannot hold a value outside `[0.0, 1.0]`, and
-/// [`ValidatedReset`](super::freshness::ValidatedReset) cannot be minted
-/// except by [`accept_reset`](super::freshness::accept_reset). So a reducer
+/// [`ValidatedReset`] cannot be minted except by
+/// [`accept_reset`](super::freshness::accept_reset). So a reducer
 /// cannot assemble a trusted window around an unchecked reset -- notably a
 /// seconds-scale instant misparsed as milliseconds, which every expiry check
 /// reads as permanently valid. Documenting that the reset "was already

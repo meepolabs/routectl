@@ -64,9 +64,8 @@ pub struct LaneKey {
 pub struct Sample {
     /// When the observation was recorded, for the reduction's age bound.
     pub ts: SystemTime,
-    /// `actual / estimate` as integer permille. Above
-    /// [`IDENTITY_PERMILLE`](super::factor::IDENTITY_PERMILLE) means the
-    /// estimator under-counted this request.
+    /// `actual / estimate` as integer permille. Above [`IDENTITY_PERMILLE`]
+    /// means the estimator under-counted this request.
     pub permille: u32,
     /// Opaque grouping tag for the caller this observation came from. Used
     /// ONLY to give each caller one vote in the reduction, so no single

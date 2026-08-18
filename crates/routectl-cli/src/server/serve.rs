@@ -704,8 +704,8 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
 /// (zero -> default mapped by `compute_max_body_bytes`). Private to
 /// this module; the only call site is `serve_on_listener`.
 ///
-/// Every path registered below is classified by [`PUBLIC_ROUTES`] or
-/// [`AUTH_GATED_ROUTES`]; adding a route without classifying it fails a
+/// Every path registered below is classified by `PUBLIC_ROUTES` or
+/// `AUTH_GATED_ROUTES`; adding a route without classifying it fails a
 /// test in `serve_tests.rs`.
 ///
 /// `proxy::split::ANTHROPIC_INFERENCE_PATHS` is the source of truth for
