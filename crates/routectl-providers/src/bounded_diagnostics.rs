@@ -122,6 +122,10 @@ impl<T: PartialEq> BoundedLogSample<T> {
     /// For a tally that runs the same collection pass twice over one request
     /// (a post-assembly rewrite re-scanned by the seam that made it) so the
     /// two runs still yield ONE aggregated record.
+    ///
+    /// Only the bedrock Invoke seam re-scans, so this is bedrock-gated:
+    /// without the gate the lean providers build warns dead_code.
+    #[cfg(feature = "bedrock")]
     pub fn absorb(&mut self, other: Self) {
         let Self { items, truncated } = other;
         for item in items {

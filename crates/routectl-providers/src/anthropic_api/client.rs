@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use routectl_core::identity::anthropic as beta_flags;
 use routectl_core::identity::anthropic::is_anthropic_api_host;
-use routectl_core::{ChatRequest, Result, StaticToken, TokenSource};
+use routectl_core::{ChatRequest, Result, StaticToken, TokenSource, sanitize_for_log};
 
 use super::cloak::{self, CloakConfig};
 use super::{context_management, ratelimit_unified, request};
@@ -1026,6 +1026,10 @@ impl AnthropicApiProvider {
             *guard = current_claim.map(str::to_string);
             t
         };
+        // Every one of these is an upstream header value: `to_str` rejects
+        // \n / \r / ESC but lets tab through and caps nothing, so the
+        // rendered `%` field still needs the sanitizer -- applied at each
+        // field site so the log-display gate can see it there.
         let claim = current_claim.unwrap_or("");
         let overage_status = quota.overage_status.as_deref().unwrap_or("");
         let utilization = quota.utilization.as_deref().unwrap_or("");
@@ -1035,22 +1039,22 @@ impl AnthropicApiProvider {
             Some(ratelimit_unified::OverageTransition::EnteredOverage) => {
                 tracing::warn!(
                     provider = %self.cfg.id,
-                    representative_claim = %claim,
-                    overage_status = %overage_status,
-                    utilization = %utilization,
-                    overage_utilization = %overage_utilization,
-                    reset = %reset,
+                    representative_claim = %sanitize_for_log(claim),
+                    overage_status = %sanitize_for_log(overage_status),
+                    utilization = %sanitize_for_log(utilization),
+                    overage_utilization = %sanitize_for_log(overage_utilization),
+                    reset = %sanitize_for_log(reset),
                     "anthropic subscription billing flipped to overage",
                 );
             }
             Some(ratelimit_unified::OverageTransition::RecoveredFromOverage) => {
                 tracing::info!(
                     provider = %self.cfg.id,
-                    representative_claim = %claim,
-                    overage_status = %overage_status,
-                    utilization = %utilization,
-                    overage_utilization = %overage_utilization,
-                    reset = %reset,
+                    representative_claim = %sanitize_for_log(claim),
+                    overage_status = %sanitize_for_log(overage_status),
+                    utilization = %sanitize_for_log(utilization),
+                    overage_utilization = %sanitize_for_log(overage_utilization),
+                    reset = %sanitize_for_log(reset),
                     "anthropic subscription billing recovered from overage",
                 );
             }

@@ -41,7 +41,7 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
         .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut billing_dropped));
     if billing_dropped {
         tracing::warn!(
-            provider = %req.model,
+            model = %routectl_core::sanitize_for_log(&req.model),
             "bedrock-converse egress: Claude Code billing/attribution system block dropped",
         );
     }
