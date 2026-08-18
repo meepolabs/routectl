@@ -52,7 +52,6 @@ fn calibration_estimate_is_stamped_below_the_trim_trigger() {
     router.record_would_trim(
         &req,
         Some(PROVIDER_KIND),
-        UPSTREAM,
         SERVED_MODEL,
         &effective,
         &mut meta,
@@ -100,7 +99,6 @@ fn calibration_estimate_is_the_last_dispatched_attempts_estimate() {
         router.record_would_trim(
             req,
             Some(PROVIDER_KIND),
-            UPSTREAM,
             SERVED_MODEL,
             &effective,
             &mut meta,

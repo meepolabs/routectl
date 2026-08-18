@@ -2030,6 +2030,95 @@ async fn a_render_failure_leaves_no_live_calibration_evidence() {
     assert_eq!(rows[0].outcome, "upstream_error");
 }
 
+/// LIVE and REPLAYED K evidence must admit the same set of requests. The
+/// startup rebuild replays `outcome = 'ok'` ledger rows ONLY, and a render
+/// failure after a good upstream response finalizes `upstream_error` -- so if
+/// the live path recorded a K sample for such a request, the in-memory K state
+/// and the state a restart rebuilds from the ledger would disagree about the
+/// same session's reuse, and the cache-marker gate the estimator feeds would
+/// flip on restart with no signal attached to it.
+///
+/// Asserting on the persisted row alone would pass against a live-side leak,
+/// so the assertion is on the router's own K store.
+#[tokio::test]
+async fn a_render_failure_leaves_no_live_k_sample() {
+    use crate::ingress::openai::OpenAiIngress;
+    use std::sync::Arc;
+
+    // Arrange: a reachable upstream and a session-keyed request, so the only
+    // reason no sample may land is the render failure.
+    let upstream = calibration_upstream().await;
+    let router = Arc::new(calibration_recording_router(&upstream.uri()).await);
+    assert!(
+        router.k_session_store.is_empty(),
+        "a freshly built router holds no K evidence",
+    );
+    let mut req = sample_request("a", false);
+    req.routectl_internal.inbound_session_key = Some("sess-k-render-fail".into());
+
+    // Act: the real non-streaming handler path, with an adapter that fails to
+    // serialize the response the upstream delivered.
+    let rig = CaptureRig::new();
+    let draft = build_usage_draft("openai", &req, "req-k-render-fail".to_string());
+    let resp = complete_response(
+        Arc::clone(&router),
+        req,
+        Default::default(),
+        RenderResponseFailsAdapter {
+            inner: OpenAiIngress,
+        },
+        ErrorEnvelopeShape::OpenAi,
+        rig.handle.clone().expect("rig handle present"),
+        draft,
+    )
+    .await;
+
+    // Assert: the client got an error, the row is not `ok` (so the rebuild
+    // will not replay it), and NO sample was recorded live either.
+    assert_ne!(resp.status(), StatusCode::OK);
+    assert!(
+        router.k_session_store.is_empty(),
+        "a request the startup replay refuses must leave no live K sample",
+    );
+    let rows = rig.flush_and_read().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "upstream_error");
+}
+
+/// A clean completion over the same rig DOES record a K sample, so the test
+/// above pins the render boundary rather than a recording path that never
+/// fires at all (a keyless request, or a rig whose upstream reports no
+/// `cache_read`, would leave the store empty for an unrelated reason).
+#[tokio::test]
+async fn a_clean_completion_records_a_live_k_sample() {
+    use crate::ingress::openai::OpenAiIngress;
+    use std::sync::Arc;
+
+    let upstream = calibration_upstream().await;
+    let router = Arc::new(calibration_recording_router(&upstream.uri()).await);
+    let rig = CaptureRig::new();
+    let mut req = sample_request("a", false);
+    req.routectl_internal.inbound_session_key = Some("sess-k-render-ok".into());
+    let draft = build_usage_draft("openai", &req, "req-k-render-ok".to_string());
+
+    let resp = complete_response(
+        Arc::clone(&router),
+        req,
+        Default::default(),
+        OpenAiIngress,
+        ErrorEnvelopeShape::OpenAi,
+        rig.handle.clone().expect("rig handle present"),
+        draft,
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        !router.k_session_store.is_empty(),
+        "a served response must record its K sample",
+    );
+}
+
 /// A clean completion over the same rig DOES record, so the test above pins
 /// the render boundary rather than a recording path that never fires at all.
 #[tokio::test]

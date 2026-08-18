@@ -105,7 +105,6 @@ fn record(router: &Router, req: &ChatRequest) {
     router.record_would_trim(
         req,
         Some(PROVIDER_KIND),
-        UPSTREAM,
         SERVED_MODEL,
         &effective,
         &mut meta,
@@ -151,7 +150,11 @@ fn shadow_misfire_warn_hashes_session_key_instead_of_logging_it_raw() {
     }
 
     assert_eq!(warn.field("provider_kind"), Some(PROVIDER_KIND));
-    assert_eq!(warn.field("model"), Some(UPSTREAM));
+    assert_eq!(
+        warn.field("model"),
+        Some(SERVED_MODEL),
+        "the logged model dimension is the served nickname the entry is keyed under",
+    );
     assert_eq!(
         warn.field("session_key_hash"),
         Some(
@@ -181,7 +184,6 @@ fn record_first_seen(router: &Router) {
     router.record_would_trim(
         &triggering_req("original head"),
         Some(PROVIDER_KIND),
-        UPSTREAM,
         SERVED_MODEL,
         &effective,
         &mut meta,

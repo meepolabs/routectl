@@ -197,7 +197,6 @@ fn record_would_trim_queries_k_store_under_served_model_not_upstream() {
     router.record_would_trim(
         &req,
         Some(PROVIDER_KIND),
-        UPSTREAM,
         SERVED_MODEL,
         &effective,
         &mut meta,
@@ -218,6 +217,75 @@ fn record_would_trim_queries_k_store_under_served_model_not_upstream() {
     );
 }
 
+/// Under an alias, the estimator's window and the shadow misfire monitor's
+/// entry must land on ONE key.
+///
+/// The monitor exists to EXPLAIN the estimator's behavior for a window: a
+/// misfire says "the prefix this window's samples were measured over shifted".
+/// If the two stores key on different model dimensions -- the estimator on the
+/// served nickname, the monitor on the upstream wire id -- they describe
+/// different populations under any alias whose nickname differs from the wire
+/// id, and a misfire can no longer be attributed to the window it was supposed
+/// to explain. Both now derive through the shared `k_query_key` helper, so the
+/// only observable key is the served-nickname triple.
+#[test]
+fn shadow_store_and_k_store_key_identically_under_an_alias() {
+    // Arrange: the served nickname and the upstream wire id DIFFER, which is
+    // precisely the aliased case where a split keying is observable.
+    assert_ne!(
+        SERVED_MODEL, UPSTREAM,
+        "the divergence this pins only exists when the two labels differ",
+    );
+    let router = Router::new(Arc::new(Config::default()));
+    record_calibrated_samples(&router);
+    let req = triggering_req();
+    let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
+    let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
+    assert!(
+        router.shadow_store.is_empty(),
+        "a fresh router holds no shadow entries",
+    );
+
+    // Act: one dispatch, which both reads the estimator and records into the
+    // shadow monitor.
+    router.record_would_trim(
+        &req,
+        Some(PROVIDER_KIND),
+        SERVED_MODEL,
+        &effective,
+        &mut meta,
+    );
+
+    // Assert: the shadow entry is addressable by the SAME triple the K window
+    // lives under, and nothing exists under the upstream-keyed triple. Probing
+    // via `record_and_compare` with the stored fingerprint: a hit on the
+    // served-model key reports `Stable` (the entry is already there), while the
+    // upstream key would be `FirstSeen` if the store had been keyed on it.
+    let fp = trimmed_prefix_fingerprint(
+        &req,
+        &propose_steady_state_trim(&req, &router.config.trim.to_params())
+            .expect("the fixture request trips the trim trigger"),
+    );
+    assert_eq!(
+        router
+            .shadow_store
+            .record_and_compare(key(SERVED_MODEL), fp, SystemTime::now()),
+        crate::k_estimator::ShadowOutcome::Stable,
+        "the shadow entry must be keyed under the served nickname, like the K window",
+    );
+    assert_eq!(
+        router
+            .shadow_store
+            .record_and_compare(key(UPSTREAM), fp, SystemTime::now()),
+        crate::k_estimator::ShadowOutcome::FirstSeen,
+        "nothing may be keyed under the upstream wire id",
+    );
+    assert!(
+        router.k_session_store.get(&key(SERVED_MODEL)).is_some(),
+        "the K window this monitor explains lives under the same triple",
+    );
+}
+
 #[test]
 fn record_would_trim_folds_missing_baked_row_to_no_break_even() {
     // Arrange: a provider_kind that names no baked cell at all -- not
@@ -235,7 +303,6 @@ fn record_would_trim_folds_missing_baked_row_to_no_break_even() {
     router.record_would_trim(
         &req,
         Some(UNKNOWN_KIND),
-        UPSTREAM,
         SERVED_MODEL,
         &effective,
         &mut meta,

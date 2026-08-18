@@ -417,7 +417,6 @@ impl Router {
             self.record_would_trim(
                 &attempt_req,
                 target.provider_kind,
-                model,
                 target.nickname.as_deref().unwrap_or(model),
                 &target.model.effective_row,
                 meta,
@@ -1177,7 +1176,6 @@ impl Router {
             self.record_would_trim(
                 &attempt_req,
                 target.provider_kind,
-                model,
                 target.nickname.as_deref().unwrap_or(model),
                 &target.model.effective_row,
                 meta,
@@ -1838,23 +1836,24 @@ impl Router {
     /// remains owned by the reduction path. Advisory only -- the
     /// dispatched bytes never change.
     ///
-    /// The two model dimensions are DELIBERATELY split. `model` is the
-    /// UPSTREAM wire id and keys the pricing lookup -- pricing cells are baked
-    /// per upstream model. `served_model` is the served NICKNAME and keys the
-    /// K estimator's [`crate::k_estimator::KQuery`], because
+    /// The model dimension is the served NICKNAME throughout. Every store this
+    /// function touches is a K-side store -- the estimator's
+    /// [`crate::k_estimator::KQuery`] and the shadow misfire monitor -- and
     /// [`Router::record_k_sample`] writes each per-session K window under the
-    /// served nickname (`meta.served_model` == `target.nickname`). Keying the
-    /// query on `served_model` (not `model`) is what makes the query triple
-    /// byte-identical to the sample-write triple; keying it on the upstream id
-    /// silently misses the store, holds every estimate at `Cold`, and leaves
-    /// `would_trim_k_floor` permanently `None`. When a target has no nickname
-    /// (`served_model` falls back to `model`), no sample is ever recorded for
-    /// that dispatch either, so the fallback never mis-keys a populated window.
+    /// served nickname (`meta.served_model` == `target.nickname`), so keying on
+    /// it is what makes the read triple byte-identical to the sample-write
+    /// triple. Keying on the upstream wire id instead silently misses the store,
+    /// holds every estimate at `Cold`, and leaves `would_trim_k_floor`
+    /// permanently `None`. Pricing needs the upstream id, but it is looked up at
+    /// chain-build time and arrives here already resolved as `effective`, so
+    /// this function never sees the wire id at all. When a target has no
+    /// nickname (`served_model` falls back to the wire id), no sample is ever
+    /// recorded for that dispatch either, so the fallback never mis-keys a
+    /// populated window.
     fn record_would_trim(
         &self,
         attempt_req: &ChatRequest,
         provider_kind: Option<&'static str>,
-        model: &str,
         served_model: &str,
         effective: &EffectiveRow,
         meta: &mut DispatchMeta,
@@ -1915,18 +1914,23 @@ impl Router {
             meta.would_trim_k_floor = would_trim_k_floor_for_meta(break_even, &estimate);
 
             // Shadow misfire monitor: recording only, never mutates attempt_req.
-            // Compute a fingerprint of the trimmed cacheable prefix and compare it
-            // against the stored value for this (session, provider_kind, model) triple.
-            // A Misfire means the prefix shifted turn-to-turn -- the canary that a
-            // real cut would break the upstream cache.
-            if let Some(session_key) = attempt_req.routectl_internal.inbound_session_key.as_deref()
-            {
+            // Compute a fingerprint of the trimmed cacheable prefix and compare
+            // it against the stored value for this triple. A Misfire means the
+            // prefix shifted turn-to-turn -- the canary that a real cut would
+            // break the upstream cache.
+            //
+            // Keyed off the SAME `k_key` the estimate above was read under, so
+            // the monitor and the estimator describe ONE population. The
+            // monitor exists to explain the estimator's behavior; keying it on
+            // the upstream wire id instead would silently split the two under
+            // any alias whose nickname differs from that id. `store_key` is
+            // `None` exactly when the request is keyless, which is also when
+            // there is no window to monitor.
+            if let (Some(session_key), Some(shadow_key)) = (
+                attempt_req.routectl_internal.inbound_session_key.as_deref(),
+                k_key.store_key(),
+            ) {
                 let fp = trimmed_prefix_fingerprint(attempt_req, &plan);
-                let shadow_key = crate::k_estimator::KSessionKey {
-                    session_key: session_key.to_string(),
-                    provider_kind: provider_kind.unwrap_or("").to_string(),
-                    model: model.to_string(),
-                };
                 let outcome =
                     self.shadow_store
                         .record_and_compare(shadow_key, fp, SystemTime::now());
@@ -1944,10 +1948,15 @@ impl Router {
                         // the WARN needs, and the per-process salt denies an
                         // offline dictionary attack on a client that keys its
                         // session by a stable per-user string.
+                        //
+                        // `model` renders the served nickname, matching the
+                        // dimension the entry is keyed under: an operator
+                        // correlating a WARN against a K window must read one
+                        // label, not two.
                         tracing::warn!(
                             session_key_hash = crate::log_hash::salted_log_hash(session_key),
                             provider_kind = provider_kind.unwrap_or(""),
-                            model = %model,
+                            model = %served_model,
                             "would_trim_shadow_misfire: trimmed cacheable prefix shifted turn-to-turn",
                         );
                     }
