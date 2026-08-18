@@ -194,6 +194,7 @@ mod tests {
     use super::*;
     use reqwest::cookie::CookieStore;
     use reqwest::header::HeaderValue;
+    use routectl_testkit::ScopedEnv;
 
     fn touch_jar_with(jar: &CookieStoreMutex, name: &str, value: &str) {
         let url = reqwest::Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
@@ -322,19 +323,16 @@ mod tests {
         );
     }
 
+    /// `#[serial_test::serial]` is the `ScopedEnv` contract -- see its
+    /// module docs. It also shares the lock with every other
+    /// env-mutating test in this binary, which `serial_test` can only
+    /// coordinate across participating tests.
     #[test]
+    #[serial_test::serial]
     fn default_cookie_path_honors_env_override() {
-        let prior = std::env::var_os("ROUTECTL_COOKIE_FILE");
-        // TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("ROUTECTL_COOKIE_FILE", "/tmp/routectl-cookie-test.json") };
+        let _cookie_file = ScopedEnv::set("ROUTECTL_COOKIE_FILE", "/tmp/routectl-cookie-test.json");
         let p = default_cookie_path().expect("path");
         assert_eq!(p, Path::new("/tmp/routectl-cookie-test.json"));
-        match prior {
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            Some(v) => unsafe { std::env::set_var("ROUTECTL_COOKIE_FILE", v) },
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            None => unsafe { std::env::remove_var("ROUTECTL_COOKIE_FILE") },
-        }
     }
 
     #[test]
