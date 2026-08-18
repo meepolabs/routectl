@@ -159,20 +159,18 @@ pub struct OpenAiCompatProvider {
 impl OpenAiCompatProvider {
     /// Build a provider from its configuration.
     pub fn new(cfg: OpenAiCompatConfig) -> Self {
-        // The mantle lane uses a no-redirect client: a signed POST must
-        // never be auto-followed across a 3xx, since replaying the SigV4
-        // signature against a different host always fails and a redirect
-        // on this lane is an upstream fault to surface, not to chase. The
-        // first-party lane keeps the stock (redirect-following) client.
-        #[cfg(feature = "bedrock")]
-        let client = if cfg.mantle.is_some() {
-            crate::http_client::build_no_redirect(cfg.user_agent.as_deref())
-                .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup")
-        } else {
-            crate::http_client::build(cfg.user_agent.as_deref())
-        };
-        #[cfg(not(feature = "bedrock"))]
-        let client = crate::http_client::build(cfg.user_agent.as_deref());
+        // Both the mantle and first-party lanes use a no-redirect client.
+        // Mantle: a signed POST must never be auto-followed across a 3xx,
+        // since replaying the SigV4 signature against a different host
+        // always fails. First-party: the `Authorization: Bearer` header
+        // reqwest DOES strip on a cross-host hop, but keeping the same
+        // no-redirect posture as every other lane on this crate avoids a
+        // per-lane accident if a future header_extras addition attaches
+        // something reqwest's default list does not cover. Either way a
+        // redirect on this lane is an upstream fault to surface, not to
+        // chase.
+        let client = crate::http_client::build_no_redirect(cfg.user_agent.as_deref())
+            .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
         Self { cfg, client }
     }
 
@@ -367,6 +365,11 @@ impl Provider for OpenAiCompatProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if !resp.status().is_success() {
             // Read headers BEFORE the capped body read moves `resp`; the
             // shared mapper takes `&HeaderMap` and computes the
@@ -490,6 +493,11 @@ impl Provider for OpenAiCompatProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if !resp.status().is_success() {
             // Read headers BEFORE the capped body read moves `resp`. Shared
             // with complete(): retry_after is preserved on the stream

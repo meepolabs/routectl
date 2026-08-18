@@ -115,6 +115,8 @@ mod integration;
 mod mantle;
 #[path = "anthropic_api/probe.rs"]
 mod probe;
+#[path = "anthropic_api/redirect.rs"]
+mod redirect;
 #[path = "anthropic_api/request_normalization.rs"]
 mod request_normalization;
 #[path = "anthropic_api/response_normalization.rs"]

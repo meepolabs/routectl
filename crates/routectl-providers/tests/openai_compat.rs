@@ -1005,6 +1005,45 @@ async fn stream_error_body_over_cap_preserves_status() {
 }
 
 // ---------------------------------------------------------------------------
+// Redirect policy: the shared no-redirect client hands back the 3xx itself
+// (not a followed response), so the egress must map it to an upstream
+// server fault rather than let it fall into the success/parse path.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn redirect_response_maps_to_server_error_class() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "http://localhost:1/elsewhere"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+    let err = provider
+        .complete(user_request("test-model"))
+        .await
+        .unwrap_err();
+
+    match &err {
+        routectl_core::Error::Upstream { status, .. } => {
+            assert_eq!(
+                *status, 502,
+                "a 3xx must surface as a mapped upstream server fault, not the bare redirect status"
+            );
+        }
+        other => panic!("expected Error::Upstream from an unfollowed 302, got {other:?}"),
+    }
+    assert_eq!(
+        routectl_core::failure_class::classify(&err, Some("openai-compat")).class,
+        routectl_core::failure_class::FailureClass::ServerError,
+        "a redirect the client refuses to follow must classify (and retry/fail over) like a server fault"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Bedrock mantle lane wire behavior: SigV4/bearer-signed egress, no
 // first-party Bearer, a no-redirect client, and the deterministic 501
 // count_tokens capability signal. These pin the runtime lane against a mock
@@ -1214,11 +1253,17 @@ mod mantle {
             .complete(user_request("anthropic.claude-haiku-4-5"))
             .await
             .unwrap_err();
-        // A 302 is surfaced as an upstream error, not chased cross-host.
-        match err {
-            Error::Upstream { status, .. } => assert_eq!(status, 302),
+        // A 302 is surfaced as a mapped upstream server fault (not the
+        // bare redirect status), and not chased cross-host.
+        match &err {
+            Error::Upstream { status, .. } => assert_eq!(*status, 502),
             other => panic!("expected Upstream, got: {other:?}"),
         }
+        assert_eq!(
+            routectl_core::failure_class::classify(&err, Some("openai-compat")).class,
+            routectl_core::failure_class::FailureClass::ServerError,
+            "an unfollowed redirect must classify like a server fault"
+        );
 
         let received = server.received_requests().await.unwrap();
         let followed = received

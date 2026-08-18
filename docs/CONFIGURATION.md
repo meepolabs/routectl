@@ -662,7 +662,13 @@ fault to surface, never followed (auto-following a signed POST would
 replay the SigV4 signature cross-host). AWS-shaped error envelopes
 (`SignatureDoesNotMatch`, `ThrottlingException`, `RequestTimeTooSkewed`)
 are lifted into the classified failure so a bad credential surfaces as an
-auth failure and a throttle as rate-limited.
+auth failure and a throttle as rate-limited. The first-party lane (no
+`bedrock_mantle` sub-table) uses the same no-redirect client: `x-api-key`
+and the Claude-Code identity headers are not covered by reqwest's
+default cross-host header strip list, so a 3xx from the configured host
+is likewise surfaced as a fault rather than chased to a different host.
+Every credentialed egress lane in routectl (Anthropic, OpenAI-compat,
+OpenAI Responses, Gemini, native Bedrock) shares this posture.
 
 Production credential guidance: use a SigV4 source (`static` with
 long-term keys, `profile`, or `default-chain`) or a long-term Bedrock API

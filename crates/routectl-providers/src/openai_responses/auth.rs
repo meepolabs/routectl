@@ -77,7 +77,8 @@ pub fn apply(
 /// `build_headers`.
 ///
 /// User-Agent is set at the reqwest::Client level (client-level
-/// default header) via `http_client::build` in
+/// default header) via `http_client::build_no_redirect` /
+/// `http_client::build_with_cookie_provider` in
 /// `OpenAiResponsesProvider::new()`, matching the anthropic_api
 /// pattern.
 fn apply_chatgpt_oauth(

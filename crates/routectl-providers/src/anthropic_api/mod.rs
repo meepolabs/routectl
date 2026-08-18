@@ -194,6 +194,15 @@ impl Provider for AnthropicApiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        // Redirects are disabled on this client (see http_client module
+        // docs), so a 3xx is a fault, not a hop -- surface it as an
+        // upstream server error BEFORE the success/parse path below,
+        // which would otherwise choke on a non-JSON 3xx body.
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         // On non-2xx, read the body as text FIRST so a non-JSON
         // upstream response (HTML 502 from a misconfigured proxy,
         // a CDN cleartext "rate limited" page, Anthropic's
@@ -373,6 +382,11 @@ impl Provider for AnthropicApiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             // Same text-first-then-opportunistic-JSON pattern as
             // `complete()` -- see comment there. Helper extracted at
@@ -613,6 +627,11 @@ impl Provider for AnthropicApiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(
+                &self.cfg.id,
+            ));
+        }
         if status >= 400 {
             // Same text-first-then-opportunistic-JSON pattern as
             // `complete()` -- a non-JSON 502/503 from a misconfigured
