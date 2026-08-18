@@ -19,6 +19,13 @@ fi
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# FIRST leg, before any cargo or rustfmt invocation: every leg below calls
+# them bare and trusts the rustup shim to honor rust-toolchain.toml. This
+# proves that trust held, so a green hook cannot mean "green against some
+# other toolchain".
+echo "pre-commit: toolchain pin preflight"
+bash scripts/assert-toolchain.sh
+
 # gitleaks: REQUIRED, with a version FLOOR. A stale or unversioned local
 # gitleaks silently lacks rules the CI gitleaks-action has (this bit us once:
 # an old /usr/bin/gitleaks missed a `jwt` finding the action caught), so the
