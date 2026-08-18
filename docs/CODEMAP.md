@@ -4657,7 +4657,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   assembly. Read-only posture: a doctor run mutates nothing
   (config/credentials/overlay/usage DB byte-identical). The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
-  Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`,
+  Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `seats`,
   `secrets`, `probe`, `capability`, `freshness`) -- one extension point per
   new section (producer + `section_title`); `NO_NETWORK_SECTIONS` is that list
   MINUS `probe` for the offline status surface. `DoctorContext` (plus the
@@ -4671,9 +4671,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   read-only input, gathered once. `build_report`/`build_report_no_network` run
   the producers over a context, flatten, and deterministically sort (section,
   name, status) via `build_report_over` into `DoctorReport { schema_version =
-  4 (UNSTABLE pre-1.0; any structural/semantic change, incl. additive, bumps
+  5 (UNSTABLE pre-1.0; any structural/semantic change, incl. additive, bumps
   it -- v4 supersedes the capability override/prior/learned findings with the
-  `capability_matrix` panel and adds the freshness section), findings, panels
+  `capability_matrix` panel and adds the freshness section, v5 adds the
+  `seats` orphan-seat section), findings, panels
   }`; `run` renders human or `--json` and returns `overall_exit`. Data
   collection lives in `gather.rs`, the section producers in `sections.rs`, the
   capability matrix panel builder in `matrix.rs`, human rendering in
@@ -4706,6 +4707,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `SecretCheck`/`SecretPresence`.
   `gather_orphan_secrets`/`referenced_secret_files` is a read-only
   managed-secret-dir vs `file://`-refs diff (never deletes).
+  `gather_orphan_seats`/`referenced_seat_coverage` is the STORED-OAuth-seat
+  sibling of that diff: it splits the config's `oauth://` refs into
+  pool-covered providers (a bare `oauth://<provider>` reaches every stored seat
+  of that provider, matching the factory's `list_seats` expansion) and
+  label-pinned seat keys (`oauth://<provider>#<label>` covers that seat ONLY,
+  never the default or a sibling label), then reports the stored seat keys no
+  ref reaches -- seat key only, never token material or a storage path, and
+  nothing is refreshed or removed.
   `build_capability_inputs` resolves the config-derived capability inputs
   (legacy keys + `derive_prior_cells` -- one prior per model whose
   `EffectiveRow::Present` carries capability data, retaining its `verified_at`
@@ -4735,7 +4744,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   shared `validation_report` (short-circuited to one `Warn` "validation
   skipped" + the secret checks when the typed load failed, so a broken file
   never emits a spurious validation `Pass`) + the leak-safe secret-presence
-  scan, auth (no seats/expired -> WARN, store-open error -> FAIL), secrets
+  scan, auth (no seats/expired -> WARN, store-open error -> FAIL), seats
+  (`section_seat_orphans`: a stored OAuth seat no provider entry references ->
+  WARN naming the seat key, remediation via `logout_target` so a labelled
+  seat's `routectl logout` hint carries `--label` rather than wiping the
+  default), secrets
   (orphan managed file -> WARN, never auto-deleted), probe via the shared
   `probe_finding` seam, and `capability` -- reduced to the config-unavailable
   degradation line plus the guarded legacy-key migrate nudge (the override /
