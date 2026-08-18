@@ -51,7 +51,9 @@ pub struct CacheDecisionSummary {
 }
 
 /// The `auto_emitted` token: the one decision in the `cache_auto_decision`
-/// vocabulary that means a breakpoint was actually injected.
+/// vocabulary that means a breakpoint was actually injected. A leaf-preserving
+/// mirror of `routectl_core::cache_decision`'s `AUTO_EMITTED` on the same
+/// terms as [`K_SUPPRESSION_TOKEN`].
 const EMITTED_TOKEN: &str = "auto_emitted";
 
 /// `COUNT(col)` ignores NULLs, so each `*_decided` count is the number of rows
@@ -112,6 +114,17 @@ pub fn cache_decision_summary(
 /// marker's break-even, and BOTH markers were withheld on economic grounds.
 /// Bound into [`SUPPRESSED_SESSIONS_SQL`] rather than inlined so the literal
 /// appears once on this side of the vocabulary.
+///
+/// A deliberate MIRROR of `routectl_core::cache_decision`'s
+/// `AUTO_SKIPPED_K_BELOW_BREAK_EVEN`, duplicated rather than imported
+/// because this crate is a leaf and must not depend on core -- the same
+/// posture `query::reduction`'s `BYTES_PER_TOKEN_ESTIMATE` takes. Agreement
+/// with the emitting spelling is pinned by a behavioral round-trip test in
+/// routectl-cli (the only crate that sees both sides): it writes a row
+/// carrying the CORE const and asserts [`suppressed_sessions`] finds it, so
+/// a typo on either side fails loudly instead of returning no rows. Same
+/// mirror-plus-round-trip shape as `capability_event`'s `TOMBSTONE_VERDICT`
+/// and its copy in `query::capability`.
 const K_SUPPRESSION_TOKEN: &str = "auto_skipped:k_below_break_even";
 
 /// Most triples [`suppressed_sessions`] returns. A bound, not a page: the

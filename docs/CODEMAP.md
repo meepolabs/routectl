@@ -141,6 +141,21 @@ listed at the bottom of each crate.
   token missing its sibling column yields `Unknown`, never a fabricated
   phase/prior). The bool and phase carried by the data variants live in
   sibling ledger fields, not in the verdict token
+- `src/cache_decision.rs` -- the frozen cache-injection decision vocabulary:
+  the ten tokens the `cache_auto_decision` log emits and the usage ledger's
+  `cache_front_decision` / `cache_terminal_decision` columns persist
+  (`AUTO_EMITTED`, `CALLER_SUPPLIED`, `VOLATILE_VETOED` and the seven
+  `AUTO_SKIPPED_*` decline reasons), collected in `CACHE_DECISION_TOKENS` with
+  the `is_known_cache_decision` membership predicate readers use to skip an
+  unrecognized token rather than panic. Single source for the spelling: the
+  router's `CacheInjection::strategy_str` maps its variants onto these consts
+  instead of holding literals, so the emitted token and a reader's expectation
+  cannot drift. CLOSED vocabulary (the emitting enum is exhaustive) and a
+  forever contract -- each token is written verbatim to a ledger column, so a
+  rename silently re-classifies every historical row. routectl-usage's read
+  side keeps a deliberate leaf-preserving MIRROR of the suppression token
+  rather than importing this crate; agreement is pinned behaviorally in
+  routectl-cli
 - `src/provider.rs` -- `Provider` trait every backend implements
   (normalize_request/response/chunk + complete + stream + on_auth_failure hook
   for 401 recovery); `async fn probe(&self) -> ProbeOutcome` is the free
@@ -2175,7 +2190,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   from `front_breakpoint_slot`, built once), `CacheInjection` (variants ->
   stable `strategy_str()` decision tokens, incl.
   `auto_skipped:no_placement_region` for a front marker with no anchor and
-  `auto_skipped:k_below_break_even` for the K-gated emission verdict) and
+  `auto_skipped:k_below_break_even` for the K-gated emission verdict; the
+  spellings come from `routectl_core::cache_decision`, not literals here) and
   `CacheDecision { front, terminal }` (the per-marker outcome pair). Byte
   identity is documented per-TARGET, not per-request: a session-derived
   verdict is deliberately NOT a plan field. The
@@ -2888,7 +2904,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   keys on the whole triple). It is the DETECTION surface for a session wrongly
   latched off caching -- that loss accrues at HTTP 200 with every health signal
   green, so it is bounded by find-time. VALIDITY: sessions seen, never a rate --
-  same drop-counter caveat as `reduction.rs`
+  same drop-counter caveat as `reduction.rs`. The two token literals here are
+  deliberate leaf-preserving MIRRORS of `routectl_core::cache_decision` (same
+  posture as `reduction.rs`'s `BYTES_PER_TOKEN_ESTIMATE` and
+  `capability_event.rs`'s `TOMBSTONE_VERDICT`); agreement with the emitting
+  spelling is pinned by a BEHAVIORAL round-trip test in routectl-cli, the only
+  crate seeing both sides -- it writes a row carrying the core const and
+  asserts the finder returns it, because a divergence would otherwise surface
+  as an empty result indistinguishable from a healthy window
 - `src/query/session_ref.rs` -- `session_ref`: per-process salted digest
   (`OnceLock<RandomState>` + `hash_one`) of a ledger session key, so a read
   query can report session IDENTITY without handing a raw client-supplied key

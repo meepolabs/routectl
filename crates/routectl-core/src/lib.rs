@@ -7,6 +7,7 @@
 //! `provider` for the per-backend trait.
 
 pub mod cache_control;
+pub mod cache_decision;
 pub mod capability;
 pub(crate) mod cloud_project;
 pub mod content_part;

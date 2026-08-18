@@ -1,6 +1,12 @@
 //! Auto-cache request plan (pure read; the injection CALL stays in dispatch).
 
 use routectl_core::cache_control::{FrontSlot, compute_frozen_floor, front_breakpoint_slot};
+use routectl_core::cache_decision::{
+    AUTO_EMITTED, AUTO_SKIPPED_BREAKPOINT_CAP, AUTO_SKIPPED_GLOBAL_DISABLED,
+    AUTO_SKIPPED_K_BELOW_BREAK_EVEN, AUTO_SKIPPED_NO_CAPABILITY, AUTO_SKIPPED_NO_PLACEMENT_REGION,
+    AUTO_SKIPPED_PROVIDER_DISABLED, AUTO_SKIPPED_VALIDATION_ROLLED_BACK, CALLER_SUPPLIED,
+    VOLATILE_VETOED,
+};
 use routectl_core::{ChatRequest, scan_volatile};
 
 /// Request-level inputs to the auto-cache decision, computed ONCE per
@@ -108,37 +114,27 @@ impl CacheInjection {
     /// Stable operator-facing token for this decision, emitted in the
     /// `cache_auto_decision` log and persisted in the usage ledger's
     /// per-marker decision columns. The legacy `requests.strategy` column
-    /// stays write-stopped as of 0.9.x. These tokens are a
-    /// CONTRACT: do not
-    /// rename or repurpose them, only add new ones. The `auto_skipped:`
-    /// prefix groups the variants where auto-emit ran but declined.
-    /// `caller_supplied` is a request-level fact evaluated FIRST and takes
-    /// precedence over every `auto_skipped:*` reason.
+    /// stays write-stopped as of 0.9.x.
     ///
-    /// | variant                  | token                              |
-    /// |--------------------------|------------------------------------|
-    /// | Emitted                  | `auto_emitted`                     |
-    /// | SkippedCallerSupplied    | `caller_supplied`                  |
-    /// | SkippedVolatileHigh      | `volatile_vetoed`                  |
-    /// | SkippedGlobalDisabled    | `auto_skipped:global_disabled`     |
-    /// | SkippedProviderDisabled  | `auto_skipped:provider_disabled`   |
-    /// | SkippedNoCapability      | `auto_skipped:no_capability`       |
-    /// | SkippedBreakpointCap     | `auto_skipped:breakpoint_cap`      |
-    /// | SkippedNoPlacementRegion | `auto_skipped:no_placement_region` |
-    /// | SkippedKBelowBreakEven   | `auto_skipped:k_below_break_even`  |
-    /// | ValidationRolledBack     | `auto_skipped:validation_rolled_back` |
+    /// The spellings live in `routectl_core::cache_decision`, which is the
+    /// vocabulary's single source across the emitting router and every
+    /// reader. They are a CONTRACT: do not rename or repurpose them, only
+    /// add new ones. The `auto_skipped:` prefix groups the variants where
+    /// auto-emit ran but declined. `caller_supplied` is a request-level
+    /// fact evaluated FIRST and takes precedence over every
+    /// `auto_skipped:*` reason.
     pub(super) const fn strategy_str(self) -> &'static str {
         match self {
-            Self::Emitted => "auto_emitted",
-            Self::SkippedCallerSupplied => "caller_supplied",
-            Self::SkippedVolatileHigh => "volatile_vetoed",
-            Self::SkippedGlobalDisabled => "auto_skipped:global_disabled",
-            Self::SkippedProviderDisabled => "auto_skipped:provider_disabled",
-            Self::SkippedNoCapability => "auto_skipped:no_capability",
-            Self::SkippedBreakpointCap => "auto_skipped:breakpoint_cap",
-            Self::SkippedNoPlacementRegion => "auto_skipped:no_placement_region",
-            Self::SkippedKBelowBreakEven => "auto_skipped:k_below_break_even",
-            Self::ValidationRolledBack => "auto_skipped:validation_rolled_back",
+            Self::Emitted => AUTO_EMITTED,
+            Self::SkippedCallerSupplied => CALLER_SUPPLIED,
+            Self::SkippedVolatileHigh => VOLATILE_VETOED,
+            Self::SkippedGlobalDisabled => AUTO_SKIPPED_GLOBAL_DISABLED,
+            Self::SkippedProviderDisabled => AUTO_SKIPPED_PROVIDER_DISABLED,
+            Self::SkippedNoCapability => AUTO_SKIPPED_NO_CAPABILITY,
+            Self::SkippedBreakpointCap => AUTO_SKIPPED_BREAKPOINT_CAP,
+            Self::SkippedNoPlacementRegion => AUTO_SKIPPED_NO_PLACEMENT_REGION,
+            Self::SkippedKBelowBreakEven => AUTO_SKIPPED_K_BELOW_BREAK_EVEN,
+            Self::ValidationRolledBack => AUTO_SKIPPED_VALIDATION_ROLLED_BACK,
         }
     }
 }

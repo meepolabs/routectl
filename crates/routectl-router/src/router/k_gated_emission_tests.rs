@@ -915,6 +915,6 @@ fn an_all_miss_calibrated_window_keeps_k_floor_below_the_break_even() {
 fn the_suppression_variant_maps_to_its_stable_token() {
     assert_eq!(
         CacheInjection::SkippedKBelowBreakEven.strategy_str(),
-        "auto_skipped:k_below_break_even",
+        routectl_core::cache_decision::AUTO_SKIPPED_K_BELOW_BREAK_EVEN,
     );
 }

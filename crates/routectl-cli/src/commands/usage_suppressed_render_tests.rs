@@ -4,10 +4,12 @@
 // `cost_config`, `report_all`, `paid_row`, ...) are in scope. All imports come
 // from the enclosing `usage_tests.rs`; do not add `use` lines here.
 
-/// The canonical suppression token. The vocabulary's own spelling lives on
-/// `CacheInjection::strategy_str` in the router crate and is not exported, so
-/// it is restated here; the query layer holds the other copy.
-const K_SUPPRESSION_TOKEN: &str = "auto_skipped:k_below_break_even";
+/// The canonical suppression token, taken from the vocabulary's single
+/// source. Every row these tests write carries the EMITTING spelling, so the
+/// finder assertions below double as the cross-crate divergence pin: the
+/// query layer keeps a leaf-preserving mirror of this literal, and a typo on
+/// either side makes the finder return no rows and these tests fail.
+const K_SUPPRESSION_TOKEN: &str = routectl_core::cache_decision::AUTO_SKIPPED_K_BELOW_BREAK_EVEN;
 
 /// Insert a row with an explicit `(session_id, provider_kind, model)` triple
 /// and explicit v16 decision columns, so the finder block is testable from the
@@ -66,6 +68,76 @@ fn suppressed_block(out: &str) -> String {
         .take_while(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn the_read_side_finds_a_row_written_with_the_emitted_suppression_token() {
+    // THE CROSS-CRATE DIVERGENCE PIN. The emitting spelling lives in
+    // routectl-core; the query layer holds a leaf-preserving mirror it cannot
+    // import. This is the only crate that sees both, and the check is
+    // BEHAVIORAL rather than a string compare: a divergence makes the SQL
+    // match nothing, and "no suppressed sessions" is indistinguishable from a
+    // healthy window to an operator. Fails loudly here instead.
+    //
+    // Arrange: one row carrying the emit-side token verbatim.
+    let (_dir, _path, db) = temp_db();
+    decision_triple_row(
+        &db,
+        "pin",
+        1_000,
+        "sess-pin",
+        "anthropic-api",
+        "haiku",
+        Some(routectl_core::cache_decision::AUTO_SKIPPED_K_BELOW_BREAK_EVEN),
+        None,
+    );
+
+    // Act: the read side, queried directly rather than through the renderer.
+    let found = suppressed_sessions(&db, 0, 2_000).expect("finder query");
+
+    // Assert
+    assert_eq!(
+        found.rows.len(),
+        1,
+        "the read side must match the token the router emits -- zero rows \
+         means the emit-side and read-side spellings have diverged",
+    );
+    assert_eq!(found.rows[0].suppressed_requests, 1);
+    assert_eq!(found.rows[0].model, "haiku");
+}
+
+#[test]
+fn a_decision_outside_the_suppression_token_is_not_a_finder_row() {
+    // The pin above proves the finder matches the right token; this proves it
+    // does not match a DIFFERENT one, so a mirror that drifted into some
+    // other vocabulary member could not pass both.
+    let (_dir, _path, db) = temp_db();
+    for (id, token) in [
+        ("emitted", routectl_core::cache_decision::AUTO_EMITTED),
+        (
+            "capped",
+            routectl_core::cache_decision::AUTO_SKIPPED_BREAKPOINT_CAP,
+        ),
+        ("vetoed", routectl_core::cache_decision::VOLATILE_VETOED),
+    ] {
+        decision_triple_row(
+            &db,
+            id,
+            1_000,
+            "sess-a",
+            "anthropic-api",
+            "haiku",
+            Some(token),
+            None,
+        );
+    }
+
+    let found = suppressed_sessions(&db, 0, 2_000).expect("finder query");
+
+    assert!(
+        found.rows.is_empty(),
+        "only the suppression token is a finder row: {found:?}"
+    );
 }
 
 #[test]
