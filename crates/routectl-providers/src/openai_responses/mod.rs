@@ -746,6 +746,10 @@ async fn read_error_body(
 mod e2e_tests;
 
 #[cfg(test)]
+#[path = "redirect_tests.rs"]
+mod redirect_tests;
+
+#[cfg(test)]
 #[path = "excerpt_tests.rs"]
 mod excerpt_tests;
 

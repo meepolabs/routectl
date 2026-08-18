@@ -99,6 +99,10 @@ impl core::marker::Unpin for routectl_testkit::bench_fixtures::SpectrumProfile
 impl core::marker::UnsafeUnpin for routectl_testkit::bench_fixtures::SpectrumProfile
 impl core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::bench_fixtures::SpectrumProfile
 impl core::panic::unwind_safe::UnwindSafe for routectl_testkit::bench_fixtures::SpectrumProfile
+impl<Q, K> equivalent::Equivalent<K> for routectl_testkit::bench_fixtures::SpectrumProfile where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for routectl_testkit::bench_fixtures::SpectrumProfile where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_testkit::bench_fixtures::SpectrumProfile::equivalent(&self, &K) -> bool
 impl<T, U> core::convert::Into<U> for routectl_testkit::bench_fixtures::SpectrumProfile where U: core::convert::From<T>
 pub fn routectl_testkit::bench_fixtures::SpectrumProfile::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for routectl_testkit::bench_fixtures::SpectrumProfile where U: core::convert::Into<T>
@@ -162,6 +166,40 @@ impl<T> core::convert::From<T> for routectl_testkit::bench_fixtures::BenchFixtur
 pub fn routectl_testkit::bench_fixtures::BenchFixture::from(T) -> T
 impl<T> tracing::instrument::Instrument for routectl_testkit::bench_fixtures::BenchFixture
 impl<T> tracing::instrument::WithSubscriber for routectl_testkit::bench_fixtures::BenchFixture
+pub mod routectl_testkit::redirect_pin
+pub struct routectl_testkit::redirect_pin::CrossHostRedirect
+pub routectl_testkit::redirect_pin::CrossHostRedirect::origin: wiremock::mock_server::exposed_server::MockServer
+pub routectl_testkit::redirect_pin::CrossHostRedirect::target: wiremock::mock_server::exposed_server::MockServer
+impl routectl_testkit::redirect_pin::CrossHostRedirect
+pub async fn routectl_testkit::redirect_pin::CrossHostRedirect::assert_not_followed(&self, &routectl_core::error::Error, &str)
+pub async fn routectl_testkit::redirect_pin::CrossHostRedirect::assert_target_untouched(&self)
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::origin_uri(&self) -> alloc::string::String
+pub async fn routectl_testkit::redirect_pin::CrossHostRedirect::start() -> Self
+impl core::marker::Freeze for routectl_testkit::redirect_pin::CrossHostRedirect
+impl core::marker::Send for routectl_testkit::redirect_pin::CrossHostRedirect
+impl core::marker::Sync for routectl_testkit::redirect_pin::CrossHostRedirect
+impl core::marker::Unpin for routectl_testkit::redirect_pin::CrossHostRedirect
+impl core::marker::UnsafeUnpin for routectl_testkit::redirect_pin::CrossHostRedirect
+impl !core::panic::unwind_safe::RefUnwindSafe for routectl_testkit::redirect_pin::CrossHostRedirect
+impl !core::panic::unwind_safe::UnwindSafe for routectl_testkit::redirect_pin::CrossHostRedirect
+impl<T, U> core::convert::Into<U> for routectl_testkit::redirect_pin::CrossHostRedirect where U: core::convert::From<T>
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_testkit::redirect_pin::CrossHostRedirect where U: core::convert::Into<T>
+pub type routectl_testkit::redirect_pin::CrossHostRedirect::Error = core::convert::Infallible
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_testkit::redirect_pin::CrossHostRedirect where U: core::convert::TryFrom<T>
+pub type routectl_testkit::redirect_pin::CrossHostRedirect::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for routectl_testkit::redirect_pin::CrossHostRedirect where T: 'static + ?core::marker::Sized
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_testkit::redirect_pin::CrossHostRedirect where T: ?core::marker::Sized
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_testkit::redirect_pin::CrossHostRedirect where T: ?core::marker::Sized
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for routectl_testkit::redirect_pin::CrossHostRedirect
+pub fn routectl_testkit::redirect_pin::CrossHostRedirect::from(T) -> T
+impl<T> tracing::instrument::Instrument for routectl_testkit::redirect_pin::CrossHostRedirect
+impl<T> tracing::instrument::WithSubscriber for routectl_testkit::redirect_pin::CrossHostRedirect
 pub struct routectl_testkit::CapturedEvent
 pub routectl_testkit::CapturedEvent::fields: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub routectl_testkit::CapturedEvent::level: tracing_core::metadata::Level

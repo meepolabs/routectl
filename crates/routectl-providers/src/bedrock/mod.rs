@@ -1092,6 +1092,10 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str, hit_cap: 
 }
 
 #[cfg(test)]
+#[path = "redirect_tests.rs"]
+mod redirect_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

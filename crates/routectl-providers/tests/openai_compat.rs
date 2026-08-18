@@ -13,6 +13,7 @@ use routectl_core::{Message, MessageContent, Provider, ReasoningDetailKind, Role
 use routectl_providers::openai_compat::{
     OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
 };
+use routectl_testkit::redirect_pin::CrossHostRedirect;
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1010,37 +1011,22 @@ async fn stream_error_body_over_cap_preserves_status() {
 // server fault rather than let it fall into the success/parse path.
 // ---------------------------------------------------------------------------
 
+/// Two-server cross-host pin for the first-party lane, mirroring the
+/// anthropic-api lane's `first_party_lane_does_not_follow_cross_host_redirect`.
+/// The redirect target answers 200, so a followed hop would look like a
+/// successful call -- only this lane's own no-redirect client keeps the
+/// target untouched and the `Authorization: Bearer` on the configured host.
 #[tokio::test]
-async fn redirect_response_maps_to_server_error_class() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(302).insert_header("location", "http://localhost:1/elsewhere"),
-        )
-        .mount(&server)
-        .await;
+async fn first_party_lane_does_not_follow_cross_host_redirect() {
+    let pin = CrossHostRedirect::start().await;
 
-    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+    let provider = make_provider(&pin.origin_uri(), ReasoningDialect::OpenAi);
     let err = provider
         .complete(user_request("test-model"))
         .await
         .unwrap_err();
 
-    match &err {
-        routectl_core::Error::Upstream { status, .. } => {
-            assert_eq!(
-                *status, 502,
-                "a 3xx must surface as a mapped upstream server fault, not the bare redirect status"
-            );
-        }
-        other => panic!("expected Error::Upstream from an unfollowed 302, got {other:?}"),
-    }
-    assert_eq!(
-        routectl_core::failure_class::classify(&err, Some("openai-compat")).class,
-        routectl_core::failure_class::FailureClass::ServerError,
-        "a redirect the client refuses to follow must classify (and retry/fail over) like a server fault"
-    );
+    pin.assert_not_followed(&err, "openai-compat").await;
 }
 
 // ---------------------------------------------------------------------------

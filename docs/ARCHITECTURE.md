@@ -68,9 +68,11 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   (`GET /` + the `/status/*` JSON panels). Live matrix integration
   tests live here.
 
-- `crates/routectl-testkit/` -- dev-only shared test doubles
-  (tracing capture); depended on by the other crates' test targets
-  only, never by shipped code.
+- `crates/routectl-testkit/` -- dev-only shared test doubles and
+  harnesses (tracing capture, restore-on-drop env guard, the
+  two-server cross-host redirect pin every credentialed egress lane's
+  redirect regression test drives); depended on by the other crates'
+  test targets only, never by shipped code.
 
 ## Hub-and-spoke contract
 

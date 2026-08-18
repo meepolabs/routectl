@@ -677,6 +677,10 @@ fn map_gemini_upstream_error(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[path = "redirect_tests.rs"]
+mod redirect_tests;
+
+#[cfg(test)]
 mod e2e_tests {
     use super::*;
     use routectl_core::{ChatRequest, MessageContent, TokenSource};
