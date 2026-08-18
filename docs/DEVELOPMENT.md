@@ -73,7 +73,8 @@ bash tools/git-hooks/install.sh
 ```
 
 This symlinks `pre-commit` and `commit-msg` into `.git/hooks/`. The
-`pre-commit` hook runs the gitleaks staged secret scan, a scan for
+`pre-commit` hook first runs `scripts/assert-toolchain.sh`, then the
+gitleaks staged secret scan, a scan for
 accidental non-public identifiers (`scripts/check-internal-ids.sh
 --staged`), and the fmt / clippy / lean-check / public-api-baseline /
 rustdoc / workspace-test gate -- the same workspace tests CI runs EXCEPT
@@ -86,6 +87,25 @@ otherwise it prints a skip warning and continues. The `commit-msg` hook
 applies the same identifier scan to the commit message. Set
 `ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate while
 iterating; CI enforces the same rules fail-closed regardless.
+
+Every gate leg invokes `cargo` and `rustfmt` bare and relies on the
+rustup shim to honor the exact-patch pin in `rust-toolchain.toml`.
+`scripts/assert-toolchain.sh` verifies that reliance held before any leg
+runs: it asserts the effective `rustc` reports the pinned version and
+that `rustfmt` comes from the same toolchain build, so an exported
+`RUSTUP_TOOLCHAIN`, a stale `rustup override`, or a system toolchain
+ahead of the shim on `PATH` fails the hook instead of silently changing
+which compiler the gates cleared against. It is a version check, not a
+rustup check -- a toolchain that IS the pinned version passes however it
+was installed. It runs from the pre-commit hook and from
+`scripts/fmt-fragments.sh` (which is also invoked standalone); CI's rust
+jobs select their toolchain through the setup action and so do not need
+it, but CI does run its self-test:
+
+```bash
+bash scripts/assert-toolchain.sh
+bash scripts/assert-toolchain.test.sh
+```
 
 `cargo fmt` walks the module tree, so it never opens a file pulled in by
 `include!` -- the fmt gate passes vacuously on those fragments, and this

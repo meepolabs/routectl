@@ -182,3 +182,10 @@ jobs:
 
       - name: log-display gate self-test
         run: bash scripts/check-log-display.test.sh
+
+      # Self-test only: the toolchain preflight itself is not run on CI's rust
+      # jobs, which select the toolchain through the setup action rather than
+      # the rustup shim. What CI does guard is that the preflight local hooks
+      # depend on keeps working.
+      - name: toolchain preflight self-test
+        run: bash scripts/assert-toolchain.test.sh

@@ -89,16 +89,19 @@ fi
 
 cd "$REPO_ROOT"
 
+# Before any rustfmt call, and repeated here rather than left to the caller:
+# this leg is invoked standalone as often as it is from the pre-commit hook,
+# and a system rustfmt shadowing the rustup shim would format-check the
+# fragments against different defaults than `cargo fmt` uses on the modules.
+# The preflight also covers rustfmt's absence, which is why no separate
+# command -v check remains below.
+bash "$SCRIPT_DIR/assert-toolchain.sh"
+
 # The edition must be passed explicitly: invoked as a bare `rustfmt` on a
 # single file there is no Cargo manifest in play, so the edition cannot be
 # inferred and rustfmt would silently fall back to 2015 and reformat toward
 # a different grammar than the crates actually use.
 EDITION=2024
-
-if ! command -v rustfmt >/dev/null 2>&1; then
-    echo "fmt-fragments: ERROR rustfmt not installed" >&2
-    exit 1
-fi
 
 # Resolve each include!("relative.rs") against the directory of the file
 # that includes it, which is how rustc resolves it.
