@@ -1383,6 +1383,91 @@ mod e2e_tests {
         }
     }
 
+    /// The Cloud Code lane's onboarding calls run on the same no-redirect
+    /// client as the generate calls, so reqwest hands a 3xx back as a normal
+    /// response. Without an explicit arm it would clear the `>= 400` gate and
+    /// die in the JSON decode as an `Internal` error -- unclassifiable, no
+    /// failover. It must map to a retryable upstream 502 instead.
+    #[tokio::test]
+    async fn cloud_code_load_code_assist_3xx_maps_to_upstream_502() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/elsewhere"))
+            .mount(&server)
+            .await;
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        // Act
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("an unfollowed onboarding redirect must surface as an error");
+
+        // Assert
+        assert_redirect_not_followed(&err);
+    }
+
+    /// Same contract for the second onboarding call: `loadCodeAssist`
+    /// succeeds without a provisioned project, so `onboardUser` runs and
+    /// answers a 3xx.
+    #[tokio::test]
+    async fn cloud_code_onboard_user_3xx_maps_to_upstream_502() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "allowedTiers": [{"id": "free-tier", "isDefault": true}]
+                    })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(ONBOARD_PATH))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", "/elsewhere"))
+            .mount(&server)
+            .await;
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        // Act
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("an unfollowed onboarding redirect must surface as an error");
+
+        // Assert
+        assert_redirect_not_followed(&err);
+    }
+
+    fn assert_redirect_not_followed(err: &Error) {
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(
+                    *status, 502,
+                    "a 3xx must surface as a mapped upstream server fault, not the bare status"
+                );
+                assert_eq!(
+                    body,
+                    crate::http_client::REDIRECT_NOT_FOLLOWED_MESSAGE,
+                    "the shared redirect message must be used verbatim"
+                );
+            }
+            other => panic!("expected Error::Upstream from an unfollowed redirect, got {other:?}"),
+        }
+        assert_eq!(
+            routectl_core::failure_class::classify(err, Some("gemini")).class,
+            routectl_core::failure_class::FailureClass::ServerError,
+            "a redirect the client refuses to follow must classify like a server fault"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_cold_start_onboards_exactly_once() {
         // #44: N concurrent cold-start completes must run onboarding once.

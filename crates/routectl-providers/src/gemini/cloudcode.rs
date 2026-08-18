@@ -276,6 +276,9 @@ pub async fn load_code_assist(
         .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
 
     let status = resp.status().as_u16();
+    if (300..400).contains(&status) {
+        return Err(crate::http_client::redirect_not_followed_error(provider_id));
+    }
     let headers = resp.headers().clone();
     let content_length = resp.content_length();
     let (bytes, hit_cap) = match crate::http_client::read_body_capped(
@@ -365,6 +368,9 @@ pub async fn onboard_user(
             .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(crate::http_client::redirect_not_followed_error(provider_id));
+        }
         let headers = resp.headers().clone();
         let content_length = resp.content_length();
         let (bytes, hit_cap) = match crate::http_client::read_body_capped(
