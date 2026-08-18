@@ -733,31 +733,121 @@ fn redact_openai_responses_response_body_output_array_recurses() {
 }
 
 #[test]
-fn redact_metadata_user_id_collapsed_when_on_verbatim_when_off() {
-    // The non-CC cloak writes `metadata.user_id` as a JSON string
-    // carrying device_id / account_uuid / session_id. The session_id
-    // is a login-session secret, so with redaction ON the value must
-    // collapse to the `<redacted len=N>` placeholder. With redaction
-    // OFF (fixture-capture posture) the raw value is left verbatim, and
-    // sibling keys are untouched either way.
+fn redact_metadata_collapses_whole_object_when_on_verbatim_when_off() {
+    // `metadata` is a caller-supplied free-form key/value bag preserved
+    // verbatim end-to-end (ingress parse -> egress wire). The named-arm
+    // approach cannot enumerate arbitrary keys, so the whole object
+    // collapses to the opaque marker with redaction ON -- not just the
+    // known `user_id` leaf -- and stays verbatim with redaction OFF
+    // (fixture-capture posture).
     let raw_user_id = r#"{"device_id":"abc","account_uuid":"def","session_id":"ghi"}"#;
     let body = json!({
         "model": "claude-sonnet-4-5",
         "metadata": {"user_id": raw_user_id, "other": "keep-me"},
     });
 
-    // ON: user_id collapsed, sibling + structural keys intact.
+    // ON: the whole metadata object collapses; structural keys intact.
     let on = redact_prompts_with_flag(&body, true);
-    assert_eq!(
-        on["metadata"]["user_id"],
-        json!(format!("<redacted len={}>", raw_user_id.chars().count()))
-    );
-    assert_eq!(on["metadata"]["other"], "keep-me");
+    assert_eq!(on["metadata"], json!({"redacted": true}));
     assert_eq!(on["model"], "claude-sonnet-4-5");
 
     // OFF: body cloned unchanged (fixture capture relies on the raw value).
     let off = redact_prompts_with_flag(&body, false);
     assert_eq!(off["metadata"]["user_id"], raw_user_id);
+    assert_eq!(off, body);
+}
+
+#[test]
+fn redact_metadata_collapses_arbitrary_unlisted_key() {
+    // The named-arm approach (`user_id` / `session_id`) cannot enumerate
+    // every key a client might set. An unlisted key -- e.g. an operator
+    // accidentally, or a client deliberately, setting `metadata.user_email`
+    // -- must still collapse under the whole-object treatment; it would
+    // otherwise flow raw into a TRACE body.
+    let body = json!({
+        "model": "claude-sonnet-4-5",
+        "metadata": {"user_email": "alice@corp.com"},
+    });
+
+    let on = redact_prompts_with_flag(&body, true);
+    assert_eq!(on["metadata"], json!({"redacted": true}));
+
+    let off = redact_prompts_with_flag(&body, false);
+    assert_eq!(off, body);
+}
+
+#[test]
+fn redact_client_metadata_collapses_whole_object_when_on_verbatim_when_off() {
+    // OpenAI Responses `client_metadata`: forwarded verbatim by the
+    // egress and swept into `provider_extras` by ingress (not in
+    // HANDLED_TOP_LEVEL_FIELDS), so it is caller-controlled the same way
+    // `metadata` is. Same whole-object collapse.
+    let body = json!({
+        "model": "gpt-5",
+        "client_metadata": {"user_id": "alice", "note": "anything"},
+    });
+
+    let on = redact_prompts_with_flag(&body, true);
+    assert_eq!(on["client_metadata"], json!({"redacted": true}));
+
+    let off = redact_prompts_with_flag(&body, false);
+    assert_eq!(off, body);
+}
+
+#[test]
+fn redact_metadata_session_id_and_prompt_cache_key_collapsed_when_on_verbatim_when_off() {
+    // `prompt_cache_key` is a TOP-LEVEL field (never nested under
+    // `metadata`), so its named arm is the only reachable path for it --
+    // the whole-`metadata`-object collapse above does not touch it.
+    // `metadata.session_id` is exercised via the whole-object collapse
+    // (this test keeps a direct assertion on it as defense-in-depth
+    // pinning, in case a future caller flattens it to the top level).
+    let session_id = "meta-user@example.com";
+    let cache_key = "user@example.com";
+    let body = json!({
+        "model": "claude-sonnet-4-5",
+        "metadata": {"session_id": session_id, "user_id": "abc"},
+        "prompt_cache_key": cache_key,
+    });
+
+    let on = redact_prompts_with_flag(&body, true);
+    assert_eq!(on["metadata"], json!({"redacted": true}));
+    assert_eq!(
+        on["prompt_cache_key"],
+        json!(format!("<redacted len={}>", cache_key.chars().count()))
+    );
+    assert_eq!(on["model"], "claude-sonnet-4-5");
+
+    let off = redact_prompts_with_flag(&body, false);
+    assert_eq!(off, body);
+}
+
+#[test]
+fn redact_canonical_end_user_id_collapsed_when_on_verbatim_when_off() {
+    // The canonical `ChatRequest.user` field ("opaque end-user identifier
+    // forwarded upstream") is serialized verbatim into the openai-compat
+    // egress's outgoing body (a direct `serde_json::to_value(req)`) and
+    // rides unmodified through any ingress dialect's raw wire body. Same
+    // string-leaf-or-recurse treatment as `user_id` / `session_id`.
+    let end_user = "user@example.com";
+    let body = json!({
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "user": end_user,
+    });
+
+    let on = redact_prompts_with_flag(&body, true);
+    assert_eq!(
+        on["user"],
+        json!(format!("<redacted len={}>", end_user.chars().count()))
+    );
+    // Structural / content fields intact (role value "user" is untouched --
+    // only the KEY "user" triggers the arm, not any string equal to "user").
+    assert_eq!(on["model"], "gpt-5");
+    assert_eq!(on["messages"][0]["role"], "user");
+    assert_eq!(on["messages"][0]["content"], "<redacted len=2>");
+
+    let off = redact_prompts_with_flag(&body, false);
     assert_eq!(off, body);
 }
 
