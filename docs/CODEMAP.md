@@ -337,8 +337,7 @@ listed at the bottom of each crate.
   `anthropic_api`, `bedrock`, `openai_responses`, `gemini`; also declares
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
-  `retry_after`, `sampling_drop_guard`, plus the ungated
-  `bounded_diagnostics`
+  `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
   `BoundedLogSample<T>`, the collection-time bound for the diagnostic samples
   attached to aggregated WARN records (`push`, `push_distinct` for
@@ -346,9 +345,11 @@ listed at the bottom of each crate.
   `push_distinct_lazily` / `is_full` for a value that costs real work to
   materialize, so a full sample renders nothing).
   `truncated` is set only when an item is dropped at capacity, never derived
-  from an offered-vs-stored count. Dependency-free and declared without a
-  feature gate, so every provider lane shares one cap; the per-request tally
-  types stay per translator
+  from an offered-vs-stored count. Dependency-free, gated on the lanes that
+  collect samples (`anthropic-api` / `bedrock` / `openai-responses`) so all of
+  them share one cap while a gemini-only build carries none of it;
+  `push_distinct_lazily` / `is_full` are narrowed further to `anthropic-api`,
+  their only caller. The per-request tally types stay per translator
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin
   and User-Agent override; also owns the response-body cap cluster shared by

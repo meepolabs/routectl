@@ -195,6 +195,12 @@ fn inert_per_block_surface(entry: &ProviderEntry) -> String {
 /// resolved `codex_version` (config-level, independent of whether the
 /// process-global identity has been installed yet), so it fires the same
 /// way on the `config check` path as on the serve boot path.
+///
+/// Not `const`: with `openai-responses` enabled the body allocates and
+/// formats. Only the reduced build collapses to the empty-`Vec` arm, and
+/// constness is part of the recorded public API -- so it cannot vary by
+/// feature.
+#[allow(clippy::missing_const_for_fn)]
 pub fn codex_identity_warnings(config: &crate::config::Config) -> Vec<String> {
     #[cfg(feature = "openai-responses")]
     {

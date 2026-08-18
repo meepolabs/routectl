@@ -1,10 +1,11 @@
 //! Collection-time bounding for the diagnostic samples the provider
 //! egresses attach to aggregated WARN records.
 //!
-//! Dependency-free and provider-agnostic on purpose: it is declared
-//! without a feature gate so a lean anthropic build, an all-features
-//! Bedrock build, and the OpenAI-Responses egress all reach the same
-//! primitive without any module depending on another provider's gate.
+//! Dependency-free and provider-agnostic on purpose: it is gated on the
+//! set of lanes that collect samples rather than on any single provider, so
+//! a lean anthropic build, an all-features Bedrock build, and the
+//! OpenAI-Responses egress all reach the same primitive without any module
+//! depending on another provider's gate.
 //! Nothing here carries provider vocabulary or wire-translation logic.
 
 /// Cap on how many items of any one diagnostic sample reach a log
@@ -87,8 +88,12 @@ impl<T> BoundedLogSample<T> {
     ///
     /// Exists so a collection site whose item is EXPENSIVE to materialize
     /// (a rendered path, a formatted fragment) can skip the work entirely
-    /// once no further item can be stored -- see
-    /// [`Self::push_distinct_lazily`].
+    /// once no further item can be stored -- see `push_distinct_lazily`.
+    ///
+    /// Only the anthropic-api output-schema scan needs the check, so it is
+    /// gated with its one caller: without the gate an openai-responses-only
+    /// build warns dead_code.
+    #[cfg(feature = "anthropic-api")]
     pub const fn is_full(&self) -> bool {
         self.items.len() >= MAX_LOGGED_DIAGNOSTIC_ITEMS
     }
@@ -134,8 +139,8 @@ impl<T: PartialEq> BoundedLogSample<T> {
         self.truncated |= truncated;
     }
 
-    /// [`Self::push_distinct`] for a value that costs real work to
-    /// materialize: `materialize` is NOT called once the sample is full, so
+    /// `push_distinct` for a value that costs real work to materialize:
+    /// `materialize` is NOT called once the sample is full, so
     /// the collection site pays only for the items that can actually reach
     /// the log record.
     ///
@@ -146,6 +151,10 @@ impl<T: PartialEq> BoundedLogSample<T> {
     /// are already distinct by construction loses nothing; one that expects
     /// heavy duplication and needs exact truncation should keep calling
     /// `push_distinct`.
+    ///
+    /// Gated with its one caller (the anthropic-api output-schema scan) for
+    /// the same reason as `is_full`, which only this method consults.
+    #[cfg(feature = "anthropic-api")]
     pub fn push_distinct_lazily(&mut self, materialize: impl FnOnce() -> T) {
         if self.is_full() {
             self.truncated = true;
@@ -257,6 +266,7 @@ mod tests {
         assert!(!sample.items().contains(&u32::MAX));
     }
 
+    #[cfg(feature = "anthropic-api")]
     #[test]
     fn push_distinct_lazily_stops_materializing_once_the_sample_is_full() {
         // Arrange
@@ -286,6 +296,7 @@ mod tests {
 
     /// Below capacity the lazy path is the eager path: it materializes and it
     /// deduplicates, so repeats neither grow the sample nor claim truncation.
+    #[cfg(feature = "anthropic-api")]
     #[test]
     fn push_distinct_lazily_deduplicates_below_capacity() {
         // Arrange

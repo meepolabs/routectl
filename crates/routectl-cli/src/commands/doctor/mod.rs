@@ -70,7 +70,7 @@ type SectionFn = fn(&DoctorContext) -> Vec<Finding>;
 
 /// The ordered aggregator sequence. THE extension point: a later section
 /// (probe, config-check, orphan-scan, ...) plugs in by adding one row here
-/// plus its render title in [`section_title`]. Order here is the render
+/// plus its render title in `section_title`. Order here is the render
 /// order; the flat findings list is sorted independently for deterministic
 /// output and exit codes.
 const SECTIONS: &[(&str, SectionFn)] = &[
@@ -89,7 +89,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
 /// entry. Every producer here is pure over [`DoctorContext`] and dials
 /// nothing -- inventory, version, config, auth (`probe_local`, no refresh),
 /// secrets, and capability. A report built from these needs no
-/// [`gather_probe_results`] pass, so a status surface can produce a full
+/// `gather_probe_results` pass, so a status surface can produce a full
 /// doctor report offline and derive reachability from an already-observed
 /// circuit phase rather than an upstream dial.
 // Consumed by the offline status surface, not the CLI `doctor` command; the
@@ -114,8 +114,9 @@ pub(crate) struct DoctorContext {
     /// version preflight does not catch (TOML syntax error, unknown field,
     /// legacy key, overlay failure). The version section surfaces it as a
     /// Fail so a present-but-broken config never reports all-Pass. Already
-    /// redacted at gather time (see [`redact_config_load_error`]) -- a
-    /// toml/serde parse error can inline a `literal:` credential, so the
+    /// redacted at gather time (see
+    /// [`crate::commands::parse_error_redaction::redact_config_load_error`])
+    /// -- a toml/serde parse error can inline a `literal:` credential, so the
     /// stored string is never the raw loader error.
     config_load_error: Option<String>,
     probes: Vec<(&'static str, LocalProbe)>,
@@ -177,7 +178,8 @@ struct CapabilityInputs {
     config: Option<CapabilityConfig>,
     /// The already-redacted config load error, set only when `config` is
     /// `None`. Redacted at gather time through the shared parse-error
-    /// redactor (see [`redact_config_load_error`]).
+    /// redactor (see
+    /// [`crate::commands::parse_error_redaction::redact_config_load_error`]).
     panel_unavailable: Option<String>,
 }
 

@@ -1829,6 +1829,12 @@ impl ProviderEntry {
     /// unset or the variant carries no such knob (only `OpenaiResponses`
     /// does). The resolved codex identity is derived from this across the
     /// whole config; see `factory::resolved_codex_version`.
+    ///
+    /// Not `const`: with `openai-responses` enabled the body calls
+    /// `Option::as_deref`, which is not a const operation. Only the
+    /// reduced build collapses to the constant `None` arm, and constness
+    /// is part of the recorded public API -- so it cannot vary by feature.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn codex_version(&self) -> Option<&str> {
         match self {
             #[cfg(feature = "openai-responses")]

@@ -386,8 +386,8 @@ async fn read_capped_body(mut response: reqwest::Response) -> Result<String, Str
 /// mid-transfer enforcement is unit-testable without a live response --
 /// constructing a `reqwest::Response` whose `Content-Length` under- or
 /// mis-states its real body requires a live HTTP round trip, which
-/// [`oversized_response_is_rejected_by_the_fetch_cap`] already covers for
-/// the header-check path.
+/// the `oversized_response_is_rejected_by_the_fetch_cap` test already
+/// covers for the header-check path.
 const fn body_cap_exceeded(total_len: usize) -> bool {
     total_len as u64 > MAX_FETCH_BYTES
 }

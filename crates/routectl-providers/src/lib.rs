@@ -39,9 +39,15 @@ compile_error!(
 );
 
 // Collection-time bounding for the diagnostic samples the egresses attach to
-// aggregated WARN records. Dependency-free, so it stays unconditional: every
-// provider lane reaches the same cap and the same truncation semantics without
-// any module depending on another provider's feature gate.
+// aggregated WARN records. Dependency-free, so the gate is on the lanes that
+// actually collect samples rather than on any one provider: the two
+// anthropic-vocabulary egresses plus the OpenAI-Responses one. A gemini-only
+// build collects no samples and would otherwise carry the whole module dead.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
 pub(crate) mod bounded_diagnostics;
 
 #[cfg(feature = "openai-compat")]

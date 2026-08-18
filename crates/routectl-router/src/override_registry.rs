@@ -19,8 +19,7 @@
 //! Legacy entries keep their static provenance so an existing config's
 //! routing behavior AND its source labels stay byte-identical once the
 //! consult reads this model instead of the two raw lists. Every key is
-//! normalized at build via
-//! [`normalize_capability_key`](routectl_core::capability::normalize_capability_key)
+//! normalized at build via [`normalize_capability_key`]
 //! with the target's provider kind, so a stored override and a later
 //! normalized lookup meet on identical strings.
 //!
