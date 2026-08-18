@@ -25,7 +25,7 @@
 use serde_json::{Value, json};
 
 use routectl_core::{
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role,
+    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role, sanitize_for_log,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -164,7 +164,7 @@ impl GeminiStreamState {
                 provider = %provider_id,
                 surface = "stream",
                 origin = "prompt_feedback",
-                block_reason = %reason,
+                block_reason = %sanitize_for_log(&reason),
                 "gemini: prompt blocked on 200 surface"
             );
             chunks.push(self.terminal_chunk(Some("content_filter".to_string()), usage));

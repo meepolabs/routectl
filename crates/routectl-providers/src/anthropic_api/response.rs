@@ -19,7 +19,7 @@ use uuid::Uuid;
 use routectl_core::schema::CacheCreation;
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
 };
 
 use super::types::{AnthropicResponse, AnthropicUsage, ContentBlock};
@@ -154,7 +154,7 @@ pub(crate) fn walk_content_blocks(
             } => {
                 warn!(
                     provider = id,
-                    block_type = %type_tag,
+                    block_type = %sanitize_for_log(type_tag),
                     "unknown content block type in response dropped from flat-text output",
                 );
                 parts.push(ContentPart::Other {

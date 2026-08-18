@@ -15,7 +15,7 @@
 
 use serde_json::{Value, json};
 
-use routectl_core::{ChatRequest, ToolDef};
+use routectl_core::{ChatRequest, ToolDef, sanitize_for_log};
 
 use super::types::{ResponsesFunctionTag, ResponsesTool};
 
@@ -73,7 +73,7 @@ fn translate_tool_choice_string(s: &str) -> Option<Value> {
         "auto" | "required" | "none" => Some(Value::String(s.to_string())),
         other => {
             tracing::warn!(
-                tool_choice = %other,
+                tool_choice = %sanitize_for_log(other),
                 "unknown bare-string tool_choice; dropping on Responses egress"
             );
             None

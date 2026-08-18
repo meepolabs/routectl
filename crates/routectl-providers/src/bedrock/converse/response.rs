@@ -23,7 +23,7 @@ use uuid::Uuid;
 use routectl_core::schema::CacheCreation;
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
 };
 
 use crate::anthropic_api::response::{map_stop_reason, sum_prompt_tokens};
@@ -222,7 +222,7 @@ fn walk_content_blocks(
                 let (tag, extras) = extract_other_tag_and_extras(v);
                 debug!(
                     provider = provider_id,
-                    block_type = %tag,
+                    block_type = %sanitize_for_log(&tag),
                     "unrecognized converse content block preserved as ContentPart::Other on canonical response"
                 );
                 parts.push(ContentPart::Other {

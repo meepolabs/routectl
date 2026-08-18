@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
-use routectl_core::{ChatRequest, ReasoningDetail, Result};
+use routectl_core::{ChatRequest, ReasoningDetail, Result, sanitize_for_log};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
 use super::GEMINI_FORMAT;
@@ -311,7 +311,7 @@ fn recover_tool_name(
     }
     tracing::warn!(
         provider = %provider_id,
-        correlation_id = %correlation_id.unwrap_or_default(),
+        correlation_id = %sanitize_for_log(correlation_id.unwrap_or_default()),
         "gemini: could not recover tool name for functionResponse; Gemini may fail to correlate"
     );
     String::new()
@@ -363,7 +363,7 @@ fn content_part_to_part(
                 if kind != Some("base64") {
                     tracing::warn!(
                         provider = %provider_id,
-                        source_type = %kind.unwrap_or("<missing>"),
+                        source_type = %sanitize_for_log(kind.unwrap_or("<missing>")),
                         "gemini: dropping non-base64 image source"
                     );
                     return Ok(None);
@@ -508,7 +508,7 @@ fn content_part_to_part(
                 if kind != Some("base64") {
                     tracing::warn!(
                         provider = %provider_id,
-                        source_type = %kind.unwrap_or("<missing>"),
+                        source_type = %sanitize_for_log(kind.unwrap_or("<missing>")),
                         "gemini: dropping non-base64 document source"
                     );
                     return Ok(None);
@@ -540,7 +540,7 @@ fn content_part_to_part(
             // Unknown block type: log and skip to keep the request valid.
             tracing::debug!(
                 provider = %provider_id,
-                type_tag = %type_tag,
+                type_tag = %sanitize_for_log(type_tag),
                 "gemini: skipping unknown content block type"
             );
             let _ = extras;
@@ -583,7 +583,7 @@ fn tool_call_to_function_call_part(provider_id: &str, tc: &Value) -> Result<Opti
     let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| {
         tracing::debug!(
             provider = %provider_id,
-            fn_name = %name,
+            fn_name = %sanitize_for_log(&name),
             "gemini: could not parse tool_call arguments as JSON; using empty object"
         );
         serde_json::json!({})
@@ -669,7 +669,7 @@ fn build_tools_and_config(
                     let kind = v.get("type").and_then(Value::as_str).unwrap_or("unknown");
                     tracing::warn!(
                         provider = %provider_id,
-                        tool_type = %kind,
+                        tool_type = %sanitize_for_log(kind),
                         "gemini: skipping tool def with no usable function name; \
                          hosted / unknown tool shapes are not representable"
                     );
@@ -1101,7 +1101,7 @@ pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value)
         if is_gemini_managed_key(k) {
             tracing::warn!(
                 provider = %provider_id,
-                key = %k,
+                key = %sanitize_for_log(k),
                 "gemini: payload_extras attempted to override routectl-managed key; dropped"
             );
             continue;

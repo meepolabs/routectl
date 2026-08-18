@@ -33,6 +33,8 @@
 
 use serde_json::{Map, Value};
 
+use routectl_core::sanitize_for_log;
+
 /// Filter `bag["anthropic_beta"]` in place against the union of
 /// `allowed_betas` and `cfg_betas` (the operator-asserted extension
 /// hatch).
@@ -91,7 +93,7 @@ pub(super) fn filter_bedrock_betas(
         } else {
             tracing::debug!(
                 provider = %provider_id,
-                flag = %flag,
+                flag = %sanitize_for_log(flag),
                 "dropping beta flag not in operator-supplied [bedrock] allowed_betas"
             );
         }

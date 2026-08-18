@@ -13,7 +13,7 @@
 use serde_json::Value;
 
 use routectl_core::schema::{ChunkChoice, ChunkDelta, UsageDelta};
-use routectl_core::{ChatChunk, Error, Result};
+use routectl_core::{ChatChunk, Error, Result, sanitize_for_log};
 
 use super::dialect::ReasoningDialect;
 use super::util::build_reasoning_detail;
@@ -212,7 +212,7 @@ impl StreamedToolCallIds {
                     provider = %provider_id,
                     choice_index,
                     tool_call_index = tc_index,
-                    generated_id = %id,
+                    generated_id = %sanitize_for_log(&id),
                     "openai-compat: synthesized missing streamed tool_call id"
                 );
                 set_tool_call_id(tc, &id);

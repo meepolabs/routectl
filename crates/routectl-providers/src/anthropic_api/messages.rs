@@ -720,7 +720,7 @@ fn emit_tool_use_blocks_from_calls(
             serde_json::from_str(arguments_raw).unwrap_or_else(|e| {
                 tracing::warn!(
                     provider = id,
-                    tool_id = %tool_id,
+                    tool_id = %sanitize_for_log(&tool_id),
                     error = %e,
                     "tool_call.arguments not valid JSON; wrapping under _arguments for upstream",
                 );

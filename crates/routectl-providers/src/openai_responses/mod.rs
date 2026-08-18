@@ -379,7 +379,7 @@ impl Provider for OpenAiResponsesProvider {
             };
             tracing::warn!(
                 provider = %self.cfg.id,
-                terminal = %terminal_kind.as_deref().unwrap_or("?"),
+                terminal = %sanitize_for_log(terminal_kind.as_deref().unwrap_or("?")),
                 "openai-responses non-success terminal event",
             );
             return Err(err);

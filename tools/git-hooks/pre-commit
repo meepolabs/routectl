@@ -45,6 +45,9 @@ gitleaks protect --staged --redact --no-banner
 echo "pre-commit: internal-ID scan (staged added lines)"
 bash scripts/check-internal-ids.sh --staged
 
+echo "pre-commit: log-display scan (% tracing fields on wire-derived values)"
+bash scripts/check-log-display.sh
+
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 

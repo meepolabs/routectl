@@ -19,6 +19,8 @@
 
 use serde_json::{Value, json};
 
+use routectl_core::sanitize_for_log;
+
 /// One OpenAI-shape `tool_calls` entry, normalized for re-emission.
 ///
 /// `arguments` is always a parsed JSON value (an object on the happy
@@ -98,7 +100,7 @@ fn parse_arguments_string(provider: &str, id: &str, raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|e| {
         tracing::warn!(
             provider = provider,
-            tool_id = %id,
+            tool_id = %sanitize_for_log(id),
             error = %e,
             "tool_call.arguments not valid JSON; wrapping under _arguments for upstream",
         );

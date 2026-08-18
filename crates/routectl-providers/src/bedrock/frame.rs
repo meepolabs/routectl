@@ -22,7 +22,7 @@ use aws_smithy_types::event_stream::Message;
 use bytes::{Bytes, BytesMut};
 use futures::stream::{BoxStream, Stream, StreamExt};
 
-use routectl_core::{ChatChunk, Error, Result};
+use routectl_core::{ChatChunk, Error, Result, sanitize_for_log};
 
 /// Cap on a single eventstream frame's advertised total length. AWS
 /// eventstream's wire `total_length` is a raw `u32` (~4 GB cap by spec)
@@ -229,7 +229,7 @@ pub fn exception_error(provider_id: &str, exception_type: &str, payload: &[u8]) 
     ) {
         tracing::warn!(
             provider = %provider_id,
-            event_type = %exception_type,
+            event_type = %sanitize_for_log(exception_type),
             message = %routectl_core::sanitize_for_log(&msg),
             "bedrock in-stream auth/permission exception",
         );

@@ -13,7 +13,9 @@
 use serde_json::Value;
 use tracing::warn;
 
-use routectl_core::{ChatRequest, Error, Result, ToolDef, is_canonical_request_key};
+use routectl_core::{
+    ChatRequest, Error, Result, ToolDef, is_canonical_request_key, sanitize_for_log,
+};
 
 use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
@@ -218,14 +220,14 @@ fn merge_extras(
                 tracing::debug!(
                     provider = id,
                     source = source,
-                    key = %k,
+                    key = %sanitize_for_log(k),
                     "forward-compat extra has no openai-compat equivalent; dropped"
                 );
             } else {
                 tracing::warn!(
                     provider = id,
                     source = source,
-                    key = %k,
+                    key = %sanitize_for_log(k),
                     "extras attempted to override routectl-managed key; dropped"
                 );
             }
@@ -337,7 +339,7 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
             {
                 warn!(
                     provider = id,
-                    tool = %c.name,
+                    tool = %sanitize_for_log(&c.name),
                     "openai-compat egress: tool cache_control dropped (Anthropic-only)",
                 );
                 record(format!("tool `{}` cache_control", c.name));
@@ -352,7 +354,7 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
                         warn!(
                             provider = id,
                             message_index = i,
-                            block_type = %type_tag,
+                            block_type = %sanitize_for_log(type_tag),
                             "openai-compat egress: forward-compat content block dropped",
                         );
                         record(format!("forward-compat block `{type_tag}` on message {i}"));

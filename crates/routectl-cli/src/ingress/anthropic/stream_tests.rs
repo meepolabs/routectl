@@ -989,6 +989,55 @@ fn opaque_event_data_payload_is_byte_for_byte() {
     );
 }
 
+/// A `ContentBlockStart`'s `type_tag` is the verbatim wire `type` string,
+/// carried through from the caller's SSE payload with no charset validation.
+/// The non-UTF-8 skip arm renders it into a `type_tag` tracing field, so a raw
+/// `\n` there would forge a whole log line and a raw ANSI CSI sequence would
+/// scroll an operator's terminal. The field must emit only printable ASCII.
+#[test]
+fn opaque_start_skip_warn_type_tag_carries_no_raw_control_characters() {
+    // Arrange: invalid UTF-8 raw_data forces the skip arm, and the tag
+    // carries a newline, a carriage return, and an ANSI erase-display
+    // sequence.
+    use routectl_core::OpaqueSseEvent;
+    const HOSTILE: &str = "server_tool_use\nWARN forged=1\r\x1b[2Jgone";
+    let chunk = opaque_only_chunk(vec![OpaqueSseEvent::ContentBlockStart {
+        upstream_index: 3,
+        type_tag: HOSTILE.into(),
+        raw_data: vec![0xff, 0xfe],
+    }]);
+    let mut s = fresh_state();
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        let out = render_chunk_internal(chunk, &mut s).unwrap();
+        assert!(
+            !out.iter()
+                .any(|e| e.event.as_deref() == Some("content_block_start")),
+            "non-utf8 raw_data must skip the content_block_start"
+        );
+    });
+
+    // Assert
+    let rendered: Vec<&str> = events.iter().filter_map(|e| e.field("type_tag")).collect();
+    assert!(
+        !rendered.is_empty(),
+        "the skip arm must emit a type_tag field"
+    );
+    for value in rendered {
+        assert!(
+            !value.chars().any(char::is_control),
+            "type_tag must carry no raw control char; got {value:?}"
+        );
+        for forbidden in ['\n', '\r', '\u{1b}'] {
+            assert!(
+                !value.contains(forbidden),
+                "type_tag must not carry {forbidden:?}; got {value:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn empty_opaque_events_no_op() {
     // Arrange: a normal text chunk (canonical-only) -- the legacy

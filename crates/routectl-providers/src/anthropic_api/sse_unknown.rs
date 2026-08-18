@@ -20,7 +20,7 @@
 
 use serde_json::{Value, json};
 
-use routectl_core::OpaqueSseEvent;
+use routectl_core::{OpaqueSseEvent, sanitize_for_log};
 
 use super::sse::{OpenBlockKind, SseState};
 use super::sse_opaque::{
@@ -58,7 +58,7 @@ impl SseState {
             provider = %provider,
             expected_index = expected,
             got_index = event_index,
-            event_kind = %event_kind,
+            event_kind = %sanitize_for_log(event_kind),
             open_block_type = block_type_name(open),
             "anthropic SSE: content-block index mismatch; dropping misattributed event",
         );
@@ -110,7 +110,7 @@ impl SseState {
         tracing::warn!(
             provider = %provider,
             upstream_index = index,
-            block_type = %type_tag,
+            block_type = %sanitize_for_log(&type_tag),
             mode = "v2_capture",
             "anthropic SSE: opening forward-compat opaque content block",
         );
