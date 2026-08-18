@@ -109,8 +109,13 @@ assert_reject() {
 assert_pass "rustc and rustfmt from the pinned toolchain build" \
     "$PINNED_TOML" "$MATCHING_RUSTC" "$MATCHING_RUSTFMT"
 
-assert_pass "a toolchain with no build id in either version line" \
-    "$PINNED_TOML" 'rustc 1.95.0' 'rustfmt 1.9.0-stable'
+assert_reject "neither version line carries a toolchain build id" \
+    "$PINNED_TOML" 'rustc 1.95.0' 'rustfmt 1.9.0-stable' \
+    "cannot verify rustfmt provenance"
+
+assert_reject "rustc carries a build id but rustfmt does not" \
+    "$PINNED_TOML" "$MATCHING_RUSTC" 'rustfmt 1.9.0-stable' \
+    "cannot verify rustfmt provenance"
 
 assert_reject "rustc is a different version than the pin" \
     "$PINNED_TOML" 'rustc 1.90.0 (aaaaaaaaa 2025-01-01)' "$MATCHING_RUSTFMT" \
