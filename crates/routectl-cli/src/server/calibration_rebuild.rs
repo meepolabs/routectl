@@ -15,20 +15,11 @@
 //! store across a reload, so re-running the rebuild there would clobber
 //! fresher live samples with older ledger history.
 //!
-//! # Migration ordering
-//!
-//! The evidence columns exist only after the newest schema migration, and a
-//! read-only open of a not-yet-migrated file is rejected outright on its
-//! schema version -- so a rebuild that merely hopes the migration already ran
-//! would silently read nothing. The usage WRITER owns the migrating open, but
-//! it performs it on its own spawned thread, so starting the writer first
-//! would only trade a silent miss for a race.
-//!
-//! This warm therefore runs the migrating open ITSELF, synchronously, before
-//! its first query, and is wired at bootstrap BEFORE the writer starts. The
-//! ladder is guarded and idempotent, so the writer's own later open finds
-//! nothing left to do; and because nothing else holds the DB at that point in
-//! bootstrap, the migration contends with no one.
+//! Like its sibling warms it runs the migrating open itself before its first
+//! query -- the evidence columns exist only after the newest migration, and a
+//! read-only open of a not-yet-migrated file is rejected outright on its schema
+//! version. See the sibling `warm_open` module for why the writer's own open
+//! cannot be relied on for that.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,7 +28,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use routectl_router::{
     CalibrationLedgerReader, CalibrationLedgerRow, CalibrationRebuildSummary, Router,
 };
-use routectl_usage::{OpenError, open, open_readonly, read_calibration_samples_since};
+use routectl_usage::{OpenError, open_readonly, read_calibration_samples_since};
+
+use super::warm_open::migrate_before_warm;
 
 /// Upper bound on the number of ledger rows the startup rebuild reads. A
 /// plain compile-time cap (never derived from runtime input) on the boot read;
@@ -140,9 +133,9 @@ fn evidence_row_to_ledger_row(row: routectl_usage::CalibrationSampleRow) -> Cali
 /// newest evidence is already past the reduction's age bound comes back
 /// uncorrected.
 ///
-/// Runs the migrating open synchronously first (see the module docs): the
-/// evidence columns exist only after the newest migration, and the read-only
-/// open the query needs rejects an older schema outright.
+/// Runs the migrating open synchronously first (see the sibling `warm_open`
+/// module): the evidence columns exist only after the newest migration, and the
+/// read-only open the query needs rejects an older schema outright.
 ///
 /// Returns the tally it logged, so a caller (today only a test) can assert on
 /// the outcome without a second read path into the private store.
@@ -150,7 +143,7 @@ pub(crate) fn warm_calibration_from_ledger(
     db_path: &Path,
     router: &Router,
 ) -> CalibrationRebuildSummary {
-    if !migrate_before_read(db_path) {
+    if !migrate_before_warm(db_path, "calibration", "every lane stays uncorrected") {
         return CalibrationRebuildSummary::default();
     }
     let reader = UsageCalibrationReader::new(db_path.to_path_buf());
@@ -158,29 +151,6 @@ pub(crate) fn warm_calibration_from_ledger(
         router.rebuild_calibration_from_ledger(&reader, SystemTime::now(), REBUILD_ROW_LIMIT);
     emit_rebuild_log(&summary);
     summary
-}
-
-/// Bring the ledger to the current schema, reporting whether the rebuild may
-/// proceed. The migrating open is guarded and idempotent, so the usage
-/// writer's own later open finds nothing left to do.
-///
-/// A failure here is not a bootstrap failure: it is logged at `debug` and the
-/// rebuild is skipped, leaving every lane uncorrected. The writer will hit the
-/// same failure on its own open and reports it at `error` from the surface
-/// that owns the ledger's health.
-fn migrate_before_read(db_path: &Path) -> bool {
-    match open(db_path) {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::debug!(
-                db_path = %db_path.display(),
-                error = %e,
-                "usage db could not be brought to the current schema; \
-                 skipping the calibration startup warm (lanes stay uncorrected)"
-            );
-            false
-        }
-    }
 }
 
 /// Report the rebuild outcome: an `info` with the per-verdict tally, plus a

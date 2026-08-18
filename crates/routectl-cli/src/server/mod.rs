@@ -26,6 +26,7 @@ mod router_build;
 pub mod secrets;
 mod serve;
 pub mod status_gate;
+mod warm_open;
 
 pub use config_load::{LoadedConfig, load_effective_config, load_effective_config_unvalidated};
 pub(crate) use config_load::{load_overlay_default, parse_config_only};
