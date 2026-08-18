@@ -75,13 +75,17 @@ bash tools/git-hooks/install.sh
 This symlinks `pre-commit` and `commit-msg` into `.git/hooks/`. The
 `pre-commit` hook runs the gitleaks staged secret scan, a scan for
 accidental non-public identifiers (`scripts/check-internal-ids.sh
---staged`), and the fmt / clippy / lean-check / rustdoc / workspace-test
-gate -- the same workspace tests CI runs EXCEPT the two replay suites
-(`egress_replay_all` / `ingress_replay_all`), which only run against a
-contributor's local fixture corpus (CI runs them unfiltered). The
-`commit-msg` hook applies the same identifier scan to the commit
-message. Set `ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate
-while iterating; CI enforces the same rules fail-closed regardless.
+--staged`), and the fmt / clippy / lean-check / public-api-baseline /
+rustdoc / workspace-test gate -- the same workspace tests CI runs EXCEPT
+the two replay suites (`egress_replay_all` / `ingress_replay_all`), which
+only run against a contributor's local fixture corpus (CI runs them
+unfiltered). The public-api-baseline leg (`scripts/public-api.sh --check
+all`) is local-only -- CI does not run it -- and only blocks when
+`cargo-public-api` and its pinned nightly toolchain are installed;
+otherwise it prints a skip warning and continues. The `commit-msg` hook
+applies the same identifier scan to the commit message. Set
+`ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate while
+iterating; CI enforces the same rules fail-closed regardless.
 
 `cargo fmt` walks the module tree, so it never opens a file pulled in by
 `include!` -- the fmt gate passes vacuously on those fragments, and this
