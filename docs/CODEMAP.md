@@ -518,12 +518,15 @@ listed at the bottom of each crate.
   and the beta-decision 4xx observability (`BetaDecision`,
   `should_log_beta_4xx`, `log_beta_decision_on_4xx`). `BetaDecision` carries
   BOUNDED booleans only, all read off the FINAL composed beta set and final
-  wire body: `has_context_1m_beta`, `has_context_management_beta`,
+  wire body: `has_oauth_beta`, `has_context_1m_beta`,
+  `has_context_management_beta`,
   `has_mid_conversation_system_beta`, `has_advisor_tool_beta`,
   `has_thinking_token_count_beta`, `has_effort_beta`, `body_has_effort` -- since
   the 9-flag floor excludes the four pass-through flags, a `true` pinpoints a
   caller/operator beta rather than floor contamination, with no raw beta string
-  or body content ever logged.
+  or body content ever logged. `has_oauth_beta` reports egress PRESENCE of
+  `oauth-2025-04-20` (client-supplied reads the same as router-minted), not
+  which party inserted it.
   `should_use_forwarded_bearer` is the shared three-way WIRE gate consulted by
   both `resolve_effective_token` and `build_headers`:
   `self.cfg.use_forwarded_bearer` (set at construction from the provider's

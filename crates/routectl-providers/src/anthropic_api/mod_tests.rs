@@ -2729,7 +2729,7 @@ fn beta_decision_reflects_genuine_cc_request() {
         "a captured session-id header must classify as genuine-CC"
     );
     assert!(
-        decision.oauth_added,
+        decision.has_oauth_beta,
         "the mandatory oauth gate must fire independent of is_non_cc"
     );
     assert!(
@@ -2760,7 +2760,7 @@ fn beta_decision_reflects_non_cc_request() {
         "no captured session-id header must classify as non-CC"
     );
     assert!(
-        decision.oauth_added,
+        decision.has_oauth_beta,
         "the mandatory oauth gate must fire for non-CC too"
     );
     assert!(
@@ -2776,6 +2776,70 @@ fn beta_decision_reflects_non_cc_request() {
             && !decision.has_thinking_token_count_beta
             && !decision.has_effort_beta,
         "the floor must not set any pass-through beta boolean"
+    );
+}
+
+/// `has_oauth_beta` reports EGRESS PRESENCE, not authorship: the field must
+/// read the same whether routectl minted `oauth-2025-04-20` or the client
+/// sent it and the router deduped it away. A triage reader asking "was the
+/// oauth beta on the wire?" gets one answer, not one that depends on which
+/// party supplied the token.
+#[test]
+fn beta_decision_oauth_beta_reports_egress_presence_regardless_of_source() {
+    let oauth_beta = routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA;
+    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+
+    // Router-inserted: the client sent no betas, so the mandatory oauth
+    // gate is what puts the token on the wire.
+    let router_inserted = req_with_claude_code_headers(Vec::new());
+    let (_rb, inserted_decision) = provider.build_headers(
+        reqwest::Client::new().post("http://127.0.0.1/test"),
+        &router_inserted,
+        "test-token",
+        None,
+    );
+
+    // Client-supplied: the caller already carries the beta, so the gate's
+    // dedup makes it a no-op -- the token still egresses.
+    let mut client_supplied = req_with_claude_code_headers(Vec::new());
+    client_supplied.anthropic_beta = vec![oauth_beta.to_string()];
+    let (_rb, supplied_decision) = provider.build_headers(
+        reqwest::Client::new().post("http://127.0.0.1/test"),
+        &client_supplied,
+        "test-token",
+        None,
+    );
+
+    assert!(
+        inserted_decision.has_oauth_beta,
+        "a router-minted oauth beta must read as present on egress"
+    );
+    assert!(
+        supplied_decision.has_oauth_beta,
+        "a client-supplied oauth beta must read as present on egress too, \
+         even though the router inserted nothing"
+    );
+}
+
+/// The negative leg of the egress-presence contract: off the cloak lane the
+/// mandatory oauth gate never fires, and with no client-supplied token the
+/// beta is genuinely absent from the wire -- so the field must read false.
+/// Without this, a field hardcoded `true` would satisfy the case above.
+#[test]
+fn beta_decision_oauth_beta_false_when_absent_from_egress() {
+    let provider = AnthropicApiProvider::new(cfg_with_allowlist(Vec::new()));
+    let req = req_with_claude_code_headers(Vec::new());
+
+    let (_rb, decision) = provider.build_headers(
+        reqwest::Client::new().post("http://127.0.0.1/test"),
+        &req,
+        "test-key",
+        None,
+    );
+
+    assert!(
+        !decision.has_oauth_beta,
+        "the api-key lane mints no oauth beta, so it must not read as present"
     );
 }
 
@@ -2934,7 +2998,7 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
         is_non_cc: true,
         forwarded_leg: false,
         cloak_mode: CloakMode::Auto,
-        oauth_added: true,
+        has_oauth_beta: true,
         has_context_1m_beta: true,
         has_context_management_beta: false,
         has_mid_conversation_system_beta: true,
@@ -2951,7 +3015,7 @@ fn log_beta_decision_on_4xx_emits_beta_context_fields() {
     ));
     assert!(logs_contain("status=400"));
     assert!(logs_contain("is_non_cc=true"));
-    assert!(logs_contain("oauth_added=true"));
+    assert!(logs_contain("has_oauth_beta=true"));
     assert!(logs_contain("has_context_1m_beta=true"));
     assert!(logs_contain("has_context_management_beta=false"));
     assert!(logs_contain("has_mid_conversation_system_beta=true"));
@@ -3003,7 +3067,7 @@ fn log_beta_decision_on_4xx_decision_fields_never_render_a_beta_literal() {
         is_non_cc: true,
         forwarded_leg: false,
         cloak_mode: CloakMode::Auto,
-        oauth_added: true,
+        has_oauth_beta: true,
         has_context_1m_beta: true,
         has_context_management_beta: true,
         has_mid_conversation_system_beta: true,
@@ -3032,7 +3096,7 @@ fn log_beta_decision_on_4xx_decision_fields_never_render_a_beta_literal() {
             "is_non_cc=",
             "forwarded_leg=",
             "cloak_mode=",
-            "oauth_added=",
+            "has_oauth_beta=",
             "has_context_1m_beta=",
             "has_context_management_beta=",
             "has_mid_conversation_system_beta=",

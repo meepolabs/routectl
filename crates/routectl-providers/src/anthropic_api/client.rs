@@ -237,12 +237,17 @@ impl AnthropicApiConfig {
 /// `has_thinking_token_count_beta`) name flags the 9-entry floor
 /// deliberately excludes, so a `true` pinpoints a caller- or
 /// operator-supplied beta rather than floor contamination.
+///
+/// `has_oauth_beta` reports PRESENCE of `oauth-2025-04-20` on egress, not
+/// whether routectl inserted it -- a client that sent the beta itself reads
+/// `true` just like a router-minted one, since a triage reader needs to know
+/// what reached the wire, not which party put it there.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct BetaDecision {
     pub(super) is_non_cc: bool,
     pub(super) forwarded_leg: bool,
     pub(super) cloak_mode: cloak::CloakMode,
-    pub(super) oauth_added: bool,
+    pub(super) has_oauth_beta: bool,
     pub(super) has_context_1m_beta: bool,
     pub(super) has_context_management_beta: bool,
     pub(super) has_mid_conversation_system_beta: bool,
@@ -623,12 +628,10 @@ impl AnthropicApiProvider {
         // own real beta set (on `req.anthropic_beta`), which must reach
         // Anthropic verbatim rather than being widened by routectl's minted
         // floor -- that would be a fingerprint the client never sent.
-        let mut oauth_added = false;
         if self.is_cloak_lane(req) {
             let oauth_beta = routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA;
             if beta_seen.insert(oauth_beta.to_string()) {
                 merged_betas.push(oauth_beta.to_string());
-                oauth_added = true;
             }
 
             // Pinned Claude Code beta floor. These are operator-equivalent
@@ -710,6 +713,7 @@ impl AnthropicApiProvider {
         // booleans only -- the raw beta strings are caller-influenced and
         // never enter the diagnostics.
         let has_beta = |flag: &str| merged_betas.iter().any(|b| b == flag);
+        let has_oauth_beta = has_beta(routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA);
         let has_context_1m_beta = has_beta(beta_flags::CONTEXT_1M_BETA);
         let has_context_management_beta = has_beta(context_management::CONTEXT_MANAGEMENT_BETA);
         let has_mid_conversation_system_beta = has_beta(beta_flags::MID_CONVERSATION_SYSTEM_BETA);
@@ -859,7 +863,7 @@ impl AnthropicApiProvider {
             is_non_cc,
             forwarded_leg,
             cloak_mode: self.cfg.cloak.mode,
-            oauth_added,
+            has_oauth_beta,
             has_context_1m_beta,
             has_context_management_beta,
             has_mid_conversation_system_beta,
@@ -902,7 +906,7 @@ impl AnthropicApiProvider {
             is_non_cc = dec.is_non_cc,
             forwarded_leg = dec.forwarded_leg,
             cloak_mode = ?dec.cloak_mode,
-            oauth_added = dec.oauth_added,
+            has_oauth_beta = dec.has_oauth_beta,
             has_context_1m_beta = dec.has_context_1m_beta,
             has_context_management_beta = dec.has_context_management_beta,
             has_mid_conversation_system_beta = dec.has_mid_conversation_system_beta,
