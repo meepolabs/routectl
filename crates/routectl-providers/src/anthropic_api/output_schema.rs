@@ -130,6 +130,10 @@ impl AdditionalPropertiesRepair {
     /// Union of two repair passes' forwards, for a seam that re-runs the
     /// repair after rewriting `output_config` and must still emit ONE WARN.
     /// The path sample stays bounded: the fold pushes through the same cap.
+    ///
+    /// Bedrock-gated for the same reason as `BoundedLogSample::absorb`: the
+    /// only re-running seam is the bedrock Invoke path.
+    #[cfg(feature = "bedrock")]
     pub(super) fn merged(mut self, other: Self) -> Self {
         self.forwarded.absorb(other.forwarded);
         self

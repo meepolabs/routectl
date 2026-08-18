@@ -141,3 +141,12 @@ jobs:
 
       - name: scan commit messages
         run: bash scripts/check-internal-ids.sh --commit-range "${{ steps.range.outputs.base }}..HEAD"
+
+      # Whole-tree, not range-scoped: the gate is cheap (pure ripgrep) and a
+      # tree-wide scan also catches a site a merge reintroduced outside the
+      # pushed range.
+      - name: scan % tracing fields on wire-derived values
+        run: bash scripts/check-log-display.sh
+
+      - name: log-display gate self-test
+        run: bash scripts/check-log-display.test.sh

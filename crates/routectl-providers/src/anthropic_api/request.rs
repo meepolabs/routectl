@@ -288,6 +288,9 @@ impl DeferredOutputConfigDiagnostics {
     /// Re-run both `output_config` passes on a body rewritten after assembly
     /// and fold their records into this one, so the request still yields one
     /// WARN per diagnostic however many times the passes ran.
+    ///
+    /// Bedrock-gated: `bedrock/invoke.rs` is its only caller.
+    #[cfg(feature = "bedrock")]
     pub(crate) fn rescanning(
         mut self,
         provider: &str,

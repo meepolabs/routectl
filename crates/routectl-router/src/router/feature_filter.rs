@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use routectl_core::capability::{FailurePhase, normalize_capability_key};
 use routectl_core::failure_class::MatchedBy;
-use routectl_core::{ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, Error, Result, sanitize_for_log};
 
 use crate::capability_strip::{Outcome, RequestInterceptor, StripContext, StripInterceptor};
 use crate::catalog::EffectiveRow;
@@ -178,8 +178,8 @@ impl Router {
         if supported.is_empty() && prior_tail.is_empty() && learned_tail.is_empty() {
             let feature_list = features.join(", ");
             tracing::warn!(
-                alias = %alias,
-                features = %feature_list,
+                alias = %sanitize_for_log(alias),
+                features = %sanitize_for_log(&feature_list),
                 "alias chain filtered to empty by unsupported_features; \
                  no provider in chain supports the requested features",
             );

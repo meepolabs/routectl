@@ -1123,13 +1123,17 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             );
             "upstream response could not be processed".to_string()
         }
-        // A missing optional provider capability, not a failure: the
-        // Display string names the internal provider id and the method.
+        // A missing optional provider capability, not a failure. Both
+        // members can carry caller bytes: the router raises this variant
+        // with the requested alias in the first position and a
+        // feature-list-derived detail in the second, so both sanitize.
         // Log at WARN and return an opaque message.
         Error::NotImplemented(provider, detail) => {
+            let safe_provider = routectl_core::sanitize_detail_for_log(provider);
+            let safe_detail = routectl_core::sanitize_detail_for_log(detail);
             tracing::warn!(
-                provider = %provider,
-                detail = %detail,
+                provider = %safe_provider,
+                detail = %safe_detail,
                 "capability not implemented; suppressed in HTTP response"
             );
             "requested capability is not implemented".to_string()

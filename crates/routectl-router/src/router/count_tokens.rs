@@ -157,7 +157,7 @@ impl Router {
             "count_tokens: all capable providers returned a capability error (cannot count)"
         } else {
             tracing::warn!(
-                alias = %req.model,
+                alias = %sanitize_for_log(&req.model),
                 "alias chain has no count_tokens-capable provider; \
                  no target in chain can count tokens for its upstream model",
             );

@@ -240,6 +240,49 @@ mod tests {
             .expect("insert reuse row");
     }
 
+    /// A reuse-bearing record shaped to clear the reuse-sample query's NOT
+    /// NULL filters, for the tests that drive the REAL `UsageWriter` instead
+    /// of inserting SQL by hand.
+    fn reuse_draft(
+        request_id: &str,
+        session_id: &str,
+        provider_kind: &str,
+        model: &str,
+    ) -> routectl_usage::UsageRecord {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as i64;
+        routectl_usage::UsageRecord {
+            ts_start: now_ms - 1000,
+            ts_end: now_ms,
+            request_id: request_id.to_string(),
+            ingress_dialect: "anthropic".to_string(),
+            requested_model: "req-model".to_string(),
+            alias: "al".to_string(),
+            model: Some(model.to_string()),
+            provider_kind: Some(provider_kind.to_string()),
+            session_id: Some(session_id.to_string()),
+            cache_read: Some(9),
+            outcome: routectl_usage::Outcome::Ok,
+            ..Default::default()
+        }
+    }
+
+    /// Spin until the writer has persisted `want` rows, or the deadline
+    /// passes. Returns false on timeout so the caller can assert with a
+    /// message rather than hang.
+    fn wait_persisted(handle: &routectl_usage::UsageHandle, want: u64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while handle.counters().persisted() < want {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
     #[test]
     fn reader_maps_rows_and_derives_window_against_real_db() {
         // Arrange: seed two rows for one triple, then drop the writer so
@@ -568,6 +611,11 @@ mod tests {
     /// The migrating open the warm performs must leave a ledger the real usage
     /// writer then attaches to without re-migrating -- the guarded, idempotent
     /// ladder is what makes running it ahead of the writer safe.
+    ///
+    /// The evidence row goes in THROUGH the writer, not around it: a
+    /// hand-inserted row would prove only that a second `open` still works,
+    /// which is true even if the writer's own attach silently refused the
+    /// warm-migrated file.
     #[test]
     fn the_warm_migrates_before_reading_and_the_writer_still_attaches() {
         // Arrange: an absent ledger, warmed FIRST (bootstrap order) so the
@@ -579,36 +627,44 @@ mod tests {
         assert!(cold.is_empty(), "an empty ledger warms no session");
 
         // Act: start the real writer against the SAME file the warm just
-        // migrated, then seed and warm again as a fresh boot would.
+        // migrated and enqueue a real record through it.
         let (handle, writer) = routectl_usage::UsageWriter::start(
             path.clone(),
             routectl_usage::CHANNEL_CAPACITY,
             0,
             true,
         );
+        handle.try_send(reuse_draft("post-writer", "s1", "anthropic-api", "opus"));
+        assert!(
+            wait_persisted(&handle, 1),
+            "the writer must persist the row into the warm-migrated ledger"
+        );
+        // Drop the producer handle BEFORE shutdown so the channel-close drain
+        // signal can fire (see the metadata-derived test below).
         drop(handle);
         writer.shutdown();
-        let db = open(&path).expect("reopen after writer");
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_millis() as i64;
-        insert_reuse_row(
-            &db,
-            "post-writer",
-            now_ms - 1000,
-            "s1",
-            "anthropic-api",
-            "opus",
-            Some(9),
+
+        // Assert: the writer's own row is readable back, then the second warm
+        // finds it -- so the schema survived the warm's open, the writer's
+        // attach, and the post-writer read.
+        assert_eq!(
+            persisted_session_id(&path, "post-writer").as_deref(),
+            Some("s1"),
+            "the writer's row must be readable from the warm-migrated ledger"
         );
-        drop(db);
         let store = KSessionStore::new();
         warm_k_store_from_ledger(&path, &store);
-
-        // Assert: the post-writer read found the reuse columns, so the schema
-        // survived both opens.
         assert_eq!(store.len(), 1);
+        assert!(
+            store
+                .get(&KSessionKey {
+                    session_key: "s1".into(),
+                    provider_kind: "anthropic-api".into(),
+                    model: "opus".into(),
+                })
+                .is_some(),
+            "the writer-written row must warm its triple"
+        );
     }
 
     /// A session identified ONLY via the body `metadata.session_id`
