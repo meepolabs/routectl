@@ -11,24 +11,32 @@ file does. Test sidecars (`*_tests.rs` paired with a source file) are
 omitted; cross-crate integration tests live under `tests/` and are
 listed at the bottom of each crate.
 
+## Ownership split: rows navigate, module docs explain
+
+A row here answers exactly one question: which file do I open for X. Its
+budget is 1-3 lines -- the path, the principal types or entry points, and
+one responsibility clause. Behavior lives in the code: policy statements,
+invariants, cross-helper relationships, and any claim about what the code
+DOES belong in the module's `//!` doc (or the item's own doc comment),
+where they are co-located with the code and reviewed with the diff that
+changes them. Field lists are never enumerated here: name the category
+and point at the struct.
+
+A row longer than about three lines, or one making a behavioral claim, is
+a defect -- it has no compiler, test, or reviewer pulling it along, so it
+goes stale silently. Migration is opportunistic: rows narrow to this
+budget as their files get touched, so longer rows below are legacy, not
+license.
+
 ## routectl-core
 
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
   trait, log helpers, and the canonical-key allowlist
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
-  `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RoutectlInternal`;
-  `RequestProvenance` (`Library` / `AnthropicIngress` / `OpenaiIngress`, the
-  ingress-dialect tag carried on `RoutectlInternal`);
-  `RoutectlInternal.forwarded_bearer: Option<ForwardedBearer>`
-  (redact-on-Debug/Display carrier for the pure-proxy client bearer captured
-  off the inbound `Authorization` header; never serialized to the wire) +
-  `RoutectlInternal.stainless_headers: Vec<(String, String)>` (captured
-  inbound `x-stainless-*` fingerprint headers for the forwarded leg; never
-  serialized to the wire) +
-  `RoutectlInternal.responses_input_passthrough: Vec<ResponsesPassthroughItem>`
-  (unknown Responses input-item kinds preserved with a `modeled_prefix`
-  source-position index for order-preserving Responses-egress replay; never
-  serialized to the wire, never read by another egress)
+  `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RequestProvenance`, and
+  the `RoutectlInternal` carrier (resolved per-model knobs plus the
+  transport-internal capture fields, never serialized to the wire -- see the
+  struct's own docs for the field-by-field contract)
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   unknown Anthropic SSE bytes (skip-serialized; preserves unknown
   content_block types verbatim through the canonical pipeline so Anthropic
@@ -600,21 +608,7 @@ listed at the bottom of each crate.
   rewrite) + `translate_tool_choice` (OpenAI/Anthropic shape mapping)
 - `src/anthropic_api/messages.rs` -- per-role content-block translation:
   `translate_messages`, `build_assistant_content`, `emit_reasoning_blocks`,
-  `build_tool_message`, content-part walk, plus `normalize_replay_invariants`
-  (tool_call_id reject, unsigned-thinking strip, and dropping a whole
-  assistant turn whose reasoning is entirely non-emittable -- via the
-  `message_has_emittable_reasoning`/`is_anthropic_emittable_detail` predicate
-  shared with `emit_reasoning_blocks` so the keep-decision and the emit gate
-  cannot drift, with an aggregated WARN on any dropped turns);
-  `build_assistant_content` carries an empty-content backstop that inserts one
-  empty text block so an assembled-empty turn never ships `content: []`; the
-  three reasoning-skip WARNs (unsigned signature, foreign format, and that
-  backstop) are aggregated per outbound provider attempt by the private
-  `ReasoningSkipTally`, which `translate_messages` owns and flushes around the
-  threaded walk in `translate_messages_threaded` so no `?` can return past the
-  flush; both `redacted_thinking` construction sites here (content parts and
-  the `reasoning_details` replay channel) route their data through the
-  `envelope_policy` tally threaded in from `request::normalize`
+  `build_tool_message`, `normalize_replay_invariants`
 - `src/anthropic_api/extras.rs` -- thinking-budget composition
   (`build_thinking`, effort clamp, `build_output_config`) + post-merge body
   reconciliation (`merge_provider_extras`, `filter_anthropic_betas`,
@@ -984,39 +978,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/system.rs` -- canonical `system` -> Converse
   `[{text}|{cachePoint}]` block array
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
-  messages (per-role dispatch, cachePoint interleave). Three
-  document-construction paths: the canonical message-content document
-  (`translate_document` -> typed `ConverseDocument`), the raw Anthropic-shape
-  tool_result document, and the canonical tool_result document
-  (`document_to_tool_result`); the two tool_result paths both delegate their
-  wire value to the shared assembler `tool_result_document_value`.
-  `sanitize_document_name` is the single `document.name` charset/length
-  enforcement point and `translate_document_citations` the single citations
-  bool lift, and all three paths route through them so they cannot drift.
-  A `CitationsDropTally` threads through all three so a request carrying N
-  malformed citations values emits one aggregated WARN, not N. A separate
-  private `ReasoningSkipTally` (unsigned category only -- the Converse seam has
-  no foreign-format signal) aggregates the per-message unsigned-signature skips
-  into one WARN per outbound provider attempt; `build_messages` owns it and
-  flushes both tallies on the ok and err arms.
-  Image AND document content follow a two-class policy on the
-  malformed-vs-unrepresentable
-  axis: a source that names no bytes fails the request with a field-naming
-  `normalize_request` error, while well-formed content this JSON wire cannot
-  carry keeps its WARN-drop. Required-field structure is validated before
-  representability, and an unrecognized-but-nonempty source shape defaults to
-  the drop so a future vendor shape does not 400 working traffic. That class
-  split applies to the carriers with no way to preserve a source they cannot
-  read -- `translate_image_source`, `translate_image_url` and
-  `translate_document`.
-  `image_source_to_tool_result` and `document_to_tool_result` (each reached
-  directly and through the matching arm of
-  `translate_tool_result_array_element`) classify NARROWLY on purpose: their
-  callers wrap an unreadable source as `ConverseToolResultContent::Json`, so
-  the model still receives the payload. Only a source that names a
-  wire-carryable kind and then names no bytes -- absent, empty, or non-string
-  `data` or `media_type` -- fails the request there; every other shape takes
-  the JSON fallback silently, with no WARN.
+  messages: `build_messages` per-role dispatch, the three document paths
+  (`translate_document`, `document_to_tool_result`, the raw
+  Anthropic-shape array element), image/tool_result carriers
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
   `toolConfig` ({auto/any/tool} union); backfills a reserved dummy `toolSpec`
   when the translated transcript carries a `toolResult` but no tools survive
