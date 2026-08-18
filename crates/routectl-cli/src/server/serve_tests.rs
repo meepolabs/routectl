@@ -642,6 +642,43 @@ fn every_registered_route_is_classified_public_or_auth_gated() {
     }
 }
 
+/// Adding a public route requires editing this expectation.
+///
+/// This looks like a tautology restating `PUBLIC_ROUTES`, and that
+/// redundancy is the entire point -- do not delete it as duplication. Every
+/// other guard in this file derives its expectation FROM the inventory:
+/// `every_registered_route_is_classified_public_or_auth_gated` checks that
+/// each served path is named somewhere, and
+/// `declared_auth_gated_routes_challenge_unauthenticated_requests` checks
+/// that the router behaves the way the lists claim. Both therefore pass
+/// happily when a sensitive path is deliberately MOVED into
+/// `PUBLIC_ROUTES`: the mistake being guarded against here is not drift but
+/// a wrong security judgement, and no test that reads the judgement as its
+/// own oracle can catch that. Pinning the literal set makes widening the
+/// unauthenticated surface impossible to do quietly -- the author must edit
+/// this array too, which puts the change in the diff a reviewer reads.
+///
+/// Widening this list is a security decision. If you are here because a new
+/// route needs to be reachable without a listener token, justify it in the
+/// `PUBLIC_ROUTES` doc comment the way `/health` is justified, then add the
+/// path below.
+#[test]
+fn adding_a_public_route_requires_editing_this_expectation() {
+    // Arrange
+    let mut actual: Vec<&str> = PUBLIC_ROUTES.to_vec();
+    actual.sort_unstable();
+
+    // Assert
+    assert_eq!(
+        actual,
+        ["/health"],
+        "the set of paths served WITHOUT listener auth changed -- widening it \
+         exposes a route to unauthenticated callers on an --unsafe-public bind. \
+         If the change is intended, justify the new path in the PUBLIC_ROUTES \
+         doc comment and update this expectation in the same commit"
+    );
+}
+
 /// The serve router must never widen its unclassified surface through a
 /// nested/fallback/service route, which registers paths the literal scan
 /// above cannot see.
