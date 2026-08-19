@@ -1,21 +1,33 @@
 # Example routectl config (v0.6+ schema). Copy to
 # ~/.config/routectl/config.toml and edit. Validate with:
 #   routectl config check
+#
+# This file passes `routectl config check` exactly as shipped, but it is
+# NOT boot-ready: every credential here is a REFERENCE, and none of them
+# resolves until you set the named env var or run the matching `routectl
+# login`. Unresolved refs are warnings, not errors.
 
 # Schema version this file targets. routectl refuses a config older than
 # the schema the running binary writes; run `routectl config migrate` to
 # bring an older file forward. See docs/CONFIGURATION.md.
 version = 4
 
-# routectl config has three first-class tables:
+# routectl config has four first-class tables:
 #
 # [providers.X]   Transport + auth ONLY. How to reach an upstream.
 #                 (kind, api_key_ref, base_url, region/creds for
 #                 Bedrock, header_extras, runtime gates, ...)
+#                 One entry names exactly ONE credential.
 #
-# [models.X]      A model declaration. Points at one provider, names
-#                 the upstream model id, owns its reasoning capability
-#                 declaration (supports_adaptive_thinking, effort_levels,
+# [pools.X]       A group of same-kind provider entries (OAuth accounts)
+#                 dispatch spreads across. The pool takes the plain
+#                 family name; each member entry takes a suffixed one
+#                 (`<family>-default`, `<family>-<label>`).
+#
+# [models.X]      A model declaration. Points at one provider entry OR
+#                 one pool, names the upstream model id, owns its
+#                 reasoning capability declaration
+#                 (supports_adaptive_thinking, effort_levels,
 #                 max_thinking_budget).
 #
 # [aliases]       Wire-string -> model nickname routing. One flat
@@ -55,27 +67,60 @@ kind        = "openai-compat"
 base_url    = "https://api.deepseek.com/v1"
 api_key_ref = "env://DEEPSEEK_API_KEY"
 
-# Anthropic Messages API direct.
-[providers.anthropic]
+# Anthropic Messages API direct, with a static API key. Named
+# `anthropic-api-key` so the plain family name `anthropic` stays free for
+# the POOL below -- a pool and a provider entry may not share a name.
+[providers.anthropic-api-key]
 kind        = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 
-# Anthropic via OAuth bearer (Claude Pro/Max subscription).
-# api_key_ref resolves to a `sk-ant-oat01-...` access token.
-[providers.anthropic-oauth]
+# Anthropic via OAuth bearer (Claude Pro/Max subscription), default seat.
+# `routectl login anthropic` mints the credential and OFFERS exactly this
+# entry plus the pool below; `oauth://anthropic` resolves it at request
+# time to an `sk-ant-oat01-...` access token.
+[providers.anthropic-default]
 kind        = "anthropic-api"
-api_key_ref = "file://<local-path>"
+api_key_ref = "oauth://anthropic"
 auth_kind   = "oauth-bearer"
 header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 
-# OpenAI Responses API via ChatGPT subscription bearer JWT (Codex).
-[providers.codex]
-kind           = "openai-responses"
-auth_kind      = "chatgpt-oauth"
-api_key_ref    = "file://<local-path>"
-account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
+# A second, independent Anthropic subscription seat. Created by
+# `routectl login anthropic --label work`; the `#work` fragment is what
+# selects that seat rather than the default one.
+[providers.anthropic-work]
+kind        = "anthropic-api"
+api_key_ref = "oauth://anthropic#work"
+auth_kind   = "oauth-bearer"
+header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
+
+# The pool that groups both Anthropic seats. A model pointing at
+# `anthropic` (the pool) spreads across its members; a model pointing at
+# one member entry pins that account. accepts_new_logins = true lets a
+# later `routectl login anthropic --label <name>` offer to join its new
+# seat here instead of leaving it unrouted.
+[pools.anthropic]
+members            = ["anthropic-default", "anthropic-work"]
+accepts_new_logins = true
+# seat_selection   = "sticky-least-loaded"   # "fill-first" (default) /
+#                                            # "round-robin" /
+#                                            # "sticky-least-loaded"
+
+# OpenAI Responses API via ChatGPT subscription bearer JWT (Codex),
+# default seat. `routectl login codex` mints it and offers this shape.
+# account_id_ref is deliberately absent: under an oauth:// bearer
+# routectl reads `chatgpt_account_id` off the session JWT itself.
+[providers.codex-default]
+kind        = "openai-responses"
+auth_kind   = "chatgpt-oauth"
+api_key_ref = "oauth://codex"
 # codex_version = "0.145.0"   # override the pinned codex CLI version on the
                               # wire without a rebuild; restart-required.
+
+# A single-member growth pool -- the exact shape a first `routectl login
+# codex` writes. A later labelled login joins its seat here.
+[pools.codex]
+members            = ["codex-default"]
+accepts_new_logins = true
 
 # AWS Bedrock with the default credential chain (env -> profile ->
 # SSO -> IRSA -> IMDS). Region applies to every model on this provider.
@@ -86,26 +131,31 @@ creds  = { kind = "default-chain" }
 # api_shape = "invoke"            # default; use "converse" for vendor-neutral.
 # anthropic_beta = ["context-1m-2025-08-07"]   # account-scoped beta floor.
 
-# Gemini via the Cloud Code ("antigravity") surface. Uses the OAuth
-# identity stored by `routectl login antigravity` -- no static key.
-# [providers.gemini-cloudcode]
+# Gemini via the Cloud Code ("antigravity") surface. `routectl login
+# antigravity` mints the OAuth identity and OFFERS this entry, so the
+# usual path needs no hand-editing at all. The block is kept here
+# commented as the TUNING path: uncomment it when you want to add fields
+# the offered entry does not carry (extra headers, an explicit base_url,
+# runtime gates) rather than accepting the default shape.
+# [providers.antigravity-default]
 # kind        = "gemini"
 # api_key_ref = "oauth://antigravity"
 # auth_mode   = "cloud-code"
 
 # ---- Models (provider + upstream + reasoning capability) ----
-# Each model picks its provider, names the upstream wire model id,
-# and declares its reasoning capabilities. Two models may share a
-# provider; Bedrock builds a separate provider instance per model so
-# each gets its own circuit breaker.
+# Each model picks its provider ENTRY or its POOL, names the upstream
+# wire model id, and declares its reasoning capabilities. Two models may
+# share a provider; Bedrock builds a separate provider instance per model
+# so each gets its own circuit breaker.
 
-# Adaptive-thinking model on Anthropic direct (Opus 4.7+).
+# Adaptive-thinking model on the Anthropic subscription POOL (Opus 4.7+),
+# so dispatch spreads across both seats.
 # supports_adaptive_thinking = true selects the adaptive wire shape:
 #   { "thinking": { "type": "adaptive" }, "output_config": { "effort": "..." } }
 # Declare all effort levels the model accepts so egresses can clamp
 # caller intent to a valid value; empty list = pass-through.
 [models.opus-direct]
-provider                   = "anthropic-oauth"
+provider                   = "anthropic"
 upstream                   = "claude-opus-4-7-20260301"
 # Adaptive thinking wire shape (Opus 4.7+ only).
 supports_adaptive_thinking = true
@@ -152,15 +202,15 @@ upstream      = "anthropic/claude-opus-4-7-20260301"
 # Empty list: OpenRouter translates effort itself; do not clamp.
 effort_levels = []
 
-# Heavy-tier on Codex (OpenAI Responses API, OpenAI-shape egress).
-# effort_levels clamping applies on OpenAI-shape egresses: a caller
-# that sends "xhigh" is clamped down to "high" for this model.
+# Heavy-tier on the Codex POOL (OpenAI Responses API, OpenAI-shape
+# egress). effort_levels clamping applies on OpenAI-shape egresses: a
+# caller that sends "xhigh" is clamped down to "high" for this model.
 [models.codex-deep]
 provider      = "codex"
 upstream      = "gpt-5.4"
 effort_levels = ["low", "medium", "high"]
 
-# Cost-tier on Codex (same provider, narrower effort range).
+# Cost-tier on the same pool, narrower effort range.
 [models.codex-fast]
 provider      = "codex"
 upstream      = "gpt-5.4"
@@ -171,9 +221,10 @@ effort_levels = ["low", "medium"]
 # caller OMITS max_tokens. Default is None -> falls through to a 64000
 # baseline. Set when an Anthropic-shape egress points at a model whose
 # upstream max_tokens cap is below 64000, so callers that omit the
-# field don't 400 on the upstream's per-model validation.
+# field don't 400 on the upstream's per-model validation. Pointing at one
+# member ENTRY rather than the pool pins this model to that account.
 # [models.opus-legacy]
-# provider          = "anthropic-oauth"
+# provider          = "anthropic-default"
 # upstream          = "claude-opus-4"
 # max_output_tokens = 32000              # older Opus 4 caps at 32000
 
@@ -185,8 +236,8 @@ effort_levels = ["low", "medium"]
 # Keys ending in `*` are suffix globs; longest matching prefix wins.
 
 [aliases]
-# Fallback chain: try Anthropic OAuth first, fall back to Bedrock if
-# the subscription rate-limits or returns 5xx.
+# Fallback chain: try the Anthropic subscription pool first, fall back to
+# Bedrock if every seat rate-limits or the upstream returns 5xx.
 heavy = ["opus-direct", "sonnet-bedrock"]
 
 # Glob: every claude-opus release routes to opus-direct.
@@ -246,16 +297,18 @@ staleness_hint_days   = 14      # age past which a verified capability reads as 
 # ---- claude-code gateway config (optional template) ----
 # Drop-in snippet for fronting claude-code with routectl. See
 # docs/CONFIGURATION.md "claude-code as a gateway client" for the
-# full setup checklist (env vars on the claude-code side, the
-# `routectl login anthropic` step, and what works / doesn't).
+# full setup checklist (env vars on the claude-code side and what
+# works / doesn't).
 #
-# Step 1: `routectl login anthropic` once -- writes the OAuth token
-# into ~/.config/routectl/credentials.json. Then uncomment below.
+# `routectl login anthropic` already OFFERS [providers.anthropic-default]
+# above, so the entry itself needs no hand-editing. What it does NOT
+# carry is the claude-code client identity, so MOVE the field lines below
+# UP INTO [providers.anthropic-default] -- uncommenting them where they
+# sit would attach them to whatever table precedes them, not to that
+# entry. Do not create a second entry naming the same `oauth://anthropic`
+# seat either: that makes a later login ambiguous, and it refuses to guess
+# which of the two a pool should grow around.
 
-# [providers.anthropic-managed]
-# kind          = "anthropic-api"
-# api_key_ref   = "oauth://anthropic"          # resolves at request time
-# auth_kind     = "oauth-bearer"
 # user_agent    = "claude-cli/2.1.143 (external, cli)"
 # forward_client_headers = [
 #     "x-claude-code-session-id",
@@ -276,16 +329,17 @@ staleness_hint_days   = 14      # age past which a verified capability reads as 
 #     "x-stainless-retry-count"                   = "0",
 # }
 
+# Models pointing at the POOL, so a later second seat serves them too.
 # [models.anthropic-haiku]
-# provider = "anthropic-managed"
+# provider = "anthropic"
 # upstream = "claude-haiku-4-5-20251001"
 
 # [models.anthropic-sonnet]
-# provider = "anthropic-managed"
+# provider = "anthropic"
 # upstream = "claude-sonnet-4-6"
 
 # [models.anthropic-opus]
-# provider = "anthropic-managed"
+# provider = "anthropic"
 # upstream = "claude-opus-4-7"
 
 # [aliases]

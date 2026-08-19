@@ -4199,7 +4199,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and never moves the exit code. `EXAMPLE_CONFIG`
   is the ONE `include_str!` of `examples/config.toml`, named by `config
   example` and by `init --scaffold`'s `STARTER_CONFIG`; an ungated test
-  gate-loads it so no build can emit an example it cannot itself parse.
+  gate-loads it so no build can emit an example it cannot itself parse, and a
+  second hermetic test asserts `secret_ref_parse_errors` AND
+  `validation_report(...).errors` are both empty for it, so the shipped example
+  cannot drift into failing the repo's own `config check`.
   `show` renders through `render_show` (a testable seam over the stdout
   `println!`), which runs `ProviderEntry::redact_secrets` -- sentinelling
   literal key refs AND reducing each `base_url` to its origin -- and prefixes
