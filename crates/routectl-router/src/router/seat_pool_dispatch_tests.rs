@@ -2,6 +2,7 @@
 //! model expands into one DispatchTarget per seat, each with its own
 //! breaker entry, ordered by the provider's `seat_selection`.
 
+use super::chain::empty_pool_error;
 use super::*;
 use crate::config::{AliasValue, PoolEntry, ProviderEntry, SeatSelection};
 use crate::seat_pool::SeatTarget;
@@ -60,56 +61,51 @@ impl Provider for SeatProvider {
     }
 }
 
-/// Build a pooled model `opus` on provider `anthropic` with three
-/// seats (default + seat-b + seat-c), each backed by its own
-/// `SeatProvider` + call counter. Returns the installed Router plus
-/// the three per-seat counters in seat order.
+/// Build a pooled model `opus` on pool `anthropic-pool` with three member
+/// accounts, each backed by its own `SeatProvider` + call counter. Returns
+/// the installed Router plus the three per-member counters in member order.
 fn pooled_router(selection: SeatSelection) -> (Router, Vec<Arc<AtomicUsize>>) {
-    pooled_router_with_labels(
-        selection,
-        &[None, Some("seat-b".into()), Some("seat-c".into())],
-    )
+    pooled_router_with_members(selection, &["anthropic-a", "anthropic-b", "anthropic-c"])
 }
 
-/// Build a pooled `opus` model with one seat per entry in `labels`
-/// (`None` is the default seat). Lets a test stand up pools of
-/// arbitrary seat sets -- e.g. a "before reload" two-seat pool and an
-/// "after reload" three-seat pool -- to exercise the coordinator's
-/// rebuild + per-state_key carry-over.
-fn pooled_router_with_labels(
+/// Build a pooled `opus` model with one seat per entry in `members`. Lets a
+/// test stand up pools of arbitrary membership -- e.g. a "before reload"
+/// two-member pool and an "after reload" three-member pool -- to exercise the
+/// coordinator's rebuild + per-state_key carry-over.
+fn pooled_router_with_members(
     selection: SeatSelection,
-    labels: &[Option<String>],
+    members: &[&str],
 ) -> (Router, Vec<Arc<AtomicUsize>>) {
     let mut counters = Vec::new();
     let mut seats: Vec<SeatTarget> = Vec::new();
-    for label in labels {
+    let mut providers = BTreeMap::new();
+    for member in members {
         let counter = Arc::new(AtomicUsize::new(0));
         counters.push(counter.clone());
         let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
-            id: format!("anthropic-{}", label.as_deref().unwrap_or("default")),
+            id: (*member).to_string(),
             calls: counter,
         });
         seats.push(SeatTarget {
-            label: label.clone(),
-            state_key: crate::seat_pool::seat_state_key("opus", label.as_deref()),
+            provider_name: (*member).to_string(),
             provider,
             auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
-                provider: "anthropic".to_string(),
-                label: label.clone(),
+                provider: (*member).to_string(),
+                label: None,
             }),
         });
+        providers.insert(
+            (*member).to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
     }
     let default_provider = seats[0].provider.clone();
 
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
     let mut pools = BTreeMap::new();
     pools.insert(
         "anthropic-pool".to_string(),
-        PoolEntry::new(vec!["anthropic".to_string()]).with_seat_selection(selection),
+        PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect())
+            .with_seat_selection(selection),
     );
     let cfg = Arc::new(Config {
         providers,
@@ -118,8 +114,13 @@ fn pooled_router_with_labels(
     });
 
     let mut router = Router::new(cfg);
-    let model = ResolvedModel::new("opus", "anthropic", default_provider, "claude-opus-4-7")
-        .with_seats(Arc::from(seats));
+    let model = ResolvedModel::new(
+        "opus",
+        "anthropic-pool",
+        default_provider,
+        "claude-opus-4-7",
+    )
+    .with_seats(Arc::from(seats));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert("opus".to_string(), Arc::new(model));
     router.install_resolved_models(models);
@@ -206,7 +207,7 @@ async fn keyless_sticky_records_keyless_fill_first() {
     // The collapse must not alter the seat order.
     assert_eq!(
         chain_state_keys_for(&router, None),
-        vec!["opus", "opus#seat-b", "opus#seat-c"]
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
 }
 
@@ -239,7 +240,7 @@ fn mark_target_records_the_served_seats_identity_not_the_first() {
     meta.mark_target(&chain[1], "opus");
 
     // Assert: the served seat's credential identity, not the first's.
-    assert_eq!(meta.served_seat, Some("anthropic#seat-b".to_string()));
+    assert_eq!(meta.served_seat, Some("anthropic-b".to_string()));
 }
 
 #[test]
@@ -323,7 +324,7 @@ async fn sticky_defer_no_healthy_stamps_defer_token() {
     // DeferNoHealthy -> `defer_no_healthy` token, fill-first order, and
     // NO pin written.
     let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
-    for key in ["opus", "opus#seat-b", "opus#seat-c"] {
+    for key in ["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"] {
         assert!(
             router.force_open_breaker(key, Duration::from_hours(1)),
             "seat {key} must own a state slot to trip"
@@ -340,7 +341,7 @@ async fn sticky_defer_no_healthy_stamps_defer_token() {
     // was written for the deferred session.
     assert_eq!(
         chain_state_keys_for(&router, Some("S")),
-        vec!["opus", "opus#seat-b", "opus#seat-c"]
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
     assert!(
         router
@@ -358,24 +359,30 @@ async fn each_seat_has_independent_breaker() {
     // so there is no shared breaker.
     let (router, _counters) = pooled_router(SeatSelection::FillFirst);
     // All three seats own a state slot.
-    assert!(router.state.contains_key("opus"));
-    assert!(router.state.contains_key("opus#seat-b"));
-    assert!(router.state.contains_key("opus#seat-c"));
+    assert!(router.state.contains_key("opus#anthropic-a"));
+    assert!(router.state.contains_key("opus#anthropic-b"));
+    assert!(router.state.contains_key("opus#anthropic-c"));
 
     // Park the default seat for a long cooldown.
-    router.park_provider("opus", Duration::from_hours(1));
+    router.park_provider("opus#anthropic-a", Duration::from_hours(1));
 
     // The default seat's breaker is open; siblings are untouched.
     assert!(
-        router.gate_check("opus", "anthropic").is_some(),
+        router
+            .gate_check("opus#anthropic-a", "anthropic-a")
+            .is_some(),
         "parked default seat must gate-block"
     );
     assert!(
-        router.gate_check("opus#seat-b", "anthropic").is_none(),
+        router
+            .gate_check("opus#anthropic-b", "anthropic-b")
+            .is_none(),
         "sibling seat-b must remain dispatchable"
     );
     assert!(
-        router.gate_check("opus#seat-c", "anthropic").is_none(),
+        router
+            .gate_check("opus#anthropic-c", "anthropic-c")
+            .is_none(),
         "sibling seat-c must remain dispatchable"
     );
 }
@@ -387,8 +394,14 @@ async fn fill_first_walks_seats_in_fixed_order() {
     let (router, _counters) = pooled_router(SeatSelection::FillFirst);
     let first = chain_state_keys(&router);
     let second = chain_state_keys(&router);
-    assert_eq!(first, vec!["opus", "opus#seat-b", "opus#seat-c"]);
-    assert_eq!(second, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+    assert_eq!(
+        first,
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
+    );
+    assert_eq!(
+        second,
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
+    );
 }
 
 #[tokio::test]
@@ -398,54 +411,54 @@ async fn round_robin_rotates_start_seat_per_request() {
     let (router, _counters) = pooled_router(SeatSelection::RoundRobin);
     assert_eq!(
         chain_state_keys(&router),
-        vec!["opus", "opus#seat-b", "opus#seat-c"]
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
     assert_eq!(
         chain_state_keys(&router),
-        vec!["opus#seat-b", "opus#seat-c", "opus"]
+        vec!["opus#anthropic-b", "opus#anthropic-c", "opus#anthropic-a"]
     );
     assert_eq!(
         chain_state_keys(&router),
-        vec!["opus#seat-c", "opus", "opus#seat-b"]
+        vec!["opus#anthropic-c", "opus#anthropic-a", "opus#anthropic-b"]
     );
     assert_eq!(
         chain_state_keys(&router),
-        vec!["opus", "opus#seat-b", "opus#seat-c"]
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
 }
 
 #[tokio::test]
 async fn parked_seat_is_skipped_and_sibling_serves() {
-    // Full dispatch: park the default seat, then a request must fall
-    // to the next seat (seat-b) and that seat's provider serves.
+    // Full dispatch: park the first member's seat, then a request must fall
+    // to the next member and that member's provider serves.
     let (router, counters) = pooled_router(SeatSelection::FillFirst);
-    router.park_provider("opus", Duration::from_hours(1));
+    router.park_provider("opus#anthropic-a", Duration::from_hours(1));
 
     let resp = router.complete(req()).await.expect("sibling serves");
-    assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
+    assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-b"));
     assert_eq!(
         counters[0].load(Ordering::SeqCst),
         0,
-        "parked default seat must not be hit"
+        "the parked member must not be hit"
     );
     assert_eq!(
         counters[1].load(Ordering::SeqCst),
         1,
-        "seat-b must serve the request"
+        "the second member must serve the request"
     );
     assert_eq!(
         counters[2].load(Ordering::SeqCst),
         0,
-        "seat-c must not be reached once seat-b succeeds"
+        "the third member must not be reached once the second succeeds"
     );
 }
 
 #[tokio::test]
 async fn fill_first_serves_default_seat_first() {
-    // Sanity: with no seat parked, FillFirst serves the default seat.
+    // Sanity: with no seat parked, FillFirst serves the first member.
     let (router, counters) = pooled_router(SeatSelection::FillFirst);
     let resp = router.complete(req()).await.expect("default serves");
-    assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
+    assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-a"));
     assert_eq!(counters[0].load(Ordering::SeqCst), 1);
     assert_eq!(counters[1].load(Ordering::SeqCst), 0);
     assert_eq!(counters[2].load(Ordering::SeqCst), 0);
@@ -461,34 +474,34 @@ async fn carry_over_preserves_surviving_seat_breaker_and_starts_new_seat_fresh()
     // (carry-over by state_key); the freshly-added seat must start
     // closed.
     let (before, _c1) =
-        pooled_router_with_labels(SeatSelection::FillFirst, &[None, Some("seat-b".into())]);
-    // Trip the default seat's breaker for a long cooldown.
+        pooled_router_with_members(SeatSelection::FillFirst, &["anthropic-a", "anthropic-b"]);
+    // Trip the first member's breaker for a long cooldown.
     assert!(
-        before.force_open_breaker("opus", Duration::from_hours(1)),
-        "default seat must own a state slot to trip"
+        before.force_open_breaker("opus#anthropic-a", Duration::from_hours(1)),
+        "first member must own a state slot to trip"
     );
     assert_eq!(
-        before.breaker_open_for("opus"),
+        before.breaker_open_for("opus#anthropic-a"),
         Some(true),
-        "default seat breaker must read open after force_open"
+        "first member's breaker must read open after force_open"
     );
 
-    // Rebuild with the added seat-c, then carry over from `before`.
-    let (mut after, _c2) = pooled_router_with_labels(
+    // Rebuild with the added third member, then carry over from `before`.
+    let (mut after, _c2) = pooled_router_with_members(
         SeatSelection::FillFirst,
-        &[None, Some("seat-b".into()), Some("seat-c".into())],
+        &["anthropic-a", "anthropic-b", "anthropic-c"],
     );
     after.carry_over_runtime_state_from(&before);
 
-    // The surviving default seat's tripped breaker carried over.
+    // The surviving member's tripped breaker carried over.
     assert_eq!(
-        after.breaker_open_for("opus"),
+        after.breaker_open_for("opus#anthropic-a"),
         Some(true),
         "surviving seat's breaker state must survive the rebuild"
     );
-    // The freshly-added seat-c starts closed (fresh state).
+    // The freshly-added member starts closed (fresh state).
     assert_eq!(
-        after.breaker_open_for("opus#seat-c"),
+        after.breaker_open_for("opus#anthropic-c"),
         Some(false),
         "newly-added seat must start with a fresh, closed breaker"
     );
@@ -523,7 +536,10 @@ async fn sticky_keyless_matches_fill_first() {
     let sticky_order = chain_state_keys_for(&sticky, None);
     let fill_order = chain_state_keys(&fill);
     assert_eq!(sticky_order, fill_order);
-    assert_eq!(sticky_order, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+    assert_eq!(
+        sticky_order,
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
+    );
 }
 
 #[tokio::test]
@@ -534,12 +550,12 @@ async fn sticky_stale_pin_not_in_pool_is_re_picked() {
     router.sticky_pins.put(
         &super::chain::sticky_pin_key("S", "opus"),
         crate::seat_pool::SeatPin {
-            state_key: "opus#seat-gone".to_string(),
+            state_key: "opus#anthropic-gone".to_string(),
             repinned: false,
         },
     );
     let order = chain_state_keys_for(&router, Some("S"));
-    let valid = ["opus", "opus#seat-b", "opus#seat-c"];
+    let valid = ["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"];
     assert!(
         valid.contains(&order[0].as_str()),
         "stale pin must re-pick a valid in-pool seat, got {}",
@@ -638,21 +654,22 @@ async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
 }
 
 /// Build a two-pool StickyLeastLoaded chain `hot = [opusPool, sonnetPool]`,
-/// each a two-seat pool on provider `anthropic`. Both pools share the same
-/// inbound session; the per-model pin namespace must give each its own
+/// each a two-member pool. Both models share the same inbound session AND the
+/// same pool membership; the per-model pin namespace must give each its own
 /// stable pin instead of clobbering a single session-keyed slot.
 fn two_pool_sticky_chain_router() -> Router {
-    fn seats_for(nickname: &str) -> Vec<SeatTarget> {
-        [None, Some("seat-b".to_string())]
-            .into_iter()
-            .map(|label| {
+    const MEMBERS: [&str; 2] = ["anthropic-a", "anthropic-b"];
+
+    fn seats_for() -> Vec<SeatTarget> {
+        MEMBERS
+            .iter()
+            .map(|member| {
                 let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
-                    id: format!("{nickname}-{}", label.as_deref().unwrap_or("default")),
+                    id: (*member).to_string(),
                     calls: Arc::new(AtomicUsize::new(0)),
                 });
                 SeatTarget {
-                    label: label.clone(),
-                    state_key: crate::seat_pool::seat_state_key(nickname, label.as_deref()),
+                    provider_name: (*member).to_string(),
                     provider,
                     auth_secret_ref: None,
                 }
@@ -661,14 +678,16 @@ fn two_pool_sticky_chain_router() -> Router {
     }
 
     let mut providers = BTreeMap::new();
-    providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
+    for member in MEMBERS {
+        providers.insert(
+            member.to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
+    }
     let mut pools = BTreeMap::new();
     pools.insert(
         "anthropic-pool".to_string(),
-        PoolEntry::new(vec!["anthropic".to_string()])
+        PoolEntry::new(MEMBERS.iter().map(|m| (*m).to_string()).collect())
             .with_seat_selection(SeatSelection::StickyLeastLoaded),
     );
     let mut config = Config {
@@ -684,9 +703,9 @@ fn two_pool_sticky_chain_router() -> Router {
     let mut router = Router::new(Arc::new(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     for (nickname, wire) in [("opusPool", "claude-opus"), ("sonnetPool", "claude-sonnet")] {
-        let seats = seats_for(nickname);
+        let seats = seats_for();
         let default_provider = seats[0].provider.clone();
-        let model = ResolvedModel::new(nickname, "anthropic", default_provider, wire)
+        let model = ResolvedModel::new(nickname, "anthropic-pool", default_provider, wire)
             .with_seats(Arc::from(seats));
         models.insert(nickname.to_string(), Arc::new(model));
     }
@@ -768,5 +787,105 @@ async fn two_sticky_pools_in_one_chain_keep_independent_stable_pins() {
             .get(&super::chain::sticky_pin_key("S", "sonnetPool"))
             .is_some(),
         "sonnet pool owns its own namespaced pin"
+    );
+}
+
+// ---- D8 pool counters + the empty-pool dispatch refusal ----
+
+#[test]
+fn a_healthy_pool_dispatch_counts_once_and_is_not_degraded() {
+    // Arrange: the compiled seat count equals the configured member count.
+    let (router, _counters) = pooled_router(SeatSelection::FillFirst);
+
+    // Act
+    let _ = router.dispatch_chain("opus", None).expect("chain resolves");
+
+    // Assert
+    let pool = router.metrics.pool_totals();
+    assert_eq!(pool.dispatch, 1, "one pooled model expansion, counted once");
+    assert_eq!(
+        pool.degraded_dispatch, 0,
+        "a full-strength pool must never read as degraded"
+    );
+    assert_eq!(pool.unavailable, 0);
+}
+
+#[test]
+fn a_pool_serving_fewer_seats_than_members_counts_a_degraded_dispatch() {
+    // The counter's whole job: traffic is concentrating on fewer accounts than
+    // the operator configured. Built with the third member declared in the pool
+    // but absent from the compiled seat set, which is exactly the shape a
+    // build-time omission leaves behind.
+    let (mut router, _counters) =
+        pooled_router_with_members(SeatSelection::FillFirst, &["anthropic-a", "anthropic-b"]);
+    let mut config = (*router.config).clone();
+    config.pools.insert(
+        "anthropic-pool".to_string(),
+        PoolEntry::new(vec![
+            "anthropic-a".to_string(),
+            "anthropic-b".to_string(),
+            "anthropic-c".to_string(),
+        ]),
+    );
+    router.config = Arc::new(config);
+
+    let _ = router.dispatch_chain("opus", None).expect("chain resolves");
+
+    let pool = router.metrics.pool_totals();
+    assert_eq!(pool.dispatch, 1);
+    assert_eq!(
+        pool.degraded_dispatch, 1,
+        "two seats against three configured members is a degraded serve"
+    );
+}
+
+#[test]
+fn dispatch_on_an_empty_pool_returns_a_retryable_error_never_unknown_alias() {
+    // The defect this pins: an empty seat set produced zero dispatch targets,
+    // which surfaced at the end of the dispatch loop as `UnknownAlias` -- a 404
+    // naming a route that IS configured, which no client retries and which
+    // sends the operator hunting a routing typo for a credential outage.
+    let (mut router, _counters) =
+        pooled_router_with_members(SeatSelection::FillFirst, &["anthropic-a"]);
+    let empty: Vec<SeatTarget> = Vec::new();
+    let model = ResolvedModel::new(
+        "opus",
+        "anthropic-pool",
+        router.resolved_models["opus"].provider.clone(),
+        "claude-opus-4-7",
+    )
+    .with_seats(Arc::from(empty));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert("opus".to_string(), Arc::new(model));
+    router.install_resolved_models(models);
+
+    let err = match router.dispatch_chain("opus", None) {
+        Err(e) => e,
+        Ok(targets) => panic!(
+            "an empty pool must refuse rather than resolve to {} targets",
+            targets.len()
+        ),
+    };
+
+    assert!(
+        !matches!(err, Error::UnknownAlias(_)),
+        "an empty pool is never an unknown route: {err:?}"
+    );
+    let Error::Upstream { status, .. } = err else {
+        panic!("expected an upstream-shaped error, got {err:?}");
+    };
+    assert_eq!(status, 503, "must map to a retryable 5xx");
+    // And the class the router derives from it must be BOTH retryable and
+    // fallbackable, or the error shape would be cosmetic.
+    let classified =
+        routectl_core::failure_class::classify(&empty_pool_error("opus"), Some("anthropic-api"));
+    let policy = crate::config::RetryPolicy::default();
+    let (retry_cap, fallback) = policy.resolved_class(&classified.class);
+    assert!(retry_cap > 0, "the class must retry: {classified:?}");
+    assert!(fallback, "the class must fall back: {classified:?}");
+    assert_eq!(
+        router.metrics.pool_totals().unavailable,
+        1,
+        "the defensive empty-pool path must be observable"
     );
 }

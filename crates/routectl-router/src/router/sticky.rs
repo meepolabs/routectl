@@ -70,14 +70,21 @@ impl Router {
     ///
     /// Also empty for a provider that curates no short recovering window,
     /// which is how an uncurated egress stays dormant by construction.
-    fn quota_tiers_for_birth(
-        &self,
-        seats: &[crate::seat_pool::SeatTarget],
-        provider_kind: Option<&str>,
-    ) -> Vec<SeatQuota> {
+    ///
+    /// The provider kind is read off each SEAT's own `[providers]` entry
+    /// rather than the model's `provider` value: a pool-backed model's
+    /// `provider` names the pool, so resolving the kind from it would miss and
+    /// leave every pool permanently uncurated (silently dormant quota).
+    fn quota_tiers_for_birth(&self, seats: &[crate::seat_pool::SeatTarget]) -> Vec<SeatQuota> {
         if !self.config.seat_quota.enabled {
             return Vec::new();
         }
+        let provider_kind = seats.first().and_then(|seat| {
+            self.config
+                .providers
+                .get(&seat.provider_name)
+                .map(crate::config::ProviderEntry::kind_str)
+        });
         let keys: Vec<Option<crate::quota::key::SeatKey>> = seats
             .iter()
             .map(|seat| crate::quota::key::seat_key_for_secret_ref(seat.auth_secret_ref.as_ref()))
@@ -148,15 +155,14 @@ impl Router {
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         nickname: &str,
-        provider_kind: Option<&str>,
     ) -> (Vec<usize>, Option<&'static str>) {
-        let quota = self.quota_tiers_for_birth(seats, provider_kind);
+        let quota = self.quota_tiers_for_birth(seats);
         let mut decision = QuotaDecision::Dormant;
         let ordered = if quota.is_empty() {
             None
         } else {
             let now = Instant::now();
-            let snapshots = self.gather_capacity_snapshots(seats, now);
+            let snapshots = self.gather_capacity_snapshots(seats, nickname, now);
             crate::seat_pool::keyless_quota_order(
                 seats.len(),
                 &snapshots,
@@ -207,7 +213,6 @@ impl Router {
         seats: &[crate::seat_pool::SeatTarget],
         key: &str,
         nickname: &str,
-        provider_kind: Option<&str>,
     ) -> (Vec<usize>, &'static str) {
         // A pinned state_key no longer present in this pool resolves to None
         // -> treated as a miss (re-pick), and `repinned` resets to false on
@@ -215,12 +220,12 @@ impl Router {
         let pin: Option<(usize, bool)> = self.sticky_pins.get(key).and_then(|p| {
             seats
                 .iter()
-                .position(|s| s.state_key == p.state_key)
+                .position(|s| s.state_key_for(nickname) == p.state_key)
                 .map(|i| (i, p.repinned))
         });
 
         let now = Instant::now();
-        let snapshots = self.gather_capacity_snapshots(seats, now);
+        let snapshots = self.gather_capacity_snapshots(seats, nickname, now);
 
         // Advance the anti-herd counter only when a pick is actually
         // attempted: a miss, or a hit whose home is non-dispatchable and not
@@ -238,7 +243,7 @@ impl Router {
         // Read quota ONLY for a genuine birth. A hit -- healthy or migrating
         // -- never consults it, so the store is not even touched.
         let quota = if pin.is_none() {
-            self.quota_tiers_for_birth(seats, provider_kind)
+            self.quota_tiers_for_birth(seats)
         } else {
             Vec::new()
         };
@@ -252,7 +257,7 @@ impl Router {
             &quota,
         );
         self.record_quota_placement(quota_decision, nickname);
-        let token = self.apply_sticky_outcome(key, seats, outcome);
+        let token = self.apply_sticky_outcome(key, nickname, seats, outcome);
         (order, token)
     }
 
@@ -263,23 +268,25 @@ impl Router {
     pub(super) fn gather_capacity_snapshots(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
+        nickname: &str,
         now: Instant,
     ) -> Vec<crate::runtime_state::CapacitySnapshot> {
         seats
             .iter()
             .map(|s| {
-                self.capacity_snapshot_for(&s.state_key, now).unwrap_or(
-                    // Defensive: a seat with no state slot should never
-                    // happen (install creates one per seat). If it does,
-                    // fail safe -- treat it as non-dispatchable so it is
-                    // excluded from a pick rather than chosen as the most-
-                    // attractive home. It still appears in the fallback
-                    // order, and the existing gate stays authoritative.
-                    crate::runtime_state::CapacitySnapshot {
-                        rpm_available: Some(0.0),
-                        circuit: crate::runtime_state::CircuitPhase::Open,
-                    },
-                )
+                self.capacity_snapshot_for(&s.state_key_for(nickname), now)
+                    .unwrap_or(
+                        // Defensive: a seat with no state slot should never
+                        // happen (install creates one per seat). If it does,
+                        // fail safe -- treat it as non-dispatchable so it is
+                        // excluded from a pick rather than chosen as the most-
+                        // attractive home. It still appears in the fallback
+                        // order, and the existing gate stays authoritative.
+                        crate::runtime_state::CapacitySnapshot {
+                            rpm_available: Some(0.0),
+                            circuit: crate::runtime_state::CircuitPhase::Open,
+                        },
+                    )
             })
             .collect()
     }
@@ -292,37 +299,40 @@ impl Router {
     pub(super) fn apply_sticky_outcome(
         &self,
         key: &str,
+        nickname: &str,
         seats: &[crate::seat_pool::SeatTarget],
         outcome: crate::seat_pool::SelectionOutcome,
     ) -> &'static str {
         match outcome {
             crate::seat_pool::SelectionOutcome::Birth { home } => {
+                let state_key = seats[home].state_key_for(nickname);
+                tracing::debug!(
+                    state_key = %state_key,
+                    member = %seats[home].provider_name,
+                    "sticky least-loaded birth pick: pinned session to seat"
+                );
                 self.sticky_pins.put(
                     key,
                     crate::seat_pool::SeatPin {
-                        state_key: seats[home].state_key.clone(),
+                        state_key,
                         repinned: false,
                     },
-                );
-                tracing::debug!(
-                    state_key = %seats[home].state_key,
-                    seat_label = ?seats[home].label,
-                    "sticky least-loaded birth pick: pinned session to seat"
                 );
                 "birth_pick"
             }
             crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
+                let state_key = seats[home].state_key_for(nickname);
+                tracing::debug!(
+                    state_key = %state_key,
+                    member = %seats[home].provider_name,
+                    "sticky least-loaded overflow-repin: migrated session to healthy sibling"
+                );
                 self.sticky_pins.put(
                     key,
                     crate::seat_pool::SeatPin {
-                        state_key: seats[home].state_key.clone(),
+                        state_key,
                         repinned: true,
                     },
-                );
-                tracing::debug!(
-                    state_key = %seats[home].state_key,
-                    seat_label = ?seats[home].label,
-                    "sticky least-loaded overflow-repin: migrated session to healthy sibling"
                 );
                 "overflow_repin"
             }

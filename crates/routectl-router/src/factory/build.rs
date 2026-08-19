@@ -10,8 +10,12 @@ use crate::catalog::{lookup_baked_with_overrides, lookup_overlay_cell, merge};
 use crate::catalog_overlay::CatalogOverlay;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
-use crate::config::{Config, CredentialSource, ProviderEntry};
+use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
+use crate::pool_build::{
+    PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolReport, unavailable_pool_error,
+};
 use crate::resolved::ResolvedModel;
+use crate::seat_pool::SeatTarget;
 #[cfg(feature = "gemini")]
 use routectl_auth::OAuthStoreProjectCache;
 use routectl_auth::{SecretRef, SecretStore};
@@ -865,141 +869,147 @@ fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
     entry.api_key_ref()
 }
 
-/// Clone a provider entry with its primary `api_key_ref` swapped for a
-/// seat-pinned URI. Used to build one provider instance per OAuth seat
-/// in a credential pool. Bedrock has no single `api_key_ref` slot, so it
-/// returns `None` -- pools are never built for Bedrock (its creds shape
-/// is multi-field and is not an `oauth://` pool).
-fn entry_with_api_key_ref(entry: &ProviderEntry, seat_uri: &str) -> Option<ProviderEntry> {
-    let mut cloned = entry.clone();
-    match &mut cloned {
-        ProviderEntry::OpenaiCompat { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
-        ProviderEntry::AnthropicApi { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
-        #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
-        #[cfg(feature = "gemini")]
-        ProviderEntry::Gemini { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::Bedrock { .. } => return None,
-    }
-    Some(cloned)
-}
+/// Compile one `[pools.<name>]` block into the dispatch seat set every
+/// model naming that pool shares.
+///
+/// A SIBLING of the non-pool path rather than a modification of it: the
+/// non-pool path builds exactly one provider from the model's own entry,
+/// while this walks the pool's declared members and builds one provider per
+/// member from that member's OWN `api_key_ref`. No member is ever enumerated
+/// through the credential store, so the bare-ref-means-default-seat rule
+/// arrives here by construction -- a member whose ref is a bare
+/// `oauth://<provider>` gets that provider's default seat and nothing else.
+///
+/// A member that cannot be built is OMITTED with an allowlisted reason
+/// rather than sinking the pool, so a pool with one dead account keeps
+/// serving through its survivors. Zero usable members yields
+/// [`PoolOutcome::Unavailable`], which the caller turns into a build refusal
+/// for every model routed at the pool.
+///
+/// Members are walked in declaration order, and the resulting seat order is
+/// the operator's declared order -- the strategy layer
+/// (`seat_order_for_request`) rotates over it per request.
+async fn compile_pool(
+    pool_name: &str,
+    pool: &PoolEntry,
+    config: &Config,
+    secrets: &Arc<dyn SecretStore>,
+    opts: &BuildOptions,
+) -> PoolOutcome {
+    let mut seats: Vec<SeatTarget> = Vec::with_capacity(pool.members.len());
+    let mut omissions: Vec<PoolMemberOmission> = Vec::new();
 
-/// Expand a model's primary OAuth credential reference into a fixed set
-/// of seat-pinned providers, ONE per stored seat, when (and only when)
-/// the ref is a bare-pool `oauth://<provider>` (label `None`) backed by
-/// MORE THAN ONE seat. Returns:
-///
-///   - `None` for the single-seat / non-pooled / labeled / non-oauth
-///     case -- the model dispatches its single `default_provider` keyed
-///     by nickname, byte-for-byte the pre-pool behavior.
-///   - `Some(seats)` with one `SeatTarget` per seat (default seat first,
-///     then sorted labels) when expansion applies. The first seat reuses
-///     `default_provider` (already built, default ref); the rest are
-///     built fresh from a seat-pinned ref. Each seat carries its own
-///     `state_key` so the breaker + RPM bucket are per-seat.
-///
-/// `list_seats` is reached through the `Arc<dyn SecretStore>` the factory
-/// already holds; for the server build path this lands in `OAuthStore`,
-/// which enumerates the stored seats for the provider.
-async fn build_seat_targets(
-    nickname: &str,
-    provider_name: &str,
-    provider_entry: &ProviderEntry,
-    primary_ref: &SecretRef,
-    default_provider: &Arc<dyn Provider>,
-    secrets: Arc<dyn SecretStore>,
-    opts: BuildOptions,
-) -> Option<Arc<[crate::seat_pool::SeatTarget]>> {
-    // Only a bare-pool oauth ref (label None) can expand. A labeled ref
-    // already pins one seat; env/file/literal are single-credential.
-    if !matches!(primary_ref, SecretRef::OAuth { label: None, .. }) {
-        return None;
-    }
-    let seat_refs = match secrets.list_seats(primary_ref).await {
-        Ok(refs) => refs,
-        Err(e) => {
-            tracing::warn!(
-                provider = %provider_name,
-                model = %nickname,
-                error = %e,
-                "seat enumeration failed; falling back to single-seat dispatch",
-            );
-            return None;
-        }
-    };
-    // A single seat resolves to the same provider already on the model;
-    // skip the pool and keep the byte-for-byte single-target path.
-    if seat_refs.len() <= 1 {
-        return None;
-    }
-    let mut seats: Vec<crate::seat_pool::SeatTarget> = Vec::with_capacity(seat_refs.len());
-    for seat_ref in &seat_refs {
-        let label = match seat_ref {
-            SecretRef::OAuth { label, .. } => label.clone(),
-            _ => None,
+    for member in &pool.members {
+        let Some(entry) = config.providers.get(member) else {
+            // Validation rejects an unknown member; stay defensive so a
+            // directly-constructed Config cannot panic the build path.
+            omissions.push(PoolMemberOmission {
+                member: member.clone(),
+                provider_kind: "unknown",
+                reason: PoolOmissionReason::CredentialMissing,
+            });
+            continue;
         };
-        let state_key = crate::seat_pool::seat_state_key(nickname, label.as_deref());
-        // The default seat (label None) reuses the provider the factory
-        // already built from the bare-pool ref -- no second build. This
-        // MUST key off the label, NOT the seat index: a labels-only pool
-        // (no bare default seat) has a labeled seat at index 0, which has
-        // to build from its OWN pinned ref rather than inherit the bare,
-        // credential-less provider.
-        let provider = if label.is_none() {
-            default_provider.clone()
-        } else {
-            let seat_uri = seat_ref.to_string();
-            let seat_entry = if let Some(e) = entry_with_api_key_ref(provider_entry, &seat_uri) {
-                e
-            } else {
-                // A provider kind with no single api_key_ref slot cannot
-                // be seat-pinned; skip this seat, not the whole pool.
-                tracing::warn!(
-                    provider = %provider_name,
-                    model = %nickname,
-                    seat = %state_key,
-                    "skipping OAuth pool seat (no api_key_ref to pin)",
-                );
+        let provider_kind = entry.kind_str();
+        let secret_ref = match member_secret_ref(entry) {
+            Ok(sr) => sr,
+            Err(reason) => {
+                omissions.push(PoolMemberOmission {
+                    member: member.clone(),
+                    provider_kind,
+                    reason,
+                });
                 continue;
-            };
-            match build_provider_with_options(
-                provider_name,
-                &seat_entry,
-                secrets.clone(),
-                opts.clone(),
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    // A single seat failing to build should not sink the
-                    // whole pool; skip it and keep the healthy seats.
-                    tracing::warn!(
-                        provider = %provider_name,
-                        model = %nickname,
-                        seat = %state_key,
-                        error = %e,
-                        "skipping OAuth pool seat (build failed)",
-                    );
-                    continue;
-                }
             }
         };
-        seats.push(crate::seat_pool::SeatTarget {
-            label,
-            state_key,
-            provider,
-            auth_secret_ref: Some(seat_ref.clone()),
-        });
+        // Probe the credential BEFORE building. An `oauth://` provider builds
+        // with a LAZY token source (so rotation is picked up per request
+        // without a restart), which means a logged-out member would otherwise
+        // build successfully and only fail at first traffic -- and the pool
+        // would report itself fully healthy. The probe is what makes "usable
+        // member" answerable at build time, which is the whole basis of the
+        // Ready / Unavailable split. One read per member per build, collapsed
+        // by the store's own cache + single-flight.
+        if let Err(e) = secrets.get(&secret_ref).await {
+            omissions.push(PoolMemberOmission {
+                member: member.clone(),
+                provider_kind,
+                reason: PoolOmissionReason::CredentialUnreadable,
+            });
+            tracing::debug!(
+                pool = %pool_name,
+                member = %member,
+                provider_kind,
+                error = %e,
+                "pool member credential unreadable",
+            );
+            continue;
+        }
+        match build_provider_with_options(member, entry, secrets.clone(), opts.clone()).await {
+            Ok(provider) => seats.push(SeatTarget {
+                provider_name: member.clone(),
+                provider,
+                auth_secret_ref: Some(secret_ref),
+            }),
+            Err(e) => {
+                // The error text is deliberately NOT carried into the
+                // omission: it can inline a credential path, an account id,
+                // or upstream response bytes, and the omission reaches both
+                // a log field and an operator-facing report. Only the
+                // variant SHAPE classifies.
+                omissions.push(PoolMemberOmission {
+                    member: member.clone(),
+                    provider_kind,
+                    reason: omission_reason_for_build_error(&e),
+                });
+                tracing::debug!(
+                    pool = %pool_name,
+                    member = %member,
+                    provider_kind,
+                    error = %e,
+                    "pool member failed to build",
+                );
+            }
+        }
     }
-    // If only the default seat survived (every labeled seat failed to
-    // build), there is no pool to dispatch across -- fall back to the
-    // single-target path so behavior matches a single-seat config.
-    if seats.len() <= 1 {
-        return None;
+
+    if seats.is_empty() {
+        PoolOutcome::Unavailable { omissions }
+    } else {
+        PoolOutcome::Ready {
+            seats: Arc::from(seats),
+            omissions,
+        }
     }
-    Some(Arc::from(seats))
+}
+
+/// The parsed credential reference of one pool member, or the omission
+/// reason its absence / malformedness earns.
+///
+/// A member with no credential ref at all cannot authenticate an account, and
+/// a member whose ref does not parse cannot be resolved -- both are
+/// pre-build refusals, distinguished so the operator knows whether to add a
+/// ref or fix one.
+fn member_secret_ref(entry: &ProviderEntry) -> std::result::Result<SecretRef, PoolOmissionReason> {
+    let uri = primary_api_key_uri(entry).ok_or(PoolOmissionReason::CredentialMissing)?;
+    if uri.is_empty() {
+        return Err(PoolOmissionReason::CredentialMissing);
+    }
+    SecretRef::parse(uri).map_err(|_| PoolOmissionReason::CredentialInvalid)
+}
+
+/// Classify a member build failure into an allowlisted omission reason by the
+/// error VARIANT, never its text.
+///
+/// `Error::Auth` is the credential lane: the store could not produce a usable
+/// credential for the ref (not logged in, refresh refused, backing file
+/// unreadable). Everything else is a provider-construction fault (a rejected
+/// base URL, an incoherent provider block).
+const fn omission_reason_for_build_error(e: &routectl_core::Error) -> PoolOmissionReason {
+    match e {
+        routectl_core::Error::Auth(_) => PoolOmissionReason::CredentialUnreadable,
+        _ => PoolOmissionReason::ProviderInitFailed,
+    }
 }
 
 /// Build a `TokenSource` for a provider that needs per-request token
@@ -1175,11 +1185,51 @@ fn install_resolved_codex_identity(config: &Config) {
 ///
 /// `[models.X].selectable = false` entries are skipped; the returned
 /// map does not contain them.
+///
+/// The tuple-returning shape for callers that do not consume the per-pool
+/// build reports. [`build_resolved_models_reported`] is the same build with
+/// the reports retained; this wrapper discards them.
 pub async fn build_resolved_models(
     config: &Config,
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
 ) -> Result<(BTreeMap<String, Arc<ResolvedModel>>, Vec<(String, String)>)> {
+    let built = build_resolved_models_reported(config, secrets, opts).await?;
+    Ok((built.models, built.failed))
+}
+
+/// Everything one `build_resolved_models_reported` pass observed.
+///
+/// The per-pool reports are the reason this shape exists: a pool's degraded
+/// state is only visible AT BUILD TIME (config alone cannot see a credential
+/// failure), so any surface that wants to report it must receive what the
+/// build observed rather than re-derive it. `#[non_exhaustive]` so a later
+/// observation can join without breaking construction.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct ResolvedModelBuild {
+    /// The per-nickname resolved-model table.
+    pub models: BTreeMap<String, Arc<ResolvedModel>>,
+    /// `(nickname, error)` for each model whose provider failed to build.
+    pub failed: Vec<(String, String)>,
+    /// One sanitized report per pool that at least one selectable model
+    /// named, in pool-name order.
+    pub pool_reports: Vec<PoolReport>,
+}
+
+/// [`build_resolved_models`] with the per-pool build reports retained.
+///
+/// Fails with `Error::Config` when any pool that a selectable model names has
+/// ZERO usable members: every request for such a model would find an empty
+/// seat set, so the refusal names both the pool and the models routed at it
+/// instead of letting the server start healthy and fail at first traffic. On
+/// a hot reload the candidate build is rejected and the previous router stays
+/// live, which is the existing behavior for any build error.
+pub async fn build_resolved_models_reported(
+    config: &Config,
+    secrets: Arc<dyn SecretStore>,
+    opts: BuildOptions,
+) -> Result<ResolvedModelBuild> {
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     let mut failed: Vec<(String, String)> = Vec::new();
 
@@ -1208,6 +1258,12 @@ pub async fn build_resolved_models(
     // differ), but the credential layer is shared.
     #[cfg(feature = "bedrock")]
     let mut bedrock_auth_cache: BTreeMap<String, CachedBedrockAuth> = BTreeMap::new();
+    // One compiled outcome per pool, and the models that named it. The cache
+    // is what makes the seat set SHARED rather than rebuilt: the second model
+    // on a pool clones the first's `Arc<[SeatTarget]>` instead of
+    // reconstructing its members' providers.
+    let mut pool_cache: BTreeMap<String, PoolOutcome> = BTreeMap::new();
+    let mut pool_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for (nickname, entry) in &config.models {
         if !entry.selectable {
@@ -1228,11 +1284,43 @@ pub async fn build_resolved_models(
             ));
             continue;
         }
+        // Provider-or-pool resolution: `[models.X] provider` names either a
+        // `[providers]` entry or a `[pools]` block, in ONE namespace.
+        // Validation rejects a name held by both, so the order below is not a
+        // precedence rule -- at most one lookup can hit.
+        if let Some(pool) = config.pools.get(&entry.provider) {
+            let outcome = match pool_cache.get(&entry.provider) {
+                Some(cached) => cached.clone(),
+                None => {
+                    // Computed ONCE per pool: every model naming this pool
+                    // shares the same seat set by Arc, so the members'
+                    // providers are built exactly once regardless of how many
+                    // models route at the pool.
+                    let built = compile_pool(&entry.provider, pool, config, &secrets, &opts).await;
+                    pool_cache.insert(entry.provider.clone(), built.clone());
+                    built
+                }
+            };
+            pool_models
+                .entry(entry.provider.clone())
+                .or_default()
+                .push(nickname.clone());
+            let Some(seats) = outcome.seats() else {
+                // Zero usable members. The build refusal that names both the
+                // pool and every model routed at it is assembled after the
+                // walk (`unavailable_pool_error`), so one message covers the
+                // whole pool rather than one per model.
+                continue;
+            };
+            let resolved = resolved_pool_model(nickname, entry, seats.clone());
+            models.insert(nickname.clone(), Arc::new(resolved));
+            continue;
+        }
         let Some(provider_entry) = config.providers.get(&entry.provider) else {
             failed.push((
                 nickname.clone(),
                 format!(
-                    "model `{nickname}` references unknown provider `{}`",
+                    "model `{nickname}` references unknown provider or pool `{}`",
                     entry.provider
                 ),
             ));
@@ -1369,86 +1457,166 @@ pub async fn build_resolved_models(
             provider,
             entry.upstream.clone(),
         );
-        if entry.supports_adaptive_thinking {
-            resolved = resolved.with_supports_adaptive_thinking(true);
-        }
-        if !entry.effort_levels.is_empty() {
-            resolved = resolved.with_effort_levels(entry.effort_levels.clone());
-        }
-        if entry.max_thinking_budget > 0 {
-            resolved = resolved.with_max_thinking_budget(entry.max_thinking_budget);
-        }
-        if let Some(d) = entry.reasoning_dialect {
-            resolved = resolved.with_reasoning_dialect(d);
-        }
-        if let Some(h) = entry.history_reasoning {
-            resolved = resolved.with_history_reasoning(h);
-        }
+        resolved = apply_model_knobs(resolved, nickname, entry);
         warn_context_management_needs_preserve(
             &entry.provider,
             nickname,
             provider_entry,
             entry.history_reasoning,
         );
-        if !entry.header_extras.is_empty() {
-            resolved = resolved.with_header_extras(entry.header_extras.clone());
-        }
-        if let Some(extras) = entry.payload_extras.as_ref() {
-            resolved = resolved.with_payload_extras(extras.clone());
-        }
-        if let Some(ms) = entry.stream_first_byte_timeout_ms {
-            if ms == 0 {
-                tracing::warn!(
-                    model = %nickname,
-                    "[models.{nickname}] stream_first_byte_timeout_ms = 0 would abandon every stream before its first content-bearing chunk; ignoring the override"
-                );
-            } else {
-                resolved = resolved.with_stream_first_byte_timeout_ms(ms);
-            }
-        }
-        if let Some(tokens) = entry.max_output_tokens {
-            if tokens == 0 {
-                tracing::warn!(
-                    model = %nickname,
-                    "[models.{nickname}] max_output_tokens = 0 would 400 every anthropic-shape request; ignoring the override"
-                );
-            } else {
-                resolved = resolved.with_max_output_tokens(tokens);
-            }
-        }
-        if let Some(label) = entry.reported_model.as_ref() {
-            resolved = resolved.with_reported_model(label.clone());
-        }
-        resolved = resolved.with_visible_routectl_provider(entry.visible_routectl_provider);
         if let Some(uri) = primary_api_key_uri(provider_entry)
             && let Ok(sr) = SecretRef::parse(uri)
         {
-            resolved = resolved.with_auth_secret_ref(sr.clone());
-            // OAuth credential-pool expansion. A bare-pool
-            // `oauth://<provider>` ref backed by more than one stored
-            // seat expands into one seat-pinned provider per seat so
-            // the dispatch chain rotates + cools across seats. A
-            // single seat / labeled ref / non-oauth ref builds exactly
-            // one provider (the default `provider` already on
-            // `resolved`), so this is a no-op there -- back-compat.
-            if let Some(seats) = build_seat_targets(
-                nickname,
-                &entry.provider,
-                provider_entry,
-                &sr,
-                &resolved.provider,
-                secrets.clone(),
-                opts.clone(),
-            )
-            .await
-            {
-                resolved = resolved.with_seats(seats);
-            }
+            resolved = resolved.with_auth_secret_ref(sr);
         }
         models.insert(nickname.clone(), Arc::new(resolved));
     }
 
-    Ok((models, failed))
+    let reports = pool_reports(&pool_cache, &pool_models);
+    if let Some(detail) = unavailable_pool_error(&reports) {
+        return Err(routectl_core::Error::Config(detail));
+    }
+    warn_pool_omissions(&reports);
+
+    Ok(ResolvedModelBuild {
+        models,
+        failed,
+        pool_reports: reports,
+    })
+}
+
+/// Emit one structured WARN per omitted pool member, once per build attempt.
+///
+/// Every field is either a config table key the operator wrote, a fixed
+/// provider-kind token, an allowlisted reason token, or a count. No store
+/// error, credential path, token, or account id reaches this line -- the
+/// omission type carries none of those, so the constraint is structural
+/// rather than a rule to remember here.
+fn warn_pool_omissions(reports: &[PoolReport]) {
+    for report in reports {
+        for omission in &report.omissions {
+            tracing::warn!(
+                event = "pool_member_omitted",
+                pool = %report.pool,
+                member = %omission.member,
+                provider_kind = omission.provider_kind,
+                reason = omission.reason.token(),
+                configured_members = report.configured_members,
+                usable_members = report.usable_members,
+                "pool member omitted from the dispatch seat set",
+            );
+        }
+    }
+}
+
+/// Apply every `[models.X]` knob that is independent of how the model's
+/// credential resolves.
+///
+/// Shared by the provider-backed and pool-backed resolution paths so the two
+/// cannot drift: a knob added to one would otherwise silently not apply to
+/// models on a pool, and the omission would be invisible (the knob simply
+/// reads as unset).
+fn apply_model_knobs(
+    mut resolved: ResolvedModel,
+    nickname: &str,
+    entry: &crate::config::ModelEntry,
+) -> ResolvedModel {
+    if entry.supports_adaptive_thinking {
+        resolved = resolved.with_supports_adaptive_thinking(true);
+    }
+    if !entry.effort_levels.is_empty() {
+        resolved = resolved.with_effort_levels(entry.effort_levels.clone());
+    }
+    if entry.max_thinking_budget > 0 {
+        resolved = resolved.with_max_thinking_budget(entry.max_thinking_budget);
+    }
+    if let Some(d) = entry.reasoning_dialect {
+        resolved = resolved.with_reasoning_dialect(d);
+    }
+    if let Some(h) = entry.history_reasoning {
+        resolved = resolved.with_history_reasoning(h);
+    }
+    if !entry.header_extras.is_empty() {
+        resolved = resolved.with_header_extras(entry.header_extras.clone());
+    }
+    if let Some(extras) = entry.payload_extras.as_ref() {
+        resolved = resolved.with_payload_extras(extras.clone());
+    }
+    if let Some(ms) = entry.stream_first_byte_timeout_ms {
+        if ms == 0 {
+            tracing::warn!(
+                model = %nickname,
+                "[models.{nickname}] stream_first_byte_timeout_ms = 0 would abandon every stream before its first content-bearing chunk; ignoring the override"
+            );
+        } else {
+            resolved = resolved.with_stream_first_byte_timeout_ms(ms);
+        }
+    }
+    if let Some(tokens) = entry.max_output_tokens {
+        if tokens == 0 {
+            tracing::warn!(
+                model = %nickname,
+                "[models.{nickname}] max_output_tokens = 0 would 400 every anthropic-shape request; ignoring the override"
+            );
+        } else {
+            resolved = resolved.with_max_output_tokens(tokens);
+        }
+    }
+    if let Some(label) = entry.reported_model.as_ref() {
+        resolved = resolved.with_reported_model(label.clone());
+    }
+    resolved.with_visible_routectl_provider(entry.visible_routectl_provider)
+}
+
+/// Assemble the `ResolvedModel` for a pool-backed model from the pool's
+/// shared seat set.
+///
+/// `provider` and `auth_secret_ref` mirror the FIRST seat: those two fields
+/// are the single-target projection of a model, and dispatch reads them only
+/// for a model with no seats. `provider_name` keeps the POOL name -- it is
+/// what the operator wrote, what the strategy lookup keys on, and what
+/// reload's rotation carry-over matches; every per-provider config lookup on
+/// the dispatch path resolves against the seat's own `provider_name` instead.
+fn resolved_pool_model(
+    nickname: &str,
+    entry: &crate::config::ModelEntry,
+    seats: Arc<[SeatTarget]>,
+) -> ResolvedModel {
+    let first = &seats[0];
+    let mut resolved = ResolvedModel::new(
+        nickname,
+        entry.provider.clone(),
+        first.provider.clone(),
+        entry.upstream.clone(),
+    );
+    if let Some(sr) = first.auth_secret_ref.clone() {
+        resolved = resolved.with_auth_secret_ref(sr);
+    }
+    resolved = apply_model_knobs(resolved, nickname, entry);
+    resolved.with_seats(seats)
+}
+
+/// The sanitized per-pool build reports, one per pool that at least one
+/// selectable model named. A pool no model routes at is not reported: it was
+/// never compiled, so there is nothing observed to report.
+fn pool_reports(
+    outcomes: &BTreeMap<String, PoolOutcome>,
+    models_by_pool: &BTreeMap<String, Vec<String>>,
+) -> Vec<PoolReport> {
+    models_by_pool
+        .iter()
+        .filter_map(|(pool, models)| {
+            let outcome = outcomes.get(pool)?;
+            let usable_members = outcome.seats().map_or(0, |seats| seats.len());
+            Some(PoolReport {
+                pool: pool.clone(),
+                models: models.clone(),
+                configured_members: usable_members + outcome.omissions().len(),
+                usable_members,
+                omissions: outcome.omissions().to_vec(),
+            })
+        })
+        .collect()
 }
 
 /// Stamp each resolved model's precomputed [`crate::catalog::EffectiveRow`]

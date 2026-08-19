@@ -55,6 +55,7 @@ pub(crate) mod learned_capability;
 pub(crate) mod learned_replay;
 pub(crate) mod log_hash;
 pub(crate) mod override_registry;
+pub mod pool_build;
 pub(crate) mod quota;
 pub(crate) mod resolved;
 pub mod router;
@@ -153,11 +154,12 @@ pub use factory::validate_provider_bedrock_mantle;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_provider_openai_mantle;
 pub use factory::{
-    BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, apply_catalog_overlay, build_provider,
-    build_provider_with_options, build_resolved_models, class_policy_warnings,
-    codex_identity_warnings, collect_config_validation, per_block_breakpoint_warnings,
-    resolved_codex_version, validate_alias_chain_targets, validate_alias_patterns,
-    validate_class_policy, validate_codex_version, validate_mitm_config, validate_pools,
+    BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, ResolvedModelBuild, apply_catalog_overlay,
+    build_provider, build_provider_with_options, build_resolved_models,
+    build_resolved_models_reported, class_policy_warnings, codex_identity_warnings,
+    collect_config_validation, per_block_breakpoint_warnings, resolved_codex_version,
+    validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
+    validate_codex_version, validate_mitm_config, validate_pools,
     validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
 };
 pub use glob::{AliasPattern, PrefixIndex};
@@ -171,6 +173,7 @@ pub use override_registry::{
     OverrideProvenance, OverrideRegistry, OverrideRow, OverrideVerdict,
     validate_capability_overrides,
 };
+pub use pool_build::{PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolReport};
 pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions,

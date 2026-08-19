@@ -26,9 +26,9 @@ use crate::quota::window::{Billing, QuotaWindow, Utilization};
 use crate::seat_pool::SeatTarget;
 use std::time::Duration;
 
-const SEAT_PROVIDER: &str = "anthropic";
+const SEAT_POOL: &str = "anthropic-pool";
 const FAST_WINDOW: Duration = Duration::from_hours(5);
-const SEAT_LABELS: [Option<&str>; 3] = [None, Some("seat-b"), Some("seat-c")];
+const SEAT_MEMBERS: [&str; 3] = ["anthropic-a", "anthropic-b", "anthropic-c"];
 
 /// A seat-pinned provider that never dispatches. Every assertion here reads
 /// the resolved CHAIN, so no seat is ever called.
@@ -55,18 +55,18 @@ impl Provider for SeatStub {
     }
 }
 
-fn secret_ref(label: Option<&str>) -> routectl_auth::SecretRef {
+fn secret_ref(member: &str) -> routectl_auth::SecretRef {
     routectl_auth::SecretRef::OAuth {
-        provider: SEAT_PROVIDER.to_string(),
-        label: label.map(str::to_string),
+        provider: member.to_string(),
+        label: None,
     }
 }
 
 /// The store key for one seat, derived through the EXPOSED read-side helper.
 /// A hand-built key would pass whichever key the store happened to use, which
 /// is exactly the silently-green failure this feature has to avoid.
-fn seat_key(label: Option<&str>) -> SeatKey {
-    seat_key_for_secret_ref(Some(&secret_ref(label))).expect("an oauth ref yields a key")
+fn seat_key(member: &str) -> SeatKey {
+    seat_key_for_secret_ref(Some(&secret_ref(member))).expect("an oauth ref yields a key")
 }
 
 /// A three-seat `StickyLeastLoaded` pool on one Anthropic provider, with
@@ -79,28 +79,28 @@ fn pooled_router(quota_enabled: bool) -> Router {
 /// `seat_quota.enabled` as given.
 fn pooled_router_with_selection(selection: SeatSelection, quota_enabled: bool) -> Router {
     let mut seats: Vec<SeatTarget> = Vec::new();
-    for label in SEAT_LABELS {
+    let mut providers = BTreeMap::new();
+    for member in SEAT_MEMBERS {
         let provider: Arc<dyn Provider> = Arc::new(SeatStub {
-            id: format!("anthropic-{}", label.unwrap_or("default")),
+            id: member.to_string(),
         });
         seats.push(SeatTarget {
-            label: label.map(str::to_string),
-            state_key: crate::seat_pool::seat_state_key("opus", label),
+            provider_name: member.to_string(),
             provider,
-            auth_secret_ref: Some(secret_ref(label)),
+            auth_secret_ref: Some(secret_ref(member)),
         });
+        providers.insert(
+            member.to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
     }
     let default_provider = seats[0].provider.clone();
 
-    let mut providers = BTreeMap::new();
-    providers.insert(
-        SEAT_PROVIDER.to_string(),
-        ProviderEntry::anthropic_api(format!("oauth://{SEAT_PROVIDER}")),
-    );
     let mut pools = BTreeMap::new();
     pools.insert(
-        format!("{SEAT_PROVIDER}-pool"),
-        PoolEntry::new(vec![SEAT_PROVIDER.to_string()]).with_seat_selection(selection),
+        SEAT_POOL.to_string(),
+        PoolEntry::new(SEAT_MEMBERS.iter().map(|m| (*m).to_string()).collect())
+            .with_seat_selection(selection),
     );
     let mut cfg = Config {
         providers,
@@ -110,7 +110,7 @@ fn pooled_router_with_selection(selection: SeatSelection, quota_enabled: bool) -
     cfg.seat_quota.enabled = quota_enabled;
 
     let mut router = Router::new(Arc::new(cfg));
-    let model = ResolvedModel::new("opus", SEAT_PROVIDER, default_provider, "claude-opus-4-7")
+    let model = ResolvedModel::new("opus", SEAT_POOL, default_provider, "claude-opus-4-7")
         .with_seats(Arc::from(seats));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert("opus".to_string(), Arc::new(model));
@@ -118,10 +118,10 @@ fn pooled_router_with_selection(selection: SeatSelection, quota_enabled: bool) -
     router
 }
 
-/// Store one FAST reading per `(label, utilization)` pair, observed now.
-fn seed_readings(router: &Router, readings: &[(Option<&str>, f64)]) {
+/// Store one FAST reading per `(member, utilization)` pair, observed now.
+fn seed_readings(router: &Router, readings: &[(&str, f64)]) {
     let observed = ObservationStamp::now();
-    for (label, fraction) in readings {
+    for (member, fraction) in readings {
         let reset_at = accept_reset(
             std::time::SystemTime::now() + FAST_WINDOW / 2,
             &observed,
@@ -130,7 +130,7 @@ fn seed_readings(router: &Router, readings: &[(Option<&str>, f64)]) {
         )
         .expect("a reset inside the window is accepted");
         let stored = router.quota_store.observe(
-            &seat_key(*label),
+            &seat_key(member),
             QuotaSnapshot {
                 observed,
                 fast: QuotaWindow::Known {
@@ -174,13 +174,13 @@ fn a_birth_pick_lands_on_the_emptiest_below_cap_seat() {
     // Arrange: every seat tied on RPM (none configured), so only quota can
     // move the pick off the rotation's choice.
     let router = pooled_router(true);
-    seed_readings(&router, &[(None, 0.40), (Some("seat-b"), 0.05)]);
+    seed_readings(&router, &[("anthropic-a", 0.40), ("anthropic-b", 0.05)]);
 
     // Act
     let home = home_of(&router, "S");
 
     // Assert: the emptiest KNOWN seat, not the rotation's seat 0.
-    assert_eq!(home, "opus#seat-b");
+    assert_eq!(home, "opus#anthropic-b");
 }
 
 #[test]
@@ -188,9 +188,9 @@ fn a_known_empty_seat_beats_the_seats_with_no_reading() {
     // The signal the feature exists to use: seat-c has never reported, and a
     // seat known to be nearly empty must win over it rather than the reverse.
     let router = pooled_router(true);
-    seed_readings(&router, &[(Some("seat-c"), 0.02)]);
+    seed_readings(&router, &[("anthropic-c", 0.02)]);
 
-    assert_eq!(home_of(&router, "S"), "opus#seat-c");
+    assert_eq!(home_of(&router, "S"), "opus#anthropic-c");
 }
 
 #[test]
@@ -199,14 +199,14 @@ fn a_healthy_pin_is_never_moved_by_a_capped_reading() {
     // is reported FULL while a sibling reports empty. The session must stay:
     // a soft cap never costs a warm prompt cache.
     let router = pooled_router(true);
-    seed_readings(&router, &[(Some("seat-b"), 0.05)]);
-    assert_eq!(home_of(&router, "S"), "opus#seat-b");
+    seed_readings(&router, &[("anthropic-b", 0.05)]);
+    assert_eq!(home_of(&router, "S"), "opus#anthropic-b");
 
-    seed_readings(&router, &[(Some("seat-b"), 1.0), (Some("seat-c"), 0.0)]);
+    seed_readings(&router, &[("anthropic-b", 1.0), ("anthropic-c", 0.0)]);
 
     assert_eq!(
         home_of(&router, "S"),
-        "opus#seat-b",
+        "opus#anthropic-b",
         "a pinned over-cap session runs to actual exhaustion rather than migrating"
     );
 }
@@ -218,7 +218,7 @@ fn a_keyless_request_places_by_cap_and_creates_no_pin() {
     // places by remaining budget. It still mints no pin: there is no key to
     // pin under. The emptiest seat therefore LEADS the walk.
     let router = pooled_router(true);
-    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+    seed_readings(&router, &[("anthropic-c", 0.0)]);
 
     let order: Vec<String> = router
         .dispatch_chain("opus", None)
@@ -229,7 +229,7 @@ fn a_keyless_request_places_by_cap_and_creates_no_pin() {
 
     assert_eq!(
         order.first().map(String::as_str),
-        Some("opus#seat-c"),
+        Some("opus#anthropic-c"),
         "the only seat with a fresh below-cap reading must lead a keyless walk"
     );
     assert_eq!(
@@ -256,7 +256,10 @@ fn a_keyless_request_falls_back_to_the_unchanged_walk_without_quota_evidence() {
         .map(|t| t.state_key)
         .collect();
 
-    assert_eq!(order, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+    assert_eq!(
+        order,
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
+    );
 }
 
 #[test]
@@ -264,7 +267,7 @@ fn a_keyless_request_with_the_switch_off_keeps_the_unchanged_walk() {
     // OFF must not consult quota for a keyless request either, so a reading
     // that would otherwise lead the walk changes nothing.
     let router = pooled_router(false);
-    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+    seed_readings(&router, &[("anthropic-c", 0.0)]);
 
     let order: Vec<String> = router
         .dispatch_chain("opus", None)
@@ -273,7 +276,10 @@ fn a_keyless_request_with_the_switch_off_keeps_the_unchanged_walk() {
         .map(|t| t.state_key)
         .collect();
 
-    assert_eq!(order, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+    assert_eq!(
+        order,
+        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
+    );
 }
 
 #[test]
@@ -283,10 +289,14 @@ fn an_all_capped_pool_still_places_and_takes_the_most_remaining() {
     let router = pooled_router(true);
     seed_readings(
         &router,
-        &[(None, 0.99), (Some("seat-b"), 0.70), (Some("seat-c"), 0.85)],
+        &[
+            ("anthropic-a", 0.99),
+            ("anthropic-b", 0.70),
+            ("anthropic-c", 0.85),
+        ],
     );
 
-    assert_eq!(home_of(&router, "S"), "opus#seat-b");
+    assert_eq!(home_of(&router, "S"), "opus#anthropic-b");
 }
 
 // ---- placement OFF: byte-identity at the birth-chooser boundary ----
@@ -305,13 +315,21 @@ fn off_is_byte_identical_to_a_chooser_with_no_quota_state() {
     for readings in [
         // A pool whose quota evidence would have moved the pick: one seat far
         // emptier than the rotation's choice.
-        vec![(None, 0.90), (Some("seat-b"), 0.01), (Some("seat-c"), 0.50)],
+        vec![
+            ("anthropic-a", 0.90),
+            ("anthropic-b", 0.01),
+            ("anthropic-c", 0.50),
+        ],
         // A pool where every seat is over cap.
-        vec![(None, 0.99), (Some("seat-b"), 0.70), (Some("seat-c"), 0.85)],
+        vec![
+            ("anthropic-a", 0.99),
+            ("anthropic-b", 0.70),
+            ("anthropic-c", 0.85),
+        ],
         // A partially observed pool -- the mixed arm.
-        vec![(Some("seat-b"), 0.95)],
+        vec![("anthropic-b", 0.95)],
         // A single below-cap seat, the strongest possible pull off seat 0.
-        vec![(Some("seat-c"), 0.0)],
+        vec![("anthropic-c", 0.0)],
     ] {
         let off = pooled_router(false);
         seed_readings(&off, &readings);
@@ -335,7 +353,7 @@ fn off_agrees_with_the_baseline_on_the_pin_it_writes() {
     // different home would be a different pin and every later turn of the
     // conversation would diverge.
     let off = pooled_router(false);
-    seed_readings(&off, &[(Some("seat-c"), 0.0)]);
+    seed_readings(&off, &[("anthropic-c", 0.0)]);
     let baseline = pooled_router(true);
 
     let _ = chain_order(&off, "S");
@@ -354,13 +372,13 @@ fn off_keeps_collecting_and_aging_observations() {
     // being APPLIED and nothing else. The store keeps accepting and keeps
     // expiring, so re-enabling is instant rather than a re-observe.
     let router = pooled_router(false);
-    seed_readings(&router, &[(Some("seat-b"), 0.05)]);
+    seed_readings(&router, &[("anthropic-b", 0.05)]);
     let _ = chain_order(&router, "S");
 
     // Collected while off.
     let reading = router
         .quota_store
-        .reading_for(&seat_key(Some("seat-b")), &ObservationStamp::now())
+        .reading_for(&seat_key("anthropic-b"), &ObservationStamp::now())
         .expect("the store accepted the observation while the switch was off");
     assert!(matches!(reading.fast, QuotaWindow::Known { .. }));
 
@@ -372,7 +390,7 @@ fn off_keeps_collecting_and_aging_observations() {
     );
     let aged = router
         .quota_store
-        .reading_for(&seat_key(Some("seat-b")), &past_reset)
+        .reading_for(&seat_key("anthropic-b"), &past_reset)
         .expect("the entry survives; its window does not");
     assert_eq!(aged.fast, QuotaWindow::Unknown);
 }
@@ -385,12 +403,15 @@ fn off_preserves_the_one_time_migration_off_an_unhealthy_seat() {
     // stranded on a dead seat.
     let router = pooled_router(false);
     let home = home_of(&router, "S");
-    assert_eq!(home, "opus", "the rotation's birth pick with no quota");
+    assert_eq!(
+        home, "opus#anthropic-a",
+        "the rotation's birth pick with no quota"
+    );
 
     // Park the pinned home so it is no longer dispatchable.
     router
         .state
-        .get("opus")
+        .get("opus#anthropic-a")
         .expect("the home seat has a state slot")
         .lock()
         .force_open(std::time::Instant::now(), Duration::from_mins(5));
@@ -398,7 +419,7 @@ fn off_preserves_the_one_time_migration_off_an_unhealthy_seat() {
     let migrated = home_of(&router, "S");
 
     assert_ne!(
-        migrated, "opus",
+        migrated, "opus#anthropic-a",
         "an unhealthy home must still migrate once with the switch off"
     );
 }
@@ -409,7 +430,7 @@ fn off_emits_no_quota_placement_diagnostic() {
     // turned the feature off would still see it deciding. The dormant arm is
     // deliberately uncounted for the same reason.
     let router = pooled_router(false);
-    seed_readings(&router, &[(Some("seat-b"), 0.05)]);
+    seed_readings(&router, &[("anthropic-b", 0.05)]);
 
     let _ = chain_order(&router, "S");
 
@@ -430,7 +451,7 @@ fn off_emits_no_quota_placement_diagnostic() {
 fn each_partition_arm_is_counted_on_a_real_birth_pick() {
     // Arrange: a below-cap pick.
     let below = pooled_router(true);
-    seed_readings(&below, &[(Some("seat-b"), 0.05)]);
+    seed_readings(&below, &[("anthropic-b", 0.05)]);
     let _ = chain_order(&below, "S");
     assert_eq!(below.metrics.quota_placement_totals().below_cap, 1);
 
@@ -438,14 +459,18 @@ fn each_partition_arm_is_counted_on_a_real_birth_pick() {
     let capped = pooled_router(true);
     seed_readings(
         &capped,
-        &[(None, 0.99), (Some("seat-b"), 0.70), (Some("seat-c"), 0.85)],
+        &[
+            ("anthropic-a", 0.99),
+            ("anthropic-b", 0.70),
+            ("anthropic-c", 0.85),
+        ],
     );
     let _ = chain_order(&capped, "S");
     assert_eq!(capped.metrics.quota_placement_totals().all_capped, 1);
 
     // A mixed capped-known / unknown fall-through.
     let mixed = pooled_router(true);
-    seed_readings(&mixed, &[(None, 0.99)]);
+    seed_readings(&mixed, &[("anthropic-a", 0.99)]);
     let _ = chain_order(&mixed, "S");
     assert_eq!(mixed.metrics.quota_placement_totals().mixed_unknown, 1);
 
@@ -460,7 +485,7 @@ fn the_selection_decision_vocabulary_is_unchanged_by_quota() {
     // Quota changes WHICH seat wins inside the existing birth path and never
     // the persisted, operator-documented decision vocabulary.
     let router = pooled_router(true);
-    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+    seed_readings(&router, &[("anthropic-c", 0.0)]);
 
     let decisions: Vec<Option<&'static str>> = router
         .dispatch_chain("opus", Some("S"))
@@ -488,7 +513,11 @@ fn a_keyless_walk_leads_with_the_emptiest_of_several_below_cap_seats() {
     let router = pooled_router(true);
     seed_readings(
         &router,
-        &[(None, 0.40), (Some("seat-b"), 0.05), (Some("seat-c"), 0.30)],
+        &[
+            ("anthropic-a", 0.40),
+            ("anthropic-b", 0.05),
+            ("anthropic-c", 0.30),
+        ],
     );
 
     let order: Vec<String> = router
@@ -500,7 +529,7 @@ fn a_keyless_walk_leads_with_the_emptiest_of_several_below_cap_seats() {
 
     assert_eq!(
         order.first().map(String::as_str),
-        Some("opus#seat-b"),
+        Some("opus#anthropic-b"),
         "among several below-cap seats the walk must lead with the most remaining, \
          not with whichever the fixed order happens to reach first"
     );
@@ -528,7 +557,7 @@ struct Engagement {
 /// cannot.
 fn engagement_of(selection: SeatSelection, keyed: bool) -> Engagement {
     let router = pooled_router_with_selection(selection, true);
-    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+    seed_readings(&router, &[("anthropic-c", 0.0)]);
 
     let _ = router
         .dispatch_chain("opus", if keyed { Some("S") } else { None })
@@ -627,12 +656,12 @@ fn fill_first_stays_at_seat_zero_with_a_reading_that_would_move_a_sticky_pool() 
     // fill-first pool draining seat 0, request after request. Its contract is
     // the drain order itself, not a placement.
     let router = pooled_router_with_selection(SeatSelection::FillFirst, true);
-    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+    seed_readings(&router, &[("anthropic-c", 0.0)]);
 
     for _ in 0..3 {
         assert_eq!(
             chain_order(&router, "S"),
-            ["opus", "opus#seat-b", "opus#seat-c"]
+            ["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
         );
     }
 }
@@ -643,22 +672,22 @@ fn round_robin_still_advances_per_request_with_quota_readings_present() {
     // repeated requests under one session key must keep rotating -- and a
     // below-cap reading must not reorder the walk.
     let router = pooled_router_with_selection(SeatSelection::RoundRobin, true);
-    seed_readings(&router, &[(Some("seat-c"), 0.0)]);
+    seed_readings(&router, &[("anthropic-c", 0.0)]);
 
     assert_eq!(
         chain_order(&router, "S"),
-        ["opus", "opus#seat-b", "opus#seat-c"]
+        ["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
     assert_eq!(
         chain_order(&router, "S"),
-        ["opus#seat-b", "opus#seat-c", "opus"]
+        ["opus#anthropic-b", "opus#anthropic-c", "opus#anthropic-a"]
     );
     assert_eq!(
         chain_order(&router, "S"),
-        ["opus#seat-c", "opus", "opus#seat-b"]
+        ["opus#anthropic-c", "opus#anthropic-a", "opus#anthropic-b"]
     );
     assert_eq!(
         chain_order(&router, "S"),
-        ["opus", "opus#seat-b", "opus#seat-c"]
+        ["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
 }

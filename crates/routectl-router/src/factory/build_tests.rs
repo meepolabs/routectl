@@ -17,6 +17,7 @@ mod build_resolved_models_tests {
     use routectl_auth::MemoryStore;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn config_with_models(
         providers: Vec<(&str, ProviderEntry)>,
@@ -404,16 +405,17 @@ mod build_resolved_models_tests {
         assert!(haiku.stream_first_byte_timeout_ms.is_none());
     }
 
-    /// Stub store that reports a fixed list of OAuth seats for any bare
-    /// pool ref. `get`/`set`/`delete` are unused by these build-time
-    /// tests (the anthropic-api oauth arm wraps a lazy `ManagedToken`
-    /// rather than resolving a token at build).
-    struct MultiSeatStore {
-        labels: Vec<Option<String>>,
+    /// Store that answers every OAuth ref with a token, and RECORDS every
+    /// `list_seats` call. Pool members are resolved from config alone, so a
+    /// nonzero count is itself the defect: it would mean a bare member ref had
+    /// silently fanned out into every stored seat of that provider again.
+    #[derive(Default)]
+    struct SeatEnumerationSpy {
+        list_seats_calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
-    impl SecretStore for MultiSeatStore {
+    impl SecretStore for SeatEnumerationSpy {
         async fn get(&self, _secret_ref: &SecretRef) -> routectl_core::Result<String> {
             Ok("token".into())
         }
@@ -427,190 +429,329 @@ mod build_resolved_models_tests {
             &self,
             secret_ref: &SecretRef,
         ) -> routectl_core::Result<Vec<SecretRef>> {
-            // A labeled ref pins one seat; mirror the real store.
-            if let SecretRef::OAuth { label: Some(_), .. } = secret_ref {
-                return Ok(vec![secret_ref.clone()]);
-            }
-            let SecretRef::OAuth { provider, .. } = secret_ref else {
+            self.list_seats_calls.fetch_add(1, Ordering::SeqCst);
+            // Two seats, so a caller that DID enumerate would visibly expand.
+            let SecretRef::OAuth {
+                provider,
+                label: None,
+            } = secret_ref
+            else {
                 return Ok(vec![secret_ref.clone()]);
             };
-            Ok(self
-                .labels
-                .iter()
-                .map(|label| SecretRef::OAuth {
+            Ok(vec![
+                secret_ref.clone(),
+                SecretRef::OAuth {
                     provider: provider.clone(),
-                    label: label.clone(),
-                })
-                .collect())
+                    label: Some("stored-sibling".into()),
+                },
+            ])
         }
     }
 
-    #[tokio::test]
-    async fn single_unlabeled_seat_builds_one_target_unchanged() {
-        // Back-compat pin: a bare-pool oauth ref backed by exactly one
-        // (unlabeled/default) seat does NOT expand -- `seats` stays None,
-        // so dispatch builds one target keyed by nickname, byte-for-byte
-        // the pre-pool behavior.
-        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore { labels: vec![None] });
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api("oauth://anthropic")
-                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
-            )],
-            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
+    /// A store whose `get` refuses for one named provider, so exactly one pool
+    /// member fails to build the way an un-logged-in account does.
+    struct OneDeadCredentialStore {
+        dead_provider: String,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for OneDeadCredentialStore {
+        async fn get(&self, secret_ref: &SecretRef) -> routectl_core::Result<String> {
+            if let SecretRef::OAuth { provider, .. } = secret_ref
+                && *provider == self.dead_provider
+            {
+                return Err(routectl_core::Error::Auth(format!(
+                    "no credentials for {provider}; run `routectl login {provider}`"
+                )));
+            }
+            Ok("token".into())
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An oauth-bearer anthropic entry for one account. `auth_kind` matters:
+    /// the oauth-bearer arm wraps a lazy `ManagedToken` rather than resolving
+    /// at build, which is what lets a healthy member build without a store hit.
+    fn oauth_member(provider: &str) -> ProviderEntry {
+        ProviderEntry::anthropic_api(format!("oauth://{provider}"))
+            .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer)
+    }
+
+    /// A config whose `[pools.<pool>]` groups `members`, with one model per
+    /// entry in `models` routed at the pool.
+    fn pooled_config(pool: &str, members: &[&str], models: &[&str]) -> Config {
+        let mut cfg = config_with_models(
+            members.iter().map(|m| (*m, oauth_member(m))).collect(),
+            models
+                .iter()
+                .map(|nick| (*nick, ModelEntry::new(pool, "claude-opus-4-7")))
+                .collect(),
         );
-        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
-            .await
-            .expect("ok");
-        assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        let opus = models.get("opus").expect("opus entry");
-        assert!(
-            opus.seats.is_none(),
-            "single seat must NOT expand into a pool"
+        cfg.pools.insert(
+            pool.to_string(),
+            crate::config::PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect()),
         );
+        cfg
     }
 
     #[tokio::test]
-    async fn pool_with_three_seats_expands_to_three_targets() {
-        // A bare-pool ref backed by three stored seats expands into three
-        // seat targets, each pinned to a distinct labeled SecretRef and a
-        // distinct state_key (default seat first, then sorted labels).
-        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
-            labels: vec![None, Some("seat-b".into()), Some("seat-c".into())],
-        });
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api("oauth://anthropic")
-                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
-            )],
-            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
-        );
-        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+    async fn a_model_naming_a_pool_resolves_to_one_seat_per_member() {
+        // Arrange: a two-member pool, one model routed at it.
+        let store: Arc<dyn SecretStore> = Arc::new(SeatEnumerationSpy::default());
+        let cfg = pooled_config("anthropic-pool", &["anthropic-a", "anthropic-b"], &["opus"]);
+
+        // Act
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect("ok");
-        assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        let opus = models.get("opus").expect("opus entry");
-        let seats = opus.seats.as_ref().expect("three-seat pool must expand");
-        assert_eq!(seats.len(), 3, "expected three seat targets");
+            .expect("a healthy pool builds");
 
-        // Distinct state_keys: default seat is the bare nickname, labeled
-        // seats carry the `#label` suffix.
-        let keys: Vec<&str> = seats.iter().map(|s| s.state_key.as_str()).collect();
-        assert_eq!(keys, vec!["opus", "opus#seat-b", "opus#seat-c"]);
-
-        // Distinct seat-pinned SecretRefs round-tripping through Display.
+        // Assert: one seat per member, each carrying that member's OWN ref.
+        let opus = built
+            .models
+            .get("opus")
+            .expect("opus resolves via the pool");
+        let seats = opus.seats.as_ref().expect("a pool-backed model has seats");
+        assert_eq!(seats.len(), 2);
+        let members: Vec<&str> = seats.iter().map(|s| s.provider_name.as_str()).collect();
+        assert_eq!(members, vec!["anthropic-a", "anthropic-b"]);
         let refs: Vec<String> = seats
             .iter()
-            .map(|s| s.auth_secret_ref.as_ref().unwrap().to_string())
+            .map(|s| s.auth_secret_ref.as_ref().expect("member ref").to_string())
             .collect();
         assert_eq!(
             refs,
-            vec![
-                "oauth://anthropic",
-                "oauth://anthropic#seat-b",
-                "oauth://anthropic#seat-c",
-            ]
+            vec!["oauth://anthropic-a", "oauth://anthropic-b"],
+            "each seat must be built from its own member's api_key_ref"
         );
     }
 
     #[tokio::test]
-    async fn labels_only_pool_builds_each_seat_from_its_own_ref() {
-        // Regression pin for the labels-only bug: a pool with NO bare
-        // default seat (operator ran `login anthropic --label a` / `--label
-        // b` only) puts a LABELED seat at index 0. Seat 0 must build from
-        // its OWN pinned ref (`oauth://anthropic#a`), NOT inherit the bare,
-        // credential-less provider the model was built from. The old
-        // `idx == 0` reuse silently bound seat 0 to the bare provider.
-        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
-            labels: vec![Some("a".into()), Some("b".into())],
-        });
+    async fn no_pool_member_enumerates_stored_seats() {
+        // THE bare-ref rule, on the pool path: membership is declared in
+        // config, so a bare member ref means that account's default seat and
+        // nothing else. Enumerating would silently re-expand one member into
+        // every stored seat of its provider.
+        let spy = Arc::new(SeatEnumerationSpy::default());
+        let store: Arc<dyn SecretStore> = spy.clone();
+        let cfg = pooled_config("anthropic-pool", &["anthropic-a", "anthropic-b"], &["opus"]);
+
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect("a healthy pool builds");
+
+        assert_eq!(
+            spy.list_seats_calls.load(Ordering::SeqCst),
+            0,
+            "the pool path must never call list_seats"
+        );
+        assert_eq!(
+            built.models["opus"].seats.as_ref().expect("seats").len(),
+            2,
+            "two members means two seats, not two members times two stored seats"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_ref_on_a_standalone_provider_no_longer_expands() {
+        // The non-pool routing rule: a bare `oauth://<provider>` on a plain
+        // `[providers.X]` entry resolves to the DEFAULT seat only. The store
+        // below reports a stored sibling, so the pre-change behavior would
+        // have produced a two-seat pool here.
+        let spy = Arc::new(SeatEnumerationSpy::default());
+        let store: Arc<dyn SecretStore> = spy.clone();
         let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api("oauth://anthropic")
-                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
-            )],
+            vec![("anthropic", oauth_member("anthropic"))],
             vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
         );
-        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+
+        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
             .await
             .expect("ok");
+
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        let opus = models.get("opus").expect("opus entry");
-        let seats = opus.seats.as_ref().expect("labels-only pool must expand");
-        assert_eq!(seats.len(), 2, "expected two labeled seat targets");
+        assert!(
+            models["opus"].seats.is_none(),
+            "a bare ref on a standalone provider must resolve to one target, \
+             not fan out across stored seats"
+        );
+        assert_eq!(
+            spy.list_seats_calls.load(Ordering::SeqCst),
+            0,
+            "the non-pool path must no longer enumerate stored seats at all"
+        );
+    }
 
-        // Labels-only: index 0 is the FIRST LABELED seat -- no bare `opus`
-        // state_key, no bare `oauth://anthropic` ref.
-        let keys: Vec<&str> = seats.iter().map(|s| s.state_key.as_str()).collect();
-        assert_eq!(keys, vec!["opus#a", "opus#b"]);
-        let refs: Vec<String> = seats
-            .iter()
-            .map(|s| s.auth_secret_ref.as_ref().unwrap().to_string())
-            .collect();
-        assert_eq!(refs, vec!["oauth://anthropic#a", "oauth://anthropic#b"]);
+    #[tokio::test]
+    async fn two_models_on_one_pool_share_one_seat_set() {
+        // The sharing contract, pinned by Arc identity rather than equal
+        // contents: equal contents would also hold if each model had rebuilt
+        // its own copy of every member's provider.
+        let store: Arc<dyn SecretStore> = Arc::new(SeatEnumerationSpy::default());
+        let cfg = pooled_config(
+            "anthropic-pool",
+            &["anthropic-a", "anthropic-b"],
+            &["opus", "sonnet"],
+        );
 
-        // The fix: NO labeled seat reuses the bare-ref provider the model
-        // was built from. With the old `idx == 0` reuse, seat 0 would be
-        // pointer-equal to `opus.provider` (the bare, credential-less
-        // build) and silently resolve the wrong identity at request time.
-        for seat in seats.iter() {
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect("a healthy pool builds");
+
+        let opus_seats = built.models["opus"].seats.as_ref().expect("opus seats");
+        let sonnet_seats = built.models["sonnet"].seats.as_ref().expect("sonnet seats");
+        assert!(
+            Arc::ptr_eq(opus_seats, sonnet_seats),
+            "both models must share ONE compiled seat set"
+        );
+        // And therefore each member's provider was built exactly once.
+        for (a, b) in opus_seats.iter().zip(sonnet_seats.iter()) {
             assert!(
-                !Arc::ptr_eq(&opus.provider, &seat.provider),
-                "labels-only seat {} must be built from its own ref, not the bare provider",
-                seat.state_key,
+                Arc::ptr_eq(&a.provider, &b.provider),
+                "member {} must not be built twice",
+                a.provider_name,
             );
         }
     }
 
     #[tokio::test]
-    async fn explicitly_labeled_ref_does_not_expand() {
-        // A model whose api_key_ref already pins a seat
-        // (`oauth://anthropic#seat-b`) builds exactly one target -- the
-        // operator selected the seat, so there is no pool to expand.
-        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
-            labels: vec![None, Some("seat-b".into()), Some("seat-c".into())],
+    async fn a_pool_with_one_dead_member_serves_through_the_survivor() {
+        // Degraded, not failed: the pool keeps serving and reports exactly the
+        // member it lost, with an allowlisted reason.
+        let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
+            dead_provider: "anthropic-b".into(),
         });
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api("oauth://anthropic#seat-b")
-                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
-            )],
-            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
-        );
-        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+        let cfg = pooled_config("anthropic-pool", &["anthropic-a", "anthropic-b"], &["opus"]);
+
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect("ok");
-        assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        let opus = models.get("opus").expect("opus entry");
-        assert!(
-            opus.seats.is_none(),
-            "an explicitly-labeled ref must NOT expand into a pool"
+            .expect("a degraded pool must still build");
+
+        let seats = built.models["opus"].seats.as_ref().expect("seats");
+        assert_eq!(seats.len(), 1, "the survivor serves");
+        assert_eq!(seats[0].provider_name, "anthropic-a");
+
+        let report = built
+            .pool_reports
+            .iter()
+            .find(|r| r.pool == "anthropic-pool")
+            .expect("the pool reports");
+        assert!(report.is_degraded());
+        assert_eq!(report.configured_members, 2);
+        assert_eq!(report.usable_members, 1);
+        assert_eq!(report.omissions.len(), 1, "exactly one member omitted");
+        assert_eq!(report.omissions[0].member, "anthropic-b");
+        assert_eq!(
+            report.omissions[0].reason,
+            crate::pool_build::PoolOmissionReason::CredentialUnreadable
         );
+        assert_eq!(report.omissions[0].provider_kind, "anthropic-api");
     }
 
     #[tokio::test]
-    async fn non_oauth_ref_does_not_expand() {
-        // Back-compat: a literal/env/file ref never pools, even if a
-        // (misconfigured) store reported multiple seats for it.
-        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
-            labels: vec![None, Some("seat-b".into())],
+    async fn an_omission_report_carries_no_store_error_text() {
+        // The report reaches a log field AND an operator-facing surface, so an
+        // error string routed into it would publish whatever the store put in
+        // its message -- here a provider id plus login guidance, elsewhere a
+        // credential path or account id. Anchored on the SHIPPED report, not on
+        // a Debug projection of it.
+        let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
+            dead_provider: "anthropic-b".into(),
         });
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
-            )],
-            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
+        let cfg = pooled_config("anthropic-pool", &["anthropic-a", "anthropic-b"], &["opus"]);
+
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect("a degraded pool must still build");
+
+        let omission = &built.pool_reports[0].omissions[0];
+        assert_eq!(
+            omission.reason.token(),
+            "credential_unreadable",
+            "the reason must be one of the four allowlisted tokens"
         );
-        let (models, _) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+        // Every field of the shipped omission, concatenated: nothing but the
+        // member key, the kind token, and the reason token may appear.
+        let shipped = format!(
+            "{}|{}|{}",
+            omission.member,
+            omission.provider_kind,
+            omission.reason.token()
+        );
+        for banned in ["routectl login", "no credentials", "token", "oauth://"] {
+            assert!(
+                !shipped.contains(banned),
+                "shipped omission must not carry `{banned}`: {shipped}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pool_with_no_usable_member_fails_the_build_naming_pool_and_model() {
+        // Zero usable members behind a selectable model is unroutable, so the
+        // build refuses rather than starting healthy and failing at first
+        // traffic. Also the reload contract: a candidate build that returns Err
+        // is discarded by every caller, leaving the previous router live.
+        let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
+            dead_provider: "anthropic-a".into(),
+        });
+        let cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["opus"]);
+
+        let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect_err("a zero-usable pool must refuse the build");
+
+        let msg = err.to_string();
+        assert!(msg.contains("anthropic-pool"), "must name the pool: {msg}");
+        assert!(msg.contains("opus"), "must name the model: {msg}");
+    }
+
+    #[tokio::test]
+    async fn a_model_naming_neither_a_provider_nor_a_pool_is_reported_failed() {
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![("anthropic", oauth_member("anthropic"))],
+            vec![("opus", ModelEntry::new("nonesuch", "claude-opus-4-7"))],
+        );
+
+        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
             .await
             .expect("ok");
-        let opus = models.get("opus").expect("opus entry");
-        assert!(opus.seats.is_none(), "a non-oauth ref must never pool");
+
+        assert!(models.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].1.contains("nonesuch"), "{:?}", failed[0]);
+    }
+
+    #[tokio::test]
+    async fn a_pool_backed_model_keeps_its_model_level_knobs() {
+        // The two resolution paths share one knob applier; without that a knob
+        // would silently not apply to pool-backed models, and the omission
+        // would read exactly like the knob being unset.
+        let store: Arc<dyn SecretStore> = Arc::new(SeatEnumerationSpy::default());
+        let mut cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["opus"]);
+        cfg.models.insert(
+            "opus".into(),
+            ModelEntry::new("anthropic-pool", "claude-opus-4-7")
+                .with_reported_model("public-label")
+                .with_visible_routectl_provider(false),
+        );
+
+        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
+            .await
+            .expect("a healthy pool builds");
+
+        let opus = &built.models["opus"];
+        assert_eq!(opus.reported_model.as_deref(), Some("public-label"));
+        assert!(!opus.visible_routectl_provider);
+        assert_eq!(
+            opus.provider_name, "anthropic-pool",
+            "the model keeps the operator-written pool name"
+        );
     }
 
     // -------------------------------------------------------------------

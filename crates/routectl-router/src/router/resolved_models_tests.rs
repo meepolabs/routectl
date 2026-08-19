@@ -104,8 +104,7 @@ fn reported_model_survives_config_resolved_dispatch_relay() {
     assert_eq!(direct.reported_model.as_deref(), Some("public-label"));
 
     let seat = crate::seat_pool::SeatTarget {
-        label: Some("seat-a".into()),
-        state_key: "m1#seat-a".into(),
+        provider_name: "seat-a".to_string(),
         provider: p.clone(),
         auth_secret_ref: None,
     };
@@ -138,8 +137,7 @@ fn visible_routectl_provider_survives_config_resolved_dispatch_relay() {
     assert!(!direct.visible_routectl_provider);
 
     let seat = crate::seat_pool::SeatTarget {
-        label: Some("seat-a".into()),
-        state_key: "m1#seat-a".into(),
+        provider_name: "seat-a".to_string(),
         provider: p.clone(),
         auth_secret_ref: None,
     };
@@ -165,26 +163,22 @@ fn seat_dispatch_target_carries_provider_kind() {
         id: "test-prov".into(),
         calls: AtomicUsize::new(0),
     });
-    let seats: Vec<crate::seat_pool::SeatTarget> = ["seat-a", "seat-b"]
-        .iter()
-        .map(|label| crate::seat_pool::SeatTarget {
-            label: Some((*label).to_string()),
-            state_key: crate::seat_pool::seat_state_key("nick", Some(label)),
-            provider: provider.clone(),
-            auth_secret_ref: None,
-        })
-        .collect();
+    let seats = vec![crate::seat_pool::SeatTarget {
+        provider_name: "test-prov".to_string(),
+        provider: provider.clone(),
+        auth_secret_ref: None,
+    }];
     let model = Arc::new(
         ResolvedModel::new("nick", "test-prov", provider, "claude-x").with_seats(seats.into()),
     );
 
     let targets = router.expand_chain_to_targets(vec![model], None);
-    assert_eq!(targets.len(), 2, "one dispatch target per seat");
+    assert_eq!(targets.len(), 1, "one dispatch target per seat");
     for target in &targets {
         assert_eq!(
             target.provider_kind,
             Some("anthropic-api"),
-            "seat target must carry the configured provider kind",
+            "seat target must carry its member entry's provider kind",
         );
     }
 }
@@ -533,27 +527,26 @@ impl Provider for StreamingProvider {
 /// optional `reported_model` override is threaded onto the model.
 fn router_with_pooled_model(
     nickname: &str,
-    provider_name: &str,
+    pool_name: &str,
     upstream: &str,
     provider: Arc<dyn Provider>,
-    seat_labels: &[&str],
+    members: &[&str],
     reported_model: Option<&str>,
 ) -> Router {
     let cfg = Arc::new(Config::default());
     let mut router = Router::new(cfg);
 
-    let seats: Vec<crate::seat_pool::SeatTarget> = seat_labels
+    let seats: Vec<crate::seat_pool::SeatTarget> = members
         .iter()
-        .map(|label| crate::seat_pool::SeatTarget {
-            label: Some((*label).to_string()),
-            state_key: crate::seat_pool::seat_state_key(nickname, Some(label)),
+        .map(|member| crate::seat_pool::SeatTarget {
+            provider_name: (*member).to_string(),
             provider: provider.clone(),
             auth_secret_ref: None,
         })
         .collect();
 
     let mut resolved =
-        ResolvedModel::new(nickname, provider_name, provider, upstream).with_seats(seats.into());
+        ResolvedModel::new(nickname, pool_name, provider, upstream).with_seats(seats.into());
     if let Some(label) = reported_model {
         resolved = resolved.with_reported_model(label);
     }
@@ -724,22 +717,31 @@ async fn status_targets_one_entry_per_seat_for_pooled() {
     });
     let router = router_with_pooled_model(
         "opus",
-        "anthropic-oauth",
+        "anthropic-pool",
         "claude-opus-4-7-wire",
         p.clone(),
-        &["seat-a", "seat-b"],
+        &["anthropic-a", "anthropic-b"],
         None,
     );
     let targets = router.status_targets(Instant::now());
     assert_eq!(targets.len(), 2, "one entry per seat of a pooled model");
     let mut keys: Vec<&str> = targets.iter().map(|t| t.state_key.as_str()).collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["opus#seat-a", "opus#seat-b"]);
+    assert_eq!(keys, vec!["opus#anthropic-a", "opus#anthropic-b"]);
+    let mut members: Vec<&str> = targets.iter().map(|t| t.provider_name.as_str()).collect();
+    members.sort_unstable();
+    assert_eq!(
+        members,
+        vec!["anthropic-a", "anthropic-b"],
+        "a seat entry names the MEMBER it dispatches, not the pool"
+    );
     for t in &targets {
         assert_eq!(t.nickname, "opus");
-        assert_eq!(t.provider_name, "anthropic-oauth");
         assert_eq!(t.upstream, "claude-opus-4-7-wire");
-        assert!(t.seat_label.is_some(), "seat entries carry a label");
+        assert!(
+            t.seat_label.is_some(),
+            "seat entries carry their member identity"
+        );
     }
 }
 

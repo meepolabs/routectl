@@ -120,31 +120,37 @@ fn pooled_two_seat_router(
 ) -> Router {
     let seats = vec![
         SeatTarget {
-            label: None,
-            state_key: crate::seat_pool::seat_state_key("opus", None),
+            provider_name: "anthropic-a".to_string(),
             provider: default_provider.clone(),
             auth_secret_ref: None,
         },
         SeatTarget {
-            label: Some("seat-b".into()),
-            state_key: crate::seat_pool::seat_state_key("opus", Some("seat-b")),
+            provider_name: "anthropic-b".to_string(),
             provider: seat_b_provider,
             auth_secret_ref: None,
         },
     ];
 
     let mut providers = BTreeMap::new();
-    providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
+    for member in ["anthropic-a", "anthropic-b"] {
+        providers.insert(
+            member.to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
+    }
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        "anthropic-pool".to_string(),
+        crate::config::PoolEntry::new(vec!["anthropic-a".into(), "anthropic-b".into()]),
     );
     let cfg = Arc::new(Config {
         providers,
+        pools,
         ..Config::default()
     });
 
     let mut router = Router::new(cfg);
-    let model = ResolvedModel::new("opus", "anthropic", default_provider, "claude-opus")
+    let model = ResolvedModel::new("opus", "anthropic-pool", default_provider, "claude-opus")
         .with_seats(Arc::from(seats));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert("opus".to_string(), Arc::new(model));
@@ -182,7 +188,7 @@ async fn complete_probe_fails_over_to_sibling_seat_on_429() {
         .complete(probe_req("opus"))
         .await
         .expect("probe must fail over to the healthy sibling seat");
-    assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
+    assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-b"));
     assert_eq!(
         a_calls.load(Ordering::SeqCst),
         1,
