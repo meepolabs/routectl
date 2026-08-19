@@ -8,14 +8,15 @@
 //! copied the block out of the docs; with it, the docs and the schema drift
 //! apart at commit time instead.
 //!
-//! Sources: `docs/CONFIGURATION.md` (every fenced ```toml block) and
-//! `examples/config.toml` (whole file). Both are `include_str!`d, so moving
-//! or renaming either one is a compile error rather than a silently skipped
-//! check.
+//! Sources: `docs/CONFIGURATION.md` and `README.md` (every fenced ```toml
+//! block) and `examples/config.toml` (whole file). All three are
+//! `include_str!`d, so moving or renaming any of them is a compile error
+//! rather than a silently skipped check.
 
 use std::collections::BTreeMap;
 
 const CONFIGURATION_MD: &str = include_str!("../../../docs/CONFIGURATION.md");
+const README_MD: &str = include_str!("../../../README.md");
 const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.toml");
 
 /// Fenced ```toml blocks as `(1-based opening-fence line, body)` pairs, in
@@ -119,5 +120,31 @@ fn the_example_config_provider_blocks_parse_as_the_kind_they_declare() {
     assert!(
         checked >= 4,
         "expected several provider entries in examples/config.toml, found {checked}"
+    );
+}
+
+/// The README quickstart is the FIRST config anyone copies, and it was the
+/// last one nothing checked: it shipped a `reasoning_dialect` on a provider
+/// entry (a `[models.X]` key -- `ProviderEntry` is `deny_unknown_fields`,
+/// so that block never parsed) behind a promise that it was a working
+/// minimal example. Held to the same bar as the reference docs here.
+#[test]
+fn readme_provider_blocks_parse_as_the_kind_they_declare() {
+    let mut checked_blocks = 0usize;
+
+    for (line, body) in toml_blocks(README_MD) {
+        let origin = format!("README.md fenced toml block at line {line}");
+        if assert_blocks_match_schema(&origin, &body) > 0 {
+            checked_blocks += 1;
+        }
+    }
+
+    // The README carries exactly one config block today. Asserting it is
+    // non-zero keeps a fence-scanner or filter regression from leaving this
+    // vacuously green over zero blocks.
+    assert!(
+        checked_blocks >= 1,
+        "expected the README quickstart to carry a provider block, checked \
+         {checked_blocks}"
     );
 }

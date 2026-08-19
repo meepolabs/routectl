@@ -148,7 +148,7 @@ Default config works for Claude 4.5/4.6 / Haiku 4.5. The two times you need extr
 **1M-context beta** (Sonnet 4.5 with 1M context window):
 
 ```toml
-[providers.anthropic]
+[providers.anthropic-api-key]
 kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
@@ -157,7 +157,7 @@ header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
 **OAuth bearer auth** (Claude Code subscription tokens, `sk-ant-oat01-...`):
 
 ```toml
-[providers.anthropic-oauth]
+[providers.anthropic-default]
 kind = "anthropic-api"
 api_key_ref = "file:///path/to/oauth-token"
 auth_kind = "oauth-bearer"
@@ -201,7 +201,7 @@ only when it appears on the per-provider `forward_client_headers`
 allowlist:
 
 ```toml
-[providers.anthropic-managed]
+[providers.anthropic-default]
 kind        = "anthropic-api"
 api_key_ref = "oauth://anthropic"
 forward_client_headers = [

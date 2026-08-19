@@ -301,33 +301,40 @@ staleness_hint_days   = 14      # age past which a verified capability reads as 
 # works / doesn't).
 #
 # `routectl login anthropic` already OFFERS [providers.anthropic-default]
-# above, so the entry itself needs no hand-editing. What it does NOT
-# carry is the claude-code client identity, so MOVE the field lines below
-# UP INTO [providers.anthropic-default] -- uncommenting them where they
-# sit would attach them to whatever table precedes them, not to that
-# entry. Do not create a second entry naming the same `oauth://anthropic`
-# seat either: that makes a later login ambiguous, and it refuses to guess
-# which of the two a pool should grow around.
+# above; what it does NOT carry is the claude-code client identity. Adding
+# it is a three-step edit, in this order, because TOML forbids defining a
+# key or a table twice:
+#
+#   1. Move the two scalar lines below INTO the
+#      [providers.anthropic-default] entry above (uncommenting them where
+#      they sit would attach them to whatever table precedes them).
+#   2. DELETE that entry's inline `header_extras = { "anthropic-beta" =
+#      ... }` line -- the sub-table below replaces it, and the same key
+#      cannot be set both ways.
+#   3. Uncomment the [providers.anthropic-default.header_extras] sub-table
+#      below. It carries the same `anthropic-beta` value the deleted line
+#      did, so nothing is lost. A multi-line inline table (`{ ... }`
+#      spanning lines) is NOT legal TOML, which is why this is a sub-table.
+#
+# Do not create a second provider entry naming the same `oauth://anthropic`
+# seat: that makes a later login ambiguous, and it refuses to guess which
+# of the two a pool should grow around.
 
-# user_agent    = "claude-cli/2.1.143 (external, cli)"
-# forward_client_headers = [
-#     "x-claude-code-session-id",
-#     "x-claude-code-agent-id",
-#     "x-claude-code-parent-agent-id",
-# ]
-# header_extras = {
-#     "anthropic-beta"                            = "claude-code-20250219,oauth-2025-04-20",
-#     "x-app"                                     = "cli",
-#     "anthropic-dangerous-direct-browser-access" = "true",
-#     "x-stainless-arch"                          = "x64",
-#     "x-stainless-lang"                          = "js",
-#     "x-stainless-os"                            = "Linux",
-#     "x-stainless-package-version"               = "0.94.0",
-#     "x-stainless-runtime"                       = "node",
-#     "x-stainless-runtime-version"               = "v24.3.0",
-#     "x-stainless-timeout"                       = "600",
-#     "x-stainless-retry-count"                   = "0",
-# }
+# user_agent = "claude-cli/2.1.143 (external, cli)"
+# forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id", "x-claude-code-parent-agent-id"]
+
+# [providers.anthropic-default.header_extras]
+# "anthropic-beta"                            = "claude-code-20250219,oauth-2025-04-20"
+# "x-app"                                     = "cli"
+# "anthropic-dangerous-direct-browser-access" = "true"
+# "x-stainless-arch"                          = "x64"
+# "x-stainless-lang"                          = "js"
+# "x-stainless-os"                            = "Linux"
+# "x-stainless-package-version"               = "0.94.0"
+# "x-stainless-runtime"                       = "node"
+# "x-stainless-runtime-version"               = "v24.3.0"
+# "x-stainless-timeout"                       = "600"
+# "x-stainless-retry-count"                   = "0"
 
 # Models pointing at the POOL, so a later second seat serves them too.
 # [models.anthropic-haiku]
