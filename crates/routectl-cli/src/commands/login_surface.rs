@@ -106,7 +106,8 @@ impl std::fmt::Display for NothingNote {
     }
 }
 
-/// One config delta: at most one new provider entry, plus one pool action.
+/// One config delta: at most one new provider entry, plus at most one pool
+/// action.
 #[derive(Debug)]
 pub struct SurfaceWrite {
     /// The provider entry to create, or `None` when an entry already
@@ -115,8 +116,13 @@ pub struct SurfaceWrite {
     /// The `[providers.<name>]` key that ends up serving the seat --
     /// either `new_entry`'s name or the matched entry's.
     pub entry_name: String,
-    /// What happens to the pool.
-    pub pool: PoolAction,
+    /// What happens to the pool, or `None` when the pool half was
+    /// deliberately skipped: the family's pool exists but is PINNED, so the
+    /// account entry surfaces while the operator's membership list is left
+    /// exactly as written. `note` says so.
+    pub pool: Option<PoolAction>,
+    /// Why the pool half was skipped, when it was.
+    pub note: Option<NothingNote>,
 }
 
 /// What a [`SurfaceWrite`] does to the pool that groups the family's seats.
@@ -261,7 +267,8 @@ pub fn plan(config: &Config, family: &str, label: Option<&str>) -> Result<Surfac
 }
 
 /// The zero-match arm: a new account entry named by the convention, plus
-/// the pool action its family's config state implies.
+/// the pool action its family's config state implies -- or no pool action at
+/// all when the family's pool is pinned.
 fn plan_fresh_entry(
     config: &Config,
     family: &str,
@@ -279,10 +286,15 @@ fn plan_fresh_entry(
     let entry_name = placement.account.entry_name.clone();
     let block = block.with_entry_name(entry_name.clone());
 
-    let pool = match placement.pool_name {
-        Some(pool) => join_action(config, &pool, &entry_name),
-        None => match create_action(config, family, &entry_name) {
-            Ok(action) => action,
+    // `plan_new_seat` reports a pool ONLY when it is growth-marked, so a
+    // `None` here means either no pool at all or a PINNED one -- and those
+    // two need opposite handling. Distinguishing them is what
+    // `pool_action_for_new_entry` does; conflating them is how a pinned pool
+    // silently grows and gains a marker it never had.
+    let (pool, note) = match placement.pool_name {
+        Some(pool) => (Some(join_action(config, &pool, &entry_name)), None),
+        None => match pool_action_for_new_entry(config, family, &entry_name) {
+            Ok(pair) => pair,
             Err(e) => return Ok(SurfacePlan::Refuse(RefuseReason::Naming(e))),
         },
     };
@@ -290,7 +302,41 @@ fn plan_fresh_entry(
         new_entry: Some(block),
         entry_name,
         pool,
+        note,
     }))
+}
+
+/// The pool half for a seat with no growth-marked pool to join: create the
+/// family pool when none exists, or skip the pool entirely when one exists
+/// but is pinned.
+///
+/// A pinned pool is an operator statement that only an explicit edit grows
+/// it. The account entry still surfaces -- the credential deserves to be
+/// visible in config -- but the membership list and the absent
+/// `accepts_new_logins` marker are both left exactly as written. This
+/// mirrors the one-match arm, which has always refused to auto-join a
+/// pinned pool.
+fn pool_action_for_new_entry(
+    config: &Config,
+    family: &str,
+    member: &str,
+) -> std::result::Result<(Option<PoolAction>, Option<NothingNote>), SeatNamingError> {
+    let plan = plan_pool_materialization(config, family, [])?;
+    if plan.pool_exists {
+        return Ok((
+            None,
+            Some(NothingNote::PinnedPool {
+                pool: plan.pool_name,
+            }),
+        ));
+    }
+    Ok((
+        Some(PoolAction::Create {
+            pool: plan.pool_name,
+            members: vec![member.to_string()],
+        }),
+        None,
+    ))
 }
 
 /// The one-match arm: the entry already consumes the ref, so only its pool
@@ -328,22 +374,36 @@ fn plan_existing_entry(config: &Config, family: &str, entry_name: &str) -> Surfa
     // pool half is perfectly determined -- turning a required join into a
     // pool creation, which makes every later login ambiguous.
     let candidates = growth_pools_for_family(config, family);
-    let pool = match candidates.as_slice() {
-        [] => match create_action(config, family, entry_name) {
-            Ok(action) => action,
+    let (pool, note) = match candidates.as_slice() {
+        // No growth-marked pool: create the family pool, or -- if one
+        // already exists and is pinned -- leave it alone. This arm reaches
+        // `pool_exists == true` whenever an operator pinned the pool their
+        // seat is not yet a member of.
+        [] => match pool_action_for_new_entry(config, family, entry_name) {
+            Ok(pair) => pair,
             Err(e) => return SurfacePlan::Refuse(RefuseReason::Naming(e)),
         },
-        [pool] => join_action(config, pool, entry_name),
+        [pool] => (Some(join_action(config, pool, entry_name)), None),
         _ => {
             return SurfacePlan::Refuse(RefuseReason::Naming(SeatNamingError::AmbiguousPool {
                 pools: candidates,
             }));
         }
     };
+    // With no entry to write and no pool to touch there is no delta at all,
+    // so this is a `Nothing` carrying the pinned note rather than an empty
+    // write.
+    if pool.is_none() {
+        return SurfacePlan::Nothing {
+            entry_name: entry_name.to_string(),
+            note,
+        };
+    }
     SurfacePlan::Write(SurfaceWrite {
         new_entry: None,
         entry_name: entry_name.to_string(),
         pool,
+        note,
     })
 }
 
@@ -362,23 +422,6 @@ fn join_action(config: &Config, pool: &str, member: &str) -> PoolAction {
         pool: pool.to_string(),
         members,
     }
-}
-
-/// Create the family's pool around `member`.
-///
-/// The pool name and its namespace collision check come from
-/// `plan_pool_materialization` with NO seats requested: the entry already
-/// exists (or is planned separately), so only the pool half applies.
-fn create_action(
-    config: &Config,
-    family: &str,
-    member: &str,
-) -> std::result::Result<PoolAction, SeatNamingError> {
-    let plan = plan_pool_materialization(config, family, [])?;
-    Ok(PoolAction::Create {
-        pool: plan.pool_name,
-        members: vec![member.to_string()],
-    })
 }
 
 /// Every pool listing `entry_name` as a member, with that pool's entry, in
@@ -459,7 +502,12 @@ pub fn render_delta(plan: &SurfacePlan) -> String {
         out.push_str(&entry.render());
         out.push('\n');
     }
-    out.push_str(&render_pool_block(&write.pool));
+    // A skipped pool half renders NOTHING -- not an empty block. The caller
+    // prints the pinned note instead, and a rendered block here would show
+    // the operator a pool edit that is deliberately not happening.
+    if let Some(action) = &write.pool {
+        out.push_str(&render_pool_block(action));
+    }
     out
 }
 
@@ -692,6 +740,12 @@ fn surface_against(
 
     let delta = render_delta(&planned);
     println!("\nCredential stored. This config change would route to it:\n\n{delta}");
+    // A write whose pool half was skipped still says WHY, next to the delta
+    // it is qualifying: the operator sees the entry being added and, in the
+    // same breath, that their pinned pool is deliberately not being grown.
+    if let Some(note) = &write.note {
+        println!("{note}.");
+    }
 
     // Everything from here to the confirmation is PRE-acceptance, so a
     // failure is a reported value, never a nonzero exit: nothing was
@@ -732,11 +786,17 @@ fn surface_against(
     })?;
 
     let entry_name = write.entry_name.clone();
+    // A skipped pool half audits as no pool rather than as the pool's name:
+    // the record must not read as though this edit touched it.
+    let pool_field = write
+        .pool
+        .as_ref()
+        .map_or_else(|| "<none>".to_string(), |action| action.pool().to_string());
     tracing::info!(
         surface = "cli",
         verb = "login-config-surface",
         entry = %routectl_core::sanitize_for_log(&entry_name),
-        pool = %routectl_core::sanitize_for_log(write.pool.pool()),
+        pool = %routectl_core::sanitize_for_log(&pool_field),
         config_changed = outcome == EditOutcome::Modified,
         "login config surface committed",
     );
@@ -805,23 +865,26 @@ fn print_availability(config: &Config, entry_name: &str) {
 /// Apply `write` to a config document, in the deterministic order the
 /// commit closure repeats under the lock.
 ///
-/// `accepts_new_logins = true` is set ONLY for a pool this edit creates --
+/// `accepts_new_logins = true` is set ONLY for a pool this edit CREATES --
 /// `upsert_pool_members` deliberately leaves the marker alone, and flipping
-/// an operator's `false` would grow a pool they pinned. This mirrors
-/// [`render_delta`] exactly; the two must agree or the shown delta is a
-/// lie.
+/// an operator's absent marker would grow a pool they pinned. A `None` pool
+/// touches the `[pools]` table not at all. This mirrors [`render_delta`]
+/// exactly; the two must agree or the shown delta is a lie.
 fn apply_delta(doc: &mut DocumentMut, write: &SurfaceWrite) -> Result<()> {
     if let Some(entry) = &write.new_entry {
         insert_provider_block(doc, &write.entry_name, entry.entry_table())?;
     }
-    let members: Vec<&str> = match &write.pool {
+    let Some(action) = &write.pool else {
+        return Ok(());
+    };
+    let members: Vec<&str> = match action {
         PoolAction::Join { members, .. } | PoolAction::Create { members, .. } => {
             members.iter().map(String::as_str).collect()
         }
     };
-    upsert_pool(doc, write.pool.pool(), &members);
-    if matches!(write.pool, PoolAction::Create { .. }) {
-        set_accepts_new_logins(doc, write.pool.pool());
+    upsert_pool(doc, action.pool(), &members);
+    if matches!(action, PoolAction::Create { .. }) {
+        set_accepts_new_logins(doc, action.pool());
     }
     Ok(())
 }

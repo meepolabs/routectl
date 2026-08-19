@@ -4547,11 +4547,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `growth_pools_for_family` DIRECTLY, never through the convention's
   default-seat placement, so an unrelated entry squatting `<family>-default`
   cannot turn a determined join into a pool creation; zero matches add the
-  account entry too. `SeatNamingError` surfaces verbatim, and a matched entry
+  account entry too. `SurfaceWrite.pool` is an `Option<PoolAction>`: the
+  pinned-pool invariant holds on EVERY arm, so a family pool that exists
+  without `accepts_new_logins` yields no pool action at all (the account entry
+  still surfaces, the membership list and the absent marker are left exactly as
+  written, and `note` carries the reason). `plan_new_seat` reports `None` for
+  both "no pool" and "pinned pool", so `pool_action_for_new_entry` consults
+  `plan_pool_materialization`'s `pool_exists` to tell them apart -- conflating
+  them is what silently grew a migrated (unmarked) pool and flipped its marker.
+  `SeatNamingError` surfaces verbatim, and a matched entry
   whose required auth fields drifted refuses naming the FIELD NAMES only. `render_delta` is THE
   renderer for the shown diff, the decline print and the recovery block --
-  typed plan data only, never a byte diff -- and writes
-  `accepts_new_logins = true` ONLY on a pool the plan creates. `surface(path,
+  typed plan data only, never a byte diff -- writes
+  `accepts_new_logins = true` ONLY on a pool the plan creates, and renders no
+  pool block at all for a skipped pool half. `surface(path,
   family, label, yes) -> SurfaceOutcome` is the one impure half: byte snapshot
   -> `edit_pipeline::preflight` -> parse -> plan -> print the delta (`--yes`
   bypasses the PROMPT, never the print) -> `confirm_high_consequence` ->
