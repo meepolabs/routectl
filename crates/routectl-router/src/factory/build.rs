@@ -930,17 +930,24 @@ async fn compile_pool(
         // member" answerable at build time, which is the whole basis of the
         // Ready / Unavailable split. One read per member per build, collapsed
         // by the store's own cache + single-flight.
-        if let Err(e) = secrets.get(&secret_ref).await {
+        if secrets.get(&secret_ref).await.is_err() {
+            let reason = PoolOmissionReason::CredentialUnreadable;
             omissions.push(PoolMemberOmission {
                 member: member.clone(),
                 provider_kind,
-                reason: PoolOmissionReason::CredentialUnreadable,
+                reason,
             });
+            // The store's error text is deliberately NOT logged: it inlines
+            // the credentials-file path and the account id it failed on, and a
+            // debug-level line ships to the same archived, audited destinations
+            // every other level does. The allowlisted reason token is the whole
+            // diagnostic -- sanitization that only holds at one log level is
+            // not sanitization.
             tracing::debug!(
                 pool = %pool_name,
                 member = %member,
                 provider_kind,
-                error = %e,
+                reason = reason.token(),
                 "pool member credential unreadable",
             );
             continue;
@@ -953,20 +960,21 @@ async fn compile_pool(
             }),
             Err(e) => {
                 // The error text is deliberately NOT carried into the
-                // omission: it can inline a credential path, an account id,
-                // or upstream response bytes, and the omission reaches both
-                // a log field and an operator-facing report. Only the
-                // variant SHAPE classifies.
+                // omission OR the log line: it can inline a credential path,
+                // an account id, or upstream response bytes, and both surfaces
+                // reach operator log destinations. Only the variant SHAPE
+                // classifies.
+                let reason = omission_reason_for_build_error(&e);
                 omissions.push(PoolMemberOmission {
                     member: member.clone(),
                     provider_kind,
-                    reason: omission_reason_for_build_error(&e),
+                    reason,
                 });
                 tracing::debug!(
                     pool = %pool_name,
                     member = %member,
                     provider_kind,
-                    error = %e,
+                    reason = reason.token(),
                     "pool member failed to build",
                 );
             }
@@ -1646,11 +1654,7 @@ pub fn apply_catalog_overlay(
     models
         .into_iter()
         .map(|(nickname, model)| {
-            let provider_kind = config
-                .models
-                .get(&nickname)
-                .and_then(|entry| config.providers.get(&entry.provider))
-                .map_or("", ProviderEntry::kind_str);
+            let provider_kind = resolved_provider_kind(&model, config);
             let baked = lookup_baked_with_overrides(
                 provider_kind,
                 &model.upstream,
@@ -1663,6 +1667,34 @@ pub fn apply_catalog_overlay(
             (nickname, stamped)
         })
         .collect()
+}
+
+/// The catalog-selector provider kind of a resolved model.
+///
+/// A POOL-backed model's `provider_name` is the pool, which is not a
+/// `[providers]` entry -- looking it up there always misses, and an empty kind
+/// silently disables the catalog row for that model (no capability priors, no
+/// pricing, no context window). So a model with compiled seats reads the kind
+/// off a SEAT's own member entry instead. Validation rejects a mixed-kind pool,
+/// so every member answers the same kind and the first usable seat is
+/// representative.
+///
+/// Falls back to the `[models.X] provider` lookup for a non-pooled model, which
+/// is where that lookup is correct.
+fn resolved_provider_kind(model: &ResolvedModel, config: &Config) -> &'static str {
+    if let Some(seats) = model.seats.as_ref()
+        && let Some(kind) = seats
+            .first()
+            .and_then(|seat| config.providers.get(&seat.provider_name))
+            .map(ProviderEntry::kind_str)
+    {
+        return kind;
+    }
+    config
+        .models
+        .get(&model.nickname)
+        .and_then(|entry| config.providers.get(&entry.provider))
+        .map_or("", ProviderEntry::kind_str)
 }
 
 /// Clone a provider entry's `CloakConfig` and stamp the global

@@ -760,6 +760,57 @@ mod build_resolved_models_tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
+    async fn a_pool_backed_model_gets_the_same_catalog_row_as_a_standalone_one() {
+        // The defect this pins: the catalog selector resolved a model's provider
+        // kind by looking its `provider` value up in `[providers]`, which for a
+        // pool-backed model names the POOL and always misses. An empty kind
+        // matches no catalog row, so capability priors, pricing, and the context
+        // window went silently absent for exactly the models a pool serves --
+        // no error, no warning, just a Missing row.
+        //
+        // Differential rather than absolute: one config, two models on the same
+        // upstream, one routed at a pool and one at a plain provider entry. The
+        // baked table can change without touching this test, and an assertion
+        // on a specific row would then pin the table instead of the selector.
+        let store: Arc<dyn SecretStore> = Arc::new(SeatEnumerationSpy::default());
+        let mut cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["pooled"]);
+        cfg.providers
+            .insert("anthropic-solo".into(), oauth_member("anthropic-solo"));
+        cfg.models.insert(
+            "pooled".into(),
+            ModelEntry::new("anthropic-pool", "claude-opus-4-7"),
+        );
+        cfg.models.insert(
+            "standalone".into(),
+            ModelEntry::new("anthropic-solo", "claude-opus-4-7"),
+        );
+
+        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("both models build");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+
+        let stamped = apply_catalog_overlay(models, &cfg, &CatalogOverlay::default());
+        let pooled = &stamped.get("pooled").expect("pooled entry").effective_row;
+        let standalone = &stamped
+            .get("standalone")
+            .expect("standalone entry")
+            .effective_row;
+
+        assert_eq!(
+            pooled, standalone,
+            "a pool-backed model must resolve the SAME catalog row as the \
+             equivalent standalone model -- the pool name is not a provider kind"
+        );
+        // And that shared row must be a real one: two Missing rows would also
+        // compare equal, which is precisely the defective state.
+        assert!(
+            matches!(pooled, crate::catalog::EffectiveRow::Present { .. }),
+            "the shared row must be Present, not a matching pair of Missing: {pooled:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn apply_catalog_overlay_stamps_baked_row_when_no_overlay_cell_matches() {
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
         let cfg = config_with_models(

@@ -215,3 +215,46 @@ async fn a_fully_healthy_pool_emits_no_omission_warn() {
     assert!(!built.pool_reports[0].is_degraded());
     assert_eq!(built.pool_reports[0].usable_members, 2);
 }
+
+#[tokio::test]
+async fn the_debug_diagnostic_for_a_lost_member_carries_no_store_error_text() {
+    // The omission's own fields are sanitized by construction, but the build
+    // ALSO emits a debug-level line beside each one. That line reached the same
+    // archived, audited destinations every other level does, so formatting the
+    // raw store error into it defeated the sanitization contract whenever debug
+    // logging was on -- a leak that only opens at one verbosity is still a leak.
+    // Captures at TRACE so the debug line is in scope.
+    let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
+        dead_provider: "anthropic-b".into(),
+    });
+    let cfg = pooled_config(&["anthropic-a", "anthropic-b"]);
+
+    let (result, events) = with_capture(build_resolved_models_reported(
+        &cfg,
+        store,
+        BuildOptions::default(),
+    ))
+    .await;
+    result.expect("a degraded pool must still build");
+
+    // EVERY event this build emitted, not just the WARN -- the debug line is
+    // the surface under test and it carries no `event` field to filter on.
+    let all = format!("{events:?}");
+    for banned in [
+        "/home/operator",
+        "credentials.json",
+        "acct_9f3b21c8",
+        "routectl login",
+        "no credentials",
+    ] {
+        assert!(
+            !all.contains(banned),
+            "no build diagnostic at any level may carry `{banned}`: {all}"
+        );
+    }
+    // And the debug line still says WHY, via the allowlisted token.
+    assert!(
+        all.contains("credential_unreadable"),
+        "the reason token must survive as the diagnostic: {all}"
+    );
+}
