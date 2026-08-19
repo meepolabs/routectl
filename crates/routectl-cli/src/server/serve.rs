@@ -700,6 +700,39 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
     "/status/query",
 ];
 
+/// Paths served by `build_axum_router` that are deliberately NOT
+/// Anthropic-dialect MITM inference traffic, i.e. the complement of
+/// `proxy::split::ANTHROPIC_INFERENCE_PATHS` over the served surface.
+///
+///   * `/health`, `/`, `/status*` -- routectl's own liveness, dashboard
+///     and read-only status surface; Claude Code never sends these to
+///     `api.anthropic.com`, so they never arrive through the MITM
+///     channel.
+///   * `/v1/chat/completions`, `/v1/responses` -- direct-client ingress
+///     dialects (OpenAI-shaped), not Anthropic-dialect.
+///
+/// Together with `ANTHROPIC_INFERENCE_PATHS` this partitions the served
+/// surface, which is what closes the reverse direction of MITM drift: a
+/// new inference route registered in `build_axum_router` without being
+/// named in one of the two lists fails
+/// `every_registered_route_is_classified_for_the_mitm_split`, so "does
+/// this route arrive through the MITM channel?" is answered in the diff
+/// instead of relying on a reviewer noticing the omission. `cfg(test)`
+/// like the auth inventory: nothing on the request path consults it.
+#[cfg(test)]
+pub(super) const NON_MITM_INFERENCE_ROUTES: &[&str] = &[
+    "/health",
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/",
+    "/status",
+    "/status/usage",
+    "/status/health",
+    "/status/config",
+    "/status/doctor",
+    "/status/query",
+];
+
 /// `max_body_bytes` MUST already be the resolved effective value
 /// (zero -> default mapped by `compute_max_body_bytes`). Private to
 /// this module; the only call site is `serve_on_listener`.
@@ -713,12 +746,13 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
 /// Anthropic-dialect inference traffic (re-injected here over loopback
 /// rather than forwarded to the real Anthropic origin). Adding a NEW
 /// Anthropic-dialect inference route below must also add its path to
-/// that const. An integration test in `tests/server.rs` pins the const
-/// itself: a change to `ANTHROPIC_INFERENCE_PATHS`'s literal set, or a
-/// const path that stops being served here, shows up as a failing test.
-/// It does NOT catch the reverse -- a new inference route added below
-/// that forgets to also update the const -- so that direction of drift
-/// relies on review, not CI; this is an accepted, deliberate tradeoff, not an oversight.
+/// that const. Drift is guarded in both directions: an integration test
+/// in `tests/server.rs` pins the const's literal set and pins that every
+/// const path is still served here, and
+/// `every_registered_route_is_classified_for_the_mitm_split` in
+/// `serve_tests.rs` fails on a route registered below that appears in
+/// neither `ANTHROPIC_INFERENCE_PATHS` nor `NON_MITM_INFERENCE_ROUTES`
+/// -- so a new inference route cannot silently miss the const.
 fn build_axum_router(
     state: Arc<AppState>,
     token_set: Arc<TokenSet>,

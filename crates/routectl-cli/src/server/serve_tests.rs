@@ -642,6 +642,66 @@ fn every_registered_route_is_classified_public_or_auth_gated() {
     }
 }
 
+/// A new inference route added to the serve router must decide, in its own
+/// diff, whether the MITM front-proxy re-injects it.
+///
+/// The mirror of the auth inventory guard, for the other classification
+/// the serve router carries. `tests/server.rs` pins
+/// `proxy::split::ANTHROPIC_INFERENCE_PATHS`'s literal set and pins that
+/// every const path is still served -- both of those read the const as
+/// their starting point, so both stay green when a NEW Anthropic-dialect
+/// route is registered here and the const is not updated: that route is
+/// then forwarded verbatim to the real Anthropic origin instead of
+/// re-injected over loopback, bypassing the credential-swap seam, and the
+/// only thing standing between the mistake and shipping is a reviewer
+/// noticing an absence.
+///
+/// Deriving the served set from the sources and requiring every path to be
+/// named on ONE side of the partition closes that direction: the author of
+/// a new route picks `ANTHROPIC_INFERENCE_PATHS` or
+/// `NON_MITM_INFERENCE_ROUTES`, and either choice is a visible edit.
+#[test]
+fn every_registered_route_is_classified_for_the_mitm_split() {
+    // Arrange
+    let mut served: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for path in production_rust_sources(&crate_src_dir()) {
+        let src = std::fs::read_to_string(&path).expect("read crate source file");
+        let label = path.display().to_string();
+        served.extend(registered_paths_in(&src, &label));
+    }
+    let classified: std::collections::BTreeSet<String> =
+        crate::proxy::split::anthropic_inference_paths()
+            .iter()
+            .chain(NON_MITM_INFERENCE_ROUTES.iter())
+            .map(|p| (*p).to_string())
+            .collect();
+
+    // Assert: neither direction may drift.
+    let unclassified: Vec<&String> = served.difference(&classified).collect();
+    assert!(
+        unclassified.is_empty(),
+        "route(s) registered but not classified for the MITM split: {unclassified:?} -- \
+         add each to proxy::split::ANTHROPIC_INFERENCE_PATHS (if the MITM proxy must \
+         re-inject it over loopback) or to NON_MITM_INFERENCE_ROUTES (with the reason \
+         it never arrives through the MITM channel)"
+    );
+    let unserved: Vec<&String> = classified.difference(&served).collect();
+    assert!(
+        unserved.is_empty(),
+        "path(s) classified for the MITM split but no longer registered: {unserved:?} \
+         -- drop them from ANTHROPIC_INFERENCE_PATHS / NON_MITM_INFERENCE_ROUTES"
+    );
+
+    // A path may not be claimed by both sides at once.
+    for path in crate::proxy::split::anthropic_inference_paths() {
+        assert!(
+            !NON_MITM_INFERENCE_ROUTES.contains(path),
+            "{path} is declared both an Anthropic-dialect inference path and a \
+             non-MITM route"
+        );
+    }
+}
+
 /// Adding a public route requires editing this expectation.
 ///
 /// This looks like a tautology restating `PUBLIC_ROUTES`, and that
