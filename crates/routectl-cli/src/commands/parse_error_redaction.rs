@@ -50,12 +50,20 @@ pub(crate) fn redact_parse_error(err: &str) -> String {
 /// path-free class message. Any other loader error (version/legacy-key
 /// rejection) carries no path or value and is kept verbatim so it stays
 /// actionable.
+/// The path-free class message for a config file that could not be read.
+///
+/// Shared with the login auto-surface, which reaches the same condition on
+/// its own (it reads `config.toml` directly rather than through the loader)
+/// and must not echo the path either -- it embeds the operator's home
+/// directory and login output gets pasted into bug reports.
+pub(crate) const CONFIG_UNREADABLE: &str = "the config file could not be read";
+
 pub fn redact_config_load_error(err: &str) -> String {
     if let Some(idx) = err.find("TOML parse error") {
         return redact_parse_error(&err[idx..]);
     }
     if err.starts_with("cannot read config") {
-        return "the config file could not be read".to_string();
+        return CONFIG_UNREADABLE.to_string();
     }
     if err.starts_with("catalog overlay load error") {
         return "the catalog overlay could not be loaded".to_string();

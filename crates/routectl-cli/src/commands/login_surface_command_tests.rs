@@ -245,33 +245,42 @@ fn a_previous_version_config_is_skipped_with_the_migrate_pointer() {
 
 #[test]
 fn an_unparseable_config_is_skipped_and_the_parse_error_carries_no_config_value() {
-    // Arrange: a syntactically valid v4 header (so the preflight passes)
-    // followed by a line whose VALUE is secret-shaped.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_config(
-        dir.path(),
-        &format!(
-            "{}[providers.x]\n\
-             kind = \"openai-compat\"\n\
-             base_url = \"http://127.0.0.1:1\"\n\
-             api_key_ref = \"literal:keep-me-exactly\"\n\
-             unknown_field_here = 1\n",
-            base()
-        ),
+    // Arrange: the fixture's RAW toml error must itself echo the sentinel,
+    // or this test is vacuous -- an error pointing at some OTHER line passes
+    // the no-leak assertion with the redactor deleted. An UNQUOTED secret-
+    // shaped value is the shape that does it: toml renders the offending
+    // source line into the diagnostic snippet verbatim.
+    let sentinel = "keep-me-exactly";
+    let body = format!(
+        "{}[providers.x]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"http://127.0.0.1:1\"\n\
+         api_key_ref = literal:{sentinel}\n",
+        base()
     );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), &body);
     let before = read(&path);
+
+    // The premise, asserted rather than assumed: without this the test
+    // cannot distinguish a working redactor from a missing one.
+    let raw = parse_config(&body).expect_err("the fixture must fail to parse");
+    assert!(
+        raw.contains(sentinel),
+        "the RAW error must echo the value, else this test proves nothing: {raw}"
+    );
 
     // Act
     let outcome =
         surface(&path, "anthropic", None, true).expect("an unparseable config is not an error");
 
-    // Assert: skipped, byte-identical, and the redactor kept the config
-    // value out of the printed detail.
+    // Assert: skipped, byte-identical, and the redactor kept the value the
+    // raw error DID carry out of the printed detail.
     let SurfaceOutcome::Skipped(SkipReason::Unparseable { detail }) = &outcome else {
         panic!("expected an unparseable skip, got {outcome:?}");
     };
     assert!(
-        !detail.contains("keep-me-exactly"),
+        !detail.contains(sentinel),
         "the parse error must not echo a config value: {detail}"
     );
     assert_eq!(read(&path), before);
@@ -310,6 +319,17 @@ fn a_conflict_after_acceptance_is_nonzero_says_the_credential_is_kept_and_keeps_
     assert!(
         msg.contains("Nothing was rolled back"),
         "the failure must state nothing was rolled back: {msg}"
+    );
+    // And it names the CLASS of failure, never the file: login resolved that
+    // path itself, and this message gets pasted into bug reports.
+    assert!(
+        msg.contains("changed on disk"),
+        "the failure must name the conflict: {msg}"
+    );
+    assert!(
+        !msg.contains(&path.display().to_string())
+            && !msg.contains(dir.path().to_str().expect("utf8 tempdir")),
+        "the failure must not disclose the config path: {msg}"
     );
     let expected_delta = render_delta(
         &super::plan(
@@ -790,5 +810,106 @@ fn every_field_of_the_shown_delta_lands_when_the_family_pool_already_exists() {
     assert!(
         !shown.contains("accepts_new_logins"),
         "a join must not show a marker it does not write: {shown}"
+    );
+}
+
+// -----------------------------------------------------------------
+// The printed delta must be valid TOML for every name config can hold.
+// Pool member names are operator-written and only checked for
+// non-emptiness, so a control character reaches the renderer.
+// -----------------------------------------------------------------
+
+/// A pool member name carrying a newline must not break the SHOWN delta.
+/// `toml_edit` escapes properly on the write path, so before the fix the
+/// committed file stayed valid while the printed block was unparseable --
+/// an operator pasting it hit a syntax error routectl appeared to author.
+#[test]
+fn a_control_character_in_a_member_name_keeps_the_shown_delta_parseable() {
+    // Arrange: a growth-marked pool whose existing member name embeds a
+    // newline and a quote, so the join renders it into `members = [...]`.
+    let hostile = "sneaky\nname\"x";
+    let mut doc: toml_edit::DocumentMut = format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
+         [providers.anthropic-default]\n\
+         kind = \"anthropic-api\"\n\
+         auth_kind = \"oauth-bearer\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         [pools.anthropic]\n\
+         accepts_new_logins = true\n"
+    )
+    .parse()
+    .expect("fixture parses");
+    routectl_router::upsert_pool_members(&mut doc, "anthropic", &["anthropic-default", hostile]);
+    let body = doc.to_string();
+    let config = parse_config(&body).expect("the fixture config parses");
+
+    // Act
+    let shown = render_delta(&super::plan(&config, "anthropic", Some("work")).expect("plans"));
+
+    // Assert: the rendered delta is valid TOML, and the member survives the
+    // round trip intact rather than being mangled or dropped.
+    assert!(
+        !shown.contains("sneaky\nname"),
+        "a raw newline must not reach the rendered TOML: {shown:?}"
+    );
+    let reparsed: routectl_router::Config =
+        toml::from_str(&format!("version = {CURRENT_CONFIG_VERSION}\n{shown}"))
+            .unwrap_or_else(|e| panic!("the shown delta must re-parse: {e}\n{shown}"));
+    let members = &reparsed.pools.get("anthropic").expect("pool").members;
+    assert!(
+        members.iter().any(|m| m == hostile),
+        "the member must round-trip byte-exact, got {members:?}"
+    );
+    assert!(members.iter().any(|m| m == "anthropic-work"));
+}
+
+/// The same property on the ENTRY key rather than a member value: a label
+/// with a control character reaches `toml_key`, which delegates to
+/// `toml_string` for anything not a bare key.
+#[test]
+fn a_control_character_in_a_label_keeps_the_printed_entry_parseable() {
+    // Arrange + Act
+    let block = crate::commands::login_provider_block::provider_block("anthropic", Some("a\nb"))
+        .expect("block");
+    let shown = block.render();
+
+    // Assert
+    assert!(
+        !shown.contains("a\nb"),
+        "a raw newline must not reach the table key: {shown:?}"
+    );
+    let reparsed: routectl_router::Config = toml::from_str(&shown)
+        .unwrap_or_else(|e| panic!("the printed entry must re-parse: {e}\n{shown}"));
+    assert!(
+        reparsed.providers.contains_key("anthropic-a\nb"),
+        "the entry name must round-trip, got {:?}",
+        reparsed.providers.keys().collect::<Vec<_>>()
+    );
+}
+
+/// The Unreadable skip and the post-acceptance failure both describe a file
+/// login resolved itself, so neither may echo its path -- login output gets
+/// pasted into bug reports, and the path embeds the operator's home
+/// directory.
+#[test]
+fn no_config_surface_message_echoes_the_config_path() {
+    // Arrange: a path with a recognizable "username" segment, made
+    // unreadable as a directory so the read fails with something other than
+    // NotFound.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("someoperator");
+    std::fs::create_dir_all(&home).expect("mkdir");
+    let path = home.join("config.toml");
+    std::fs::create_dir(&path).expect("a directory where the file belongs");
+
+    // Act
+    let outcome = surface(&path, "anthropic", None, true).expect("a read failure is not an error");
+
+    // Assert: the class, with no path anywhere in it.
+    assert_eq!(outcome, SurfaceOutcome::Skipped(SkipReason::Unreadable));
+    let rendered = SkipReason::Unreadable.to_string();
+    assert!(
+        !rendered.contains("someoperator") && !rendered.contains('/'),
+        "the skip message must not disclose the path: {rendered}"
     );
 }

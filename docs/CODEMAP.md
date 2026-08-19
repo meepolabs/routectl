@@ -4531,7 +4531,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   table for the write path (one row set, no render-then-parse round trip), and
   `with_entry_name` renames the key when the config being edited is the naming
   authority. `required_auth_fields(oauth_id)` exposes just the `kind` + auth
-  selector an entry MUST carry, for the auto-surface's drift check. Mutates no
+  selector an entry MUST carry, for the auto-surface's drift check. `toml_key` /
+  `toml_string` render operator-written names as TOML: `toml_string` escapes the
+  full control set TOML forbids in a basic string (not just quote/backslash), so
+  a member or label carrying a newline cannot make the PRINTED delta
+  unparseable while the `toml_edit`-written file stays valid. Mutates no
   config and emits no credential material
 - `src/commands/login_surface.rs` -- login's config auto-surface, pure planner
   plus the confirmed write. `ref_matches(&Config, &SecretRef)` finds the
@@ -4571,7 +4575,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   succeeded, the credential is stored); only a failure AFTER acceptance is
   `Err`, whose message states the credential remains stored and was never
   rolled back and carries the same `render_delta` as a recovery block. A
-  snapshot conflict NEVER retries against fresh bytes
+  snapshot conflict NEVER retries against fresh bytes. Every message here is
+  path-FREE (`write_failure_class` maps each `ConfigWriteError` variant to its
+  class; the unreadable skip reuses `parse_error_redaction::CONFIG_UNREADABLE`)
+  -- login resolves the config path itself, and its output gets pasted into bug
+  reports
 - `src/commands/login_surface_availability.rs` -- what is still missing between
   a seat config reaches and traffic arriving: two boolean scans over the typed
   config behind `availability_gap(config, entry, Option<pool>)`, reported after

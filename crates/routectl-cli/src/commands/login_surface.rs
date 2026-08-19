@@ -49,7 +49,8 @@ use routectl_router::seat_naming::{
     seat_secret_ref,
 };
 use routectl_router::{
-    Config, EditOutcome, ProviderEntry, parse_config, upsert_pool_members as upsert_pool,
+    Config, ConfigWriteError, EditOutcome, ProviderEntry, parse_config,
+    upsert_pool_members as upsert_pool,
 };
 use toml_edit::{DocumentMut, Item};
 
@@ -61,7 +62,7 @@ use super::login_provider_block::{
     ProviderBlock, provider_block, required_auth_fields, toml_key, toml_string,
 };
 use super::login_surface_availability::availability_gap;
-use super::parse_error_redaction::redact_parse_error;
+use super::parse_error_redaction::{CONFIG_UNREADABLE, redact_parse_error};
 use crate::config_classify::collect_high_consequence_changes;
 
 /// The config delta a freshly minted seat implies.
@@ -580,10 +581,12 @@ pub enum SkipReason {
     /// The file exists but could not be read (permissions, a broken symlink,
     /// a device error). Never an error: a login is not the moment to fail on
     /// a config file routectl was not asked to write.
-    Unreadable {
-        /// The IO failure, with the path.
-        detail: String,
-    },
+    ///
+    /// Carries no detail on purpose. The path embeds the operator's home
+    /// directory and the IO string adds nothing actionable, so this reports
+    /// the CLASS -- the same wording `redact_config_load_error` collapses
+    /// the loader's path-bearing read failure to.
+    Unreadable,
     /// The file exists but this build must not edit it: its version is out
     /// of bounds, or it carries a removed key the migrator relocates. The
     /// preflight's own wording -- which already names `config migrate` for
@@ -611,9 +614,9 @@ impl std::fmt::Display for SkipReason {
                  to create one, then add the entry below"
             ),
             Self::Unwritable { detail } => write!(f, "{detail} Nothing was written"),
-            Self::Unreadable { detail } => write!(
+            Self::Unreadable => write!(
                 f,
-                "{detail}; no config change was proposed. Nothing was written"
+                "{CONFIG_UNREADABLE}, so no config change was proposed. Nothing was written"
             ),
             Self::Unparseable { detail } => write!(
                 f,
@@ -832,9 +835,11 @@ fn read_snapshot(config_path: &Path) -> std::result::Result<Vec<u8>, SkipReason>
     match std::fs::read(config_path) {
         Ok(bytes) => Ok(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(SkipReason::NoConfigFile),
-        Err(e) => Err(SkipReason::Unreadable {
-            detail: format!("cannot read config `{}`: {e}", config_path.display()),
-        }),
+        // The path is deliberately NOT echoed: it embeds the operator's home
+        // directory, and this text is printed by a command whose output ends
+        // up pasted into bug reports. The class of failure is what makes the
+        // message actionable; `config check` names the file it read.
+        Err(_) => Err(SkipReason::Unreadable),
     }
 }
 
@@ -915,7 +920,7 @@ fn commit(
     snapshot: &[u8],
     snapshot_text: &str,
     write: &SurfaceWrite,
-) -> Result<EditOutcome> {
+) -> std::result::Result<EditOutcome, String> {
     let result = routectl_router::edit_config_toml::<RelockValidationError, _>(
         config_path,
         snapshot,
@@ -931,8 +936,34 @@ fn commit(
             }
         },
     )
-    .map_err(super::edit_pipeline::render_write_error)?;
+    .map_err(write_failure_class)?;
     Ok(result.outcome)
+}
+
+/// The path-free class of a write failure.
+///
+/// `ConfigWriteError`'s own `Display` names the file in every variant, which
+/// is right for `config set` (the operator passed that path on argv) and
+/// wrong here: login resolves the path itself, so echoing it discloses the
+/// operator's home directory in output that gets pasted into bug reports.
+/// Each class already implies the remedy, so nothing actionable is lost.
+fn write_failure_class(err: ConfigWriteError<RelockValidationError>) -> String {
+    match err {
+        ConfigWriteError::Conflict { .. } => {
+            "the config file changed on disk after this change was shown, so it was not \
+             applied -- another writer got there first"
+                .to_string()
+        }
+        ConfigWriteError::Io { .. } => "the config file could not be written".to_string(),
+        ConfigWriteError::Parse { .. } => {
+            "the config file no longer parses, so it was not modified".to_string()
+        }
+        ConfigWriteError::Edit(_) => {
+            "the resulting config failed validation under the write lock, so it was not \
+             applied"
+                .to_string()
+        }
+    }
 }
 
 #[cfg(test)]
