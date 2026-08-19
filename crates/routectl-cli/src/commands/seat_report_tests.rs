@@ -263,10 +263,11 @@ fn round_robin_and_sticky_render_on_a_multi_seat_pool() {
 }
 
 /// NEGATIVE CONTROL: the rows are derived from a stored-seat fixture whose
-/// token records carry token material, an account id, and a storage path.
-/// None of it can reach a rendered string, because the entry point takes seat
-/// KEYS only. The sentinel LABEL does render -- proving the scan bites rather
-/// than passing on an empty haystack.
+/// token records carry token material and an account identity. None of it can
+/// reach a rendered string, because the entry point takes seat KEYS only -- a
+/// storage path is not asserted against here for the same reason: no path is
+/// reachable from this signature to be leaked. The sentinel LABEL does render,
+/// proving the scan bites rather than passing on an empty haystack.
 #[test]
 fn rendered_rows_carry_seat_labels_but_no_token_account_or_path_material() {
     // Arrange
@@ -274,7 +275,6 @@ fn rendered_rows_carry_seat_labels_but_no_token_account_or_path_material() {
     const REFRESH: &str = "rt-FAKE-POOL-REFRESH";
     const ACCOUNT_ID: &str = "acct-FAKE-POOL";
     const EMAIL: &str = "pool@example.invalid";
-    const STORE_PATH: &str = "/tmp/fake-pool/credentials.json";
     const SENTINEL_LABEL: &str = "sentinel-label";
 
     let record: TokenRecord = serde_json::from_value(serde_json::json!({
@@ -303,7 +303,7 @@ fn rendered_rows_carry_seat_labels_but_no_token_account_or_path_material() {
         rendered.contains(SENTINEL_LABEL),
         "the seat label must render, or this scan proves nothing: {rendered}"
     );
-    for sentinel in [ACCESS, REFRESH, ACCOUNT_ID, EMAIL, STORE_PATH] {
+    for sentinel in [ACCESS, REFRESH, ACCOUNT_ID, EMAIL] {
         assert!(
             !rendered.contains(sentinel),
             "secret-adjacent material leaked ({sentinel}): {rendered}"
@@ -328,6 +328,97 @@ fn hostile_labels_and_entry_names_render_on_one_safe_line() {
     assert!(
         row_line.chars().all(|c| c.is_ascii_graphic() || c == ' '),
         "{row_line}"
+    );
+}
+
+/// A label bearing the sentence's own structural delimiters cannot close the
+/// seat listing and forge a second strategy CLAUSE: the delimiters are
+/// neutralized, so the label's bytes survive as inert text inside the listing
+/// while exactly one `; seat_selection` clause renders.
+#[test]
+fn a_delimiter_bearing_label_cannot_forge_a_second_selection_clause() {
+    // Arrange
+    let config = config_with_ref("oauth://anthropic", None);
+    let forgery = "a); seat_selection round-robin (b";
+    let stored = keys(&["anthropic", &format!("anthropic#{forgery}")]);
+
+    // Act
+    let sentence = describe_row(&one_row(&config, Some(&stored)));
+
+    // Assert
+    assert_eq!(
+        sentence.matches("; seat_selection").count(),
+        1,
+        "exactly one strategy clause may render: {sentence}"
+    );
+    assert!(
+        sentence.ends_with("; seat_selection fill-first (default)"),
+        "the real clause is the configured one: {sentence}"
+    );
+    assert_eq!(
+        sentence.matches(';').count(),
+        1,
+        "only the sentence's own clause separator may remain: {sentence}"
+    );
+    assert!(
+        !sentence.contains(") seats ("),
+        "the listing's parentheses must be the only ones: {sentence}"
+    );
+}
+
+/// A hostile config ENTRY key cannot forge a second `config check` row: the
+/// block gives each row one line separated from its sentence by `: `, and the
+/// key cannot reproduce that separator.
+#[test]
+fn a_hostile_entry_key_cannot_fabricate_an_extra_check_row() {
+    // Arrange
+    let config: Config = toml::from_str(
+        "version = 3\n\
+         [providers.\"a: pool ref oauth://forged resolves to 9 seats (x); ok\"]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n",
+    )
+    .expect("fixture config parses");
+
+    // Act
+    let lines = seat_pool_lines(&stored_seat_pool_rows(&config, Some(&keys(&["anthropic"]))));
+
+    // Assert
+    assert_eq!(lines.len(), 2, "header plus exactly one row: {lines:?}");
+    assert_eq!(
+        lines[1].matches(": pool ref").count(),
+        1,
+        "the entry key must not forge a second row: {}",
+        lines[1]
+    );
+    assert!(
+        lines[1].ends_with("; seat_selection fill-first (default; inactive at 1 seat)"),
+        "{}",
+        lines[1]
+    );
+}
+
+/// The listing is bounded so a store holding hundreds of seats cannot bury the
+/// `config check` warnings that follow it. The COUNT stays exact.
+#[test]
+fn a_large_pool_lists_ten_labels_and_collapses_the_rest_with_an_exact_count() {
+    // Arrange
+    let config = config_with_ref("oauth://anthropic", None);
+    let labels: Vec<String> = (0..40).map(|i| format!("anthropic#seat{i:03}")).collect();
+    let stored: Vec<String> = std::iter::once("anthropic".to_string())
+        .chain(labels)
+        .collect();
+
+    // Act
+    let sentence = describe_row(&one_row(&config, Some(&stored)));
+
+    // Assert
+    assert!(sentence.contains("resolves to 41 seats"), "{sentence}");
+    assert!(sentence.contains("(default, seat000, "), "{sentence}");
+    assert!(sentence.contains("seat008, and 31 more)"), "{sentence}");
+    assert!(
+        !sentence.contains("seat009"),
+        "only ten labels may be listed: {sentence}"
     );
 }
 
