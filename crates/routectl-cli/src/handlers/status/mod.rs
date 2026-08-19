@@ -811,6 +811,6 @@ mod tests {
         // doctor 6, config 3).
         assert_eq!(panels["health"]["schema_version"], 5);
         assert_eq!(panels["config"]["schema_version"], 3);
-        assert_eq!(panels["doctor"]["schema_version"], 6);
+        assert_eq!(panels["doctor"]["schema_version"], 7);
     }
 }

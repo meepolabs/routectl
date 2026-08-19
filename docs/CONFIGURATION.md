@@ -1685,7 +1685,7 @@ account identity, no credential, no header, nothing from a body.
 
 The per-request seat-selection decision vocabulary
 (`birth_pick` / `sticky_stay` / ... , see
-[credential pool](#credential-pool-multiple-seats-per-provider)) is
+[credential pools](#credential-pools-multiple-accounts-per-provider)) is
 UNCHANGED by this feature: quota changes which seat a birth picks, never
 how that decision is named.
 
@@ -3433,8 +3433,8 @@ The battery sections, in render order:
 | Config schema version (`version`) | The config's schema version against the binary; a too-old config FAILs with a `config migrate` remediation, a too-new one FAILs with an upgrade remediation, a present-but-broken config FAILs rather than reporting all-PASS. |
 | Config validation (`config`) | The static validator suite (the same one `config check` runs) plus a read-only secret-presence scan. Every message names the ref SCHEME, never the secret value, path, or env var name. |
 | OAuth credentials (`auth`) | Stored OAuth seats and their expiry; no seats logged in is a WARN, an expired seat is a WARN, a credential store that will not open is a FAIL. |
-| OAuth seat pools (`pools`) | One purely informational PASS row per `oauth://` reference per provider entry, describing how many stored seats it resolves to and which `seat_selection` strategy applies. A bare `oauth://<provider>` pool ref lists the seats it expands to (the default seat as `default`, then labelled siblings; a long list is truncated with an exact remaining count); a labelled ref reports that it pins one seat and that `seat_selection` does not apply to it. Never advises, carries no remediation, and can never move the exit code; when the credential store will not open the count reads as unknown while the strategy still renders (the `auth` section owns that FAIL). |
-| OAuth seats (`seats`) | Stored OAuth seats no provider entry's `oauth://` ref reaches surface as a WARN naming the seat. Matching is by full seat identity: a labelled ref (`oauth://<provider>#<label>`) pins that one seat and covers no sibling, while a bare `oauth://<provider>` pool ref covers every stored seat of that provider. Read-only -- a stored credential is NEVER auto-deleted or refreshed, and the finding names only the seat key, never token material or a storage path. |
+| OAuth seat pools (`pools`) | One row per `[pools.<name>]` block naming its members and the seat each one's ref names, its `seat_selection`, whether it accepts new logins, and any member the credential store holds no seat for; then one purely informational PASS row per `oauth://` reference on a provider entry NO pool claims (a bare ref pins the default seat, a `#label` ref that one seat; neither carries a strategy). A pool missing a member's stored credential is a WARN naming the member, and a pool no member of which has one is a FAIL -- every model naming it is unroutable. When the credential store will not open, presence reads as unknown and the section claims neither (the `auth` section owns that FAIL). LIMIT: this section builds no router, so it reports CONFIG-and-STORE presence -- a member whose credential is stored but which the provider factory could not construct is visible only to a surface that has a built router. |
+| OAuth seats (`seats`) | Stored OAuth seats no provider entry's `oauth://` ref reaches surface as a WARN naming the seat. Matching is by full seat identity: every ref names exactly one seat, so a bare `oauth://<provider>` ref vouches for the DEFAULT seat alone and a labeled seat is reached only by a ref naming it -- in a pooled configuration, that pool member's own pinned ref. Read-only -- a stored credential is NEVER auto-deleted or refreshed, and the finding names only the seat key, never token material or a storage path. |
 | Managed secrets (`secrets`) | Managed secret files not referenced by any provider surface as a WARN. The scan is a read-only directory diff; a stored secret is NEVER auto-deleted. |
 | Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty), and a WARN nudging `config migrate` when deprecated capability-list keys are still set. Never emits a FAIL, so it can never flip the exit code. |
@@ -3639,29 +3639,89 @@ provider permits -- see the README "Responsible use" section.
    `oauth://anthropic` token has expired -- re-run `routectl login
    anthropic` (auto-refresh is a follow-up).
 
-### Credential pool (multiple seats per provider)
+### Credential pools (multiple accounts per provider)
 
 A single OAuth provider can hold more than one credential ("seat") in
 the routectl store. The default seat is the bare provider; additional
-seats are named with a `#<label>` suffix. This lets an operator pool a
-few same-provider subscriptions and (with the round-robin knob below)
-spread load across them.
+seats are named with a `#<label>` suffix. `[pools.<name>]` is how an
+operator pools a few same-provider subscriptions and spreads load across
+them.
 
-**Seat refs.** A config `api_key_ref` selects which seat resolves at
-request time:
+**The resolution hierarchy** (stated once, referenced everywhere else in
+this document):
 
-- `oauth://anthropic` -- the default (unlabeled) seat, or the whole
-  pool when `seat_selection` is set (the bare ref expands to every
-  stored seat for that provider).
-- `oauth://anthropic#seat-b` -- one specific labeled seat. Pins exactly
-  that credential; never widened to the pool.
+```
+alias -> model -> provider entry OR pool -> credential
+```
+
+An `[aliases]` entry resolves to a `[models.X]` nickname; the model's
+`provider` value names EITHER one `[providers.X]` entry OR one
+`[pools.X]` block; a provider entry names exactly ONE credential through
+its `api_key_ref`; a pool names one credential per member. A pool is
+therefore the only multi-account dispatch target -- a provider entry has
+one credential and nothing to select between.
+
+**Seat refs.** A config `api_key_ref` names exactly one seat:
+
+- `oauth://anthropic` -- the DEFAULT (unlabeled) seat, and only that
+  seat. It is not a set and carries no strategy.
+- `oauth://anthropic#seat-b` -- one specific labeled seat.
+
+Under config schema version 3 a bare ref quietly stood for every stored
+seat of its provider. Version 4 retired that reading: reaching several
+accounts is what `[pools.<name>]` is for, and each account gets its own
+`[providers.X]` entry naming its own seat. See
+[Migrating a v3 config to explicit pools](#migrating-a-v3-config-to-explicit-pools).
+
+**The pool block.** A pool lists the provider entries (accounts) it
+groups, all of the same provider kind:
+
+```toml
+[providers.anthropic-default]
+kind        = "anthropic-api"
+api_key_ref = "oauth://anthropic"
+auth_kind   = "oauth-bearer"
+
+[providers.anthropic-seat-b]
+kind        = "anthropic-api"
+api_key_ref = "oauth://anthropic#seat-b"
+auth_kind   = "oauth-bearer"
+
+[pools.anthropic]
+members            = ["anthropic-default", "anthropic-seat-b"]
+seat_selection     = "round-robin"   # "fill-first" (default) / "round-robin" / "sticky-least-loaded"
+accepts_new_logins = false           # the ONLY thing that grows a pool
+
+[models.anthropic-sonnet]
+provider = "anthropic"               # the POOL, so dispatch spreads across both accounts
+upstream = "claude-sonnet-4-6"
+```
+
+| Key | Meaning |
+|---|---|
+| `members` | `[providers]` table keys, required and non-empty, at most 32. Every member must exist, all must share one provider kind, and a provider entry belongs to at most one pool. This release's members are OAuth accounts. |
+| `seat_selection` | How dispatch picks among the members for one request. Documented per strategy below. Set on the POOL, because the strategy is a property of the SET, not of one transport. |
+| `accepts_new_logins` | Whether a future `routectl login` for this family may propose joining the new account to this pool. `false` (the default) pins the membership list, so only an explicit config edit grows it. There is no wildcard member token. |
+
+A pool name must not collide with a `[providers]` key or a `[models]`
+nickname -- `config check`, the `serve` gate, and the hot-reload gate all
+reject that, along with a mixed-kind pool, an unknown member, a member
+claimed by two pools, and an empty member list. A rejected hot reload
+leaves the running router serving the previous config.
+
+**Naming convention.** The migrator and `routectl login` derive names the
+same way, so a name generated by one is recognized by the other: the POOL
+takes the plain family name (`anthropic`), and each account entry takes a
+suffixed one -- `<family>-default` for the default seat,
+`<family>-<label>` for a labelled seat. A generated name that collides
+with an unrelated existing entry is refused rather than resolved by
+guesswork.
 
 **Registering seats.** The four OAuth CLI commands take an optional
-`--label`. Without it, every command behaves exactly as before and
-targets the default seat:
+`--label`. Without it, every command targets the default seat:
 
 ```bash
-# Default seat (unchanged behavior).
+# Default seat.
 routectl login anthropic
 
 # Add a second, independent seat. Does NOT overwrite the default.
@@ -3686,29 +3746,17 @@ Seats are NOT declared in this file. They live in the credential store
 (`credentials.json`), and the only way to add one is to log in:
 `routectl login <provider> --label <name>`. The config's `api_key_ref`
 selects among the seats already stored; it never creates one. `routectl
-config check` and `routectl doctor` both report, per provider entry, how
-many stored seats its ref resolves to and which labels they carry.
+config check` and `routectl doctor` both report each pool -- its members
+and the seat each names, its strategy, whether it accepts new logins, and
+any member the credential store holds no seat for -- plus one line per
+provider entry no pool claims.
 
-**Seat selection.** A `seat_selection` knob picks how dispatch chooses
-among a pool's seats. It is set on the `[pools.<name>]` block that groups
-the accounts, because the strategy is a property of the SET, not of one
-transport. It takes effect only when a pool resolves to more than one
-stored seat -- with a single seat (or a `#label`-pinned ref) there is
-nothing to choose between, and every strategy behaves identically:
-
-```toml
-[providers.anthropic-managed]
-kind          = "anthropic-api"
-api_key_ref   = "oauth://anthropic"
-auth_kind     = "oauth-bearer"
-
-[pools.anthropic]
-members        = ["anthropic-managed"]
-seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sticky-least-loaded"
-```
+**Seat selection.** `seat_selection` takes effect only when a pool
+resolves to more than one usable member; with one member there is nothing
+to choose between and every strategy behaves identically:
 
 - `fill-first` (default) -- drain one seat before advancing to the
-  next. A single-seat provider (the common case) keeps today's
+  next. A single-member pool (the common case) keeps today's
   behavior with no config. The drain IS this strategy's contract, not a
   rough edge on it: holding one seat keeps that seat's prompt cache warm,
   and running it down until the upstream refuses is the price of the
@@ -3800,8 +3848,15 @@ be read at all (without it there is no way to tell a single-seat family
 from a multi-seat one, and stamping the version alone would silently
 narrow the ref). Each refusal names what to fix by hand; rerun after.
 
-After migrating, point a `[models.X] provider` value at the POOL to route
-across its accounts -- a provider entry still names exactly one account.
+When the migration materializes a pool, it also repoints every
+`[models.X] provider` that named the migrated entry at the POOL, so a
+model that dispatched across every stored seat before the migration
+keeps doing so after it -- the combined diff shows the repoints and the
+confirmation covers them. A single-seat relocation (no accounts
+materialized) leaves model references alone: one member, identical
+breadth. On `routectl doctor` and `routectl config check` the migrated
+file reads as one pool row listing every account (the pool named after
+the family, its members suffixed) with the models routed through it.
 
 ### Header pack ("look like claude-code")
 

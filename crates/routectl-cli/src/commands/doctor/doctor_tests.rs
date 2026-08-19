@@ -688,8 +688,8 @@ fn legacy_nudge_absent_without_legacy_lists() {
 }
 
 #[test]
-fn schema_version_is_six() {
-    assert_eq!(SCHEMA_VERSION, 6);
+fn schema_version_is_seven() {
+    assert_eq!(SCHEMA_VERSION, 7);
 
     let context = ctx(
         config_with_overrides(),
@@ -698,7 +698,7 @@ fn schema_version_is_six() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 6);
+    assert_eq!(report.schema_version, 7);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -1375,18 +1375,62 @@ fn referenced_managed_secret_is_not_an_orphan() {
     assert!(gather_orphan_secrets(&cfg).is_empty());
 }
 
-/// A stored seat some provider entry's bare `oauth://<provider>` ref reaches
-/// is NOT an orphan -- the bare ref is a pool ref, so it covers the default
-/// seat and every labelled sibling of that provider.
+/// The DEFAULT seat a bare `oauth://<provider>` ref names is NOT an orphan.
+/// Schema version 4 scoped a bare ref to exactly that seat.
 #[test]
-fn referenced_oauth_seat_is_not_an_orphan() {
+fn referenced_default_oauth_seat_is_not_an_orphan() {
+    let cfg = config_referencing_anthropic();
+    let seats = vec![("anthropic".to_string(), token_record(9_000))];
+
+    assert!(gather_orphan_seats(&cfg, &seats).is_empty());
+}
+
+/// A LABELLED seat no ref names is an orphan even though a bare-ref entry for
+/// its family exists: schema version 4 retired the bare-ref-covers-every-seat
+/// reading, so the bare ref vouches for the default seat alone. This is the
+/// verdict the pool world flips -- under the old rule the labelled seat read
+/// as covered.
+#[test]
+fn a_labelled_seat_is_an_orphan_despite_a_bare_ref_for_its_family() {
     let cfg = config_referencing_anthropic();
     let seats = vec![
         ("anthropic".to_string(), token_record(9_000)),
         ("anthropic#seat-b".to_string(), token_record(9_000)),
     ];
 
-    assert!(gather_orphan_seats(&cfg, &seats).is_empty());
+    assert_eq!(
+        gather_orphan_seats(&cfg, &seats),
+        vec!["anthropic#seat-b".to_string()],
+        "a bare ref covers the default seat only"
+    );
+}
+
+/// The migrated shape: one account entry per stored seat, grouped by a pool.
+/// Every labelled seat is then covered by its own member's pinned ref, so no
+/// seat of a migrated provider is reported orphaned.
+#[test]
+fn no_seat_of_a_migrated_pooled_provider_is_an_orphan() {
+    let cfg: Config = toml::from_str(
+        "version = 3\n\
+         [providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         [providers.anthropic-seat-b]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic#seat-b\"\n\
+         [pools.anthropic-pool]\n\
+         members = [\"anthropic\", \"anthropic-seat-b\"]\n",
+    )
+    .expect("pooled fixture parses");
+    let seats = vec![
+        ("anthropic".to_string(), token_record(9_000)),
+        ("anthropic#seat-b".to_string(), token_record(9_000)),
+    ];
+
+    assert!(
+        gather_orphan_seats(&cfg, &seats).is_empty(),
+        "pool membership covers every labelled seat its members name"
+    );
 }
 
 /// A stored seat no provider entry references surfaces as a Warn naming the
@@ -1566,7 +1610,7 @@ fn seats_section_is_in_both_section_lists() {
 }
 
 /// A config with two provider entries reaching the same oauth provider: one
-/// bare pool ref and one label-pinned ref.
+/// bare default-seat ref and one label-pinned ref, neither claimed by a pool.
 fn config_with_pool_and_pinned_refs() -> Config {
     let mut cfg = Config::default();
     cfg.providers.insert(
@@ -1580,11 +1624,30 @@ fn config_with_pool_and_pinned_refs() -> Config {
     cfg
 }
 
-/// The pool section is purely informational: every finding is Pass with no
-/// remediation, for BOTH a bare pool ref and a label-pinned ref, and the
-/// section cannot move the overall exit code.
+/// A two-account pool over the same two entries -- the shape `config migrate`
+/// produces.
+fn config_with_a_named_pool() -> Config {
+    toml::from_str(
+        "version = 3\n\
+         [providers.anthropic]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n\
+         [providers.anthropic-work]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic#work\"\n\
+         [pools.anthropic-pool]\n\
+         members = [\"anthropic\", \"anthropic-work\"]\n\
+         seat_selection = \"round-robin\"\n\
+         accepts_new_logins = true\n",
+    )
+    .expect("pooled fixture parses")
+}
+
+/// Standalone ref rows stay purely informational: every finding is Pass with
+/// no remediation, for BOTH a bare default-seat ref and a label-pinned ref,
+/// and they cannot move the overall exit code.
 #[test]
-fn seat_pool_findings_are_pass_without_remediation_and_never_move_the_exit() {
+fn standalone_seat_ref_findings_are_pass_without_remediation_and_never_move_the_exit() {
     // Arrange
     let context = ctx(
         config_with_pool_and_pinned_refs(),
@@ -1615,7 +1678,7 @@ fn seat_pool_findings_are_pass_without_remediation_and_never_move_the_exit() {
     assert!(
         find(&report.findings, "pools", "anthropic")
             .detail
-            .contains("resolves to 2 seats (default, work)"),
+            .contains("pins the default seat"),
         "{:?}",
         find(&report.findings, "pools", "anthropic")
     );
@@ -1629,15 +1692,98 @@ fn seat_pool_findings_are_pass_without_remediation_and_never_move_the_exit() {
     assert_eq!(
         overall_exit(&report.findings),
         overall_exit(&without_pools),
-        "pool findings must not change the exit code"
+        "standalone ref findings must not change the exit code"
     );
 }
 
-/// An unreadable credential store still renders the pool rows, with the
-/// unknown-count wording and the strategy retained. The store Fail stays the
-/// auth section's alone.
+/// A named pool renders as ONE finding carrying its members, their seats, the
+/// strategy, and the growth marker -- and its members are not repeated as
+/// standalone rows.
 #[test]
-fn seat_pool_findings_stay_pass_with_unknown_count_when_the_store_is_unreadable() {
+fn a_named_pool_renders_one_finding_with_members_strategy_and_growth_marker() {
+    // Arrange
+    let context = ctx(
+        config_with_a_named_pool(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        vec![
+            ("anthropic".to_string(), token_record(9_000)),
+            ("anthropic#work".to_string(), token_record(9_000)),
+        ],
+    );
+
+    // Act
+    let pools = section_seat_pools(&context);
+
+    // Assert
+    assert_eq!(pools.len(), 1, "the pool absorbs both members: {pools:?}");
+    let pool = find(&pools, "pools", "anthropic-pool");
+    assert_eq!(pool.status, Status::Pass);
+    assert!(pool.remediation.is_none(), "{pool:?}");
+    assert_eq!(
+        pool.detail,
+        "pool `anthropic-pool` has 2 members (anthropic=default, anthropic-work=work); \
+         seat_selection round-robin; accepts new logins: yes"
+    );
+}
+
+/// A pool one member of which has no stored credential is a Warn naming that
+/// member; a pool no member of which has one is a Fail, because every model
+/// naming it is unroutable.
+#[test]
+fn a_pool_missing_credentials_warns_and_a_pool_with_none_fails() {
+    // Arrange
+    let degraded_ctx = ctx(
+        config_with_a_named_pool(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        vec![("anthropic".to_string(), token_record(9_000))],
+    );
+    let unusable_ctx = ctx(
+        config_with_a_named_pool(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    // Act
+    let degraded = find(
+        &section_seat_pools(&degraded_ctx),
+        "pools",
+        "anthropic-pool",
+    )
+    .clone();
+    let unusable = find(
+        &section_seat_pools(&unusable_ctx),
+        "pools",
+        "anthropic-pool",
+    )
+    .clone();
+
+    // Assert
+    assert_eq!(degraded.status, Status::Warn);
+    assert!(
+        degraded
+            .detail
+            .ends_with("; no stored credential for anthropic-work"),
+        "{degraded:?}"
+    );
+    assert!(degraded.remediation.is_some(), "{degraded:?}");
+    assert_eq!(unusable.status, Status::Fail);
+    assert!(
+        unusable
+            .detail
+            .ends_with("; no member has a stored credential"),
+        "{unusable:?}"
+    );
+    assert!(unusable.remediation.is_some(), "{unusable:?}");
+}
+
+/// An unreadable credential store still renders the rows, with presence
+/// unknown and the strategy retained -- and claims neither Warn nor Fail. The
+/// store Fail stays the auth section's alone.
+#[test]
+fn seat_pool_findings_stay_pass_with_unknown_presence_when_the_store_is_unreadable() {
     // Arrange
     let config: Config = toml::from_str(
         "version = 3\n\
@@ -1668,15 +1814,22 @@ fn seat_pool_findings_stay_pass_with_unknown_count_when_the_store_is_unreadable(
         assert_eq!(f.status, Status::Pass, "{f:?}");
         assert!(f.remediation.is_none(), "{f:?}");
     }
-    let bare = find(&pools, "pools", "anthropic");
+    let pool = find(&pools, "pools", "anthropic-pool");
     assert!(
-        bare.detail
-            .contains("seat count unknown (credential store unavailable)"),
-        "{bare:?}"
+        pool.detail.contains("seat_selection round-robin"),
+        "an unknown presence answer must still render the configured strategy: {pool:?}"
     );
     assert!(
-        bare.detail.ends_with("; seat_selection round-robin"),
-        "an unknown count must still render the configured strategy: {bare:?}"
+        pool.detail
+            .ends_with("; member credential presence unknown (credential store unavailable)"),
+        "{pool:?}"
+    );
+    let standalone = find(&pools, "pools", "anthropic-work");
+    assert!(
+        standalone
+            .detail
+            .contains("store presence unknown - credential store unavailable"),
+        "{standalone:?}"
     );
 }
 
@@ -2050,7 +2203,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 6);
+    assert_eq!(no_net.schema_version, 7);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
