@@ -3198,7 +3198,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   literals plus real 401-vs-200 probes, so an unclassified route fails a test
   instead of shipping unauthenticated; `PUBLIC_ROUTES` is additionally pinned
   to its exact literal set, so widening the unauthenticated surface cannot
-  pass without editing that expectation in the same change), the graceful
+  pass without editing that expectation in the same change; a second
+  `NON_MITM_INFERENCE_ROUTES` test-only const partitions the same served
+  surface against `proxy::split::ANTHROPIC_INFERENCE_PATHS`, so a new
+  Anthropic-dialect route that forgets the MITM const fails a test too),
+  the graceful
   bounded-drain shutdown
   (`serve_with_bounded_drain` + `drain_deadline_watcher` + `DRAIN_DEADLINE`),
   MITM front-proxy spawn (`start_mitm_proxy`), and the usage-writer lifecycle
@@ -4171,7 +4175,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ANTHROPIC_INFERENCE_PATHS` is the single source of truth for that decision
   (exposed via `anthropic_inference_paths()`), deliberately excluding
   `/v1/chat/completions` and `/v1/responses` (direct-client ingress dialects
-  never reached through this proxy)
+  never reached through this proxy). Guarded in both directions: `tests/server.rs`
+  pins the const's literal set and that every const path is served, and
+  `serve_tests.rs` pins the const plus `NON_MITM_INFERENCE_ROUTES` as a
+  partition of every registered route
 
 ### commands
 

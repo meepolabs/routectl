@@ -30,13 +30,16 @@ use super::mitm::MitmCtx;
 /// those are direct-client ingress dialects, never reached through this
 /// MITM channel (Claude Code never sends them to `api.anthropic.com`).
 ///
-/// This is a `const` + a CI test ([`anthropic_inference_paths`] used
-/// from `tests/server.rs`), not a table-driven route registration --
-/// the three inference routes have distinct handlers/methods in
+/// This is a `const` + CI tests ([`anthropic_inference_paths`] used from
+/// `tests/server.rs`, plus the partition guard in
+/// `server::serve::serve_tests`), not a table-driven route registration
+/// -- the three inference routes have distinct handlers/methods in
 /// `build_axum_router`, so forcing them through one iterate-and-register
 /// mechanism would be a contorted router refactor for no behavioral
-/// gain. See the pointer comment at `build_axum_router` in
-/// `server/mod.rs`.
+/// gain. A served path that is NOT Anthropic-dialect is declared in
+/// `server::serve`'s `NON_MITM_INFERENCE_ROUTES` instead; between the
+/// two, every registered route is classified. See the pointer comment at
+/// `build_axum_router`.
 pub(crate) const ANTHROPIC_INFERENCE_PATHS: &[&str] =
     &["/v1/messages", "/v1/messages/count_tokens", "/v1/models"];
 
